@@ -13,6 +13,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemachange"
@@ -22,12 +23,14 @@ import (
 // dataFaultRows is how many rows the data-fault tables start with: several
 // chunks at the copier's initial chunk size, so the one violating row,
 // planted in the back half, is met after chunks have already landed in
-// the shadow — the abandon has something to discard.
-const dataFaultRows = 4000
+// the shadow — the abandon has something to discard. Seeded rows take ids
+// and uniq values 1..dataFaultRows, so a row's uniq is also its key.
+const dataFaultRows = int(4 * copier.DefaultInitialChunkRows)
 
 // dataFaultViolator is the one row's uniq value whose label will not fit
-// the narrowed type.
-const dataFaultViolator = 3000
+// the narrowed type. It lies past the copier's first chunk, so the first
+// chunk lands before the copy meets it, whatever the initial size is.
+const dataFaultViolator = 3 * copier.DefaultInitialChunkRows
 
 // stringTooLong is the SQLSTATE the server raises when a value does not
 // fit the column's declared length (string_data_right_truncation).
@@ -62,7 +65,7 @@ func TestMigrateReportsABlockWritesDataFaultAndLeavesNothingBehind(t *testing.T)
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)
 
-	assertDataFaultVerdict(t, err, out.String(), table, "the write fence is off the source")
+	assertDataFaultVerdict(t, err, out.String(), table, "the write fence is off the source", true)
 	assertDataFaultLeftNothing(t, pool, table)
 }
 
@@ -101,7 +104,7 @@ func TestMigrateReportsALiveDataFaultAndLeavesNothingBehind(t *testing.T) {
 	assert.Positive(t, summary.Inserts)
 	assert.Positive(t, summary.Updates)
 
-	assertDataFaultVerdict(t, err, out.String(), table, "its replication slot is dropped")
+	assertDataFaultVerdict(t, err, out.String(), table, "its replication slot is dropped", false)
 	assertDataFaultLeftNothing(t, pool, table)
 	var slots int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_replication_slots`).Scan(&slots))
@@ -131,11 +134,13 @@ func dataFaultAlter(table testutil.WorkloadTable) string {
 // data-fault contract: an operational error that is not a refusal, and a
 // failed verdict coded data-fault whose detail says the run was abandoned,
 // names what was released, and offers no --restart, since nothing remains
-// for one to discard.
-func assertDataFaultVerdict(t *testing.T, runErr error, stdout string, table testutil.WorkloadTable, released string) {
+// for one to discard. writesBlocked is whether the run put the write fence
+// on, which the verdict reports even after the abandon takes it off.
+func assertDataFaultVerdict(t *testing.T, runErr error, stdout string, table testutil.WorkloadTable, released string, writesBlocked bool) {
 	t.Helper()
 	require.Error(t, runErr, "a data fault is an operational error")
 	require.NotErrorIs(t, runErr, verdict.ErrRefused, "a data fault is not a refusal: the process exits 1, not 2")
+	require.NotErrorIs(t, runErr, verdict.ErrAcceptedBlocking, "a data fault is not an accepted-blocking run: the process exits 1, not 3")
 	var abandoned *schemachange.AbandonedError
 	require.ErrorAs(t, runErr, &abandoned, "the error is the Runner's abandonment")
 	var pgErr *pgconn.PgError
@@ -148,6 +153,7 @@ func assertDataFaultVerdict(t *testing.T, runErr error, stdout string, table tes
 	assert.Equal(t, string(executor.CodeDataFault), v.Code)
 	assert.Equal(t, table.Schema+"."+table.Table, v.Table)
 	assert.False(t, v.Forced)
+	assert.Equal(t, writesBlocked, v.WritesBlocked, "the verdict says whether the table was offline for writes")
 	assert.Contains(t, v.Detail, "the run was abandoned")
 	assert.Contains(t, v.Detail, released)
 	assert.NotContains(t, v.Detail, "--restart", "nothing remains for a restart to discard")
@@ -190,9 +196,13 @@ func assertDataFaultLeftNothing(t *testing.T, pool *pgxpool.Pool, table testutil
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`SELECT count(*) FROM `+table.Qualified()+` WHERE length(label) > $1`, dataFaultLabelWidth).Scan(&violators))
 	assert.Equal(t, 1, violators, "the planted row is still the one the statement cannot hold")
-	var rows int
-	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*) FROM `+table.Qualified()).Scan(&rows))
-	assert.GreaterOrEqual(t, rows, dataFaultRows, "every seeded row is still in the source")
+	// Counted over the seeded range alone: the live load's inserts take
+	// uniq values far above it and it never deletes, so a total count
+	// would let an insert hide a seeded row the abandon removed.
+	var seeded int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM `+table.Qualified()+` WHERE uniq <= $1`, dataFaultRows).Scan(&seeded))
+	assert.Equal(t, dataFaultRows, seeded, "every seeded row is still in the source")
 
 	_, err = pool.Exec(t.Context(),
 		`INSERT INTO `+table.Qualified()+` (uniq, amount, label) VALUES ($1, 1.25, 'after-abandon')`, dataFaultRows*10)
