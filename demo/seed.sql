@@ -36,9 +36,10 @@ SELECT (g % 10000) + 1, g, 'order ' || g
 FROM generate_series(1, 5000) g;
 
 -- One note wider than the varchar(32) the exec tour's data-fault step
--- narrows the column to. It sits past the copier's first chunks, so the
--- fault is met after rows have already landed in the shadow and the
--- abandon has something to discard. Every other note stays well inside
+-- narrows the column to. With the copier's default chunk size it sits past
+-- the first chunk, so the abandon usually has copied rows to discard; the
+-- tour does not depend on where the fault lands, and the Go suite covers
+-- an abandon after chunks have landed. Every other note stays well inside
 -- the width, so the later widening to varchar(200) copies cleanly.
 UPDATE orders SET note = repeat('x', 64) WHERE id = 4000;
 
