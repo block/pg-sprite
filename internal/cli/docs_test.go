@@ -77,7 +77,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 14, "the doc publishes fourteen captured --json outputs")
+	require.Len(t, blocks, 15, "the doc publishes fifteen captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -121,6 +121,21 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		ExecutedSQL: []string{
 			"ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email)) NOT VALID",
 		},
+	}
+	// The data-fault verdict is captured from the demo tour's narrowing of
+	// orders.note: the seeded long note fails the chunk's insert, and the
+	// detail is the migrate package's rendering of the abandoned run.
+	dataFault := verdict.Verdict{
+		Outcome:   verdict.OutcomeFailed,
+		Code:      string(executor.CodeDataFault),
+		Statement: "ALTER TABLE public.orders ALTER COLUMN note TYPE varchar(32)",
+		Table:     "public.orders",
+		Detail: "the copy-and-swap run stopped: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: " +
+			"copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: " +
+			"ERROR: value too long for type character varying(32) (SQLSTATE 22001); " +
+			"the server rejected the rows as the statement would shape them, so the run was abandoned: " +
+			"the shadow is dropped, its replication slot is dropped, and the checkpoint row is deleted; " +
+			"correct the data or the statement, then run it again, which starts from the beginning",
 	}
 	// The executed verdict is captured from a run; its detail is the
 	// verdict's own rendering of the verification pass and the retained
@@ -186,7 +201,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
-	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, rewriteRequired,
+	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, rewriteRequired,
 		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
 		lintReport, diff}
 	for i, w := range want {

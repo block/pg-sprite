@@ -185,6 +185,32 @@ execute_copy_swap() {
     fi
 }
 
+# execute_data_fault table sql
+#
+# Runs a copy-and-swap change whose statement the seeded data cannot
+# satisfy — one row will not fit the narrowed type — and requires the
+# failed verdict coded data-fault for the table, the operational exit code
+# 1 (not the refusal's 2: the planner accepted the statement; the rows
+# rejected it), and no --force in play. The run abandons itself before it
+# returns, so the next copy-and-swap on the same table finds no shadow,
+# no replication slot, and no checkpoint row of the faulted run's — which
+# the row that follows this one in run_exec shows by succeeding.
+execute_data_fault() {
+    local table="$1" sql="$2" out status=0
+    step "execute (copy-and-swap, expect a data fault): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --free-disk 1GiB --alter "$sql" 2>/dev/null) || status=$?
+        assert_eq "data-fault exit of [$sql]" 1 "$status"
+        assert_eq "outcome of [$sql]" "failed" "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "code of [$sql]" "data-fault" "$(jq -r '.code' <<<"$out")"
+        assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+        assert_eq "forced of [$sql]" false "$(jq -r '.forced // false' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql" \
+            || echo "(exit $? — expected 1: a row will not fit the new type; the run abandoned itself and dropped its shadow, slot, and checkpoint row)"
+    fi
+}
+
 # execute_refused reason sql
 #
 # Runs a schema change the engine must refuse and requires the refusal
@@ -549,6 +575,13 @@ run_exec() {
     # retained source is dropped. It runs before the DROP INDEX rows so the
     # swap carries orders_total_idx across for them to drop.
     execute_copy_swap                   "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+    # A data fault: the seed plants one note wider than varchar(32), so the
+    # copy meets a row the narrowed type will not hold. The run abandons
+    # itself; the widening that follows runs through copy-and-swap on the
+    # same table, which it could not if the faulted run had left its
+    # shadow, its slot, or its checkpoint row behind.
+    execute_data_fault      public.orders   "ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)"
+    execute_copy_swap                       "ALTER TABLE orders ALTER COLUMN note TYPE varchar(200)"
     execute_refused backend-unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     # The plain DROP INDEX is refused (the concurrent drop is the safe
     # idiom); the acknowledgement runs it anyway under budgets. The mismatch
@@ -588,6 +621,8 @@ elif [ "$section" = all ]; then
     echo "Every statement above was classified before anything ran. The"
     echo "executions committed online — where the submitted form would have"
     echo "blocked, pg-sprite ran the safer native sequence instead; a genuine"
-    echo "rewrite went through copy-and-swap — and the changes it cannot yet do"
-    echo "safely were refused before they could hurt."
+    echo "rewrite went through copy-and-swap; one whose rows would not fit the new"
+    echo "type abandoned itself and dropped its shadow, slot, and checkpoint row —"
+    echo "and the changes it cannot"
+    echo "yet do safely were refused before they could hurt."
 fi
