@@ -29,7 +29,8 @@ the phased build plan should be traceable back to one of these.
   one inferred from an absence or granted broadly. When the engine cannot tell intent from
   accident, it refuses. This is why a desired file that no longer lists a column refuses
   rather than drops it, and why the destructive acknowledgement names one table and exists only
-  where the operator wrote the statement.
+  where the operator wrote the statement. RF-12 makes the rule checkable: every irreversible
+  operation and its acknowledgement are listed in one registry that CI keeps complete.
 - **Decisions, not options.** Prefer sensible defaults over configuration knobs; non-default
   options are poorly tested and a source of surprise. The engine should make the right call
   for the user rather than expose another flag.
