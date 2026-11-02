@@ -3,7 +3,6 @@ package applier
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/jackc/pgx/v5"
 
@@ -84,11 +83,13 @@ func (f *Flusher) flushIn(ctx context.Context, tx pgx.Tx, batch Batch) (Result, 
 	if err := f.confirmResolution(ctx, tx); err != nil {
 		return Result{}, err
 	}
-	if _, err := tx.Exec(ctx, "SET LOCAL extra_float_digits = "+strconv.Itoa(digits)); err != nil {
-		return Result{}, fmt.Errorf("restore extra_float_digits after the flush: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `SELECT pg_catalog.set_config('bytea_output', $1, true)`, byteaOutput); err != nil {
-		return Result{}, fmt.Errorf("restore bytea_output after the flush: %w", err)
+	// One statement puts back both of the caller's output settings, since it
+	// runs under the swap's lock. They are set transaction-local, as SET LOCAL
+	// would set them, so at commit the connection returns to its own values
+	// rather than keeping the caller's; set_config takes the values as bind
+	// parameters, which SET LOCAL cannot.
+	if _, err := tx.Exec(ctx, `SELECT pg_catalog.set_config('extra_float_digits', $1, true), pg_catalog.set_config('bytea_output', $2, true)`, digits, byteaOutput); err != nil {
+		return Result{}, fmt.Errorf("restore extra_float_digits and bytea_output after the flush: %w", err)
 	}
 	return result, nil
 }
@@ -98,19 +99,14 @@ func (f *Flusher) flushIn(ctx context.Context, tx pgx.Tx, batch Batch) (Result, 
 // searchPath, the path statement the Flusher runs every flush under — and
 // returns the extra_float_digits and bytea_output it found, so the caller's
 // own values can be put back once the flush has written.
-// extra_float_digits is an integer on every supported server.
-func pinFlushSettings(ctx context.Context, tx pgx.Tx, searchPath string) (int, string, error) {
-	var text, byteaOutput string
-	if err := tx.QueryRow(ctx, `SELECT pg_catalog.current_setting('extra_float_digits'), pg_catalog.current_setting('bytea_output')`).Scan(&text, &byteaOutput); err != nil {
-		return 0, "", fmt.Errorf("read extra_float_digits and bytea_output before the flush: %w", err)
-	}
-	digits, err := strconv.Atoi(text)
-	if err != nil {
-		return 0, "", fmt.Errorf("read extra_float_digits before the flush: %q is not an integer: %w", text, err)
+func pinFlushSettings(ctx context.Context, tx pgx.Tx, searchPath string) (string, string, error) {
+	var digits, byteaOutput string
+	if err := tx.QueryRow(ctx, `SELECT pg_catalog.current_setting('extra_float_digits'), pg_catalog.current_setting('bytea_output')`).Scan(&digits, &byteaOutput); err != nil {
+		return "", "", fmt.Errorf("read extra_float_digits and bytea_output before the flush: %w", err)
 	}
 	// INV: CO-9
 	if _, err := tx.Exec(ctx, chunksql.Rendering+"; "+searchPath); err != nil {
-		return 0, "", fmt.Errorf("set flush settings: %w", err)
+		return "", "", fmt.Errorf("set flush settings: %w", err)
 	}
 	return digits, byteaOutput, nil
 }
