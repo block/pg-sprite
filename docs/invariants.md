@@ -556,7 +556,9 @@ a `Shadow` that breaks either pairing is refused before a connection opens (ST-6
 copier's cuts and measurements, and every conversion-free copy, pass, and flush, keep the
 catalog alone. In
 `pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
-`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
+`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the new-sequence read
+(`readSequenceOwnedColumns`, which runs on the catalog-only path the shadow introspection
+leaves, so qualification is its second line), the identity `setval`, and
 the `format` call that renders the shadow's identity default qualify every function, relation,
 type, and operator: a planted `oid = regclass` operator on the build's path that hides
 `pg_class` and sequences does not change their answers, one that matches everything does not
@@ -1210,7 +1212,11 @@ the first row moves, caught before the build commits (tests
 `TestBuildShadowRefusesANewSerialColumn`,
 `TestBuildShadowRefusesMakingAKeptColumnAnIdentity`,
 `TestBuildShadowAdmitsARetypeBesideTheSourcesSerialKey`,
-`TestRunnerRefusesANewIdentityColumnBeforeAnyRowOrFence`); for the native route's sequences,
+`TestRunnerRefusesANewIdentityColumnBeforeAnyRowOrFence`, with the order against the re-add and
+handoff checks pinned by `TestBuildShadowRefusesReplacingAnIdentityColumnWithAnIdentityAsAReadd`
+and `TestBuildShadowRefusesAKeptIdentityColumnDeclaredAgainAsANewSequence`), and `InspectShadow`
+runs the same check so a resume of such a shadow stops before the copy
+(`TestInspectShadowRefusesAShadowThatOwnsASequenceTheSourceLacks`); for the native route's sequences,
 `pkg/executor` `admitSequence`, which `RunSequence` calls to admit every step's shape and
 target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second

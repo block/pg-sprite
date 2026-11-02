@@ -26,7 +26,9 @@ type sequenceOwnedColumn struct {
 func readSequenceOwnedColumns(ctx context.Context, tx pgx.Tx, shadowOID uint32) ([]sequenceOwnedColumn, error) {
 	// INV: CO-9 — every relation, operator, and type is pg_catalog-qualified,
 	// so a planted oid = regclass operator cannot hide a column's sequence
-	// edge from the check.
+	// edge from the check. Both callers run it after a shadow introspection
+	// has left the transaction on a catalog-only search_path; the
+	// qualification keeps it safe should that order change.
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname, a.attidentity OPERATOR(pg_catalog.<>) ''
 		FROM pg_catalog.pg_attribute a
@@ -78,7 +80,7 @@ func refuseNewSequenceColumns(schema, table string, owned []sequenceOwnedColumn)
 	// INV: ST-6
 	c := owned[0]
 	if c.identity {
-		return refuse(CauseStatementNewSequence, nil, "the statement for %s.%s declares %s as an identity column, which the swap cannot carry to the live table; declare it a plain column here and add the identity in a later schema change", schema, table, c.column)
+		return refuse(CauseStatementNewSequence, nil, "the statement for %s.%s declares %s as an identity column, which the swap cannot carry to the live table; declare it a plain column here, then fill it and set NOT NULL, and add the identity with a direct ALTER COLUMN … ADD GENERATED outside the online route, which does not run it", schema, table, c.column)
 	}
-	return refuse(CauseStatementNewSequence, nil, "the statement for %s.%s gives %s a sequence of its own, which the swap cannot carry to the live table; declare it a plain column here and attach the sequence in a later schema change", schema, table, c.column)
+	return refuse(CauseStatementNewSequence, nil, "the statement for %s.%s gives %s a sequence of its own, which the swap cannot carry to the live table; declare it a plain column here, then attach a sequence with a direct CREATE SEQUENCE … OWNED BY and SET DEFAULT nextval(…) outside the online route", schema, table, c.column)
 }
