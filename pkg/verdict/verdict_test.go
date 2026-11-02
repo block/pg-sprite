@@ -443,16 +443,26 @@ func TestIndexUsageJSONKeepsAZeroCountAndOmitsUnrecordedTimes(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal([]byte(js), &got))
 	assert.Equal(t, map[string]any{
-		"idx_scan":     float64(0),
-		"read_at":      "2026-10-28T09:30:00Z",
-		"unique":       true,
-		"track_counts": true,
+		"idx_scan":                    float64(0),
+		"read_at":                     "2026-10-28T09:30:00Z",
+		"unique":                      true,
+		"track_counts":                true,
+		"track_counts_off_by_setting": false,
 	}, got["index_usage"])
 
 	lastScan := readAt.Add(-time.Hour)
+	partitions := 2
 	v.IndexUsage.IdxScans = 42
 	v.IndexUsage.LastIdxScan = &lastScan
+	v.IndexUsage.Partitions = &partitions
 	v.IndexUsage.TrackCounts = false
+	v.IndexUsage.TrackCountsOffBySetting = true
 	assert.Contains(t, v.String(),
-		"usage:     42 index scans on this server (replicas not counted), last 2026-10-28T08:30:00Z, unique, track_counts off")
+		"usage:     42 index scans on this server (replicas not counted) through its partition indexes (2), last 2026-10-28T08:30:00Z, unique, track_counts off, track_counts off for some roles")
+
+	js, err = v.JSON()
+	require.NoError(t, err)
+	got = nil
+	require.NoError(t, json.Unmarshal([]byte(js), &got))
+	assert.Equal(t, float64(2), got["index_usage"].(map[string]any)["partitions"], "a partitioned index's leaf count")
 }

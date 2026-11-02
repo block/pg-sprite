@@ -603,27 +603,38 @@ type Verdict struct {
 // replica's reads.
 type IndexUsage struct {
 	// IdxScans is the cumulative count of scans of the index since
-	// StatsReset.
+	// StatsReset, or since the index was created if that is later; for a
+	// partitioned index, the sum over its leaf indexes.
 	IdxScans int64 `json:"idx_scan"`
 	// LastIdxScan is when the server last recorded a scan; absent when it
-	// recorded none, and always on PostgreSQL 14 and 15.
+	// recorded none, and always on PostgreSQL 14 and 15. In UTC.
 	LastIdxScan *time.Time `json:"last_idx_scan,omitempty"`
-	// StatsReset is when counting began; absent when the server reports no
-	// reset, so the start of the window is unknown.
+	// StatsReset is when the database's statistics were last reset; absent
+	// when the server reports no reset. In UTC.
 	StatsReset *time.Time `json:"stats_reset,omitempty"`
-	// ReadAt is the server's clock when the evidence was read.
+	// ReadAt is the server's clock when the evidence was read. In UTC.
 	ReadAt time.Time `json:"read_at"`
 	// Unique reports whether the index enforces uniqueness, a guarantee the
 	// drop would also discard.
 	Unique bool `json:"unique"`
+	// Partitions is the number of leaf indexes of a partitioned index, whose
+	// scans IdxScans sums; absent for an index that is not partitioned.
+	Partitions *int `json:"partitions,omitempty"`
 	// TrackCounts is false when the server was counting no scans, so a zero
 	// IdxScans proves nothing.
 	TrackCounts bool `json:"track_counts"`
+	// TrackCountsOffBySetting is true when a saved ALTER ROLE or ALTER
+	// DATABASE setting turns track_counts off, so the scans of those
+	// sessions are missing from IdxScans.
+	TrackCountsOffBySetting bool `json:"track_counts_off_by_setting"`
 }
 
 // Summary renders the evidence on one line for the verdict's text form.
 func (u IndexUsage) Summary() string {
 	s := fmt.Sprintf("%d index scans on this server (replicas not counted)", u.IdxScans)
+	if u.Partitions != nil {
+		s += fmt.Sprintf(" through its partition indexes (%d)", *u.Partitions)
+	}
 	if u.LastIdxScan != nil {
 		s += ", last " + u.LastIdxScan.UTC().Format(time.RFC3339)
 	}
@@ -632,6 +643,9 @@ func (u IndexUsage) Summary() string {
 	}
 	if !u.TrackCounts {
 		s += ", track_counts off"
+	}
+	if u.TrackCountsOffBySetting {
+		s += ", track_counts off for some roles"
 	}
 	return s
 }
