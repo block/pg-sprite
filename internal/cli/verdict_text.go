@@ -51,6 +51,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	if v.WritesBlocked {
 		fmt.Fprintf(&b, "\n  %s   writes to the table were refused (55006) while the run held it", pal.bold("blocked:"))
 	}
+	if v.IndexUsage != nil {
+		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("usage:"), v.IndexUsage.Summary())
+	}
 	if v.AllowedDestructive {
 		fmt.Fprintf(&b, "\n  %s   the statement's data loss was acknowledged (allow-destructive)", pal.bold("allowed:"))
 	}
