@@ -227,14 +227,19 @@ takes it afterwards fails the confirmation (parked-before-insert and parked-befo
 tests). The applier's flush holds only `ACCESS SHARE` on the shadow until its first write, so a
 flush transaction of an earlier run parked between confirming the table lock and that write is
 not one the copier's fence — or the verifier's repair fence — waits on; that gap is open.
-`pkg/applier` `Buffer.Drain` — every
-buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
-in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
-two entries are judged per key, except that once neither is uncut the image and its old key's
-entry wait together and flush together, so the flush never deletes or copies the old key's row
-while an image still needs it for completion (three-way rule, discard-all before the first claim,
-deferred entry keeps merging, straddling move, pair waits in either direction, uncut half judged
-alone, deferral spreading through a shared old key and along a chain of pairs); `Drain`
+`pkg/applier` `Buffer.Drain` judges
+every buffered key against one `Position` snapshot: landed flushes, uncut is discarded, and
+in-flight stays buffered until a later drain finds its chunk landed. A key-moving UPDATE's two
+entries are judged per key, and once neither is uncut a pair rule applies. **The image waits
+for an old key in flight or invisible**, so the flush never deletes or copies the old key's
+row while the chunk that will copy it is still landing. **A landed old key's delete flushes
+ahead of an image in flight for its chunk**, because a moved row carrying a unique value cannot
+land while the old key's shadow row holds that value; once its chunk lands, the image completes
+from the source row. An invisible image still holds its old key's entry back. (Drain unit
+tests: three-way rule, discard-all before the first claim, deferred entry keeps merging,
+straddling move, pair waits for the old key, landed old key flushes ahead of its in-flight
+image, uncut half judged alone, deferral spreading through a shared old key and along a chain
+of pairs.) `Drain`
 judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
 count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names, as
 copies of its `Entries`, the moved, marker-bearing images the flush must complete — from the old
@@ -269,12 +274,30 @@ writer holds its locks until its commit is visible and the swap's `ACCESS EXCLUS
 them all out (sync-commit test: a writer under `synchronous_commit = on` against a standby that
 never answers has its UPDATE delivered and left buffered with `Invisible` one and nothing
 applied, the confirmed position below the delivered one, until the backend is cancelled, after
-which the change lands and the catch-up converges). Also open: a primary-key move or a
-unique-value swap that straddles a chunk the copier is reading collides, on the copier's own
-insert of the moved row, with the stale shadow row the flush has not yet deleted (SQLSTATE
-`23505`); the catch-up's half of the exchange is correct and the resolution is the copier's, so
-the convergence tests for key moves and unique-key swaps start their load after the copy has
-landed. *Test obligation:* a
+which the change lands and the catch-up converges). *Enforced* for the copier's side
+of a unique value that moves between rows while its chunk is in flight: the chunk's insert
+collides (SQLSTATE `23505`, or `23P01` for an exclusion constraint) with the shadow row that
+still holds the value — a landed row the flush has yet to rewrite, or a row of the same chunk
+the copier itself read before the swap — and the copier runs the chunk again after a bounded
+wait (`copier.Options.CollisionAttempts` × `CollisionBackoff`, linear), counting each
+collision, until the flush has moved the value and the chunk lands or the attempts run out and
+the server's error is returned with no cause of its own (a copier integration test holds a
+colliding row across several attempts and removes it; a catch-up convergence test runs
+unique-key swaps throughout the copy). *Enforced* for a primary-key move whose row carries a
+unique secondary value, from a landed key to a key in flight: the drain flushes the landed old
+key's delete ahead of the image (the pair rule above), the retried chunk's insert of the row
+under the new key then lands, and the image, flushed once its chunk has landed, completes from
+the source row because the old key's shadow row is gone (a drain unit test asserts the landed
+old key flushes alone as a delete marker with the image deferred and flushed by the next drain;
+a catch-up test holds the new key's chunk in flight by hand, asserts the old key's shadow row
+is deleted while it is, and converges once the chunk lands). The chunk-level retry remains
+bounded: a chunk whose key range keeps receiving unique values from landed rows faster than one
+move per catch-up cycle collides on every attempt with a different row, and the copy stops with
+the server's error once the attempts run out. In practice this is a sustained-rate bound: a
+load of key moves or unique-value swaps running through the copy at a few dozen a second can
+exhaust the attempts, most often on the last chunk, where every key move lands. Such a load
+during the copy is not supported until the copier commits a collided chunk around the rows
+that collided and retries only those. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
@@ -533,7 +556,9 @@ a `Shadow` that breaks either pairing is refused before a connection opens (ST-6
 copier's cuts and measurements, and every conversion-free copy, pass, and flush, keep the
 catalog alone. In
 `pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
-`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
+`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the new-sequence read
+(`readSequenceOwnedColumns`, which runs on the catalog-only path the shadow introspection
+leaves, so qualification is its second line), the identity `setval`, and
 the `format` call that renders the shadow's identity default qualify every function, relation,
 type, and operator: a planted `oid = regclass` operator on the build's path that hides
 `pg_class` and sequences does not change their answers, one that matches everything does not
@@ -779,7 +804,8 @@ the proof's lock, every drop, and the requested build share **one** overall budg
 recovery over k quarantined entries costs at most the budget, not (k+1) budgets.
 The declarative diff leans on this proof without performing it: when desired names an index
 whose live entry is an unfinished build, `diff` plans the `create-index` alone and never a
-drop, knowing the create cannot run as-is against the occupied name. The plan completes only
+drop, knowing the create cannot run as-is against the occupied name, and says so with an
+`invalid-index-rebuild` advisory on the plan report. The plan completes only
 through this invariant's proven removal — `RebuildAbandonedIndex`, or `DropAbandonedIndex`
 when the name must be cleared without completing the plan — or through an operator
 following the runbook; a plain `CREATE INDEX` on the occupied name fails as a duplicate
@@ -851,7 +877,8 @@ would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal s
 ineligible one because its scope exceeds the acknowledged table — and a statement the gate
 admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
-refusal as it stands rather than the accepted execution. The front door requires the
+refusal as it stands rather than the accepted execution. It accepts the lock only: an
+accepted `DROP INDEX` also needs the destructive acknowledgement (RF-10). The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
 `migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
@@ -1173,7 +1200,9 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last; inside the shadow build's transaction, `pkg/schemachange`
+require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
+`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+shadow build's transaction, `pkg/schemachange`
 `readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
 gives the shadow an identity or sequence-owned column the source does not have
 (`shadow-statement-new-sequence`), since the swap carries only the source's sequences and
@@ -1183,7 +1212,11 @@ the first row moves, caught before the build commits (tests
 `TestBuildShadowRefusesANewSerialColumn`,
 `TestBuildShadowRefusesMakingAKeptColumnAnIdentity`,
 `TestBuildShadowAdmitsARetypeBesideTheSourcesSerialKey`,
-`TestRunnerRefusesANewIdentityColumnBeforeAnyRowOrFence`); for the native route's sequences,
+`TestRunnerRefusesANewIdentityColumnBeforeAnyRowOrFence`, with the order against the re-add and
+handoff checks pinned by `TestBuildShadowRefusesReplacingAnIdentityColumnWithAnIdentityAsAReadd`
+and `TestBuildShadowRefusesAKeptIdentityColumnDeclaredAgainAsANewSequence`), and `InspectShadow`
+runs the same check so a resume of such a shadow stops before the copy
+(`TestInspectShadowRefusesAShadowThatOwnsASequenceTheSourceLacks`); for the native route's sequences,
 `pkg/executor` `admitSequence`, which `RunSequence` calls to admit every step's shape and
 target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
@@ -1369,7 +1402,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
   column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
   statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
-  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
+  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options),
+  [make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,
   typed, audited acknowledgement: `--force` on the routes it governs, or `--accept-blocking`
@@ -1429,22 +1463,30 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   other gate, and an acknowledged run is audited at warn level and carries
   `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
   and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
-  reason. A `DROP INDEX` stays with the statement-kind gate and `--accept-blocking`, which
-  the destructive acknowledgement does not reach. Outage-risk statements are covered by
+  reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
+  accepts that refusal, the drop still runs only if `--allow-destructive` names the same
+  owning table, and otherwise it is refused with `destructive-change` before anything
+  executes, the detail listing the checks that catch an index the application still uses.
+  Accepting the lock is not accepting the loss. Outage-risk statements are covered by
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
-  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`),
+  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`, which decides every
+  shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
+  `TestEveryOpKindIsClassifiedForDestructiveness`,
+  `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
   `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
   `TestRunRefusesAnUnacknowledgedDropNotNull`, `TestRunExecutesAnAcknowledgedDropColumn`,
   `TestRunRejectsAMismatchedDestructiveAcknowledgement`,
   `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
   `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
-  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
+  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`,
+  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
-  [design principles](design-principles.md#declarative-review-first-workflow),
+  [design principles](design-principles.md#declarative-review-first-workflow)
+  ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),
   SchemaBot's `--allow-unsafe` acknowledgement for destructive plans.
 - **RF-11** — A table is judged idle only when the connected server's statistics prove no use
   inside the window: no other session holds a lock on it, both last-scan times are recorded
@@ -1501,15 +1543,19 @@ a plain table is an unfinished concurrent build — abandoned, or still running 
 never emits a `DROP INDEX` for it, whatever the desired file says about its name: a drop by
 name cannot tell the two apart, and dropping under a running build is the cleanup this
 invariant forbids. That keeps the cleanup half. It gives up the other half when the desired
-file no longer names the index at all: the observation is discarded and the plan is empty,
-so a desired state that removes an index the build never delivered reads as already
-converged. The trade is preferred to the alternatives — a name-based drop, or a fabricated
-change — because the plan stays executable and never destroys a build it cannot see; the
-leftover surfaces at the next `pull` (see [pull.md](pull.md)) and clears per the
-[invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same conclusion from
-the other side: the diff cannot confirm the entry is abandoned, so it must not round the
-uncertainty into a destructive change. *Enforced:* `pkg/schemadiff` never-drops-invalid
-tests against real debris on a real database.
+file no longer names the index at all: no statement is planned, so a desired state that
+removes an index the build never delivered converges to zero statements. The observation is
+not discarded, though — the plan report carries it as an `invalid-index-undeclared`
+advisory (see [plan-report.md](plan-report.md#advisory-kinds-advisorieskind-diff-source-only)), outside the statements and
+the fingerprint, so the empty plan says "no changes to run; the table carries an unfinished
+build" rather than "converged". The trade is preferred to the alternatives — a name-based
+drop, or a fabricated change — because the plan stays executable and never destroys a build
+it cannot see; the leftover also surfaces at the next `pull` (see [pull.md](pull.md)) and
+clears per the [invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same
+conclusion from the other side: the diff cannot confirm the entry is abandoned, so it must
+not round the uncertainty into a destructive change. *Enforced:* `pkg/schemadiff`
+never-drops-invalid tests against real debris on a real database; `pkg/diffplan` proves the
+empty plan carries the advisory and the unchanged fingerprint.
 
 ### OC-3 — Control requests are durable operator intent
 

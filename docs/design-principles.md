@@ -24,6 +24,12 @@ the phased build plan should be traceable back to one of these.
 - **Safety over speed.** The consequences of a bug are data loss in production systems, so a
   feature must be *safe* and *safe-by-default* before it is fast. Speed work (parallelism,
   watermark optimization) only lands on top of a proven-correct path.
+- <a id="make-mistakes-hard-to-commit"></a>**Make mistakes hard to commit.** An action that is
+  hard to undo needs explicit, specific intent: a typed acknowledgement naming its target, never
+  one inferred from an absence or granted broadly. When the engine cannot tell intent from
+  accident, it refuses. This is why a desired file that no longer lists a column refuses
+  rather than drops it, and why the destructive acknowledgement names one table and exists only
+  where the operator wrote the statement.
 - **Decisions, not options.** Prefer sensible defaults over configuration knobs; non-default
   options are poorly tested and a source of surprise. The engine should make the right call
   for the user rather than expose another flag.

@@ -33,3 +33,28 @@ func TestRefuseNewSequenceColumnsRefusesANewSerialColumn(t *testing.T) {
 	assert.Equal(t, CauseStatementNewSequence, RefusalCauseOf(err))
 	assert.ErrorContains(t, err, "seqno", "the message names the column")
 }
+
+// With two new sequence columns the message names the first in attribute
+// order and gives that column's remedy: a serial column ahead of an
+// identity column is told to attach a sequence, not to add an identity.
+func TestRefuseNewSequenceColumnsNamesTheFirstColumnAndItsRemedy(t *testing.T) {
+	err := refuseNewSequenceColumns("public", "orders", []sequenceOwnedColumn{
+		{column: "seqno"},
+		{column: "ticket", identity: true},
+	})
+
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.ErrorContains(t, err, "seqno")
+	assert.NotContains(t, err.Error(), "ticket", "only the first column is named")
+	assert.ErrorContains(t, err, "CREATE SEQUENCE … OWNED BY", "a serial column's remedy attaches a sequence")
+	assert.NotContains(t, err.Error(), "ADD GENERATED")
+
+	err = refuseNewSequenceColumns("public", "orders", []sequenceOwnedColumn{
+		{column: "ticket", identity: true},
+		{column: "seqno"},
+	})
+
+	assert.ErrorContains(t, err, "ticket")
+	assert.ErrorContains(t, err, "ADD GENERATED", "an identity column's remedy adds the identity")
+	assert.NotContains(t, err.Error(), "OWNED BY")
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/suggest"
@@ -38,7 +39,7 @@ type destructiveFixture struct {
 // discard, and rows whose values a drop would lose.
 func newDestructiveFixture(t *testing.T) destructiveFixture {
 	t.Helper()
-	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t), MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
@@ -77,14 +78,15 @@ func (f destructiveFixture) run(t *testing.T, sql string, opts migrate.Options) 
 // table is the acknowledgement that names the fixture's orders table.
 func (f destructiveFixture) table() string { return f.schema + ".orders" }
 
-// copySwapOptions is a quiesced copy-and-swap policy over the fixture's
-// database with room on disk, so a statement routed to that backend can run.
+// copySwapOptions is a copy-and-swap policy that blocks the orders table's
+// writes, over the fixture's database with room on disk, so a statement
+// routed to that backend can run.
 func (f destructiveFixture) copySwapOptions() migrate.Options {
 	opts := runOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      true,
+		BlockWrites:   f.table(),
 	}
 	return opts
 }
@@ -368,9 +370,9 @@ func TestRunGuidesADropAndReAddToAnInPlaceTypeChange(t *testing.T) {
 	assert.EqualValues(t, 500*501/2, total, "every qty value is still there")
 }
 
-// The destructive acknowledgement does not reach a DROP INDEX: the
+// The destructive acknowledgement alone does not lift a DROP INDEX: the
 // statement-kind gate refuses it first in favor of DROP INDEX
-// CONCURRENTLY, and only --accept-blocking governs that refusal.
+// CONCURRENTLY, and only --accept-blocking accepts that refusal.
 func TestRunAllowDestructiveDoesNotLiftADropIndexRefusal(t *testing.T) {
 	f := newDestructiveFixture(t)
 	opts := runOptions()
