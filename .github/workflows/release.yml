@@ -46,9 +46,14 @@ jobs:
         run: make check-capabilities
 
       # Belt and braces on top of the ancestry gate: re-run the suite against
-      # the exact tree being released.
+      # the exact tree being released. Same shape as the CI matrix job: one
+      # long-lived server rather than per-test containers, which oversubscribe
+      # the runner and push the heaviest packages past go test's per-package
+      # deadline.
+      - name: Start the test database
+        run: make db-up
       - name: Test the tagged tree
-        run: make test
+        run: make test-db
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@9c156ee8a17a598857849441385a2041ef570552 # v6.3.0
