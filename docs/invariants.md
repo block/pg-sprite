@@ -227,14 +227,19 @@ takes it afterwards fails the confirmation (parked-before-insert and parked-befo
 tests). The applier's flush holds only `ACCESS SHARE` on the shadow until its first write, so a
 flush transaction of an earlier run parked between confirming the table lock and that write is
 not one the copier's fence — or the verifier's repair fence — waits on; that gap is open.
-`pkg/applier` `Buffer.Drain` — every
-buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
-in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
-two entries are judged per key, except that once neither is uncut the image and its old key's
-entry wait together and flush together, so the flush never deletes or copies the old key's row
-while an image still needs it for completion (three-way rule, discard-all before the first claim,
-deferred entry keeps merging, straddling move, pair waits in either direction, uncut half judged
-alone, deferral spreading through a shared old key and along a chain of pairs); `Drain`
+`pkg/applier` `Buffer.Drain` judges
+every buffered key against one `Position` snapshot: landed flushes, uncut is discarded, and
+in-flight stays buffered until a later drain finds its chunk landed. A key-moving UPDATE's two
+entries are judged per key, and once neither is uncut a pair rule applies. **The image waits
+for an old key in flight or invisible**, so the flush never deletes or copies the old key's
+row while the chunk that will copy it is still landing. **A landed old key's delete flushes
+ahead of an image in flight for its chunk**, because a moved row carrying a unique value cannot
+land while the old key's shadow row holds that value; once its chunk lands, the image completes
+from the source row. An invisible image still holds its old key's entry back. (Drain unit
+tests: three-way rule, discard-all before the first claim, deferred entry keeps merging,
+straddling move, pair waits for the old key, landed old key flushes ahead of its in-flight
+image, uncut half judged alone, deferral spreading through a shared old key and along a chain
+of pairs.) `Drain`
 judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
 count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names, as
 copies of its `Entries`, the moved, marker-bearing images the flush must complete — from the old
@@ -278,11 +283,21 @@ wait (`copier.Options.CollisionAttempts` × `CollisionBackoff`, linear), countin
 collision, until the flush has moved the value and the chunk lands or the attempts run out and
 the server's error is returned with no cause of its own (a copier integration test holds a
 colliding row across several attempts and removes it; a catch-up convergence test runs
-unique-key swaps throughout the copy). *Open:* a primary-key move whose row carries a unique
-secondary value, from a landed key to a key in flight: the drain's pair rule defers the old
-key's delete until the chunk lands, and the chunk cannot land while the old key's row holds the
-value, so the two wait on each other until the copier's attempts run out; the convergence test
-for key moves starts its load after the copy has landed. *Test obligation:* a
+unique-key swaps throughout the copy). *Enforced* for a primary-key move whose row carries a
+unique secondary value, from a landed key to a key in flight: the drain flushes the landed old
+key's delete ahead of the image (the pair rule above), the retried chunk's insert of the row
+under the new key then lands, and the image, flushed once its chunk has landed, completes from
+the source row because the old key's shadow row is gone (a drain unit test asserts the landed
+old key flushes alone as a delete marker with the image deferred and flushed by the next drain;
+a catch-up test holds the new key's chunk in flight by hand, asserts the old key's shadow row
+is deleted while it is, and converges once the chunk lands). The chunk-level retry remains
+bounded: a chunk whose key range keeps receiving unique values from landed rows faster than one
+move per catch-up cycle collides on every attempt with a different row, and the copy stops with
+the server's error once the attempts run out. In practice this is a sustained-rate bound: a
+load of key moves or unique-value swaps running through the copy at a few dozen a second can
+exhaust the attempts, most often on the last chunk, where every key move lands. Such a load
+during the copy is not supported until the copier commits a collided chunk around the rows
+that collided and retries only those. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
@@ -544,7 +559,9 @@ a `Shadow` that breaks either pairing is refused before a connection opens (ST-6
 copier's cuts and measurements, and every conversion-free copy, pass, and flush, keep the
 catalog alone. In
 `pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
-`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
+`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the new-sequence read
+(`readSequenceOwnedColumns`, which runs on the catalog-only path the shadow introspection
+leaves, so qualification is its second line), the identity `setval`, and
 the `format` call that renders the shadow's identity default qualify every function, relation,
 type, and operator: a planted `oid = regclass` operator on the build's path that hides
 `pg_class` and sequences does not change their answers, one that matches everything does not
@@ -1186,9 +1203,25 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last; for the native route's sequences, `pkg/executor`
-`admitSequence`, which `RunSequence` calls to admit every step's shape and target before the
-first step runs. `migrate --dry-run` reports the same shape refusals through
+require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
+`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+shadow build's transaction, `pkg/schemachange`
+`readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
+gives the shadow an identity or sequence-owned column the source does not have
+(`shadow-statement-new-sequence`), since the swap carries only the source's sequences and
+would otherwise stop on the new one after the whole copy — a prerequisite knowable before
+the first row moves, caught before the build commits (tests
+`TestBuildShadowRefusesANewIdentityColumnBesideARetype`,
+`TestBuildShadowRefusesANewSerialColumn`,
+`TestBuildShadowRefusesMakingAKeptColumnAnIdentity`,
+`TestBuildShadowAdmitsARetypeBesideTheSourcesSerialKey`,
+`TestRunnerRefusesANewIdentityColumnBeforeAnyRowOrFence`, with the order against the re-add and
+handoff checks pinned by `TestBuildShadowRefusesReplacingAnIdentityColumnWithAnIdentityAsAReadd`
+and `TestBuildShadowRefusesAKeptIdentityColumnDeclaredAgainAsANewSequence`), and `InspectShadow`
+runs the same check so a resume of such a shadow stops before the copy
+(`TestInspectShadowRefusesAShadowThatOwnsASequenceTheSourceLacks`); for the native route's sequences,
+`pkg/executor` `admitSequence`, which `RunSequence` calls to admit every step's shape and
+target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
 enforcement; the size guard and privilege preflight need live facts and stay the apply's.
 *Planned enforcement:* wiring those checks into the route, and
@@ -1282,12 +1315,21 @@ field for field against the checkpointed proof. A re-added column the copy canno
 its default — the primary key, the replacement of a source identity column, or a column that
 refuses NULL, by its own `NOT NULL` or a domain's, with no default of its own or on its type —
 is refused inside the build's transaction with `shadow-statement-readd`, so no shadow is
-committed for a statement whose copy could not run.
+committed for a statement whose copy could not run. The same holds for every column the copy
+list leaves out, not only a re-add: a new column that refuses NULL with nothing the server
+fills it from, and the source's primary key absent from the kept columns — dropped outright or
+replaced by a key under a new name, which no chunk range, watermark, or streamed change could
+be expressed in on the shadow — are refused in the same transaction with
+`shadow-statement-new-column`. A column re-added or added as an identity or `serial` is
+fillable by the server, so it passes both checks and is refused by ST-6's
+`shadow-statement-new-sequence` instead.
 *Enforced:* `pkg/schemachange` (`readColumnPositions` reads both relations' live attribute
 numbers inside the build's and the inspection's transaction; `sameColumns` keeps a column only
 when its live position equals its shadow attribute number; `copyColumns` takes only those;
 `readDomainFills` reads what each shadow column's domain contributes; `refuseUnfillableReadds`
-refuses the three re-adds before the build commits). Tests:
+refuses the three re-adds before the build commits; `refuseUnfillableNewColumns` then refuses a
+shadow without the primary key among its kept columns, and any other left-out column that
+refuses NULL with nothing to fill it). Tests:
 `TestSameColumnsComparesLivePositionToShadowNumber`,
 `TestRefuseUnfillableReaddsAdmitsAColumnTheServerFills`,
 `TestRefuseUnfillableReaddsRefusesThePrimaryKey`,
@@ -1296,12 +1338,26 @@ refuses the three re-adds before the build commits). Tests:
 `TestRefuseUnfillableReaddsIgnoresColumnsTheStatementKeptOrDropped`,
 `TestRefuseUnfillableReaddsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
 `TestRefuseUnfillableReaddsRefusesAColumnWhoseDomainRefusesNull`,
+`TestRefuseUnfillableNewColumnsAdmitsAColumnTheServerFills`,
+`TestRefuseUnfillableNewColumnsRefusesNotNullWithoutADefault`,
+`TestRefuseUnfillableNewColumnsRefusesAShadowWithoutThePrimaryKey`,
+`TestRefuseUnfillableNewColumnsIgnoresColumnsTheStatementKeptOrDropped`,
+`TestRefuseUnfillableNewColumnsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
+`TestRefuseUnfillableNewColumnsRefusesAColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesANewNotNullColumnWithNoDefault`,
+`TestBuildShadowRefusesANewColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesAStatementThatReplacesThePrimaryKey`,
+`TestBuildShadowRefusesADroppedPrimaryKeyWithNoReplacement`,
+`TestBuildShadowRefusesAReplacementKeyWithADefault`,
+`TestBuildShadowRefusesAnUnfillableColumnAfterAFillableOne`,
+`TestBuildShadowAdmitsANewColumnTheServerFills`,
+`TestRunnerRefusesAnUnfillableNewColumnBeforeAnyRowOrFence`,
 `TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
 `TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
 `TestBuildShadowRefusesAReaddedNotNullColumnWithNoDefault`,
 `TestBuildShadowRefusesAReaddedPrimaryKey`,
 `TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn`,
-`TestBuildShadowDoesNotRefuseAPlainColumnReaddedAsAnIdentity`,
+`TestBuildShadowRefusesAPlainColumnReaddedAsAnIdentity`,
 `TestBuildShadowRefusesAReaddedColumnWhoseDomainRefusesNull`,
 `TestBuildShadowRefusesAReaddedColumnWhoseBaseDomainRefusesNull`,
 `TestBuildShadowRefusesAReaddedColumnWhoseDefaultIsOnlyOnTheBaseDomain`,
@@ -1416,7 +1472,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
   accepts that refusal, the drop still runs only if `--allow-destructive` names the same
   owning table, and otherwise it is refused with `destructive-change` before anything
-  executes, the detail listing the checks that catch an index the application still uses.
+  executes, the detail listing the checks that catch an index the application still uses and
+  the verdict's `index_usage` carrying the connected server's live evidence for the index.
   Accepting the lock is not accepting the loss. Outage-risk statements are covered by
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
@@ -1432,7 +1489,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
   `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
   `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`,
-  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`, `TestAdmitDestructive`,
+  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`,
+  `TestReadIndexUsageCountsEachIndexsOwnScans`,
+  `TestReadIndexUsageSumsAPartitionedIndexsLeafIndexes`,
+  `TestCheckLeafStatisticsListedRefusesAnUnlistedLeaf`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)

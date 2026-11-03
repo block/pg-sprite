@@ -2,6 +2,7 @@ package schemachange_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -243,6 +244,52 @@ func TestRunnerResumesALiveRunWhoseSlotWasDropped(t *testing.T) {
 	assert.Positive(t, writes)
 	assert.True(t, result.Reconciled, "the lost slot was reconciled before the stream reopened")
 	assert.Equal(t, checkpoint.PhaseCatchingUp, second.seen()[0], "the reconcile hands the run a row catching up on the new slot")
+}
+
+// A live run cancelled while it catches up — the stream open, the
+// catch-up applying — ends as the cancellation it is, whatever the owner
+// cancelled with: an owner's own cause (context.WithCancelCause) is
+// carried and the error still reads as context.Canceled, so an embedder
+// that stops the run with a cause of its own is not told the run failed.
+// The stop is clean: the row stays catching up, the slot is let go, and
+// a resume carries the run to done under the same writer.
+func TestRunnerCancelledWithACauseWhileCatchingUpReadsAsCancelled(t *testing.T) {
+	const seeded = 2500
+	f := newDecodingFixture(t, seeded)
+	w := f.startWriter(t, seeded, liveWriterInterval)
+
+	runCtx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	ownerStop := errors.New("owner is ready to cut over")
+	cancelWhileCatchingUp := func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCatchingUp {
+			cancel(ownerStop)
+		}
+		return nil
+	}
+	r, err := schemachange.NewRunner(f.cfg, f.store, liveRunOptions(schemachange.RunOptions{AfterCheckpoint: cancelWhileCatchingUp}))
+	require.NoError(t, err)
+	_, err = r.Run(runCtx, f.pool, f.target, f.liveStatement(t))
+	require.ErrorIs(t, err, context.Canceled, "a cancel with the owner's own cause is still a cancellation")
+	require.ErrorIs(t, err, ownerStop, "and carries the owner's cause")
+	first := w.stop(t)
+	require.Positive(t, first, "the source was written while the first run was in progress")
+
+	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseCatchingUp, row.Phase, "the cancelled run left its row where it was")
+	status, found, err := decode.InspectSlot(t.Context(), f.pool, row.SlotName)
+	require.NoError(t, err)
+	require.True(t, found, "the cancelled run leaves its slot for the resume")
+	assert.False(t, status.Active, "the cancelled run's stream let the slot go")
+
+	w = f.startWriterFrom(t, seeded, liveWriterInterval, liveUniqBase+first+1)
+	var writes int
+	result, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: untilVerifying(t, w, &writes, nil)})
+	require.NoError(t, err)
+	f.assertLiveDone(t, result)
+	assert.Positive(t, writes)
+	assert.Equal(t, row.ShadowTable, result.Shadow.ShadowTable, "the resumed run continued on the shadow the cancelled run built")
 }
 
 // A row a quiesced run wrote is refused by a live run, and a row a live

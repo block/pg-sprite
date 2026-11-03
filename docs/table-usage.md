@@ -8,7 +8,11 @@ those statistics can prove. This page explains what the check reads, how it deci
 `DROP TABLE` is still refused by both front doors today
 ([capabilities](capabilities.md#deliberately-operator-owned)). The check described here is
 a read-only primitive, `preflight.ReadTableUsage` and `TableUsage.Judge`, that a later
-drop path will consult. Nothing calls it yet.
+drop path will consult. Nothing calls it yet. Its index-level sibling,
+`preflight.ReadIndexUsage`, reads one index's `idx_scan`, `last_idx_scan`, and uniqueness
+(summed over the leaf indexes of a partitioned index) under the same limits, including the
+saved `track_counts` settings check, and is reported, never judged, on a refused `DROP INDEX`
+([lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door)).
 
 ## Read this first: what the check can see
 

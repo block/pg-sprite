@@ -346,6 +346,34 @@ $ echo $?
 1
 ```
 
+### Data fault in a copy-and-swap run (`data-fault`) — exit 1
+
+A copy-and-swap run whose rows the server rejects under the new shape stops with
+`code: data-fault`. Here one `orders.note` is longer than the narrowed type
+holds, so a chunk's insert into the shadow fails with SQLSTATE `22001`. The same
+statement would fail the same way on every resume, so the run abandons itself
+before returning. It drops the shadow, drops its replication slot (or takes the
+write fence off the source), and deletes the checkpoint row. Fix the data or the
+statement, then run it again; the run starts from the beginning. If the detail
+says the run "could not be abandoned", its hold and checkpoint row remain: fix
+the data or the statement and rerun with `--restart SCHEMA.TABLE`
+([execution model](execution-model.md)):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)' --free-disk 1GiB --json
+{
+  "outcome": "failed",
+  "code": "data-fault",
+  "statement": "ALTER TABLE public.orders ALTER COLUMN note TYPE varchar(32)",
+  "table": "public.orders",
+  "detail": "the copy-and-swap run stopped: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001); the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, its replication slot is dropped, and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
+}
+```
+
+```text
+pg-sprite: error: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001)
+```
+
 ### Refused: no online rewrite exists (`rewrite-required`) — exit 2
 
 The column and its constraint arrive in one statement, so no online

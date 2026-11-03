@@ -14,10 +14,12 @@ import (
 const exitCodeInterrupted = 128 + int(syscall.SIGINT)
 
 // errInterrupted is the cancellation cause recorded when an operator's
-// signal stops a run. It wraps context.Canceled, so a caller that reads
-// the cause (context.Cause) sees the same ordinary cancellation as one
-// that reads ctx.Err(), and the run's verdict is cancelled-by-caller
-// whichever phase the signal lands in.
+// signal stops a run. The copier and the catch-up report any cause as a
+// cancellation, so the run's verdict is cancelled-by-caller whichever
+// phase the signal lands in. Wrapping context.Canceled as well keeps the
+// cause readable as a cancellation to code that reads it directly
+// (context.Cause), and lets the engine report it as it stands rather than
+// appending the cancellation a second time.
 var errInterrupted = fmt.Errorf("interrupted by signal: %w", context.Canceled)
 
 // Interruptible derives a context that an operator's SIGINT or SIGTERM

@@ -421,6 +421,46 @@ func TestDiffTextRefusedStatementDropsApply(t *testing.T) {
 	assert.True(t, diffRefused(report))
 }
 
+// Desired-state execution rejects --block-writes, so a desired plan's
+// copy-and-swap note points offline mode at migrate --alter for its table,
+// while the imperative dry run of the same statement keeps the flag.
+func TestDiffTextCopyAndSwapNotePointsOfflineModeAtAlter(t *testing.T) {
+	statement := plan.Statement{
+		SQL:         `ALTER TABLE "orders" ALTER COLUMN "qty" TYPE bigint`,
+		Route:       planner.RouteCopyAndSwap,
+		Backend:     router.BackendCopyAndSwap,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "alter column type",
+			Route:     planner.RouteCopyAndSwap,
+			Reason:    planner.ReasonTypeRewrite,
+		}},
+	}
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+	desired := plan.NewReport(plan.SourceDiff)
+	desired.Schema, desired.Table, desired.ServerVersion = "app", "orders", "16.10"
+	desired.Disposition = router.DispositionExecute
+	exists := true
+	desired.TableExists = &exists
+	desired.Statements = append(desired.Statements, statement)
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, desired))
+	text := flat(out.String())
+	assert.Contains(t, text, "offline mode, which blocks the table's writes until the swap, runs one statement at a time with pg-sprite migrate --alter --block-writes app.orders")
+	assert.NotContains(t, text, "--block-writes instead")
+
+	imperative := plan.NewReport(plan.SourceAlter)
+	imperative.Schema, imperative.Table, imperative.ServerVersion = "app", "orders", "16.10"
+	imperative.Disposition = router.DispositionExecute
+	imperative.Statements = append(imperative.Statements, statement)
+	out.Reset()
+	require.NoError(t, writeDryRunText(&out, palette{}, imperative))
+	text = flat(out.String())
+	assert.Contains(t, text, "--block-writes instead blocks the table's writes until the swap (offline mode)")
+	assert.NotContains(t, text, "migrate --alter --block-writes")
+}
+
 // The refusal exit contract keys off the report's disposition, and a
 // greenfield plan (missing table) does not refuse — for diff that is the
 // normal create-the-table case, unlike the dry run's table-not-found error.

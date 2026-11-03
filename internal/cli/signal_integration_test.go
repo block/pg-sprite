@@ -25,8 +25,8 @@ const copyStartedDeadline = 30 * time.Second
 
 // An operator's first signal while the copy is running stops the run
 // through its own stop path and reports the cancellation as the caller's:
-// the copier returns the context's cause, and the cause must still read
-// as a cancellation, or the verdict says the run broke.
+// the copier's error carries the signal's cause and reads as a
+// cancellation, or the verdict says the run broke.
 func TestMigrateSignalDuringCopyReportsCancelledByCaller(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})

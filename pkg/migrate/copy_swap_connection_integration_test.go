@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -33,7 +34,7 @@ func newTwoDatabases(t *testing.T) twoDatabases {
 	t.Helper()
 	serverURL := testutil.StartPostgres(t)
 	poolURL := testutil.NewDatabase(t, serverURL)
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: poolURL})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: poolURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return twoDatabases{pool: pool, poolURL: poolURL, otherURL: testutil.NewDatabase(t, serverURL)}
@@ -127,7 +128,7 @@ func TestRunDesiredRefusesAConnectionOnAnotherDatabase(t *testing.T) {
 			qty  integer NOT NULL,
 			note text
 		)`),
-	}, copySwapRunOptions(d.otherURL, schema+".orders"))
+	}, desiredCopySwapOptions(d.otherURL))
 	var mismatch *migrate.CopySwapConnectionMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	assert.Equal(t, mismatch.PoolCluster, mismatch.ConnectionCluster, "both databases are on the test server")
@@ -261,6 +262,10 @@ func assertStopsBeforeAnyStatement(t *testing.T, d twoDatabases, runPool *pgxpoo
 	assert.NotErrorAs(t, err, &mismatch)
 	assert.Zero(t, v, "nothing was executed, so there is no verdict")
 
+	// Desired-state execution rejects the block-writes acknowledgement, so
+	// the desired run takes the same wiring without it.
+	desiredOpts := opts
+	desiredOpts.CopySwap.BlockWrites = ""
 	res, err := migrate.RunDesired(t.Context(), runPool, migrate.DesiredRequest{
 		Schema: schema,
 		Desired: parseDesired(t, `CREATE TABLE orders (
@@ -268,7 +273,7 @@ func assertStopsBeforeAnyStatement(t *testing.T, d twoDatabases, runPool *pgxpoo
 			qty  integer NOT NULL,
 			note text
 		)`),
-	}, opts)
+	}, desiredOpts)
 	require.Error(t, err)
 	assert.NotErrorAs(t, err, &mismatch)
 	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)

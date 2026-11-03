@@ -22,9 +22,9 @@ type Batch struct {
 	// the copier's own read of those chunks will see the change.
 	Discarded int
 	// Deferred counts the entries still buffered because their keys are
-	// inside an in-flight chunk, or travel with one that is or with one
-	// that is invisible. This is the number a stalled catch-up is waiting
-	// on the copier for.
+	// inside an in-flight chunk, or are moved images whose old key's entry
+	// is in flight or invisible, or travel with an invisible image. This is
+	// the number a stalled catch-up is waiting on the copier for.
 	Deferred int
 	// Held counts the entries still buffered because a flush held them (see
 	// Buffer.Hold) — with a completion, or because their shadow row was
@@ -103,13 +103,21 @@ func (b Batch) CompleteFirst() []Entry {
 // batch's OldestFirstLSN until the flush commits, and rebuilds them.
 //
 // An image that moved from an old key, and the entry still buffered at that
-// old key, travel together once neither is uncut: if either is in flight or
-// invisible both wait, otherwise both flush. The flush completes the image's
+// old key, travel together once neither is uncut: the image waits while the
+// old key's entry is in flight or invisible, and the old key's entry waits
+// while the image is invisible. The flush completes the image's
 // unchanged-TOAST markers before it deletes anything (D13), and that reading
-// must not race the deletion or copy of the old key's row; Batch.CompleteFirst
-// names the images it applies to. An image whose completion is pending
-// (Buffer.Hold) stays buffered whatever its key's state, until Release lets
-// the completion in or an event drops it.
+// must not race the copy of the old key's row or a transaction no snapshot
+// shows yet; Batch.CompleteFirst names the images it applies to. A landed
+// old key's entry does not wait for an image whose own chunk is in flight:
+// the row's unique values are still under the old key in the shadow, and
+// the chunk's insert of the row under the new key collides with them until
+// that entry flushes, so holding it back would wait on a chunk that is
+// waiting on it. The image, flushed once its chunk lands, finds the old
+// key's shadow row gone and completes from the source row under its own key
+// instead, held until the stream passes the read (D13). An image whose
+// completion is pending (Buffer.Hold) stays buffered whatever its key's
+// state, until Release lets the completion in or an event drops it.
 func (b *Buffer) Drain(pos copier.Position, snap Snapshot) Batch {
 	// INV: CO-4
 	state := make(map[int64]copier.KeyState, len(b.entries))
@@ -123,7 +131,7 @@ func (b *Buffer) Drain(pos copier.Position, snap Snapshot) Batch {
 			invisible[key] = struct{}{}
 		}
 	}
-	b.deferPairs(state)
+	b.deferPairs(state, invisible)
 	var batch Batch
 	b.hasOldest = false
 	for key, e := range b.entries {
@@ -163,13 +171,15 @@ type movePair struct {
 	image, old int64
 }
 
-// deferPairs marks both halves of every travelling pair in flight when either
-// half is. Two images may share one old key, so a deferral can spread through
-// that key to another pair; the passes repeat until one changes nothing.
-// Every pass that continues moves at least one key to in flight, so the work
-// is bounded by the number of pairs squared, not by the buffer: the pairs are
-// collected once, and a buffer with no moves costs one scan.
-func (b *Buffer) deferPairs(state map[int64]copier.KeyState) {
+// deferPairs marks both halves of every travelling pair in flight when the
+// pair must wait together (see waitsTogether). Two images may share one old
+// key, so a deferral can spread through that key to another pair; the passes
+// repeat until one changes nothing. Every pass that continues moves at least
+// one key to in flight, so the work is bounded by the number of pairs
+// squared, not by the buffer: the pairs are collected once, and a buffer
+// with no moves costs one scan. invisible names the keys whose entries are
+// in flight for their transaction's visibility rather than for a chunk.
+func (b *Buffer) deferPairs(state map[int64]copier.KeyState, invisible map[int64]struct{}) {
 	var pairs []movePair
 	for key, e := range b.entries {
 		if e.OldKey == nil {
@@ -182,7 +192,8 @@ func (b *Buffer) deferPairs(state map[int64]copier.KeyState) {
 	for changed := true; changed; {
 		changed = false
 		for _, p := range pairs {
-			if !waitsTogether(state[p.image], state[p.old]) {
+			_, imageInvisible := invisible[p.image]
+			if !waitsTogether(state[p.image], state[p.old], imageInvisible) {
 				continue
 			}
 			if state[p.image] != copier.KeyInFlight || state[p.old] != copier.KeyInFlight {
@@ -195,10 +206,14 @@ func (b *Buffer) deferPairs(state map[int64]copier.KeyState) {
 }
 
 // waitsTogether reports whether a moved image and its old key's entry must
-// both be deferred: neither is uncut, and at least one is in flight.
-func waitsTogether(image, old copier.KeyState) bool {
+// both be deferred: neither is uncut, and the old key's entry is in flight —
+// for its chunk or for its visibility — or the image is invisible. An image
+// in flight for its chunk alone does not hold a landed old key's entry back
+// (see Drain): the chunk cannot land while that entry's row still holds the
+// moved row's unique values in the shadow.
+func waitsTogether(image, old copier.KeyState, imageInvisible bool) bool {
 	if image == copier.KeyUncut || old == copier.KeyUncut {
 		return false
 	}
-	return image == copier.KeyInFlight || old == copier.KeyInFlight
+	return old == copier.KeyInFlight || imageInvisible
 }
