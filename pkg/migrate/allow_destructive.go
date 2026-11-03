@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/suggest"
@@ -128,12 +130,93 @@ func AdmitDestructive(st statement.Statement, schema string, rs router.Statement
 	return v, true, nil
 }
 
-// auditAllowDestructive records the acknowledged data loss before anything
-// executes. The record is warn-level and unconditional, as the force audit
-// is, and the verdict's AllowedDestructive field is its machine-readable
-// twin.
-func auditAllowDestructive(audit *slog.Logger, st statement.Statement) {
+// dropIndexDestructiveVerdict is the refusal for an accepted blocking DROP
+// INDEX without the destructive acknowledgement. Every index drop counts,
+// not only a unique one: the common mistake is dropping an index the
+// application still reads through, so the detail lists the checks that
+// catch it before naming the acknowledgement, and carries this server's
+// live usage of the index as the first piece of that evidence. table is the
+// index's owning table, resolved from the catalog.
+func dropIndexDestructiveVerdict(st statement.Statement, table string, usage preflight.IndexUsage) verdict.Verdict {
+	detail := "DROP INDEX discards an index that queries, foreign-key checks, or a uniqueness guarantee may " +
+		"still rely on, and undoing it is a full index build; " + describeIndexUsage(usage) +
+		"; before dropping, confirm that pg_stat_user_indexes.idx_scan for the index is 0 on every replica " +
+		"too (each instance keeps its own counters) over a window since stats_reset that covers the " +
+		"application's full cycle, that no foreign key's referencing columns rely on it, and, for a unique " +
+		"index, that nothing still needs the uniqueness it enforces — then rerun with --allow-destructive " + table
+	v := verdict.Verdict{
+		Statement:  st.SQL(),
+		Table:      table,
+		Detail:     detail,
+		IndexUsage: indexUsageEvidence(usage),
+	}
+	return v.WithRefusal(destructiveChangeRefusal())
+}
+
+// indexUsageEvidence copies the read into the verdict with every instant in
+// UTC, so the JSON is the same whichever host's time zone ran pg-sprite.
+func indexUsageEvidence(u preflight.IndexUsage) *verdict.IndexUsage {
+	e := &verdict.IndexUsage{
+		IdxScans:                u.IdxScans,
+		LastIdxScan:             utcTime(u.LastIdxScan),
+		StatsReset:              utcTime(u.StatsReset),
+		ReadAt:                  u.ReadAt.UTC(),
+		Unique:                  u.Unique,
+		TrackCounts:             u.TrackCounts,
+		TrackCountsOffBySetting: u.TrackCountsOffBySetting,
+	}
+	if u.Partitioned {
+		partitions := u.Partitions
+		e.Partitions = &partitions
+	}
+	return e
+}
+
+func utcTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	utc := t.UTC()
+	return &utc
+}
+
+// describeIndexUsage renders the connected server's evidence for the
+// refusal detail: the scan count, since when it counts, the last scan when
+// the server records one, and the caveats that make a zero meaningless.
+// The server does not record when an index was created, and an index
+// counts only from then, so the window is stated as the later of the two.
+func describeIndexUsage(u preflight.IndexUsage) string {
+	since := "since its statistics began (no reset recorded)"
+	if u.StatsReset != nil {
+		since = "since stats_reset at " + u.StatsReset.UTC().Format(time.RFC3339)
+	}
+	since += " or since the index was created, if later (the server does not record when)"
+	object := "the index"
+	if u.Partitioned {
+		object = fmt.Sprintf("the index through its partition indexes (%d)", u.Partitions)
+	}
+	s := fmt.Sprintf("this server has scanned %s %d times %s", object, u.IdxScans, since)
+	if u.LastIdxScan != nil {
+		s += ", last at " + u.LastIdxScan.UTC().Format(time.RFC3339)
+	}
+	if u.Unique {
+		s += "; it is a unique index"
+	}
+	if !u.TrackCounts {
+		s += "; track_counts is off, so this server counted no scans and the count proves nothing"
+	}
+	if u.TrackCountsOffBySetting {
+		s += "; an ALTER ROLE or ALTER DATABASE setting turns track_counts off, so scans by those sessions are not counted"
+	}
+	return s
+}
+
+// auditAllowDestructive records the acknowledged data loss on table before
+// anything executes. The record is warn-level and unconditional, as the
+// force audit is, and the verdict's AllowedDestructive field is its
+// machine-readable twin.
+func auditAllowDestructive(audit *slog.Logger, st statement.Statement, table string) {
 	audit.Warn("destructive change acknowledged; the statement will discard live data or structure",
-		"table", qualified(st),
+		"table", table,
 		"kind", st.Kind().String())
 }

@@ -389,6 +389,9 @@ CREATE UNIQUE INDEX events_name_key ON events (name);
 	assert.Equal(t, schemadiff.ChangeCreateIndex, changes[0].Kind)
 	assert.False(t, changes[0].Destructive)
 	assert.Equal(t, fmt.Sprintf("CREATE UNIQUE INDEX events_name_key ON %s.events USING btree (name)", schema), changes[0].SQL)
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "events_name_key"},
+	}, schemadiff.Advisories(live, want), "the non-destructive create is accompanied by the advisory that completing it removes the leftover")
 
 	// A baseline pulled from the table renders the leftover like any other
 	// index and materializes it valid, so the round trip diffs to exactly
@@ -431,6 +434,7 @@ CREATE UNIQUE INDEX events_name_key ON events (name);
 	rediff, err := schemadiff.Diff(schema, after, want)
 	require.NoError(t, err)
 	assert.Empty(t, rediff, "a valid index with the desired definition is delivered")
+	assert.Empty(t, schemadiff.Advisories(after, want), "a delivered index leaves nothing to advise")
 }
 
 // Desired may name the leftover of a failed build with a different
@@ -477,6 +481,9 @@ CREATE INDEX events_name_key ON events (name);
 	assert.Equal(t, schemadiff.ChangeCreateIndex, changes[0].Kind)
 	assert.False(t, changes[0].Destructive)
 	assert.Equal(t, fmt.Sprintf("CREATE INDEX events_name_key ON %s.events USING btree (name)", schema), changes[0].SQL)
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "events_name_key"},
+	}, schemadiff.Advisories(live, want), "a redefined leftover is still the rebuild case: desired names it")
 
 	// The duplicate rows stay: they only ever conflicted with the abandoned
 	// unique build, not with the plain index desired now.
@@ -592,6 +599,9 @@ CREATE TABLE events (
 	changes, err = schemadiff.Diff(schema, live, without)
 	require.NoError(t, err)
 	assert.Empty(t, changes, "an in-flight build desired does not name is not dropped from under its builder")
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexUndeclared, Index: "events_name_idx"},
+	}, schemadiff.Advisories(live, without), "the empty plan carries the observation the change list discards")
 
 	// Releasing the snapshot lets the build finish; the same desired state
 	// then diffs to nothing.

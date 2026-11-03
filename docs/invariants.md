@@ -227,20 +227,19 @@ takes it afterwards fails the confirmation (parked-before-insert and parked-befo
 tests). The applier's flush holds only `ACCESS SHARE` on the shadow until its first write, so a
 flush transaction of an earlier run parked between confirming the table lock and that write is
 not one the copier's fence — or the verifier's repair fence — waits on; that gap is open.
-`pkg/applier` `Buffer.Drain` — every
-buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
-in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
-two entries are judged per key, except that once neither is uncut the image waits for its old
-key's entry — an old key in flight, or invisible, holds its image back so the flush never
-deletes or copies the old key's row while the chunk that will copy it is still landing — while a
-landed old key's entry flushes ahead of an image in flight for its chunk (an invisible image
-still holds its old key's entry back): the delete must not wait for the image's chunk, because
-when the moved row carries a unique value the chunk cannot land while the old key's shadow row
-holds it, and the image, once its chunk lands, completes from the source row instead (three-way
-rule, discard-all before the first claim, deferred entry keeps merging,
-straddling move, pair waits for the old key, landed old key flushes ahead of its in-flight image,
-uncut half judged alone, deferral spreading through a shared old key and along a chain of
-pairs); `Drain`
+`pkg/applier` `Buffer.Drain` judges
+every buffered key against one `Position` snapshot: landed flushes, uncut is discarded, and
+in-flight stays buffered until a later drain finds its chunk landed. A key-moving UPDATE's two
+entries are judged per key, and once neither is uncut a pair rule applies. **The image waits
+for an old key in flight or invisible**, so the flush never deletes or copies the old key's
+row while the chunk that will copy it is still landing. **A landed old key's delete flushes
+ahead of an image in flight for its chunk**, because a moved row carrying a unique value cannot
+land while the old key's shadow row holds that value; once its chunk lands, the image completes
+from the source row. An invisible image still holds its old key's entry back. (Drain unit
+tests: three-way rule, discard-all before the first claim, deferred entry keeps merging,
+straddling move, pair waits for the old key, landed old key flushes ahead of its in-flight
+image, uncut half judged alone, deferral spreading through a shared old key and along a chain
+of pairs.) `Drain`
 judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
 count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names, as
 copies of its `Entries`, the moved, marker-bearing images the flush must complete — from the old
@@ -567,7 +566,9 @@ a `Shadow` that breaks either pairing is refused before a connection opens (ST-6
 copier's cuts and measurements, and every conversion-free copy, pass, and flush, keep the
 catalog alone. In
 `pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
-`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
+`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the new-sequence read
+(`readSequenceOwnedColumns`, which runs on the catalog-only path the shadow introspection
+leaves, so qualification is its second line), the identity `setval`, and
 the `format` call that renders the shadow's identity default qualify every function, relation,
 type, and operator: a planted `oid = regclass` operator on the build's path that hides
 `pg_class` and sequences does not change their answers, one that matches everything does not
@@ -813,7 +814,8 @@ the proof's lock, every drop, and the requested build share **one** overall budg
 recovery over k quarantined entries costs at most the budget, not (k+1) budgets.
 The declarative diff leans on this proof without performing it: when desired names an index
 whose live entry is an unfinished build, `diff` plans the `create-index` alone and never a
-drop, knowing the create cannot run as-is against the occupied name. The plan completes only
+drop, knowing the create cannot run as-is against the occupied name, and says so with an
+`invalid-index-rebuild` advisory on the plan report. The plan completes only
 through this invariant's proven removal — `RebuildAbandonedIndex`, or `DropAbandonedIndex`
 when the name must be cleared without completing the plan — or through an operator
 following the runbook; a plain `CREATE INDEX` on the occupied name fails as a duplicate
@@ -885,7 +887,8 @@ would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal s
 ineligible one because its scope exceeds the acknowledged table — and a statement the gate
 admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
-refusal as it stands rather than the accepted execution. The front door requires the
+refusal as it stands rather than the accepted execution. It accepts the lock only: an
+accepted `DROP INDEX` also needs the destructive acknowledgement (RF-10). The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
 `migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
@@ -1207,9 +1210,25 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last; for the native route's sequences, `pkg/executor`
-`admitSequence`, which `RunSequence` calls to admit every step's shape and target before the
-first step runs. `migrate --dry-run` reports the same shape refusals through
+require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
+`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+shadow build's transaction, `pkg/schemachange`
+`readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
+gives the shadow an identity or sequence-owned column the source does not have
+(`shadow-statement-new-sequence`), since the swap carries only the source's sequences and
+would otherwise stop on the new one after the whole copy — a prerequisite knowable before
+the first row moves, caught before the build commits (tests
+`TestBuildShadowRefusesANewIdentityColumnBesideARetype`,
+`TestBuildShadowRefusesANewSerialColumn`,
+`TestBuildShadowRefusesMakingAKeptColumnAnIdentity`,
+`TestBuildShadowAdmitsARetypeBesideTheSourcesSerialKey`,
+`TestRunnerRefusesANewIdentityColumnBeforeAnyRowOrFence`, with the order against the re-add and
+handoff checks pinned by `TestBuildShadowRefusesReplacingAnIdentityColumnWithAnIdentityAsAReadd`
+and `TestBuildShadowRefusesAKeptIdentityColumnDeclaredAgainAsANewSequence`), and `InspectShadow`
+runs the same check so a resume of such a shadow stops before the copy
+(`TestInspectShadowRefusesAShadowThatOwnsASequenceTheSourceLacks`); for the native route's sequences,
+`pkg/executor` `admitSequence`, which `RunSequence` calls to admit every step's shape and
+target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
 enforcement; the size guard and privilege preflight need live facts and stay the apply's.
 *Planned enforcement:* wiring those checks into the route, and
@@ -1303,12 +1322,21 @@ field for field against the checkpointed proof. A re-added column the copy canno
 its default — the primary key, the replacement of a source identity column, or a column that
 refuses NULL, by its own `NOT NULL` or a domain's, with no default of its own or on its type —
 is refused inside the build's transaction with `shadow-statement-readd`, so no shadow is
-committed for a statement whose copy could not run.
+committed for a statement whose copy could not run. The same holds for every column the copy
+list leaves out, not only a re-add: a new column that refuses NULL with nothing the server
+fills it from, and the source's primary key absent from the kept columns — dropped outright or
+replaced by a key under a new name, which no chunk range, watermark, or streamed change could
+be expressed in on the shadow — are refused in the same transaction with
+`shadow-statement-new-column`. A column re-added or added as an identity or `serial` is
+fillable by the server, so it passes both checks and is refused by ST-6's
+`shadow-statement-new-sequence` instead.
 *Enforced:* `pkg/schemachange` (`readColumnPositions` reads both relations' live attribute
 numbers inside the build's and the inspection's transaction; `sameColumns` keeps a column only
 when its live position equals its shadow attribute number; `copyColumns` takes only those;
 `readDomainFills` reads what each shadow column's domain contributes; `refuseUnfillableReadds`
-refuses the three re-adds before the build commits). Tests:
+refuses the three re-adds before the build commits; `refuseUnfillableNewColumns` then refuses a
+shadow without the primary key among its kept columns, and any other left-out column that
+refuses NULL with nothing to fill it). Tests:
 `TestSameColumnsComparesLivePositionToShadowNumber`,
 `TestRefuseUnfillableReaddsAdmitsAColumnTheServerFills`,
 `TestRefuseUnfillableReaddsRefusesThePrimaryKey`,
@@ -1317,12 +1345,26 @@ refuses the three re-adds before the build commits). Tests:
 `TestRefuseUnfillableReaddsIgnoresColumnsTheStatementKeptOrDropped`,
 `TestRefuseUnfillableReaddsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
 `TestRefuseUnfillableReaddsRefusesAColumnWhoseDomainRefusesNull`,
+`TestRefuseUnfillableNewColumnsAdmitsAColumnTheServerFills`,
+`TestRefuseUnfillableNewColumnsRefusesNotNullWithoutADefault`,
+`TestRefuseUnfillableNewColumnsRefusesAShadowWithoutThePrimaryKey`,
+`TestRefuseUnfillableNewColumnsIgnoresColumnsTheStatementKeptOrDropped`,
+`TestRefuseUnfillableNewColumnsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
+`TestRefuseUnfillableNewColumnsRefusesAColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesANewNotNullColumnWithNoDefault`,
+`TestBuildShadowRefusesANewColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesAStatementThatReplacesThePrimaryKey`,
+`TestBuildShadowRefusesADroppedPrimaryKeyWithNoReplacement`,
+`TestBuildShadowRefusesAReplacementKeyWithADefault`,
+`TestBuildShadowRefusesAnUnfillableColumnAfterAFillableOne`,
+`TestBuildShadowAdmitsANewColumnTheServerFills`,
+`TestRunnerRefusesAnUnfillableNewColumnBeforeAnyRowOrFence`,
 `TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
 `TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
 `TestBuildShadowRefusesAReaddedNotNullColumnWithNoDefault`,
 `TestBuildShadowRefusesAReaddedPrimaryKey`,
 `TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn`,
-`TestBuildShadowDoesNotRefuseAPlainColumnReaddedAsAnIdentity`,
+`TestBuildShadowRefusesAPlainColumnReaddedAsAnIdentity`,
 `TestBuildShadowRefusesAReaddedColumnWhoseDomainRefusesNull`,
 `TestBuildShadowRefusesAReaddedColumnWhoseBaseDomainRefusesNull`,
 `TestBuildShadowRefusesAReaddedColumnWhoseDefaultIsOnlyOnTheBaseDomain`,
@@ -1434,19 +1476,30 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   other gate, and an acknowledged run is audited at warn level and carries
   `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
   and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
-  reason. A `DROP INDEX` stays with the statement-kind gate and `--accept-blocking`, which
-  the destructive acknowledgement does not reach. Outage-risk statements are covered by
+  reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
+  accepts that refusal, the drop still runs only if `--allow-destructive` names the same
+  owning table, and otherwise it is refused with `destructive-change` before anything
+  executes, the detail listing the checks that catch an index the application still uses and
+  the verdict's `index_usage` carrying the connected server's live evidence for the index.
+  Accepting the lock is not accepting the loss. Outage-risk statements are covered by
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
-  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`),
+  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`, which decides every
+  shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
+  `TestEveryOpKindIsClassifiedForDestructiveness`,
+  `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
   `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
   `TestRunRefusesAnUnacknowledgedDropNotNull`, `TestRunExecutesAnAcknowledgedDropColumn`,
   `TestRunRejectsAMismatchedDestructiveAcknowledgement`,
   `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
   `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
-  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
+  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`,
+  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`,
+  `TestReadIndexUsageCountsEachIndexsOwnScans`,
+  `TestReadIndexUsageSumsAPartitionedIndexsLeafIndexes`,
+  `TestCheckLeafStatisticsListedRefusesAnUnlistedLeaf`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)
@@ -1507,15 +1560,19 @@ a plain table is an unfinished concurrent build — abandoned, or still running 
 never emits a `DROP INDEX` for it, whatever the desired file says about its name: a drop by
 name cannot tell the two apart, and dropping under a running build is the cleanup this
 invariant forbids. That keeps the cleanup half. It gives up the other half when the desired
-file no longer names the index at all: the observation is discarded and the plan is empty,
-so a desired state that removes an index the build never delivered reads as already
-converged. The trade is preferred to the alternatives — a name-based drop, or a fabricated
-change — because the plan stays executable and never destroys a build it cannot see; the
-leftover surfaces at the next `pull` (see [pull.md](pull.md)) and clears per the
-[invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same conclusion from
-the other side: the diff cannot confirm the entry is abandoned, so it must not round the
-uncertainty into a destructive change. *Enforced:* `pkg/schemadiff` never-drops-invalid
-tests against real debris on a real database.
+file no longer names the index at all: no statement is planned, so a desired state that
+removes an index the build never delivered converges to zero statements. The observation is
+not discarded, though — the plan report carries it as an `invalid-index-undeclared`
+advisory (see [plan-report.md](plan-report.md#advisory-kinds-advisorieskind-diff-source-only)), outside the statements and
+the fingerprint, so the empty plan says "no changes to run; the table carries an unfinished
+build" rather than "converged". The trade is preferred to the alternatives — a name-based
+drop, or a fabricated change — because the plan stays executable and never destroys a build
+it cannot see; the leftover also surfaces at the next `pull` (see [pull.md](pull.md)) and
+clears per the [invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same
+conclusion from the other side: the diff cannot confirm the entry is abandoned, so it must
+not round the uncertainty into a destructive change. *Enforced:* `pkg/schemadiff`
+never-drops-invalid tests against real debris on a real database; `pkg/diffplan` proves the
+empty plan carries the advisory and the unchanged fingerprint.
 
 ### OC-3 — Control requests are durable operator intent
 

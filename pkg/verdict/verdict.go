@@ -590,6 +590,64 @@ type Verdict struct {
 	// StatisticsRefresh reports the ANALYZE a committed type change owes
 	// the planner; nil when the statement retyped no column.
 	StatisticsRefresh *StatisticsRefresh `json:"statistics_refresh,omitempty"`
+	// IndexUsage is the live usage evidence of the index a destructive-change
+	// refusal of an accepted DROP INDEX would have dropped; nil for every
+	// other verdict.
+	IndexUsage *IndexUsage `json:"index_usage,omitempty"`
+}
+
+// IndexUsage is how the server pg-sprite is connected to has seen an index
+// used, read when a DROP INDEX is refused for want of the destructive
+// acknowledgement. It describes that one server only: every replica keeps
+// its own counters, so an index this server never scans may still serve a
+// replica's reads.
+type IndexUsage struct {
+	// IdxScans is the cumulative count of scans of the index since
+	// StatsReset, or since the index was created if that is later; for a
+	// partitioned index, the sum over its leaf indexes.
+	IdxScans int64 `json:"idx_scan"`
+	// LastIdxScan is when the server last recorded a scan; absent when it
+	// recorded none, and always on PostgreSQL 14 and 15. In UTC.
+	LastIdxScan *time.Time `json:"last_idx_scan,omitempty"`
+	// StatsReset is when the database's statistics were last reset; absent
+	// when the server reports no reset. In UTC.
+	StatsReset *time.Time `json:"stats_reset,omitempty"`
+	// ReadAt is the server's clock when the evidence was read. In UTC.
+	ReadAt time.Time `json:"read_at"`
+	// Unique reports whether the index enforces uniqueness, a guarantee the
+	// drop would also discard.
+	Unique bool `json:"unique"`
+	// Partitions is the number of leaf indexes of a partitioned index, whose
+	// scans IdxScans sums; absent for an index that is not partitioned.
+	Partitions *int `json:"partitions,omitempty"`
+	// TrackCounts is false when the server was counting no scans, so a zero
+	// IdxScans proves nothing.
+	TrackCounts bool `json:"track_counts"`
+	// TrackCountsOffBySetting is true when a saved ALTER ROLE or ALTER
+	// DATABASE setting turns track_counts off, so the scans of those
+	// sessions are missing from IdxScans.
+	TrackCountsOffBySetting bool `json:"track_counts_off_by_setting"`
+}
+
+// Summary renders the evidence on one line for the verdict's text form.
+func (u IndexUsage) Summary() string {
+	s := fmt.Sprintf("%d index scans on this server (replicas not counted)", u.IdxScans)
+	if u.Partitions != nil {
+		s += fmt.Sprintf(" through its partition indexes (%d)", *u.Partitions)
+	}
+	if u.LastIdxScan != nil {
+		s += ", last " + u.LastIdxScan.UTC().Format(time.RFC3339)
+	}
+	if u.Unique {
+		s += ", unique"
+	}
+	if !u.TrackCounts {
+		s += ", track_counts off"
+	}
+	if u.TrackCountsOffBySetting {
+		s += ", track_counts off for some roles"
+	}
+	return s
 }
 
 // StatisticsRefresh is the outcome of re-analyzing a table after a
@@ -665,6 +723,9 @@ func (v Verdict) String() string {
 	}
 	if v.WritesBlocked {
 		b.WriteString("\n  blocked:   writes to the table were refused (55006) while the run held it")
+	}
+	if v.IndexUsage != nil {
+		fmt.Fprintf(&b, "\n  usage:     %s", v.IndexUsage.Summary())
 	}
 	if v.AllowedDestructive {
 		b.WriteString("\n  allowed:   the statement's data loss was acknowledged (allow-destructive)")

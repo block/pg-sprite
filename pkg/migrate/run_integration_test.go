@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
@@ -41,7 +42,7 @@ func parseOne(t *testing.T, sql string) statement.Statement {
 // coverage the CLI's integration tests give the flag surface.
 func TestRunDispatch(t *testing.T) {
 	url := testutil.StartPostgres(t)
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	defer pool.Close()
 

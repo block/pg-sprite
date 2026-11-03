@@ -64,6 +64,17 @@ func fenceAfterStop(ctx context.Context, store *checkpoint.Store, st statement.S
 	}
 }
 
+// ErrBlockWritesNotSupported is returned by [RunDesired] when
+// Options.CopySwap.BlockWrites is set. The acknowledgement names a table,
+// but on the declarative front door the derived plan, not the operator,
+// decides which statements take copy-and-swap and so how many fenced copies
+// refuse the table's writes and for how long; a value left on an embedder's
+// configuration would take the table offline for every later plan. Offline
+// mode belongs on the imperative front door, one statement the operator
+// wrote at a time.
+var ErrBlockWritesNotSupported = errors.New(
+	"the block-writes acknowledgement applies to the imperative front door only; desired-state execution never takes a table offline for writes")
+
 // checkBlockWritesAck confirms that the block-writes acknowledgement names the
 // resolved target table, exactly as the force and restart acknowledgements
 // must. A block-writes run refuses every write to the table for its whole

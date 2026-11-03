@@ -54,7 +54,9 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
 - [Migrate](#migrate)
   - [Runs as written (`metadata-only`) — exit 0](#runs-as-written-metadata-only--exit-0)
   - [Safer-sequence substitution (`safer-idiom`) — exit 0](#safer-sequence-substitution-safer-idiom--exit-0)
-  - [Real execution](#real-execution)
+  - [Real execution — exit 0](#real-execution--exit-0)
+  - [Accepted blocking refusal (`index-statement`) — exit 3](#accepted-blocking-refusal-index-statement--exit-3)
+  - [Failed mid-sequence (`execution-failed`) — exit 1](#failed-mid-sequence-execution-failed--exit-1)
   - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
   - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
   - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
@@ -160,7 +162,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -201,7 +203,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -239,7 +241,7 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UN
 }
 ```
 
-### Real execution
+### Real execution — exit 0
 
 The same statement without `--dry-run` runs the substituted sequence for
 real. The verdict names what was executed and every step that committed
@@ -259,12 +261,17 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UN
 }
 ```
 
+### Accepted blocking refusal (`index-statement`) — exit 3
+
 An operator-accepted blocking refusal has a distinct marked outcome and exit
 3; exit 0 remains exclusive to online-safe execution. `--accept-blocking`
 takes the schema-qualified table whose lock the operator accepts, must match
 the index's owning table exactly (a mismatch executes nothing and exits 1),
 and requires an explicit `--statement-timeout`; it cannot be combined with
-`--force` or `--dry-run`. The text rendering marks the outcome as a warning:
+`--force` or `--dry-run`. A `DROP INDEX` also discards the index, so it needs
+`--allow-destructive` naming the same table; without it the drop is refused
+with `destructive-change` (exit 2) and nothing runs. The text rendering marks
+the outcome as a warning:
 
 ```text
 executed without online safety (accepted blocking refusal)
@@ -273,10 +280,11 @@ executed without online safety (accepted blocking refusal)
   statement: DROP INDEX public.users_email_idx
   safer:     DROP INDEX CONCURRENTLY
   budgets:   lock 3s, statement 10m
+  allowed:   the statement's data loss was acknowledged (allow-destructive)
 ```
 
 ```console
-$ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blocking public.users --lock-timeout 3s --statement-timeout 10m --json
+$ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blocking public.users --allow-destructive public.users --lock-timeout 3s --statement-timeout 10m --json
 {
   "outcome": "executed-without-online-safety",
   "reason": "index-statement",
@@ -284,10 +292,86 @@ $ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blockin
   "statement": "DROP INDEX public.users_email_idx",
   "table": "public.users",
   "safer_idiom": "DROP INDEX CONCURRENTLY",
+  "allowed_destructive": true,
   "blocking_passthrough": true,
   "lock_timeout": "3s",
   "statement_timeout": "10m"
 }
+```
+
+### Failed mid-sequence (`execution-failed`) — exit 1
+
+Exit 1 means execution started and PostgreSQL refused a step, or the command
+stopped before anything ran. Here the safer sequence for a `CHECK` constraint
+adds it `NOT VALID`, which commits, and then fails to validate it because a
+row has an upper-case email. The verdict on stdout names the failed step and
+the committed prefix that remains (`executed_sql`); the PostgreSQL error,
+with its SQLSTATE, goes to stderr. The constraint now exists `NOT VALID`, so
+fix the rows and then run the failed step (`failed_step_sql`) to finish. Do
+not rerun the original `ADD CONSTRAINT`: the constraint already exists, so it
+fails with `duplicate_object` (see the
+[retry paths](execution-model.md#the-committed-prefix)):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))' --json
+{
+  "outcome": "failed",
+  "code": "execution-failed",
+  "failed_step": 2,
+  "failed_step_sql": "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_lower\"",
+  "statement": "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))",
+  "table": "public.users",
+  "detail": "sequence step 2 of 2 failed; the 1 committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
+  "executed_sql": [
+    "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email)) NOT VALID"
+  ]
+}
+```
+
+```text
+pg-sprite: error: run schema change on public.users: sequence step 2 of 2 (validate-constraint) failed; steps before it committed and their state remains: optimistic attempt: ERROR: check constraint "users_email_lower" of relation "users" is violated by some row (SQLSTATE 23514)
+```
+
+When `code` is `commit-outcome-unknown`, the failed step's `COMMIT` may have
+landed; inspect the catalog before retrying.
+
+The other exit 1 is an error before anything runs — bad flags, an unreachable
+database, or an acknowledgement that names the wrong table. It prints no
+verdict, even with `--json`; stdout is empty and the error is on stderr:
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --allow-destructive public.orders
+pg-sprite: error: the destructive acknowledgement must name the resolved target table "public.users", got "public.orders"; nothing was executed
+$ echo $?
+1
+```
+
+### Data fault in a copy-and-swap run (`data-fault`) — exit 1
+
+A copy-and-swap run whose rows the server rejects under the new shape stops with
+`code: data-fault`. Here one `orders.note` is longer than the narrowed type
+holds, so a chunk's insert into the shadow fails with SQLSTATE `22001`. The same
+statement would fail the same way on every resume, so the run abandons itself
+before returning. It drops the shadow, drops its replication slot (or takes the
+write fence off the source), and deletes the checkpoint row. Fix the data or the
+statement, then run it again; the run starts from the beginning. If the detail
+says the run "could not be abandoned", its hold and checkpoint row remain: fix
+the data or the statement and rerun with `--restart SCHEMA.TABLE`
+([execution model](execution-model.md)):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)' --free-disk 1GiB --json
+{
+  "outcome": "failed",
+  "code": "data-fault",
+  "statement": "ALTER TABLE public.orders ALTER COLUMN note TYPE varchar(32)",
+  "table": "public.orders",
+  "detail": "the copy-and-swap run stopped: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001); the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, its replication slot is dropped, and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
+}
+```
+
+```text
+pg-sprite: error: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001)
 ```
 
 ### Refused: no online rewrite exists (`rewrite-required`) — exit 2
@@ -303,7 +387,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -345,7 +429,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -405,7 +489,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -442,7 +526,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -507,7 +591,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -634,7 +718,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "diff",
   "schema": "public",
   "table": "users",
