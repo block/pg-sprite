@@ -58,20 +58,15 @@ func TestTableLockConfirmDistinguishesHolderGoneFromHolderElsewhere(t *testing.T
 
 // goneLock acquires the table lock and then terminates the session's
 // backend, so the server no longer grants the lock while the session still
-// believes it holds it. The cleanup waits for the keepalive to notice the
-// loss before releasing.
+// believes it holds it. The cleanup releases the session without waiting
+// for the keepalive to notice the loss, which TestTableLockKeepaliveLoss
+// covers.
 func goneLock(t *testing.T, cfg dbconn.Config, pool *pgxpool.Pool, schema, table string) *dbconn.TableLockSession {
 	t.Helper()
 	lock, err := dbconn.AcquireTableLock(t.Context(), cfg, schema, table)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		const lockLossDeadline = 30 * time.Second
-		select {
-		case <-lock.Done():
-		case <-time.After(lockLossDeadline):
-			t.Errorf("lock session did not report loss within %s", lockLossDeadline)
-		}
-		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())))
+		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())), "releasing a session whose backend is gone fails")
 	})
 	var terminated bool
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT pg_terminate_backend($1)`, lock.BackendPID()).Scan(&terminated))

@@ -661,13 +661,7 @@ func (f copierFixture) goneLock(t *testing.T, table string) *dbconn.TableLockSes
 	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		const lockLossDeadline = 30 * time.Second
-		select {
-		case <-lock.Done():
-		case <-time.After(lockLossDeadline):
-			t.Errorf("lock session did not report loss within %s", lockLossDeadline)
-		}
-		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())))
+		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())), "releasing a session whose backend is gone fails")
 	})
 	f.terminateBackend(t, lock.BackendPID())
 	require.NoError(t, lock.Err(), "the keepalive has not yet noticed the loss; the in-transaction check must")

@@ -375,13 +375,7 @@ func (f flushFixture) goneLock(t *testing.T, table string) *dbconn.TableLockSess
 	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		const lockLossDeadline = 30 * time.Second
-		select {
-		case <-lock.Done():
-		case <-time.After(lockLossDeadline):
-			t.Errorf("lock session did not report loss within %s", lockLossDeadline)
-		}
-		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())))
+		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())), "releasing a session whose backend is gone fails")
 	})
 	var terminated bool
 	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT pg_terminate_backend($1)`, lock.BackendPID()).Scan(&terminated))
