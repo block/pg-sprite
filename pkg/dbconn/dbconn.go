@@ -200,21 +200,27 @@ func resolveTimeouts(cfg Config) (lock, statement time.Duration) {
 // ServerVersion reads the connected server's server_version setting.
 // Plan reports carry it because classification is version-sensitive: a
 // stored report names the server whose rules produced it.
+//
+// INV: CO-9 — the pool may be the caller's own, with a path that lists
+// another schema ahead of pg_catalog, so the function is qualified.
 func ServerVersion(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 	var v string
-	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version')").Scan(&v); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT pg_catalog.current_setting('server_version')").Scan(&v); err != nil {
 		return "", fmt.Errorf("read server_version: %w", err)
 	}
 	return v, nil
 }
 
 // ServerMajor reads the connected server's numeric major version.
+//
+// INV: CO-9 — as ServerVersion; the division is done here rather than in
+// SQL, where `/` would resolve through the caller's path.
 func ServerMajor(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	var major int
-	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int / 10000").Scan(&major); err != nil {
+	var num int
+	if err := pool.QueryRow(ctx, "SELECT pg_catalog.current_setting('server_version_num')::int").Scan(&num); err != nil {
 		return 0, fmt.Errorf("read server major version: %w", err)
 	}
-	return major, nil
+	return num / 10000, nil
 }
 
 // IndexBuildProgress is one server observation of a concurrent index build.
