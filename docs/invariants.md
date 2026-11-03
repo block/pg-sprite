@@ -556,7 +556,9 @@ a `Shadow` that breaks either pairing is refused before a connection opens (ST-6
 copier's cuts and measurements, and every conversion-free copy, pass, and flush, keep the
 catalog alone. In
 `pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
-`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
+`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the new-sequence read
+(`readSequenceOwnedColumns`, which runs on the catalog-only path the shadow introspection
+leaves, so qualification is its second line), the identity `setval`, and
 the `format` call that renders the shadow's identity default qualify every function, relation,
 type, and operator: a planted `oid = regclass` operator on the build's path that hides
 `pg_class` and sequences does not change their answers, one that matches everything does not
@@ -1199,10 +1201,24 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
-`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; for the
-native route's sequences, `pkg/executor`
-`admitSequence`, which `RunSequence` calls to admit every step's shape and target before the
-first step runs. `migrate --dry-run` reports the same shape refusals through
+`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+shadow build's transaction, `pkg/schemachange`
+`readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
+gives the shadow an identity or sequence-owned column the source does not have
+(`shadow-statement-new-sequence`), since the swap carries only the source's sequences and
+would otherwise stop on the new one after the whole copy — a prerequisite knowable before
+the first row moves, caught before the build commits (tests
+`TestBuildShadowRefusesANewIdentityColumnBesideARetype`,
+`TestBuildShadowRefusesANewSerialColumn`,
+`TestBuildShadowRefusesMakingAKeptColumnAnIdentity`,
+`TestBuildShadowAdmitsARetypeBesideTheSourcesSerialKey`,
+`TestRunnerRefusesANewIdentityColumnBeforeAnyRowOrFence`, with the order against the re-add and
+handoff checks pinned by `TestBuildShadowRefusesReplacingAnIdentityColumnWithAnIdentityAsAReadd`
+and `TestBuildShadowRefusesAKeptIdentityColumnDeclaredAgainAsANewSequence`), and `InspectShadow`
+runs the same check so a resume of such a shadow stops before the copy
+(`TestInspectShadowRefusesAShadowThatOwnsASequenceTheSourceLacks`); for the native route's sequences,
+`pkg/executor` `admitSequence`, which `RunSequence` calls to admit every step's shape and
+target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
 enforcement; the size guard and privilege preflight need live facts and stay the apply's.
 *Planned enforcement:* wiring those checks into the route, and
@@ -1296,7 +1312,9 @@ field for field against the checkpointed proof. A re-added column the copy canno
 its default — the primary key, the replacement of a source identity column, or a column that
 refuses NULL, by its own `NOT NULL` or a domain's, with no default of its own or on its type —
 is refused inside the build's transaction with `shadow-statement-readd`, so no shadow is
-committed for a statement whose copy could not run.
+committed for a statement whose copy could not run. A column re-added as an identity or
+`serial` is fillable by the server, so it passes this check and is refused by ST-6's
+`shadow-statement-new-sequence` instead.
 *Enforced:* `pkg/schemachange` (`readColumnPositions` reads both relations' live attribute
 numbers inside the build's and the inspection's transaction; `sameColumns` keeps a column only
 when its live position equals its shadow attribute number; `copyColumns` takes only those;
@@ -1315,7 +1333,7 @@ refuses the three re-adds before the build commits). Tests:
 `TestBuildShadowRefusesAReaddedNotNullColumnWithNoDefault`,
 `TestBuildShadowRefusesAReaddedPrimaryKey`,
 `TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn`,
-`TestBuildShadowDoesNotRefuseAPlainColumnReaddedAsAnIdentity`,
+`TestBuildShadowRefusesAPlainColumnReaddedAsAnIdentity`,
 `TestBuildShadowRefusesAReaddedColumnWhoseDomainRefusesNull`,
 `TestBuildShadowRefusesAReaddedColumnWhoseBaseDomainRefusesNull`,
 `TestBuildShadowRefusesAReaddedColumnWhoseDefaultIsOnlyOnTheBaseDomain`,

@@ -82,6 +82,14 @@ const (
 	// the replacement of a source identity column whose sequence the
 	// handoff cannot carry to it.
 	CauseStatementReadd RefusalCause = "shadow-statement-readd"
+	// CauseStatementNewSequence means the gated statement gives the shadow
+	// an identity or sequence-owned column the source does not have — an
+	// added identity or serial column, or a kept column made an identity
+	// (ST-6): the swap hands the live table exactly the source's sequences
+	// and identity columns, so a sequence the statement minted would copy
+	// every row and then stop at the swap; the build refuses it before any
+	// shadow exists.
+	CauseStatementNewSequence RefusalCause = "shadow-statement-new-sequence"
 	// CauseCutoverUnverified means the cutover gate was handed no usable
 	// data-equality proof (CO-1): the built-shadow proof or the verified
 	// shadow proof is empty, the two name different relations, or the
@@ -249,6 +257,7 @@ func RefusalCauses() []RefusalCause {
 		CauseGrantsDiffer,
 		CauseIdentityHandoff,
 		CauseStatementReadd,
+		CauseStatementNewSequence,
 		CauseCutoverUnverified,
 		CauseCutoverUndrained,
 		CauseCutoverUnfenced,
@@ -283,8 +292,8 @@ func (c RefusalCause) Invariant() string {
 	switch c {
 	case CauseLockUnproven, CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed:
 		return "LK-1"
-	case CauseProofEmpty, CauseSourceShape, CauseRelationReplaced, CauseSwapMismatch,
-		CauseCopyShadowMismatch, CauseCopyChunkUnknown:
+	case CauseProofEmpty, CauseSourceShape, CauseStatementNewSequence, CauseRelationReplaced,
+		CauseSwapMismatch, CauseCopyShadowMismatch, CauseCopyChunkUnknown:
 		return "ST-6"
 	case CauseCopyFrontierBroken:
 		return "CO-4"
@@ -322,7 +331,8 @@ func (c RefusalCause) Invariant() string {
 // operation is environmental — state outside the engine stopped a
 // supportable change. A statement the engine declines to carry as written
 // — a conversion the copy cannot reproduce, a re-added column it cannot
-// fill — is a capability boundary. Every other cause is an invariant violation: an
+// fill, a new identity or sequence the swap cannot carry — is a capability
+// boundary. Every other cause is an invariant violation: an
 // input the caller handed in that cannot have come from this engine, or a
 // write of the engine's own that the catalog does not show; nothing on the
 // server changes that, so the importer reports it. The class is a triage
@@ -341,7 +351,7 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld,
 		CauseRestartSwapCommitted, CauseCopyConversionDrift:
 		return refusal.ClassEnvironmental
-	case CauseStatementConversion, CauseStatementReadd:
+	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewSequence:
 		return refusal.ClassCapabilityBoundary
 	case CauseLockUnproven, CauseProofEmpty, CauseStatementTarget, CauseGrantsDiffer,
 		CauseCutoverUnverified, CauseCutoverUndrained, CauseSwapMismatch, CauseResumeTerminal,
