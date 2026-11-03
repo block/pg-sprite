@@ -49,7 +49,10 @@ catalog, so they derive the same list, and the copier, the checksum digest, and 
 all take their columns from it (ST-11). A re-added column the copy cannot leave to its default —
 the primary key, the replacement of a source identity column, or a column that refuses NULL with
 no default of its own or its domain's — is refused inside the build's transaction
-(`shadow-statement-readd`), so no shadow is committed for a copy that could not run.
+(`shadow-statement-readd`). Every other column the copy leaves out is checked the same way: a new
+column that refuses NULL with nothing to fill it from, or a shadow whose kept columns no longer
+include the source's primary key, is refused in the same transaction
+(`shadow-statement-new-column`). Either way no shadow is committed for a copy that could not run.
 
 **Comparison-only exception.** `RowSecurityChange.CanonicalSQLForNamespace` may erase
 only the validated RLS operation target's schema on a fresh parsed tree. This supports

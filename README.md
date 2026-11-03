@@ -70,8 +70,9 @@ refusal — never a silently wrong or incomplete result:
   through to a blocking rewrite, and the route's preflight refuses table shapes
   and environments it cannot run against. The shadow build also refuses a
   statement the copy cannot carry: a `USING` expression it cannot reproduce,
-  a dropped-and-re-added column it cannot fill, or a new identity or `serial`
-  column whose sequence the swap cannot carry.
+  a dropped-and-re-added or new column it cannot fill, a key it would not
+  keep, or a new identity or `serial` column whose sequence the swap cannot
+  carry.
 - **Connection poolers**: point pg-sprite directly at the primary; the
   application keeps whatever pooling it uses. pg-sprite's own connection
   through a pooler is unsupported, except Supabase's Supavisor session

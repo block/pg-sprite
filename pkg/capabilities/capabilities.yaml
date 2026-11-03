@@ -33,7 +33,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Table rewrite to check every row against the domain; routes to copy-and-swap, which does not carry an added column yet (the shadow fill and the stream would each fill it from the default)"
+    reason_notes: "Table rewrite to check every row against the domain; routes to copy-and-swap, which does not carry an added column yet (the shadow fill and the stream would each fill it from the default). A library caller that reaches the shadow build with a domain that refuses NULL and has no default is refused there with shadow-statement-new-column"
   - id: add-column-generated-stored
     area: "column_changes"
     operation: "`ADD COLUMN ... GENERATED ... STORED`"

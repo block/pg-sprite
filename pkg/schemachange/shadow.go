@@ -307,6 +307,13 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := refuseUnfillableReadds(target.Schema(), target.Table(), target.PKColumn(), sourcePositions, shadowPositions, targetModel, shadowDomains, identities); err != nil {
 		return BuiltShadow{}, err
 	}
+	// Any other column the copy list leaves out is a new column the server
+	// fills; one it cannot fill, or a key the shadow no longer has, is
+	// refused here rather than by the first chunk's error after the shadow
+	// is committed.
+	if err := refuseUnfillableNewColumns(target.Schema(), target.Table(), target.PKColumn(), sourcePositions, shadowPositions, targetModel, shadowDomains); err != nil {
+		return BuiltShadow{}, err
+	}
 	// A sequence the statement minted on the shadow has no place in the
 	// swap's handoff, which carries the source's sequences and identity
 	// columns alone; it is refused here, before a copy would run to the
