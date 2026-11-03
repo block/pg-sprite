@@ -72,7 +72,8 @@ type CopySwapOptions struct {
 	// writes until the swap. It must name the resolved target table as
 	// SCHEMA.TABLE, the same way Restart does, so the declaration cannot be
 	// left on a script and fence another table by accident. Empty runs the
-	// live path: slot, stream, and catch-up.
+	// live path: slot, stream, and catch-up. Run takes it; RunDesired
+	// rejects any value with ErrBlockWritesNotSupported.
 	BlockWrites string
 
 	// Restart, when set, is the operator's acknowledgement that the run on

@@ -173,8 +173,11 @@ func TestRunDesiredRefusesAPoolSmallerThanCopyAndSwapNeeds(t *testing.T) {
 		)`)
 	require.NoError(t, err)
 
+	// Desired-state execution takes no block-writes acknowledgement. The
+	// pool is checked before the route's preflight, so the server needs no
+	// logical decoding for the pool check to answer.
 	opts := f.options()
-	opts.CopySwap.BlockWrites = f.schema + ".t"
+	opts.CopySwap.BlockWrites = ""
 	res, err := RunDesired(t.Context(), small, DesiredRequest{Schema: f.schema, Desired: desired}, opts)
 	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
 	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)

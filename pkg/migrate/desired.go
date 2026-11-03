@@ -183,9 +183,10 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // the operational error. An error with a zero result means the pipeline
 // stopped before planning or executing anything.
 //
-// Options.Force and Options.AllowDestructive are rejected: the declarative
-// front door never runs a submitted form blind and refuses a destructive
-// plan whole. A destructive or force-worthy change belongs on the
+// Options.Force, Options.AllowDestructive and Options.CopySwap.BlockWrites
+// are rejected: the declarative front door never runs a submitted form
+// blind, refuses a destructive plan whole, and never takes a table offline
+// for writes. A destructive, force-worthy or offline change belongs on the
 // imperative front door where the operator states it explicitly.
 //
 // Every planned statement runs back through [Run], so Run's note on the
@@ -201,6 +202,9 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	}
 	if opts.AllowDestructive != "" {
 		return DesiredResult{}, ErrAllowDestructiveNotSupported
+	}
+	if opts.CopySwap.BlockWrites != "" {
+		return DesiredResult{}, ErrBlockWritesNotSupported
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if ref, ok := desiredShapeRefusal(err); ok {

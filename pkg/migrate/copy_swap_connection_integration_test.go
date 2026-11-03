@@ -128,7 +128,7 @@ func TestRunDesiredRefusesAConnectionOnAnotherDatabase(t *testing.T) {
 			qty  integer NOT NULL,
 			note text
 		)`),
-	}, copySwapRunOptions(d.otherURL, schema+".orders"))
+	}, desiredCopySwapOptions(d.otherURL))
 	var mismatch *migrate.CopySwapConnectionMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	assert.Equal(t, mismatch.PoolCluster, mismatch.ConnectionCluster, "both databases are on the test server")
@@ -262,6 +262,10 @@ func assertStopsBeforeAnyStatement(t *testing.T, d twoDatabases, runPool *pgxpoo
 	assert.NotErrorAs(t, err, &mismatch)
 	assert.Zero(t, v, "nothing was executed, so there is no verdict")
 
+	// Desired-state execution rejects the block-writes acknowledgement, so
+	// the desired run takes the same wiring without it.
+	desiredOpts := opts
+	desiredOpts.CopySwap.BlockWrites = ""
 	res, err := migrate.RunDesired(t.Context(), runPool, migrate.DesiredRequest{
 		Schema: schema,
 		Desired: parseDesired(t, `CREATE TABLE orders (
@@ -269,7 +273,7 @@ func assertStopsBeforeAnyStatement(t *testing.T, d twoDatabases, runPool *pgxpoo
 			qty  integer NOT NULL,
 			note text
 		)`),
-	}, opts)
+	}, desiredOpts)
 	require.Error(t, err)
 	assert.NotErrorAs(t, err, &mismatch)
 	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
