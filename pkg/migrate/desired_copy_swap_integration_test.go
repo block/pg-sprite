@@ -147,12 +147,13 @@ func TestRunDesiredCopyAndSwap(t *testing.T) {
 
 // Desired-state execution takes no block-writes acknowledgement, so a plan
 // that reaches a copy always needs the live path. On a server without
-// logical decoding (the default wal_level = replica) the plan below, a
+// logical decoding (wal_level = replica, on a server of the test's own: a
+// shared PG_DSN server may have logical decoding on) the plan below, a
 // native ADD COLUMN ahead of a retype routed to copy-and-swap, is refused
 // whole at admission: the route's preflight refuses the server as an
 // environmental condition, and neither statement runs.
 func TestRunDesiredRefusesACopyOnAServerWithoutLogicalDecoding(t *testing.T) {
-	serverURL := testutil.StartPostgres(t)
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=replica")
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	defer pool.Close()
