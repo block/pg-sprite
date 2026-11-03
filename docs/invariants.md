@@ -1462,6 +1462,27 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `table_usage_idle_integration_test.go`; a reset between the read's statistics reads not
   seen, and a role's saved `track_counts = off` unknown, in
   `table_usage_coverage_integration_test.go`. *Source:* [table usage](table-usage.md).
+- **RF-12** — Every operation pg-sprite can run that cannot be undone is listed in one
+  registry with the typed acknowledgement that lifts its refusal, and the list is complete:
+  every shape the planner marks destructive, a blocking `DROP INDEX` or `REINDEX`, the
+  submitted blocking form, a copy-and-swap restart, and a copy-and-swap that blocks the
+  table's writes. On `migrate --alter`, each is refused with its declared reason when its
+  acknowledgement is missing, and is a usage error that executes nothing when the
+  acknowledgement names any table but the resolved target. Desired-state execution takes no
+  acknowledgement: `RunDesired` rejects each with its own sentinel before any database work,
+  and `migrate --desired` rejects each flag. A new acknowledgement, a new destructive shape,
+  or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry entry and a
+  desired-state decision. RF-10, RF-5, and AB-1..AB-5 state what each gate does; this
+  invariant states that the set of gates is complete. *Enforced:* `pkg/migrate`
+  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
+  `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`,
+  `ErrRestartNotSupported`, `ErrBlockWritesNotSupported`), `pkg/planner`
+  (`DestructiveOpKinds`), `internal/cli` (`validateInput`). *Test obligation:*
+  `TestIrreversibleOperationRegistryIsComplete` for the registry's shape and the
+  desired-state rejections, `TestIrreversibleOperationsAreGated` for each entry's refusal
+  and wrong-target usage error against real PostgreSQL with the table, checkpoint, and write
+  path unchanged, and `TestEveryAcknowledgementFlagMapsToARegistryEntry` for the CLI flags.
+  *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
 
 ## Orchestration / control-plane (OC)
 
@@ -1561,4 +1582,5 @@ about **how we write and review the code**.
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | RF-11 | table usage primitive (ahead of any drop path) | per-branch window-edge and partition-aggregation unit tests; recent, lock-holder, version, reset, and partitioned-table integration tests on 14 → 18 |
+| RF-12 | irreversible-operations registry | registry completeness and desired-state rejection unit tests; per-entry refusal and wrong-target integration test; CLI flag-to-entry walk |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

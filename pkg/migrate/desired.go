@@ -198,6 +198,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if err := opts.validate(); err != nil {
 		return DesiredResult{}, err
 	}
+	// INV: RF-12 — desired-state execution takes no acknowledgement.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
