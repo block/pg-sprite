@@ -51,7 +51,9 @@ type Position struct {
 	Cut Watermark
 	// InFlight are the claimed, unlanded chunks, in ascending key order. It is
 	// empty once Run has returned nil; after a failed Run it lists the chunks
-	// whose transactions did not commit, so their keys never read as landed.
+	// that did not land. A chunk in Pending is listed too although it has
+	// committed every row but its pending keys, and its other keys read as
+	// landed: use Classify, not membership here, to judge a key.
 	InFlight []Chunk
 	// Pending lists, in the order of InFlight, the in-flight chunks that have
 	// committed every row but a few, with the keys still to copy. Such a

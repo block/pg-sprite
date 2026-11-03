@@ -7,8 +7,9 @@
 // rewrite commits around the rows held off and copies those alone, after
 // bounded waits, once the row is gone — first clearing the shadow above the
 // watermark when it resumes, and reports a Position whose Classify is the
-// applier's rule for a captured key: uncut, in flight, or landed. A column the Shadow proof names in
-// Conversions is copied through that USING expression; the copier does not
+// applier's rule for a captured key: uncut, in flight, or landed. A column
+// the Shadow proof names in Conversions is copied through that USING
+// expression; the copier does not
 // decide whether the statement behind the proof may run — the router's
 // availability check is that gate, and a caller that drives the copier
 // directly is trusted to have consulted it. Every refusal is a *RefusalError carrying a

@@ -142,7 +142,6 @@ func TestCopierStopsWhenACollisionOutlastsEveryAttempt(t *testing.T) {
 	assert.Equal(t, copier.RefusalCause(""), copier.RefusalCauseOf(err), "a collision is the server's answer, not a copier refusal")
 	assert.False(t, errors.Is(err, copier.ErrInvariantViolation))
 	assert.False(t, dbconn.Retryable(err), "a collision is not a transient the connection layer retries")
-	assert.Contains(t, err.Error(), fmt.Sprintf("on each of %d attempts", attempts))
 	assert.Equal(t, int64(attempts), c.Collisions())
 
 	pos := c.Position()

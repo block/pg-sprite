@@ -18,6 +18,12 @@ const (
 	sqlstateExclusionViolation = "23P01"
 )
 
+// sqlstateObjectNotInPrerequisiteState is the SQLSTATE the server raises,
+// among other cases, when an INSERT ... ON CONFLICT with no conflict target
+// meets a table with a DEFERRABLE unique or exclusion constraint, which
+// cannot serve as an arbiter.
+const sqlstateObjectNotInPrerequisiteState = "55000"
+
 const (
 	// DefaultCollisionAttempts is the number of passes a chunk whose insert
 	// collided is given before the copy stops, when Options leaves
@@ -33,14 +39,29 @@ const (
 
 // collided reports whether err is the server refusing a chunk's insert
 // because a shadow row already holds one of its values under a unique index
-// or an exclusion constraint. The primary key cannot be the index: the
-// insert's ON CONFLICT (pk) DO NOTHING skips a row already there (CO-4).
+// or an exclusion constraint. Only the strict insert raises it, and the
+// primary key cannot be the index: that insert's ON CONFLICT (pk) DO NOTHING
+// skips a row already there (CO-4). The passes that copy around held-off
+// rows use ON CONFLICT DO NOTHING with no target, which skips a conflict on
+// any unique index or exclusion constraint instead of raising it.
 func collided(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
 		return false
 	}
 	return pgErr.Code == sqlstateUniqueViolation || pgErr.Code == sqlstateExclusionViolation
+}
+
+// refusesSkipping reports whether err is the server refusing the pass that
+// copies around held-off rows because the shadow has a DEFERRABLE unique or
+// exclusion constraint, which ON CONFLICT with no target cannot use as an
+// arbiter.
+func refusesSkipping(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == sqlstateObjectNotInPrerequisiteState
 }
 
 // copyUntilClear copies chunk until every row of it has committed, returning
@@ -79,11 +100,13 @@ func (c *Copier) copyUntilClear(ctx context.Context, pool *pgxpool.Pool, chunk C
 // has rewritten the row holding a pending row's value the next pass lands
 // it, and a pending row the source has since deleted is simply no longer
 // read; the pending keys only ever shrink, and the chunk lands when they
-// are gone. A pass the server refuses as a whole, as a deferred unique
-// constraint refuses at commit, is run again as it was. A collision no pass
-// outlasts ends the copy with the server's error, wrapped with the chunk's
-// bounds and the passes made; the chunk stays in flight with its keys
-// pending.
+// are gone. A shadow with a DEFERRABLE unique or exclusion constraint
+// cannot be copied around, since the server refuses the pass's target-less
+// ON CONFLICT on it, so its chunk reruns the strict insert over the whole
+// range instead (rerunWhole). A collision no pass outlasts ends the copy
+// with the server's error, wrapped with the chunk's bounds, the passes
+// made, and the keys still pending; the chunk stays in flight with those
+// keys pending.
 func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, chunk Chunk, collision error) (int64, time.Duration, error) {
 	var total int64
 	var took time.Duration
@@ -91,7 +114,7 @@ func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, c
 	var pending []int64
 	for pass := 2; ; pass++ {
 		if pass == c.opts.CollisionAttempts+1 {
-			return 0, 0, fmt.Errorf("chunk [%d, %d] collided with a shadow row on each of %d attempts and still has rows pending whose values other shadow rows hold: %w", chunk.Lower(), chunk.Upper(), c.opts.CollisionAttempts, collision)
+			return 0, 0, c.pendingOutlasted(chunk, pending, collision)
 		}
 		if err := c.waitBeforePass(ctx, pass); err != nil {
 			return 0, 0, err
@@ -99,12 +122,10 @@ func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, c
 		started := c.opts.Clock.Now()
 		inserted, held, err := c.copyPending(ctx, pool, chunk, pending)
 		if err != nil {
-			if !collided(err) {
-				return 0, 0, err
+			if pending == nil && refusesSkipping(err) {
+				return c.rerunWhole(ctx, pool, chunk, pass+1, collision)
 			}
-			collision = err
-			c.collisions.Add(1)
-			continue
+			return 0, 0, err
 		}
 		if pending == nil {
 			took = c.opts.Clock.Now().Sub(started)
@@ -119,6 +140,44 @@ func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, c
 		}
 		c.collisions.Add(1)
 	}
+}
+
+// rerunWhole finishes a collided chunk whose shadow cannot be copied around,
+// in passes numbered from pass up to Options.CollisionAttempts: each waits
+// as waitBeforePass says and then runs the strict insert over the whole
+// range, which lands every row of the chunk once the flush has moved the
+// colliding value out of its way and otherwise collides again. Nothing is
+// settled, so the chunk's keys stay in flight until it lands. A collision
+// no pass outlasts ends the copy with the server's error, wrapped with the
+// chunk's bounds and the passes made.
+func (c *Copier) rerunWhole(ctx context.Context, pool *pgxpool.Pool, chunk Chunk, pass int, collision error) (int64, time.Duration, error) {
+	for ; pass <= c.opts.CollisionAttempts; pass++ {
+		if err := c.waitBeforePass(ctx, pass); err != nil {
+			return 0, 0, err
+		}
+		started := c.opts.Clock.Now()
+		inserted, err := c.copyChunk(ctx, pool, chunk)
+		if err == nil {
+			return inserted, c.opts.Clock.Now().Sub(started), nil
+		}
+		if !collided(err) {
+			return 0, 0, err
+		}
+		collision = err
+		c.collisions.Add(1)
+	}
+	return 0, 0, fmt.Errorf("chunk [%d, %d] collided with a shadow row on each of %d attempts: %w", chunk.Lower(), chunk.Upper(), c.opts.CollisionAttempts, collision)
+}
+
+// pendingOutlasted is the error that ends the copy when a collided chunk
+// has used its passes: it names how many keys are still pending and the
+// lowest of them, which Position().Pending lists in full, and wraps the
+// strict insert's collision.
+func (c *Copier) pendingOutlasted(chunk Chunk, pending []int64, collision error) error {
+	if len(pending) == 0 {
+		return fmt.Errorf("chunk [%d, %d] collided with a shadow row on each of %d attempts: %w", chunk.Lower(), chunk.Upper(), c.opts.CollisionAttempts, collision)
+	}
+	return fmt.Errorf("chunk [%d, %d] still has %d pending keys after %d attempts, the lowest %d, whose values other shadow rows hold: %w", chunk.Lower(), chunk.Upper(), len(pending), c.opts.CollisionAttempts, pending[0], collision)
 }
 
 // copyPending runs one pass of a collided chunk: over the whole range while
@@ -150,8 +209,10 @@ func (c *Copier) waitBeforePass(ctx context.Context, pass int) error {
 // Collisions is the number of chunk passes this copier's run has had the
 // server refuse on a unique index or an exclusion constraint, or has had to
 // leave rows held off from, each followed by another pass or by the copy
-// stopping. It is safe to read from any goroutine while Run is in progress;
-// a copy whose source saw no value move during it reads zero.
+// stopping. It counts per pass, so one chunk waiting on a single held-off
+// key adds one for each pass that still finds the key's value taken. It is
+// safe to read from any goroutine while Run is in progress; a copy whose
+// source saw no value move during it reads zero.
 func (c *Copier) Collisions() int64 {
 	return c.collisions.Load()
 }

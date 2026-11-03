@@ -159,7 +159,8 @@ is the hold), so no flush interleaves with the delete and the copy
 
 ### CO-4 — The copy/apply ordering invariants
 
-The copier **never overwrites** (`ON CONFLICT (pk) DO NOTHING`); the applier **always
+The copier **never overwrites** (`ON CONFLICT (pk) DO NOTHING` on a chunk's strict insert, and
+`ON CONFLICT DO NOTHING` with no target on the passes after a collision); the applier **always
 overwrites** (`ON CONFLICT (pk) DO UPDATE` + explicit deletes); captured changes above the
 copier's watermark are **discarded, judged per key**, which is sound only because v1 restricts
 the chunk key to one integer-family PK with a monotonic watermark
@@ -278,24 +279,30 @@ which the change lands and the catch-up converges). *Enforced* for the copier's 
 of a unique value that moves between rows while its chunk is in flight: the chunk's insert
 collides (SQLSTATE `23505`, or `23P01` for an exclusion constraint) with the shadow row that
 still holds the value — a landed row the flush has yet to rewrite, or a row of the same chunk
-the copier itself read before the swap — and the copier commits the chunk around the colliding
-rows: a second pass inserts every row of the chunk whose values no shadow row holds and
-settles the chunk with the held-off keys pending (`copier.Position.Pending`), so from then on
-the applier writes every other key of the chunk as landed and keeps only the pending keys in
-flight; each later pass, after a wait one `copier.Options.CollisionBackoff` longer than the one
-before, inserts only the keys still pending, never the range again, so a value that moves
-into the range after the second pass is the applier's to write and cannot make the chunk
-collide anew. The pending keys only shrink — the flush rewrites the row holding a pending
-row's value and the next pass lands it, or the source deletes the pending row and the next
-pass no longer reads it — and the chunk lands when they are gone; a chunk whose pending keys
-outlast `copier.Options.CollisionAttempts` passes stops the copy with the server's error and
-no cause of its own, the chunk still in flight with its keys pending so a checkpoint records
-none of it as copied and the resume clear removes the rows committed around them (a copier
-integration test holds a colliding row, asserts the chunk commits around it with that key
-alone pending, and removes the row; a catch-up convergence test runs unique-key swaps
-throughout the copy; a second runs primary-key moves faster than one per backoff from before
-the first chunk is read, so every move lands in the last chunk while it is in flight, and
-converges within the attempts). *Enforced* for a primary-key move whose row carries a
+the copier itself read before the swap. The copier then commits the chunk around the colliding
+rows. A second pass inserts every row of the chunk whose values no shadow row holds and
+settles the chunk with the held-off keys pending (`copier.Position.Pending`); from then on the
+applier writes every other key of the chunk as landed and keeps only the pending keys in
+flight. Each later pass waits one `copier.Options.CollisionBackoff` longer than the one before
+and inserts only the keys still pending, never the range again, so a value that moves into the
+range after the second pass is the applier's to write and cannot make the chunk collide anew.
+The pending keys only shrink: the flush rewrites the row holding a pending row's value and the
+next pass lands it, or the source deletes the pending row and the next pass no longer reads
+it. The chunk lands when they are gone. A chunk whose pending keys outlast
+`copier.Options.CollisionAttempts` passes stops the copy with the server's error and no cause
+of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
+as copied and the resume clear removes the rows committed around them. A shadow with a
+`DEFERRABLE` unique or exclusion constraint cannot be copied around, because the server
+refuses `ON CONFLICT` with no target on such a table (SQLSTATE `55000`); its collided chunk
+instead reruns the strict insert over the whole range after the same growing waits, with no
+keys pending, until the flush has moved the value or the attempts run out. (Copier integration
+tests: a colliding row committed around with that key alone pending, then removed; three
+pending keys shrinking as their holders go; a row arriving in a settled chunk's range left to
+the applier; a row the shadow already holds never held off; the waits growing by one backoff
+per pass; a deferrable unique constraint rerunning the whole chunk and converging. Catch-up
+convergence tests: unique-key swaps throughout the copy, and primary-key moves faster than one
+per backoff from before the first chunk is read, so every move lands in the last chunk while
+it is in flight.) *Enforced* for a primary-key move whose row carries a
 unique secondary value, from a landed key to a key in flight: the drain flushes the landed old
 key's delete ahead of the image (the pair rule above), the retried chunk's insert of the row
 under the new key then lands, and the image, flushed once its chunk has landed, completes from
@@ -307,7 +314,11 @@ bounded whatever the rate of moves: a unique value that keeps arriving in a chun
 from landed rows reaches it after the pass that committed around the first collision, and is
 then the applier's to write, never the chunk's; only the keys held off at that pass are
 retried, and the copy stops with the server's error only when one of those keys' values is
-still held by another shadow row after the last pass. *Test obligation:* a
+still held by another shadow row after the last pass. That bound does not hold for a shadow
+with a `DEFERRABLE` unique or exclusion constraint: its chunk reruns whole, so values that
+keep arriving in its range from landed rows faster than one move per catch-up cycle can make
+every pass collide, and the copy stops with the server's error once the attempts run out.
+*Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,

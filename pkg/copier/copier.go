@@ -52,7 +52,9 @@ type Options struct {
 	// shadow rows hold, then passes over only the rows held off. Each pass
 	// reads the source afresh, so a value a source change moved between
 	// keys lands once the applier has flushed the move's other half into
-	// the shadow.
+	// the shadow. On a shadow with a DEFERRABLE unique or exclusion
+	// constraint, which cannot be copied around, the passes after the first
+	// rerun the refused insert over the whole chunk.
 	CollisionAttempts int
 	// CollisionBackoff is the wait before a collided chunk's first pass over
 	// the rows it held off; each later wait is one backoff longer. The pass
