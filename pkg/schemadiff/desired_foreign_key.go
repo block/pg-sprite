@@ -80,13 +80,15 @@ func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema st
 // returns how many it renamed. Renaming a constraint's index renames the
 // constraint with it.
 func renameStandInIndexes(ctx context.Context, tx pgx.Tx, scratch, table string, next int) (int, error) {
+	// INV: CO-9 — the read runs under the scratch build's path, which lists
+	// the target schema, so every relation and operator is qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT idx.relname
-		FROM pg_index i
-		JOIN pg_class idx ON idx.oid = i.indexrelid
-		JOIN pg_class rel ON rel.oid = i.indrelid
-		JOIN pg_namespace n ON n.oid = rel.relnamespace
-		WHERE n.nspname = $1 AND rel.relname = $2
+		FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class idx ON idx.oid OPERATOR(pg_catalog.=) i.indexrelid
+		JOIN pg_catalog.pg_class rel ON rel.oid OPERATOR(pg_catalog.=) i.indrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) rel.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND rel.relname OPERATOR(pg_catalog.=) $2
 		ORDER BY idx.relname`, scratch, table)
 	if err != nil {
 		return 0, fmt.Errorf("read scratch stand-in indexes of %s: %w", table, err)
@@ -112,15 +114,18 @@ func renameStandInIndexes(ctx context.Context, tx pgx.Tx, scratch, table string,
 // rather than as a comparison against a live table's binding.
 func confirmForeignKeysBindScratch(ctx context.Context, tx pgx.Tx, scratch, table string) error {
 	var escaped []string
+	// INV: CO-9 — the read runs under the scratch build's path, which lists
+	// the target schema, so every relation and operator is qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT con.conname
-		FROM pg_constraint con
-		JOIN pg_class rel ON rel.oid = con.conrelid
-		JOIN pg_namespace reln ON reln.oid = rel.relnamespace
-		JOIN pg_class ref ON ref.oid = con.confrelid
-		JOIN pg_namespace refn ON refn.oid = ref.relnamespace
-		WHERE con.contype = 'f' AND reln.nspname = $1 AND rel.relname = $2
-		      AND refn.nspname <> $1
+		FROM pg_catalog.pg_constraint con
+		JOIN pg_catalog.pg_class rel ON rel.oid OPERATOR(pg_catalog.=) con.conrelid
+		JOIN pg_catalog.pg_namespace reln ON reln.oid OPERATOR(pg_catalog.=) rel.relnamespace
+		JOIN pg_catalog.pg_class ref ON ref.oid OPERATOR(pg_catalog.=) con.confrelid
+		JOIN pg_catalog.pg_namespace refn ON refn.oid OPERATOR(pg_catalog.=) ref.relnamespace
+		WHERE con.contype OPERATOR(pg_catalog.=) 'f'
+		      AND reln.nspname OPERATOR(pg_catalog.=) $1 AND rel.relname OPERATOR(pg_catalog.=) $2
+		      AND refn.nspname OPERATOR(pg_catalog.<>) $1
 		ORDER BY con.conname`, scratch, table)
 	if err != nil {
 		return fmt.Errorf("read scratch foreign keys of %s: %w", table, err)

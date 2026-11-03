@@ -563,13 +563,22 @@ the `format` call that renders the shadow's identity default qualify every funct
 type, and operator: a planted `oid = regclass` operator on the build's path that hides
 `pg_class` and sequences does not change their answers, one that matches everything does not
 make a re-pointed default read as the source sequence, and a planted `format(text, text[])` does
-not change the default the build sets. *Open:* `pkg/schemachange`'s policy read runs under the
-shadow build's path and leaves `pg_policy`, `unnest`, and `pg_get_userbyid` unqualified, so a
-lookalike in the source schema changes what the shadow build and the cutover gate read for the
-table's policies. *Test obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with
-decoy catalog relations and functions in the schema) yields the same answer as the default
-path, per read site and per pooled session; and on a path pg-sprite builds that lists a user
-schema, a lookalike planted there that answers the unqualified call does not change the read.
+not change the default the build sets. The fidelity snapshot the shadow build and the cutover
+gate share (`pkg/schemachange` `readFidelity` and the comment, grant, default-privilege, and
+policy reads under it) qualifies the same way, so a lookalike in the source schema does not
+drop a role's grant, hand a column grant to `PUBLIC`, change a comment, or change a policy's
+roles (`TestBuildShadowFidelityReadsIgnoreImpostorCatalogNames`). The scratch build's own
+reads beside introspection — the stand-in index read and the foreign-key binding proof in
+`pkg/schemadiff` — qualify every relation and operator too; both compare oid with oid and
+oid with a bound parameter, so no planted overload can change their answers and no
+shadowing-path probe can tell them from unqualified reads. Their qualification is held by
+its text instead (`TestDesiredForeignKeyReadsQualifyEveryRelationAndOperator`), and their
+answers under the build's own path by `TestDesiredForeignKeyScratchReads`.
+*Test obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog
+relations and functions in the schema) yields the same answer as the default path, per read
+site and per pooled session; on a path pg-sprite builds that lists a user schema, a
+lookalike planted there that answers the unqualified call does not change the read; and a
+read whose comparisons admit no overload is held to its qualification by a source guard.
 
 ## Locking and concurrency (LK)
 
