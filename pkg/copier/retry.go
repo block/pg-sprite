@@ -18,6 +18,10 @@ const (
 	sqlstateExclusionViolation = "23P01"
 )
 
+// sqlstateDeadlockDetected is the SQLSTATE the server raises when it breaks
+// a cycle of transactions waiting on each other by rolling this one back.
+const sqlstateDeadlockDetected = "40P01"
+
 // sqlstateObjectNotInPrerequisiteState is the SQLSTATE the server raises,
 // among other cases, when an INSERT ... ON CONFLICT with no conflict target
 // meets a table with a DEFERRABLE unique or exclusion constraint, which
@@ -52,6 +56,31 @@ func collided(err error) bool {
 	return pgErr.Code == sqlstateUniqueViolation || pgErr.Code == sqlstateExclusionViolation
 }
 
+// deadlocked reports whether err is the server rolling a chunk's pass back
+// to break a deadlock. The shadow's writers — the copier's workers and the
+// applier's flush — insert values under the same unique indexes, so while
+// source changes move values between keys two of them can each wait on a
+// value the other's open transaction holds: the cyclic form of a
+// collision. The rolled-back pass committed nothing, so the chunk is given
+// another pass on the same terms as a collision.
+func deadlocked(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == sqlstateDeadlockDetected
+}
+
+// earnsAnotherPass reports whether a chunk's strict insert ended in a way
+// that gives the chunk its collision passes: a collision, or a deadlock
+// with another shadow writer.
+func earnsAnotherPass(err error) bool {
+	if collided(err) {
+		return true
+	}
+	return deadlocked(err)
+}
+
 // refusesSkipping reports whether err is the server refusing the pass that
 // copies around held-off rows because the shadow has a DEFERRABLE unique or
 // exclusion constraint, which ON CONFLICT with no target cannot use as an
@@ -74,16 +103,17 @@ func refusesSkipping(err error) bool {
 // move and the flush has since given a landed row the value the chunk
 // carries (CO-4). The first pass is the strict insert, which collides as a
 // whole; it serves the chunk that collides on nothing, the common case, at
-// one statement. Nothing else is retried here: a row the shadow rejects on
-// its own terms, a lock wait that timed out, a lost connection is the first
-// pass's error, returned as such.
+// one statement. A pass the server rolls back to break a deadlock is
+// treated as a collision (deadlocked). Nothing else is retried here: a row
+// the shadow rejects on its own terms, a lock wait that timed out, a lost
+// connection is the first pass's error, returned as such.
 func (c *Copier) copyUntilClear(ctx context.Context, pool *pgxpool.Pool, chunk Chunk) (int64, time.Duration, error) {
 	started := c.opts.Clock.Now()
 	inserted, err := c.copyChunk(ctx, pool, chunk)
 	if err == nil {
 		return inserted, c.opts.Clock.Now().Sub(started), nil
 	}
-	if !collided(err) {
+	if !earnsAnotherPass(err) {
 		return 0, 0, err
 	}
 	c.collisions.Add(1)
@@ -121,6 +151,11 @@ func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, c
 		}
 		started := c.opts.Clock.Now()
 		inserted, held, err := c.copyPending(ctx, pool, chunk, pending)
+		if deadlocked(err) {
+			// The pass committed nothing, so pending is unchanged.
+			c.collisions.Add(1)
+			continue
+		}
 		if err != nil {
 			if pending == nil && refusesSkipping(err) {
 				return c.rerunWhole(ctx, pool, chunk, pass+1, collision)
@@ -207,9 +242,10 @@ func (c *Copier) waitBeforePass(ctx context.Context, pass int) error {
 }
 
 // Collisions is the number of chunk passes this copier's run has had the
-// server refuse on a unique index or an exclusion constraint, or has had to
-// leave rows held off from, each followed by another pass or by the copy
-// stopping. It counts per pass, so one chunk waiting on a single held-off
+// server refuse on a unique index or an exclusion constraint or roll back
+// to break a deadlock, or has had to leave rows held off from, each
+// followed by another pass or by the copy stopping. It counts per pass,
+// so one chunk waiting on a single held-off
 // key adds one for each pass that still finds the key's value taken. It is
 // safe to read from any goroutine while Run is in progress; a copy whose
 // source saw no value move during it reads zero.
