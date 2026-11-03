@@ -31,14 +31,14 @@ func refuseUnfillableNewColumns(schema, table, pk string, sourcePositions, shado
 	same := sameColumns(sourcePositions, shadowPositions)
 	// INV: ST-11
 	if !same[pk] {
-		return refuse(CauseStatementNewColumn, nil, "the statement for %s.%s leaves the table without its primary key %s, which the copy is keyed on; a key under another name does not lift this, so change the key in place with ALTER COLUMN TYPE instead", schema, table, pk)
+		return refuse(CauseStatementNewColumn, nil, "the statement for %s.%s leaves the table without its primary key %s, which the copy is keyed on, so the key column must stay; to retype the key, change it in place with ALTER COLUMN TYPE; to drop it, run the drop as its own schema change", schema, table, pk)
 	}
 	for _, column := range shadow.Columns {
 		if same[column.Name] {
 			continue
 		}
 		if requiresAValueTheCopyCannotGive(column, domains[column.Name]) {
-			return refuse(CauseStatementNewColumn, nil, "the statement for %s.%s adds column %s, which refuses NULL and has no default of its own or from its type, so the copy has no value to give it; give the new column a default, or add it in a later schema change the server applies in place", schema, table, column.Name)
+			return refuse(CauseStatementNewColumn, nil, "the statement for %s.%s adds column %s, which refuses NULL and has no default of its own or from its type, so the copy has no value to give it; give the new column a default, or add it nullable or with a default in its own schema change, fill it, then set it NOT NULL", schema, table, column.Name)
 		}
 	}
 	return nil

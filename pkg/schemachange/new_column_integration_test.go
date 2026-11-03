@@ -69,6 +69,58 @@ func TestBuildShadowRefusesAStatementThatReplacesThePrimaryKey(t *testing.T) {
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "a refused build creates nothing")
 }
 
+// Dropping the primary key outright, with no new column at all, leaves the
+// shadow without the column the copy is keyed on. Only the key check can
+// refuse this statement: nothing on the shadow refuses NULL.
+func TestBuildShadowRefusesADroppedPrimaryKeyWithNoReplacement(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+
+	_, err := f.build(t, "orders", `
+		ALTER TABLE %s.orders
+			DROP COLUMN id,
+			ALTER COLUMN qty TYPE bigint`)
+
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseStatementNewColumn, schemachange.RefusalCauseOf(err))
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "a refused build creates nothing")
+}
+
+// A replacement key with a default is fillable, so the NOT NULL check would
+// pass it; it is still refused, because the copy is driven by the source's
+// key, which the shadow no longer has.
+func TestBuildShadowRefusesAReplacementKeyWithADefault(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+
+	_, err := f.build(t, "orders", `
+		ALTER TABLE %s.orders
+			DROP COLUMN id,
+			ADD COLUMN new_id bigint DEFAULT 0 PRIMARY KEY,
+			ALTER COLUMN qty TYPE bigint`)
+
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseStatementNewColumn, schemachange.RefusalCauseOf(err))
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "a refused build creates nothing")
+}
+
+// Every new column is checked, not only the first: a fillable new column
+// ahead of an unfillable one does not let the statement through.
+func TestBuildShadowRefusesAnUnfillableColumnAfterAFillableOne(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+
+	_, err := f.build(t, "orders", `
+		ALTER TABLE %s.orders
+			ADD COLUMN region text,
+			ADD COLUMN tier text NOT NULL,
+			ALTER COLUMN qty TYPE bigint`)
+
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseStatementNewColumn, schemachange.RefusalCauseOf(err))
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "a refused build creates nothing")
+}
+
 // A new column the server fills — nullable, or NOT NULL with a default —
 // builds beside a retype, and stays out of the copy list: the copy writes
 // the kept columns and the server fills the new one on every copied row.
@@ -98,6 +150,30 @@ func TestBuildShadowAdmitsANewColumnTheServerFills(t *testing.T) {
 
 		assert.Equal(t, []string{"id", "qty", "note", "sku"}, built.CopyColumns())
 	})
+}
+
+// A NOT NULL column with a default beside a retype runs to the end: the
+// copy writes the kept columns, the server fills the new column with its
+// default on every copied row, and the retype lands.
+func TestRunnerRunsANewNotNullColumnWithADefault(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+
+	result, err := f.run(t, "orders", `
+		ALTER TABLE %s.orders
+			ADD COLUMN priority integer NOT NULL DEFAULT 7,
+			ALTER COLUMN qty TYPE bigint`, schemachange.RunOptions{})
+	require.NoError(t, err)
+
+	assert.True(t, result.Verification.Clean())
+	assert.Equal(t, []string{"id", "qty", "note", "sku"}, result.Shadow.CopyColumns, "the new column is not a copy column")
+	var notDefault int64
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT count(*) FILTER (WHERE priority <> 7)
+		FROM `+f.schema+`.orders`).Scan(&notDefault))
+	assert.Zero(t, notDefault, "every copied row holds the new column's default")
+	assert.Equal(t, "bigint", f.columnType(t, "orders", "qty"), "the retype landed")
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
 }
 
 // Through the Runner the refusal lands before the run has touched anything:
