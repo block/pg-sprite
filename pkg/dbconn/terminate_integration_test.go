@@ -1,6 +1,8 @@
 package dbconn_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -14,39 +16,117 @@ import (
 
 // TerminateBlockers runs on whatever pool the caller hands it, under that
 // session's own search_path. A caller's pool whose path lists a schema ahead
-// of pg_catalog resolves an unqualified pg_terminate_backend to a lookalike
-// planted there; one that returns true and signals nothing would make the
-// call report the blocker evicted while it keeps the lock. The statement
-// qualifies every function it calls, so the lookalike is never consulted
-// and the blocker really exits.
-func TestTerminateBlockersIgnoresTheCallersShadowingSearchPath(t *testing.T) {
+// of pg_catalog resolves an unqualified function to a same-signature
+// lookalike planted there. The statement qualifies every function it calls,
+// so each test below plants one lookalike and proves it is never consulted:
+// the holder is the pid reported, and the holder really exits.
+
+// A pg_terminate_backend that returns true and signals nothing would make
+// the call report the blocker evicted while it keeps the lock.
+func TestTerminateBlockersIgnoresAShadowingTerminateBackend(t *testing.T) {
+	url, pool, schema := newShadowingFixture(t)
+	testutil.ExecInSchema(t, pool, schema, `
+		CREATE FUNCTION pg_terminate_backend(integer) RETURNS boolean
+			LANGUAGE sql AS 'SELECT true'`)
+
+	assertTerminatesOnlyTheHolder(t, url, pool, schema)
+}
+
+// A pg_blocking_pids that names a bystander would make the call terminate
+// the bystander and report it as the blocker, while the holder keeps the lock.
+func TestTerminateBlockersIgnoresAShadowingBlockingPids(t *testing.T) {
+	url, pool, schema := newShadowingFixture(t)
+	bystander, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(bystander.Release)
+	var bystanderPid int
+	require.NoError(t, bystander.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&bystanderPid))
+	testutil.ExecInSchema(t, pool, schema, fmt.Sprintf(`
+		CREATE FUNCTION pg_blocking_pids(integer) RETURNS integer[]
+			LANGUAGE sql AS 'SELECT ARRAY[%d]'`, bystanderPid))
+
+	assertTerminatesOnlyTheHolder(t, url, pool, schema)
+	alive, err := backendAlive(t.Context(), pool, bystanderPid)
+	require.NoError(t, err)
+	assert.True(t, alive, "the bystander must not be terminated")
+}
+
+// An unnest that returns no rows would make the call report nothing
+// terminated, so the cutover's eviction would silently do nothing.
+func TestTerminateBlockersIgnoresAShadowingUnnest(t *testing.T) {
+	url, pool, schema := newShadowingFixture(t)
+	testutil.ExecInSchema(t, pool, schema, `
+		CREATE FUNCTION unnest(anyarray) RETURNS SETOF anyelement
+			LANGUAGE sql AS 'SELECT $1[1] WHERE false'`)
+
+	assertTerminatesOnlyTheHolder(t, url, pool, schema)
+}
+
+// ServerVersion and ServerMajor also run on the caller's pool. A
+// current_setting that reports another server would make a version-gated
+// proof apply the wrong server's rules.
+func TestServerVersionIgnoresAShadowingCurrentSetting(t *testing.T) {
+	url, pool, schema := newShadowingFixture(t)
+	wantVersion, err := dbconn.ServerVersion(t.Context(), pool)
+	require.NoError(t, err)
+	wantMajor, err := dbconn.ServerMajor(t.Context(), pool)
+	require.NoError(t, err)
+	testutil.ExecInSchema(t, pool, schema, `
+		CREATE FUNCTION current_setting(text) RETURNS text
+			LANGUAGE sql AS 'SELECT ''990000'''`)
+	caller := testutil.NewCatalogShadowingPool(t, url, schema)
+
+	gotVersion, err := dbconn.ServerVersion(t.Context(), caller)
+	require.NoError(t, err)
+	gotMajor, err := dbconn.ServerMajor(t.Context(), caller)
+	require.NoError(t, err)
+	assert.Equal(t, wantVersion, gotVersion)
+	assert.Equal(t, wantMajor, gotMajor)
+}
+
+// newShadowingFixture starts a server and returns its URL, a NewPool pool,
+// and a fresh schema holding the swap_target table the lookalikes sit beside.
+func newShadowingFixture(t *testing.T) (string, *pgxpool.Pool, string) {
+	t.Helper()
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-
 	schema := testutil.NewSchema(t, pool)
 	testutil.ExecInSchema(t, pool, schema, `
-		CREATE TABLE swap_target (id int primary key);
-		CREATE FUNCTION pg_terminate_backend(integer) RETURNS boolean
-			LANGUAGE sql AS 'SELECT true'`)
-	table := schema + ".swap_target"
+		CREATE TABLE swap_target (
+			id int PRIMARY KEY
+		)`)
+	return url, pool, schema
+}
+
+// assertTerminatesOnlyTheHolder queues one backend behind another on
+// swap_target, calls TerminateBlockers for the waiter on a pool whose path
+// puts schema ahead of pg_catalog, and asserts the holder is the one pid
+// reported and that it exits.
+func assertTerminatesOnlyTheHolder(t *testing.T, url string, pool *pgxpool.Pool, schema string) {
+	t.Helper()
 	caller := testutil.NewCatalogShadowingPool(t, url, schema)
+	holderPid, waiterPid := blockOneBackendBehindAnother(t, pool, schema+".swap_target")
 
-	aPid, bPid := blockOneBackendBehindAnother(t, pool, table)
-
-	terminated, err := dbconn.TerminateBlockers(t.Context(), caller, bPid)
+	terminated, err := dbconn.TerminateBlockers(t.Context(), caller, waiterPid)
 	require.NoError(t, err)
-	assert.Equal(t, []int{aPid}, terminated, "only the holder should be reported terminated")
+	assert.Equal(t, []int{holderPid}, terminated, "only the holder should be reported terminated")
 
 	const exitDeadline = 10 * time.Second
 	require.Eventually(t, func() bool {
-		var alive bool
-		err := pool.QueryRow(t.Context(),
-			"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)", aPid).Scan(&alive)
+		alive, err := backendAlive(t.Context(), pool, holderPid)
 		return err == nil && !alive
 	}, exitDeadline, 50*time.Millisecond,
 		"the blocker the call reported as terminated is still running")
+}
+
+// backendAlive reports whether pid is still a server backend.
+func backendAlive(ctx context.Context, pool *pgxpool.Pool, pid int) (bool, error) {
+	var alive bool
+	err := pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)", pid).Scan(&alive)
+	return alive, err
 }
 
 // blockOneBackendBehindAnother holds ACCESS EXCLUSIVE on table in one
