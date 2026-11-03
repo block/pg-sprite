@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -354,8 +355,8 @@ func TestCatchupConvergesUnderMixedLoad(t *testing.T) {
 // completes the image's unchanged blob from the old key's row before it
 // deletes that row (CO-4, D13). A move with a half in flight is covered by
 // the drain unit tests and the stall test, which holds the new key's chunk
-// in flight by hand; a sustained key-move load during the copy is the
-// chunk retry's rate bound, which CO-4 states.
+// in flight by hand; a key-move load during the copy is covered by
+// TestCatchupConvergesUnderKeyMovesFasterThanTheCollisionBackoff.
 func TestCatchupConvergesUnderKeyMoves(t *testing.T) {
 	f := newCatchupFixture(t, 1500)
 	run := startCatchup(t, f, applier.CatchupOptions{})
@@ -481,6 +482,72 @@ func TestCatchupConvergesUnderUniqueKeyMovesDuringTheCopy(t *testing.T) {
 	})
 	summary := run.quiesce(t, load)
 	assert.Positive(t, summary.UniqueMoves)
+
+	run.stop(t)
+	f.assertConverged(t, run.shadow)
+}
+
+// Primary keys move to fresh identity values from before the copy claims
+// its first chunk, faster than the copier's collision backoff: every move
+// lands in the last chunk, [max, +∞), under a uniq value a landed row still
+// holds in the shadow until the next drain flushes its delete. The chunk's
+// first attempt collides; the attempts after it commit the rows the shadow
+// admits and run again only for the rows it refused, so a move that
+// arrives between attempts cannot send the whole chunk back to the start,
+// the chunk lands within the bound, and the shadow converges (CO-4).
+//
+// The moves run many times faster than the backoff but well below the
+// rate at which the copier lands collided chunks, so the copy gains on the
+// frontier the moves push upward and finishes; a load that mints keys
+// faster than the copier lands them keeps the last chunk open for ever.
+//
+// Whether a random move hits a landed key before the copy reaches the last
+// chunk depends on timing, so the test makes one such move itself, on the
+// first landing, and holds the flushes until the copier has collided on
+// it: the collision happens on every run. The load keeps moving keys
+// throughout, and the flushes resume as soon as the collision is seen.
+func TestCatchupConvergesUnderKeyMovesFasterThanTheCollisionBackoff(t *testing.T) {
+	f := newCatchupFixture(t, 1500)
+	move := &keyMoveOnLanding{t: t, f: f}
+	run := startCatchupWith(t, f, catchupSetup{copierClock: move})
+	move.shadow = pgx.Identifier{f.table.Schema, run.shadow.ShadowTable()}.Sanitize()
+	load := testutil.StartLoad(t, f.pool, f.table, testutil.LoadSpec{
+		Seed: 7, Workers: 2, RatePerSecond: 30,
+		Mix: testutil.Mix{KeyMove: 1},
+	})
+
+	run.awaitStatus(t, "discard changes to keys the copier has not claimed", func(s applier.Status) bool {
+		return s.Discarded > 0
+	})
+	resume, err := run.catchup.Pause(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(resume)
+
+	copied := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Go(func() { copied <- run.copier.Run(t.Context(), f.pool) })
+	t.Cleanup(wg.Wait)
+
+	const collisionDeadline = 15 * time.Second
+	require.Eventually(t, func() bool { return run.copier.Collisions() >= 1 }, collisionDeadline, 10*time.Millisecond,
+		"the last chunk should collide on the uniq value the moved landed key still holds in the shadow")
+	require.NoError(t, move.result())
+
+	resume()
+	const copyDeadline = 30 * time.Second
+	select {
+	case err := <-copied:
+		require.NoError(t, err, "the copy lands every chunk while the moves keep arriving")
+	case <-time.After(copyDeadline):
+		require.FailNow(t, "the copy did not finish after the flushes resumed")
+	}
+	assert.Equal(t, copier.NewWatermark(math.MaxInt64), run.copier.Position().Cut, "every key is landed")
+	t.Logf("chunk passes the copier counted after a collision: %d", run.copier.Collisions())
+	run.awaitStatus(t, "apply moved images and the deletes under their old keys", func(s applier.Status) bool {
+		return s.Applied > 0
+	})
+	summary := run.quiesce(t, load)
+	assert.Positive(t, summary.KeyMoves)
 
 	run.stop(t)
 	f.assertConverged(t, run.shadow)

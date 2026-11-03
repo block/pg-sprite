@@ -1,11 +1,13 @@
-// Package chunksql holds the one statement that puts a chunk of source rows
-// into the shadow, and the search_path and output settings it runs under.
-// The copier runs the statement for every chunk it lands and the verifier
-// runs it for every chunk it repairs; one text in one place is what makes
-// a repair put back exactly what a copy would have, and keeps the statement
-// off the public API, where a caller could run it outside the guard both
-// packages wrap around it. The applier's flush shares the path and the
-// settings, since it evaluates the same conversion expressions.
+// Package chunksql holds the statements that put a chunk of source rows
+// into the shadow, and the search_path and output settings they run under.
+// The copier runs Insert for every chunk it lands and the verifier runs it
+// for every chunk it repairs; one text in one place is what makes a repair
+// put back exactly what a copy would have, and keeps the statement off the
+// public API, where a caller could run it outside the guard both packages
+// wrap around it. InsertSkipping and InsertKeys are the copier's statements
+// for a chunk whose Insert collided; they select the rows exactly as Insert
+// does. The applier's flush shares the path and the settings, since it
+// evaluates the same conversion expressions.
 package chunksql
 
 import (
@@ -35,24 +37,80 @@ import (
 // are schema-qualified; the expressions are the user's text, which is why
 // SearchPath puts the source schema on the path they resolve in.
 func Insert(schema, source, shadow, key string, columns []string, conversions map[string]string) string {
-	targets := make([]string, 0, len(columns))
-	selected := make([]string, 0, len(columns))
-	for _, column := range columns {
-		quoted := pgx.Identifier{column}.Sanitize()
-		targets = append(targets, quoted)
-		if expr, ok := conversions[column]; ok {
-			selected = append(selected, expr+" AS "+quoted)
-			continue
-		}
-		selected = append(selected, quoted)
-	}
+	targets, selected := columnLists(columns, conversions)
 	pk := pgx.Identifier{key}.Sanitize()
 	return "INSERT INTO " + pgx.Identifier{schema, shadow}.Sanitize() +
-		" (" + strings.Join(targets, ", ") + ")" +
-		" SELECT " + strings.Join(selected, ", ") +
+		" (" + targets + ")" +
+		" SELECT " + selected +
 		" FROM " + pgx.Identifier{schema, source}.Sanitize() +
 		" WHERE " + pk + " BETWEEN $1::bigint AND $2::bigint" +
 		" ON CONFLICT (" + pk + ") DO NOTHING"
+}
+
+// InsertSkipping is the statement the copier runs over a chunk whose Insert
+// collided: the same rows, selected the same way, inserted with ON CONFLICT
+// DO NOTHING on every unique index and exclusion constraint rather than on
+// the key alone, so a source row whose value a shadow row still holds under
+// another key is left out instead of failing the chunk. It returns one row:
+// the number of rows it inserted, and the ascending bigint keys of the
+// source rows it read that are in the shadow neither now nor from before —
+// the rows still held off, which the copier runs InsertKeys for once the
+// catch-up has rewritten the rows holding their values (CO-4). Every part of
+// the statement runs on the one snapshot its start took, so the shadow it
+// reads for "from before" is the shadow before this statement's own
+// inserts, which the insert's RETURNING accounts for instead.
+func InsertSkipping(schema, source, shadow, key string, columns []string, conversions map[string]string) string {
+	pk := pgx.Identifier{key}.Sanitize()
+	return insertPending(schema, source, shadow, pk, columns, conversions, pk+" BETWEEN $1::bigint AND $2::bigint")
+}
+
+// InsertKeys is InsertSkipping over the source rows whose key is in the
+// bigint array $1 rather than over a key range: the copier's statement for
+// the keys an earlier pass left held off, and only those, since a source row
+// that arrived in the chunk after that pass is the catch-up's to write.
+func InsertKeys(schema, source, shadow, key string, columns []string, conversions map[string]string) string {
+	pk := pgx.Identifier{key}.Sanitize()
+	return insertPending(schema, source, shadow, pk, columns, conversions, pk+" = ANY($1::bigint[])")
+}
+
+// insertPending renders the skipping insert over the source rows where
+// matches. The source rows are read once into a materialized CTE so the
+// insert and the held-off query see the same rows; the insert's RETURNING
+// names what landed, and a read row that neither landed nor was already in
+// the shadow is held off.
+func insertPending(schema, source, shadow, pk string, columns []string, conversions map[string]string, where string) string {
+	targets, selected := columnLists(columns, conversions)
+	shadowName := pgx.Identifier{schema, shadow}.Sanitize()
+	return "WITH src AS MATERIALIZED (" +
+		"SELECT " + selected +
+		" FROM " + pgx.Identifier{schema, source}.Sanitize() +
+		" WHERE " + where + ")," +
+		" ins AS (INSERT INTO " + shadowName + " (" + targets + ")" +
+		" SELECT " + targets + " FROM src" +
+		" ON CONFLICT DO NOTHING RETURNING " + pk + ")" +
+		" SELECT (SELECT count(*) FROM ins)," +
+		" ARRAY(SELECT src." + pk + "::bigint FROM src" +
+		" WHERE NOT EXISTS (SELECT 1 FROM ins WHERE ins." + pk + " = src." + pk + ")" +
+		" AND NOT EXISTS (SELECT 1 FROM " + shadowName + " sh WHERE sh." + pk + " = src." + pk + ")" +
+		" ORDER BY src." + pk + ")"
+}
+
+// columnLists renders the insert's column list and the matching select
+// list: every column quoted, a converted column selected as its expression
+// aliased to the column it lands in.
+func columnLists(columns []string, conversions map[string]string) (targets, selected string) {
+	targetList := make([]string, 0, len(columns))
+	selectedList := make([]string, 0, len(columns))
+	for _, column := range columns {
+		quoted := pgx.Identifier{column}.Sanitize()
+		targetList = append(targetList, quoted)
+		if expr, ok := conversions[column]; ok {
+			selectedList = append(selectedList, expr+" AS "+quoted)
+			continue
+		}
+		selectedList = append(selectedList, quoted)
+	}
+	return strings.Join(targetList, ", "), strings.Join(selectedList, ", ")
 }
 
 // Rendering pins, for the rest of the transaction, the two output settings
