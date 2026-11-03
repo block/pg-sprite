@@ -202,7 +202,8 @@ transaction; chunks are cut and registered under one lock, and the ledger refuse
 does not start just above the frontier (`copy-frontier-broken`, a typed `copier.RefusalCause`),
 so the frontier never runs ahead of an unregistered chunk; a chunk is registered in flight before its transaction begins and leaves the in-flight set
 only when it commits — a chunk whose transaction did not commit stays in flight, so its keys
-never read as landed; a resumed copy first deletes every shadow row above W in bounded batches,
+never read as landed; a resumed copy, and a reconcile before its recopy pass over a partial
+watermark (`copier.ClearAbove`, ST-4), first deletes every shadow row above W in bounded batches,
 each in its own guarded transaction, before its first chunk is cut — the whole shadow when
 nothing landed, since a zero watermark says nothing about what an earlier run left above it — so
 every key above W is genuinely uncut when the applier starts discarding for it; the first clear
@@ -1123,12 +1124,17 @@ two, makes the recopy collide with a shadow row the compare left alone; the one 
 transaction rolls back, the pass compares again, and the recopy cut from that comparison
 covers both chunks and lands (CO-3). A source that moves a value into the differing chunks
 before every recopy exhausts the pass's bounded attempts; the pass then ends in the last
-collision's error with the row still in `reconciling` and the shadow unchanged, and the next
-attempt restarts the reconcile — closed, never a shadow with a row the source lacks. The
-pass compares only through the watermark, which is why the reconcile clears the shadow above
-a partial watermark before it: a unique value the source moved out of a shadow row above the
-watermark into a differing chunk below it would otherwise collide with a row no comparison
-can reach, on every attempt of every reconcile, until the source moved it back. *Source:*
+collision's error with the row still in `reconciling`, no recopy committed, and the watermark
+unmoved, and the next attempt restarts the reconcile — closed, never a shadow with a row the
+source lacks. The pass compares only through the watermark, which is why the reconcile clears
+the shadow above a partial watermark before it, and before any slot command so a new slot
+retains WAL only while the pass runs: a unique value the source moved out of a shadow row
+above the watermark into a differing chunk below it would otherwise collide with a row no
+comparison can reach, on every attempt of every reconcile, until the source moved it back. A
+clear that fails, a lock timeout behind a writer still holding the shadow included, ends the
+attempt before the marker with the row and its watermark as they were
+(retries-after-the-clear-fence-times-out test); with nothing landed there is no pass and no
+clear (with-nothing-landed-leaves-the-shadow-alone test). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum

@@ -556,9 +556,10 @@ error, as the server raised it, when every attempt collides — the row then sta
 only when the colliding shadow row is inside the comparison, and a reconcile on resume compares
 only through the row's watermark, so before its pass it clears the shadow above a partial
 watermark through `copier.ClearAbove` — the same clear the copier that resumes from the
-watermark runs first (CO-4) — leaving every shadow row inside the comparison. Under `repair` the
-collision is the pass's error: a repair
-assumes the source rows it recopies hold still.
+watermark runs first (CO-4) — leaving every shadow row inside the comparison. The clear runs
+before the reconcile touches the slot, so a new slot retains WAL only while the pass runs.
+Under `repair` the collision is the pass's error: a repair assumes the source rows it recopies
+hold still.
 
 ### D15 — Capture changes with pgoutput
 

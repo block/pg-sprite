@@ -2,9 +2,12 @@ package schemachange_test
 
 import (
 	"context"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -71,6 +74,111 @@ func TestReconcileClearsTheShadowAboveAPartialWatermarkBeforeItsRecopy(t *testin
 	require.NoError(t, err)
 	copyAll(t, f, resumed)
 	f.assertConverged(t, shadow)
+}
+
+// A writer still holding the shadow keeps the clear's first batch waiting
+// past lock_timeout. The clear runs before any slot command, so the
+// attempt ends with the server's lock timeout, no slot made, and the row
+// and its watermark as they were. Once the writer ends, the next attempt
+// clears, recopies without a collision, and lands.
+func TestReconcileRetriesAfterTheClearFenceTimesOut(t *testing.T) {
+	f := newReconcileFixture(t, 500)
+	shadow := f.buildShadow(t)
+	copyAll(t, f, newCopier(t, f, shadow))
+	cp := f.row(shadow, checkpoint.PhaseCopying, copier.NewWatermark(300), "", 0)
+	require.NoError(t, f.store.Save(t.Context(), f.lock, cp))
+	f.exec(t, `UPDATE %s SET amount = 0 WHERE id = 150`)
+	f.exec(t, `UPDATE %s SET uniq = -400 WHERE id = 400`)
+	f.exec(t, `UPDATE %s SET uniq = 400 WHERE id = 160`)
+
+	// A transaction that has deleted nothing still holds ROW EXCLUSIVE on
+	// the shadow, which the clear's SHARE ROW EXCLUSIVE fence waits on.
+	table := pgx.Identifier{f.table.Schema, shadow.ShadowTable()}.Sanitize()
+	writer, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() {
+		// Redundant safety closer: the writer is rolled back below.
+		_ = writer.Rollback(context.WithoutCancel(t.Context()))
+	}()
+	_, err = writer.Exec(t.Context(), `
+		DELETE FROM `+table+`
+		WHERE id = -1`)
+	require.NoError(t, err)
+
+	reconciler, err := schemachange.NewReconciler(f.cfg, f.lock, f.store, f.target, shadow, checksum.Options{
+		LockTimeout: time.Second,
+		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
+	})
+	require.NoError(t, err)
+	_, err = reconciler.Reconcile(t.Context(), f.pool, cp)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "55P03", pgErr.Code, "the clear's fence ran out of lock_timeout")
+	row := f.load(t, shadow)
+	assert.Equal(t, checkpoint.PhaseCopying, row.Phase, "the clear failed before the row was marked")
+	assert.Equal(t, copier.NewWatermark(300), row.Watermark)
+	assert.False(t, f.slotExists(t, f.target.DecodingName()), "the clear failed before any slot was made")
+	require.NoError(t, writer.Rollback(t.Context()))
+
+	reconciled, err := reconciler.Reconcile(t.Context(), f.pool, row)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		assert.NoError(t, reconciled.Slot.Close(ctx))
+		assert.NoError(t, decode.DropSlot(ctx, f.cfg, f.pool, reconciled.Slot.Name()))
+	})
+	assert.Equal(t, 0, reconciled.Outcome.Collisions)
+	assert.Equal(t, 0, f.shadowRowsAbove(t, shadow, 300))
+}
+
+// With nothing landed there is no pass, so the reconcile leaves the shadow
+// as it is: clearing it is the resumed copier's job, which clears the
+// whole key space from a zero watermark.
+func TestReconcileWithNothingLandedLeavesTheShadowAlone(t *testing.T) {
+	f := newReconcileFixture(t, 500)
+	shadow := f.buildShadow(t)
+	copyAll(t, f, newCopier(t, f, shadow))
+	cp := f.row(shadow, checkpoint.PhaseCopying, copier.Watermark{}, "", 0)
+	require.NoError(t, f.store.Save(t.Context(), f.lock, cp))
+
+	reconciler, err := schemachange.NewReconciler(f.cfg, f.lock, f.store, f.target, shadow, checksum.Options{})
+	require.NoError(t, err)
+	reconciled, err := reconciler.Reconcile(t.Context(), f.pool, cp)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		assert.NoError(t, reconciled.Slot.Close(ctx))
+		assert.NoError(t, decode.DropSlot(ctx, f.cfg, f.pool, reconciled.Slot.Name()))
+	})
+
+	assert.Equal(t, 500, f.shadowRowsAbove(t, shadow, 0), "nothing landed, so the shadow is the resumed copier's to clear")
+}
+
+// ClearAbove clears nothing above a complete watermark and the whole
+// shadow above a zero one.
+func TestClearAboveHonorsCompleteAndZeroWatermarks(t *testing.T) {
+	f := newReconcileFixture(t, 500)
+	shadow := f.buildShadow(t)
+	copyAll(t, f, newCopier(t, f, shadow))
+
+	require.NoError(t, copier.ClearAbove(t.Context(), f.pool, f.target, shadow, f.lock, copier.NewWatermark(math.MaxInt64), copier.Options{}))
+	assert.Equal(t, 500, f.shadowRowsAbove(t, shadow, 0), "a complete watermark has nothing above it")
+
+	require.NoError(t, copier.ClearAbove(t.Context(), f.pool, f.target, shadow, f.lock, copier.Watermark{}, copier.Options{}))
+	assert.Equal(t, 0, f.shadowRowsAbove(t, shadow, 0), "a zero watermark leaves the whole key space above it")
+}
+
+// slotExists reports whether the server has a replication slot named name.
+func (f reconcileFixture) slotExists(t *testing.T, name string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_catalog.pg_replication_slots
+			WHERE slot_name = $1
+		)`, name).Scan(&exists))
+	return exists
 }
 
 // shadowRowsAbove counts the shadow rows whose key lies above key.
