@@ -81,3 +81,15 @@ func TestRunRejectsRestartWithAnotherAcknowledgement(t *testing.T) {
 		})
 	}
 }
+
+// Desired-state execution never starts a stopped run over: the derived
+// plan, not the operator, would decide which run the acknowledgement
+// discards, so it is rejected as a typed sentinel before any database
+// work, even when it names a table the plan would touch.
+func TestRunDesiredRejectsRestart(t *testing.T) {
+	opts := DefaultOptions()
+	opts.CopySwap.Restart = "app.orders"
+	res, err := RunDesired(t.Context(), nil, DesiredRequest{Schema: "app"}, opts)
+	require.ErrorIs(t, err, ErrRestartNotSupported)
+	assert.Equal(t, DesiredResult{}, res)
+}

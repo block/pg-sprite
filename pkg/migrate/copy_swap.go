@@ -86,7 +86,8 @@ type CopySwapOptions struct {
 	// A leftover whose swap already committed is not discarded: the
 	// change is past the point of starting over, and the run is refused
 	// so it can be finished without the acknowledgement. Empty resumes a
-	// leftover, as every run does.
+	// leftover, as every run does. Run takes it; RunDesired rejects any
+	// value with ErrRestartNotSupported.
 	Restart string
 
 	// Copier sizes the copy: its workers, the chunk sizes and the chunk
