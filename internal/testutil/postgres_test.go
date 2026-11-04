@@ -1,7 +1,6 @@
 package testutil_test
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -17,9 +16,7 @@ import (
 // major the CI matrix selected. Without this, a matrix entry that silently
 // fell back to a default image would still pass every test.
 func TestServerMajorMatchesRequestedVersion(t *testing.T) {
-	if os.Getenv("PG_DSN") != "" {
-		t.Skip("PG_DSN points at an external server; version is not harness-selected")
-	}
+	testutil.SkipOnSharedServer(t, "checks the major of the image the harness chose")
 	url := testutil.StartPostgres(t)
 
 	pool, err := pgxpool.New(t.Context(), url)
