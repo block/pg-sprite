@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"testing"
 
@@ -271,9 +270,7 @@ func TestCheckPrivilegesRefusesSetFalseMembership(t *testing.T) {
 // that role exists (Aurora/RDS), the REPLICATION role attribute otherwise.
 // The refusal names the mechanism the cluster actually uses.
 func TestCheckPrivilegesReplicationAccess(t *testing.T) {
-	if os.Getenv("PG_DSN") != "" {
-		t.Skip("creates the cluster-level rds_replication role; container-only")
-	}
+	testutil.SkipOnSharedServer(t, "creates the cluster-level rds_replication role")
 	f := newPrivilegeFixture(t)
 	ctx := t.Context()
 	f.grant(t, fmt.Sprintf("GRANT USAGE, CREATE ON SCHEMA %s TO %s",

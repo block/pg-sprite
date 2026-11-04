@@ -14,7 +14,7 @@ PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DA
 # Which corpus replay project to run (replay/<project>/project.conf).
 REPLAY_PROJECT ?= buzz
 
-.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-own-server test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -35,6 +35,15 @@ test-unit:
 # containers). Start it first: make db-up [PG_VERSION=14]
 test-db:
 	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test -race -count=1 ./...
+
+# The tests that need a server of their own (testutil.SkipOnSharedServer):
+# they create a cluster-level role or a tablespace, or check which image the
+# harness chose, so test-db skips them. This runs exactly those the container
+# way, with PG_DSN cleared; CI's matrix and the release job run it beside
+# test-db, and internal/testutil's own-server completeness test holds the
+# list here to the helper's callers.
+test-own-server:
+	PG_DSN= $(GO) test -race -count=1 -run '^(TestServerMajorMatchesRequestedVersion|TestCheckPrivilegesReplicationAccess|TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC|TestBuildShadowKeepsTheSourceTablespace)$$' ./internal/testutil ./pkg/preflight ./pkg/schemachange
 
 # Full suite against every supported PostgreSQL major (14 -> 18) via
 # testcontainers — the local mirror of the CI matrix.
