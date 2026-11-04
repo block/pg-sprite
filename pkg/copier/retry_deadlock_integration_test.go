@@ -30,11 +30,12 @@ import (
 // In both tests the other writer is an open transaction standing in for a
 // flush. Before the first chunk starts it holds slot 20 under key 2001, so
 // a pass that has inserted slot 10 for key 10 waits on it at key 20; the
-// writer then inserts slot 10 under key 2000 and waits on the pass. The pass
-// began waiting first, so its deadlock check runs first and the server rolls
-// the pass back. The writer commits, the next pass commits the chunk around
-// the slots the writer holds, and once the writer's rows are gone, as a
-// flush would rewrite them, every row lands.
+// writer then inserts slot 10 under key 2000 and waits on the pass. The
+// writer's deadlock check is put off for a minute, so the pass's check,
+// at the server's default deadlock_timeout, finds the cycle and the server
+// rolls the pass back. The writer commits, the next pass commits the chunk
+// around the slots the writer holds, and once the writer's rows are gone,
+// as a flush would rewrite them, every row lands.
 
 // The strict insert is the pass that deadlocks.
 func TestCopierRetriesAStrictInsertThatDeadlocksWithAnotherShadowWriter(t *testing.T) {
@@ -76,10 +77,7 @@ func TestCopierRetriesAPassAroundHeldOffRowsThatDeadlocksWithAnotherShadowWriter
 type shadowWriter struct {
 	// watch is a connection of its own for seeing the chunk pass wait,
 	// acquired before the copy starts so the check never queues behind the
-	// copier for one of the pool's: the server checks a wait for a
-	// deadlock once, deadlock_timeout after it starts, so the writer must
-	// begin its own wait well inside that for the pass to be the one that
-	// finds the cycle and is rolled back.
+	// copier for one of the pool's.
 	watch      *pgxpool.Conn
 	shadowName string
 	// committedFirst, when set, is a statement committed on its own before
@@ -122,6 +120,15 @@ func (f copierFixture) shadowWriterAtFirstChunk(t *testing.T, shadow schemachang
 			return
 		}
 		w.tx = tx
+		// The server checks a wait for a deadlock once, deadlock_timeout
+		// after it starts, and rolls back the waiter whose check finds the
+		// cycle. The writer's check is put off well past the chunk pass's,
+		// which keeps the server default, so the pass is always the one
+		// rolled back however the two waits' start times fall.
+		if _, err := tx.Exec(t.Context(), "SET LOCAL deadlock_timeout = '1min'"); err != nil {
+			w.err = fmt.Errorf("put off the other writer's deadlock check: %w", err)
+			return
+		}
 		if err := tx.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&w.pid); err != nil {
 			w.err = fmt.Errorf("read the other writer's pid: %w", err)
 			return

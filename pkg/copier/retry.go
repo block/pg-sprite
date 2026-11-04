@@ -62,7 +62,11 @@ func collided(err error) bool {
 // source changes move values between keys two of them can each wait on a
 // value the other's open transaction holds: the cyclic form of a
 // collision. The rolled-back pass committed nothing, so the chunk is given
-// another pass on the same terms as a collision.
+// another pass on the same terms as a collision. The match is by SQLSTATE
+// alone, so a deadlock on any statement of the pass — the guard's table
+// locks included — earns the pass too; that is as safe, since the pass
+// still committed nothing. Only this side of the cycle is retried: a flush
+// the server picks as the victim fails the catch-up.
 func deadlocked(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
@@ -133,10 +137,10 @@ func (c *Copier) copyUntilClear(ctx context.Context, pool *pgxpool.Pool, chunk C
 // are gone. A shadow with a DEFERRABLE unique or exclusion constraint
 // cannot be copied around, since the server refuses the pass's target-less
 // ON CONFLICT on it, so its chunk reruns the strict insert over the whole
-// range instead (rerunWhole). A collision no pass outlasts ends the copy
-// with the server's error, wrapped with the chunk's bounds, the passes
-// made, and the keys still pending; the chunk stays in flight with those
-// keys pending.
+// range instead (rerunWhole). A chunk no pass lands ends the copy with the
+// latest pass's error from the server — a collision or a deadlock —
+// wrapped with the chunk's bounds, the passes made, and the keys still
+// pending; the chunk stays in flight with those keys pending.
 func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, chunk Chunk, collision error) (int64, time.Duration, error) {
 	var total int64
 	var took time.Duration
@@ -152,7 +156,9 @@ func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, c
 		started := c.opts.Clock.Now()
 		inserted, held, err := c.copyPending(ctx, pool, chunk, pending)
 		if deadlocked(err) {
-			// The pass committed nothing, so pending is unchanged.
+			// The pass committed nothing, so pending is unchanged; the
+			// deadlock is now the error an exhausted chunk reports.
+			collision = err
 			c.collisions.Add(1)
 			continue
 		}
@@ -182,9 +188,10 @@ func (c *Copier) copyAroundCollisions(ctx context.Context, pool *pgxpool.Pool, c
 // as waitBeforePass says and then runs the strict insert over the whole
 // range, which lands every row of the chunk once the flush has moved the
 // colliding value out of its way and otherwise collides again. Nothing is
-// settled, so the chunk's keys stay in flight until it lands. A collision
-// no pass outlasts ends the copy with the server's error, wrapped with the
-// chunk's bounds and the passes made.
+// settled, so the chunk's keys stay in flight until it lands. A pass the
+// server rolls back to break a deadlock takes the next pass, as a
+// collision does. A chunk no pass lands ends the copy with the latest
+// pass's error, wrapped with the chunk's bounds and the passes made.
 func (c *Copier) rerunWhole(ctx context.Context, pool *pgxpool.Pool, chunk Chunk, pass int, collision error) (int64, time.Duration, error) {
 	for ; pass <= c.opts.CollisionAttempts; pass++ {
 		if err := c.waitBeforePass(ctx, pass); err != nil {
@@ -195,24 +202,25 @@ func (c *Copier) rerunWhole(ctx context.Context, pool *pgxpool.Pool, chunk Chunk
 		if err == nil {
 			return inserted, c.opts.Clock.Now().Sub(started), nil
 		}
-		if !collided(err) {
+		if !earnsAnotherPass(err) {
 			return 0, 0, err
 		}
 		collision = err
 		c.collisions.Add(1)
 	}
-	return 0, 0, fmt.Errorf("chunk [%d, %d] collided with a shadow row on each of %d attempts: %w", chunk.Lower(), chunk.Upper(), c.opts.CollisionAttempts, collision)
+	return 0, 0, c.pendingOutlasted(chunk, nil, collision)
 }
 
-// pendingOutlasted is the error that ends the copy when a collided chunk
-// has used its passes: it names how many keys are still pending and the
-// lowest of them, which Position().Pending lists in full, and wraps the
-// strict insert's collision.
-func (c *Copier) pendingOutlasted(chunk Chunk, pending []int64, collision error) error {
+// pendingOutlasted is the error that ends the copy when a chunk has used
+// its passes: it names how many keys are still pending and the lowest of
+// them, which Position().Pending lists in full, and wraps the latest pass's
+// error, a collision or a deadlock, so errors.As finds the SQLSTATE that
+// ended the run.
+func (c *Copier) pendingOutlasted(chunk Chunk, pending []int64, last error) error {
 	if len(pending) == 0 {
-		return fmt.Errorf("chunk [%d, %d] collided with a shadow row on each of %d attempts: %w", chunk.Lower(), chunk.Upper(), c.opts.CollisionAttempts, collision)
+		return fmt.Errorf("chunk [%d, %d] did not land in %d attempts: %w", chunk.Lower(), chunk.Upper(), c.opts.CollisionAttempts, last)
 	}
-	return fmt.Errorf("chunk [%d, %d] still has %d pending keys after %d attempts, the lowest %d, whose values other shadow rows hold: %w", chunk.Lower(), chunk.Upper(), len(pending), c.opts.CollisionAttempts, pending[0], collision)
+	return fmt.Errorf("chunk [%d, %d] still has %d pending keys after %d attempts, the lowest %d: %w", chunk.Lower(), chunk.Upper(), len(pending), c.opts.CollisionAttempts, pending[0], last)
 }
 
 // copyPending runs one pass of a collided chunk: over the whole range while
@@ -241,14 +249,16 @@ func (c *Copier) waitBeforePass(ctx context.Context, pass int) error {
 	}
 }
 
-// Collisions is the number of chunk passes this copier's run has had the
-// server refuse on a unique index or an exclusion constraint or roll back
-// to break a deadlock, or has had to leave rows held off from, each
-// followed by another pass or by the copy stopping. It counts per pass,
-// so one chunk waiting on a single held-off
-// key adds one for each pass that still finds the key's value taken. It is
-// safe to read from any goroutine while Run is in progress; a copy whose
-// source saw no value move during it reads zero.
+// Collisions is the number of chunk passes this copier's run has had to
+// repeat: passes the server refused on a unique index or an exclusion
+// constraint, passes it rolled back to break a deadlock, and passes that
+// left rows held off, each followed by another pass or by the copy
+// stopping. It mixes both causes in one count; the error a stopped copy
+// returns names the one that ended it. It counts per pass, so one chunk
+// waiting on a single held-off key adds one for each pass that still finds
+// the key's value taken. It is safe to read from any goroutine while Run
+// is in progress; a copy whose source saw no value move during it reads
+// zero.
 func (c *Copier) Collisions() int64 {
 	return c.collisions.Load()
 }

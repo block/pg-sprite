@@ -54,7 +54,10 @@ type Options struct {
 	// keys lands once the applier has flushed the move's other half into
 	// the shadow. On a shadow with a DEFERRABLE unique or exclusion
 	// constraint, which cannot be copied around, the passes after the first
-	// rerun the refused insert over the whole chunk.
+	// rerun the refused insert over the whole chunk. A pass the server
+	// rolls back to break a deadlock with another shadow writer spends one
+	// attempt from the same budget, after waiting up to the server's
+	// deadlock_timeout to be chosen.
 	CollisionAttempts int
 	// CollisionBackoff is the wait before a collided chunk's first pass over
 	// the rows it held off; each later wait is one backoff longer. The pass
