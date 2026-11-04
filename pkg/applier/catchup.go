@@ -22,6 +22,10 @@ const (
 	// DefaultCatchupMaxChanges is how many changes a cycle adds before it
 	// drains and flushes, whatever the interval says.
 	DefaultCatchupMaxChanges = 10_000
+	// DefaultDeadlockAttempts is how many cycles in a row the server may
+	// roll the flush back as a deadlock victim before the catch-up stops,
+	// when CatchupOptions leaves DeadlockAttempts zero.
+	DefaultDeadlockAttempts = 10
 )
 
 var (
@@ -66,6 +70,14 @@ type CatchupOptions struct {
 	// takes decode.DefaultSlotLagCeiling; a value below one byte is
 	// refused, so the ceiling is always in force.
 	SlotLagCeiling int64
+	// DeadlockAttempts is how many cycles in a row the server may roll the
+	// flush back as a deadlock victim (ErrBatchDeadlocked) before Run ends
+	// with that error. A deadlocked batch is requeued whole and flushed
+	// again on the next cycle, by when the copier's pass it deadlocked
+	// with has committed or rolled back; a flush that commits, or is
+	// refused by a constraint instead, resets the count. Each attempt
+	// waits up to the server's deadlock_timeout to be chosen as the victim.
+	DeadlockAttempts int
 }
 
 func (o CatchupOptions) withDefaults() CatchupOptions {
@@ -81,6 +93,9 @@ func (o CatchupOptions) withDefaults() CatchupOptions {
 	if o.SlotLagCeiling == 0 {
 		o.SlotLagCeiling = decode.DefaultSlotLagCeiling
 	}
+	if o.DeadlockAttempts == 0 {
+		o.DeadlockAttempts = DefaultDeadlockAttempts
+	}
 	return o
 }
 
@@ -94,6 +109,9 @@ func (o CatchupOptions) validate() error {
 	}
 	if o.SlotLagCeiling < 1 {
 		return fmt.Errorf("%w: slot lag ceiling %d is below one byte; use zero for the default", ErrInvalidCatchupOptions, o.SlotLagCeiling)
+	}
+	if o.DeadlockAttempts < 1 {
+		return fmt.Errorf("%w: deadlock attempts %d is below one; use zero for the default", ErrInvalidCatchupOptions, o.DeadlockAttempts)
 	}
 	return nil
 }
@@ -119,7 +137,8 @@ type Status struct {
 	// entries deferred behind an in-flight chunk or held for a completion.
 	Buffered int
 	// Deferred is the number of entries the last drain left waiting for an
-	// in-flight chunk, or for a batch a constraint refused (ErrBatchDeferred).
+	// in-flight chunk, or for a batch a constraint refused (ErrBatchDeferred)
+	// or the server rolled back as a deadlock victim (ErrBatchDeadlocked).
 	Deferred int
 	// Held is the number of images buffered until the stream passes a read
 	// the flush made: a completion read for a moved image, or a presence
@@ -145,6 +164,12 @@ type Status struct {
 	// BatchesDeferred is the number of batches a constraint refused even
 	// whole-row, requeued for a later drain (CO-6).
 	BatchesDeferred uint64
+	// BatchesDeadlocked is the number of batches whose flush the server
+	// rolled back as a deadlock victim and requeued for the next cycle. A
+	// nonzero value is normal while the copy and the catch-up write the
+	// shadow together; a run of them that reaches DeadlockAttempts ends Run,
+	// and that last victim is reported in Run's error, not counted here.
+	BatchesDeadlocked uint64
 	// FlushesHeld is set while a Pause holds the flushes off the shadow,
 	// from Pause's return until its resume, and not while a cycle's own
 	// flush runs. Unlike the fields above it is not a cycle's record: it
@@ -180,6 +205,11 @@ type Catchup struct {
 	// it flushes and by a Pause until its resume, so a Pause returns only
 	// once no flush is in flight and a cycle under a Pause skips its flush.
 	flushes chan struct{}
+	// deadlocks is how many cycles in a row the server has rolled the flush
+	// back as a deadlock victim, judged against opts.DeadlockAttempts; a
+	// flush that ends any other way resets it. Run's goroutine alone
+	// touches it.
+	deadlocks int
 
 	mu     sync.Mutex
 	status Status
@@ -234,9 +264,10 @@ func (c *Catchup) Confirmed() decode.LSN {
 // copier's Position after the last Add — so a discarded uncut key's change
 // is one the copier's read will see, and a change whose commit the source
 // has not yet made visible waits for a later cycle (CO-4) — drains, flushes
-// the batch, puts a refused batch back (ErrBatchDeferred) or
-// holds the images the flush did not write — those it completed and those
-// whose shadow row it found absent — and then confirms the lowest of the
+// the batch, puts a refused batch (ErrBatchDeferred) or one the server
+// rolled back as a deadlock victim (ErrBatchDeadlocked) back for the next
+// cycle, or holds the images the flush did not write — those it completed
+// and those whose shadow row it found absent — and then confirms the lowest of the
 // stream's delivered position and the buffer's oldest pending position:
 // everything below it is in the shadow or was discarded as uncut, so a stream
 // reopened from it misses nothing (ST-4). An empty cycle on a quiet table
@@ -257,12 +288,15 @@ func (c *Catchup) Confirmed() decode.LSN {
 // next stream resumes. A cycle error that is not the stop itself travels
 // with the stop, so a caller
 // checks the failure sentinels — ErrInvariantViolation, ErrTableLockLost,
-// ErrBatchDeferred — before it reads the stop as clean. The whole run is
-// bound to the table lock session, so losing the lock ends the cycle in
-// flight, a flush or a quiet wait on the stream alike, and Run reports the
-// loss as ErrTableLockLost under LK-1. A batch the shadow refuses once the
-// copy has landed every key ends Run with ErrBatchDeferred: no chunk is
-// left to change the outcome, so the schema change cannot converge. While
+// ErrBatchDeferred, ErrBatchDeadlocked — before it reads the stop as clean.
+// The whole run is bound to the table lock session, so losing the lock ends
+// the cycle in flight, a flush or a quiet wait on the stream alike, and Run
+// reports the loss as ErrTableLockLost under LK-1. A batch the shadow
+// refuses once the copy has landed every key ends Run with
+// ErrBatchDeferred: no chunk is left to change the outcome, so the schema
+// change cannot converge. A flush the server rolls back as the deadlock
+// victim CatchupOptions.DeadlockAttempts cycles in a row ends Run with
+// ErrBatchDeadlocked, wrapping the server's error. While
 // it runs the catch-up is the tracker's work source (CatchupOptions.Tracker),
 // and it has stopped being one by the time Run returns.
 func (c *Catchup) Run(ctx context.Context, pool *pgxpool.Pool) error {
@@ -367,8 +401,10 @@ func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 // apply is the cycle's drain and flush, behind the flush gate: under a
 // Pause it does neither, and the buffer keeps every entry for the first
 // cycle after the resume. A flushed batch's refusal is requeued, or ends
-// the catch-up when no chunk is left to resolve it, and the images a flush
-// completed but did not write are held.
+// the catch-up when no chunk is left to resolve it; a batch the server
+// rolled back as a deadlock victim is requeued for the next cycle, or ends
+// the catch-up once that has happened DeadlockAttempts cycles in a row; and
+// the images a flush completed but did not write are held.
 func (c *Catchup) apply(ctx context.Context, pool *pgxpool.Pool) (cycleOutcome, error) {
 	if !c.tryFlushes() {
 		return cycleOutcome{paused: true}, nil
@@ -392,18 +428,44 @@ func (c *Catchup) apply(ctx context.Context, pool *pgxpool.Pool) (cycleOutcome, 
 		// refuses it is one the source does not have.
 		return cycleOutcome{}, fmt.Errorf("catch-up on %s.%s cannot converge, the copy has landed every key and no chunk is left to resolve the refusal: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	case errors.Is(err, ErrBatchDeferred):
+		c.deadlocks = 0
 		if err := c.buffer.Requeue(batch); err != nil {
 			return cycleOutcome{}, err
 		}
 		outcome.deferred = true
+	case errors.Is(err, ErrBatchDeadlocked):
+		if err := c.deadlockVictim(err); err != nil {
+			return cycleOutcome{}, err
+		}
+		if err := c.buffer.Requeue(batch); err != nil {
+			return cycleOutcome{}, err
+		}
+		outcome.deadlocked = true
 	case err != nil:
 		return cycleOutcome{}, err
 	default:
+		if len(batch.Entries) > 0 {
+			c.deadlocks = 0
+		}
 		if err := c.buffer.Hold(result.Held); err != nil {
 			return cycleOutcome{}, err
 		}
 	}
 	return outcome, nil
+}
+
+// deadlockVictim counts one more cycle whose flush the server rolled back
+// as the deadlock victim, and returns the flush's error as the catch-up's
+// once that has happened DeadlockAttempts cycles in a row: the flush is
+// losing every round against the other shadow writer, and another cycle
+// would hold the slot's WAL for nothing. Below the bound it returns nil
+// and the batch is the next cycle's to flush again.
+func (c *Catchup) deadlockVictim(err error) error {
+	c.deadlocks++
+	if c.deadlocks < c.opts.DeadlockAttempts {
+		return nil
+	}
+	return fmt.Errorf("catch-up on %s.%s: the flush was rolled back as the deadlock victim %d cycles in a row: %w", c.flusher.target.Schema(), c.flusher.target.Table(), c.deadlocks, err)
 }
 
 // snapshot takes the source's snapshot on pool for this cycle's drain, and
@@ -456,6 +518,9 @@ type cycleOutcome struct {
 	// deferred is set when the flush refused the batch and it was requeued;
 	// result is then empty.
 	deferred bool
+	// deadlocked is set when the server rolled the flush back as a deadlock
+	// victim and the batch was requeued; result is then empty.
+	deadlocked bool
 	// paused is set when a Pause held the flushes, so the cycle neither
 	// drained nor flushed; batch and result are then empty.
 	paused bool
@@ -534,9 +599,11 @@ func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) (decode
 // flush did with the batch, what the buffer holds, and the positions the
 // cycle confirmed and measured. A requeued batch's entries are back in the
 // buffer, waiting as the drain's deferred ones do, so they count as
-// deferred; a committed flush's images and deletes count as applied. A
-// paused cycle drained nothing, so the last drain's count of deferred
-// entries stands and only the buffer and the positions move.
+// deferred, whether a constraint refused the batch or the server rolled
+// its flush back as a deadlock victim; a committed flush's images and
+// deletes count as applied. A paused cycle drained nothing, so the last
+// drain's count of deferred entries stands and only the buffer and the
+// positions move.
 func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -544,10 +611,11 @@ func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 	case outcome.paused:
 		// Nothing was drained or flushed, so the flush counters stand.
 	case outcome.deferred:
-		c.status.Discarded += uint64(outcome.batch.Discarded)
-		c.status.Deferred = outcome.batch.Deferred + len(outcome.batch.Entries)
-		c.status.Invisible = outcome.batch.Invisible
+		c.recordRequeued(outcome.batch)
 		c.status.BatchesDeferred++
+	case outcome.deadlocked:
+		c.recordRequeued(outcome.batch)
+		c.status.BatchesDeadlocked++
 	default:
 		c.status.Discarded += uint64(outcome.batch.Discarded)
 		c.status.Deferred = outcome.batch.Deferred
@@ -562,4 +630,13 @@ func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 	c.status.Delivered = c.stream.Delivered()
 	c.status.Confirmed = c.stream.Confirmed()
 	c.status.WALEnd = walEnd
+}
+
+// recordRequeued folds a drained batch that went back into the buffer
+// unapplied into the status, under record's lock: its entries wait as the
+// drain's deferred ones do.
+func (c *Catchup) recordRequeued(batch Batch) {
+	c.status.Discarded += uint64(batch.Discarded)
+	c.status.Deferred = batch.Deferred + len(batch.Entries)
+	c.status.Invisible = batch.Invisible
 }

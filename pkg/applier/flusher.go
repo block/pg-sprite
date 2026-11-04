@@ -30,6 +30,16 @@ var (
 	// batch back with Buffer.Requeue and drains again once the copier has
 	// moved.
 	ErrBatchDeferred = errors.New("batch deferred: a unique index or exclusion constraint refused it")
+	// ErrBatchDeadlocked reports a batch whose flush the server rolled back
+	// to break a deadlock (SQLSTATE 40P01). The shadow's writers — the
+	// copier's chunk passes and the flush — insert values under the same
+	// unique indexes, so while source changes move values between keys the
+	// two can each wait on a value the other's open transaction holds; the
+	// server picks one to roll back, and this is the flush picked. The
+	// transaction committed nothing and the shadow is as it was; the stream
+	// owner puts the batch back with Buffer.Requeue and flushes it again on
+	// its next cycle, by when the other writer has committed or rolled back.
+	ErrBatchDeadlocked = errors.New("batch deadlocked: the server rolled the flush back to break a deadlock")
 )
 
 const (
@@ -40,6 +50,10 @@ const (
 	// raises when an insert or update would conflict with a row it already
 	// admits; it refuses the same exchanges a unique index does.
 	sqlstateExclusionViolation = "23P01"
+	// sqlstateDeadlockDetected is the SQLSTATE the server raises when it
+	// breaks a cycle of transactions waiting on each other by rolling this
+	// one back.
+	sqlstateDeadlockDetected = "40P01"
 )
 
 // Options bounds a flush. Zero values take the dbconn session timeout
@@ -190,7 +204,10 @@ func NewFlusher(target preflight.CopySwapTarget, shadow copier.Shadow, lock *dbc
 // completion, since the source can have deleted the row before its chunk was
 // read; one that returns after the stream has passed that check, still
 // absent, is an image the source could not have produced given the shadow,
-// and is ErrInvariantViolation, with nothing committed. The
+// and is ErrInvariantViolation, with nothing committed. A flush the server
+// rolls back as a deadlock victim, because it and the copier's open chunk
+// each wait on a unique value the other holds, is ErrBatchDeadlocked with
+// the shadow unchanged, for the stream owner to requeue and flush again. The
 // transaction runs under the lock session's Bind context, so losing the
 // table lock cancels the flush and it reports the loss. An empty batch is a
 // no-op.
@@ -202,7 +219,7 @@ func (f *Flusher) Flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (R
 	defer unbind()
 	result, err := f.flush(ctx, pool, batch)
 	if err != nil {
-		return Result{}, f.lostOr(err)
+		return Result{}, f.lostOr(f.deadlockedOr(err))
 	}
 	if lost := f.lockLost(); lost != nil {
 		return Result{}, lost
@@ -471,4 +488,24 @@ func constraintCollision(err error) bool {
 		return false
 	}
 	return pgErr.Code == sqlstateUniqueViolation || pgErr.Code == sqlstateExclusionViolation
+}
+
+// deadlocked reports whether err is the server rolling the flush back as a
+// deadlock victim: the one failure a flush recovers from by running the
+// same batch again.
+func deadlocked(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == sqlstateDeadlockDetected
+}
+
+// deadlockedOr names a deadlock-victim rollback ErrBatchDeadlocked, keeping
+// the server's error in the chain, and returns any other error as it is.
+func (f *Flusher) deadlockedOr(err error) error {
+	if !deadlocked(err) {
+		return err
+	}
+	return fmt.Errorf("%w: %s.%s: %w", ErrBatchDeadlocked, f.shadow.Schema(), f.shadow.ShadowTable(), err)
 }
