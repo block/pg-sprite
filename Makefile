@@ -31,10 +31,16 @@ test:
 test-unit:
 	SKIP_INTEGRATION=1 $(GO) test -race ./...
 
+# Race detector flag for test-db and test-own-server. CI clears it (RACE=)
+# on every PostgreSQL major but the newest: the code that runs goroutines
+# does not branch on the server version, and the detector slows the suite
+# down. `make test-db RACE=` is the faster local loop.
+RACE ?= -race
+
 # Integration suite against the long-lived compose database (no per-test
 # containers). Start it first: make db-up [PG_VERSION=14]
 test-db:
-	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test -race -count=1 ./...
+	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test $(RACE) -count=1 ./...
 
 # The tests that need a server of their own (testutil.SkipOnSharedServer):
 # they create a cluster-level role or a tablespace, or check which image the
@@ -43,7 +49,7 @@ test-db:
 # test-db, and internal/testutil's own-server completeness test holds the
 # list here to the helper's callers.
 test-own-server:
-	PG_DSN= $(GO) test -race -count=1 -run '^(TestServerMajorMatchesRequestedVersion|TestCheckPrivilegesReplicationAccess|TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC|TestBuildShadowKeepsTheSourceTablespace)$$' ./internal/testutil ./pkg/preflight ./pkg/schemachange
+	PG_DSN= $(GO) test $(RACE) -count=1 -run '^(TestServerMajorMatchesRequestedVersion|TestCheckPrivilegesReplicationAccess|TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC|TestBuildShadowKeepsTheSourceTablespace)$$' ./internal/testutil ./pkg/preflight ./pkg/schemachange
 
 # Full suite against every supported PostgreSQL major (14 -> 18) via
 # testcontainers — the local mirror of the CI matrix.
