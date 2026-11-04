@@ -54,6 +54,11 @@ jobs:
         run: make db-up
       - name: Test the tagged tree
         run: make test-db
+      # The tests that create cluster-level objects skip on a shared server
+      # and would otherwise run on no gate at all; they get their own
+      # containers, few enough not to oversubscribe the runner.
+      - name: Test the tests that need a server of their own
+        run: make test-own-server
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@9c156ee8a17a598857849441385a2041ef570552 # v6.3.0

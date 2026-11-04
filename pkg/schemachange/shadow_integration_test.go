@@ -3,7 +3,6 @@ package schemachange_test
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -373,9 +372,7 @@ func TestBuildShadowRevokesDefaultPrivilegesTheSourceLacks(t *testing.T) {
 // role spelled PUBLIC must land on that role, not on the pseudo-role that
 // every role in the database is a member of.
 func TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC(t *testing.T) {
-	if os.Getenv("PG_DSN") != "" {
-		t.Skip("creates the cluster-level role \"PUBLIC\"; container-only")
-	}
+	testutil.SkipOnSharedServer(t, "creates the cluster-level role \"PUBLIC\"")
 	f := newShadowFixture(t)
 	_, err := f.pool.Exec(t.Context(), `CREATE ROLE "PUBLIC"`)
 	require.NoError(t, err)
@@ -421,9 +418,7 @@ func TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC(t *testing.T) {
 // database default, so the builder moves the still-empty shadow to the
 // source's tablespace and the snapshot carries it for the cutover gate.
 func TestBuildShadowKeepsTheSourceTablespace(t *testing.T) {
-	if os.Getenv("PG_DSN") != "" {
-		t.Skip("creates a tablespace directory on the server's filesystem; container-only")
-	}
+	testutil.SkipOnSharedServer(t, "creates a tablespace directory on the server's filesystem")
 	f := newShadowFixture(t)
 	tablespace := f.schema + "_ts"
 	f.exec(t, `COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/`+tablespace+`'`)
