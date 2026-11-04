@@ -143,6 +143,12 @@ jobs:
   # throwaway-schema harness keeps tests isolated on a shared server
   # anyway. TLS tests are the exception — they still start their own
   # containers because they control the server's TLS posture.
+  #
+  # Only the PostgreSQL 16 job runs the suite under the race detector. A
+  # data race is in the Go code, which is the same whichever server version
+  # it talks to; the detector makes every test binary several times slower,
+  # so running it on all five majors repeats the same check at that cost.
+  # The unit job also runs with -race.
   test:
     name: test (PostgreSQL ${{ matrix.pg }})
     needs: changes
@@ -152,8 +158,12 @@ jobs:
       fail-fast: false
       matrix:
         pg: ["14", "15", "16", "17", "18"]
+        include:
+          - pg: "16"
+            race: "-race"
     env:
       PG_VERSION: ${{ matrix.pg }}
+      RACE: ${{ matrix.race }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -164,7 +174,7 @@ jobs:
       - name: Start the test database
         run: make db-up
       - name: Test against the long-lived database
-        run: make test-db
+        run: make test-db RACE="$RACE"
 
   # Supabase uses its own PostgreSQL image, roles, pooler and API services.
   # Keep this required: ordinary PostgreSQL tests cannot cover those boundaries.

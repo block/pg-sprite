@@ -25,7 +25,10 @@ Concretely:
   the bug and fails on the pre-fix code.
 - **Real database, race-enabled.** Unit tests run with `-race`; core (`pkg/`)
   logic is never validated against mocks — integration tests run against
-  real PostgreSQL, across every supported major in CI.
+  real PostgreSQL, across every supported major in CI. The integration
+  suite runs under `-race` on one major (PostgreSQL 16), since a data race
+  is in the Go code whatever the server version; the other majors run it
+  without the detector.
 - **The matrix is a gate, not advisory.** The `all-green` sentinel job
   requires the full version matrix; docs-only changes are the only path
   that skips it, and even they must pass the unit job — the guards that

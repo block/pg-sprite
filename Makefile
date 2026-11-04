@@ -31,10 +31,15 @@ test:
 test-unit:
 	SKIP_INTEGRATION=1 $(GO) test -race ./...
 
+# Race detector flag for test-db. CI clears it (RACE=) on every PostgreSQL
+# major but one: the race detector checks the Go code, which is the same
+# whichever server version it talks to, and it slows the suite down.
+RACE ?= -race
+
 # Integration suite against the long-lived compose database (no per-test
 # containers). Start it first: make db-up [PG_VERSION=14]
 test-db:
-	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test -race -count=1 ./...
+	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test $(RACE) -count=1 ./...
 
 # Full suite against every supported PostgreSQL major (14 -> 18) via
 # testcontainers — the local mirror of the CI matrix.
