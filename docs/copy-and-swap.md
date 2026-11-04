@@ -5,18 +5,49 @@ type change such as `integer` to `numeric(12,2)`. pg-sprite routes these to **co
 it builds the new shape as a shadow table, copies the rows into it in chunks, verifies the
 copy, and swaps it in under the table's name with a short, bounded lock.
 
-This page is the operator's guide: the two ways to run it, how to choose, what each needs,
-and how to stop, resume, and start over. The design is in
+This page is the operator's guide: how to open the route, the two ways to run it, how to
+choose, what each needs, and how to stop, resume, and start over. The design is in
 [copy-and-swap-design.md](copy-and-swap-design.md); every refusal is in
 [limitations.md](limitations.md) and [refusal-classes.md](refusal-classes.md).
 
 ## Contents
 
+- [Preview: the route is closed until you open it](#preview-the-route-is-closed-until-you-open-it)
 - [Live or offline](#live-or-offline)
 - [What each run needs](#what-each-run-needs)
 - [Free disk space](#free-disk-space)
 - [Run it](#run-it)
 - [Stop, resume, and start over](#stop-resume-and-start-over)
+
+## Preview: the route is closed until you open it
+
+Copy-and-swap is in preview: it has not yet been exercised under production-like load, so it
+runs only when you open it for the run with `--copy-and-swap` (`CopySwapOptions.Enabled` as a
+library caller). Without the flag, a statement the planner routes to copy-and-swap is refused
+before anything is read or run, and every native change is unaffected:
+
+```console
+$ pg-sprite migrate --free-disk 1GiB --json \
+    --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
+{
+  "outcome": "refused",
+  "reason": "copy-and-swap-refused",
+  "class": "capability-boundary",
+  "cause": "copy-and-swap-not-enabled",
+  "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
+  "table": "public.order_archive",
+  "detail": "copy-and-swap is in preview and not enabled for this run: the change needs a shadow-table copy and cutover, which runs only when the policy opts in (migrate --copy-and-swap on the CLI, Options.CopySwap.Enabled in the library); nothing was executed"
+}
+```
+
+The other route flags — `--free-disk`, `--block-writes`, `--keep-old`, `--restart` — open
+nothing on their own; they govern a run that `--copy-and-swap` has opened. The flag does not
+combine with `--dry-run`, which never runs anything and so needs no opening. With
+`--desired`, a derived plan that routes any statement to copy-and-swap is refused whole,
+native statements included, unless the flag is set. `--force` keeps its meaning: it runs the
+statement natively, bypassing the route and this gate alike.
+
+Every example on this page that runs a copy-and-swap carries the flag.
 
 ## Live or offline
 

@@ -84,6 +84,7 @@ routed to provisioning and never to the data change runner.
 | `not-native-safe-rewrite-required` | The submitted form blocks the table and the planner cannot construct the required safer sequence | `capability-boundary` | — |
 | `not-native-safe-rewrite-required` | A `RENAME COLUMN` or `RENAME TO` (`app-breaking-rename`): no SQL exists to substitute, and the deliberate path is the `guidance` rollout and then the statement under `--force` | `by-design` | — |
 | `backend-unavailable` | The plan routes to copy-and-swap for an operation the engine does not carry yet | `capability-boundary` | — |
+| `copy-and-swap-refused` | Cause `copy-and-swap-not-enabled`: the statement routes to copy-and-swap and the run did not open the route (`--copy-and-swap`, `CopySwapOptions.Enabled`); either front door refuses before any connection check or catalog read (`copySwapNotEnabledRefusal`) | `capability-boundary` | — |
 | `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` — and a `DROP INDEX` under `--accept-blocking` — until `--allow-destructive` names the table (RF-10) | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
@@ -106,6 +107,10 @@ conversion.
 | `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
 ### `copy-and-swap-refused`, keyed on `CopySwapRefusalCause`
+
+One cause under this reason is not a preflight cause: `copy-and-swap-not-enabled` is minted by
+the front doors themselves (the site-keyed row above) when the run has not opened the route,
+and is raised before the preflight is reached. The preflight causes follow.
 
 The closed set is `preflight.CopySwapRefusalCauses()`, raised before the copy-and-swap route
 writes anything ([ST-6](invariants.md#st-6--preflight-before-the-first-write),

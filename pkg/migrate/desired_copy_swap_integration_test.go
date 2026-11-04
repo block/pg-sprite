@@ -23,6 +23,7 @@ import (
 func copySwapRunOptions(serverURL, table string) migrate.Options {
 	opts := runOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
+		Enabled:       true,
 		Connection:    dbconn.Config{URL: serverURL},
 		FreeDiskBytes: testutil.UnlimitedDisk,
 		BlockWrites:   table,

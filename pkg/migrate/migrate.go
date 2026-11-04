@@ -116,8 +116,9 @@ type Options struct {
 
 	// CopySwap is the policy for a statement the router assigns to the
 	// copy-and-swap backend. A statement the router keeps on the native
-	// backend never reads it; a statement routed to copy-and-swap cannot
-	// run without CopySwap.Connection.
+	// backend never reads it; a statement routed to copy-and-swap is
+	// refused unless CopySwap.Enabled opens the route, and cannot run
+	// without CopySwap.Connection.
 	CopySwap CopySwapOptions
 
 	// Logger receives decision diagnostics (routing, preflight, execution

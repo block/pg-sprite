@@ -17,6 +17,17 @@ import (
 // mappings are total over their set and fail closed outside it, and
 // TestRefusalRegistryIsComplete walks both sets.
 
+// copySwapNotEnabledRefusal: the statement routes to copy-and-swap and the
+// policy has not opened the route (CopySwapOptions.Enabled). The route is
+// in preview, so the boundary is the engine's: the same statement runs
+// once the caller opts in, and a release that opens the route by default
+// lifts the refusal for every caller. Minted before any connection check
+// or catalog read, on both front doors.
+func copySwapNotEnabledRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonCopyAndSwapRefused).
+		WithCause(verdict.CauseCopyAndSwapNotEnabled)
+}
+
 // copySwapPreflightRefusal classifies a copy-and-swap preflight cause by the
 // class the cause declares for itself (docs/refusal-classes.md). ok is false
 // for a cause outside preflight.CopySwapRefusalCauses(), which declares no
