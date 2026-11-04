@@ -151,18 +151,29 @@ jobs:
   # is the one where a new version-specific branch lands first. The unit job
   # also runs with -race. A timing-dependent race gets one sample per push
   # here instead of five.
+  #
+  # The race job is split in two. Go runs packages in alphabetical order a
+  # few at a time, so pkg/schemachange, the slowest package by far, starts
+  # last and sets the length of the whole job. One shard runs it alone and
+  # the other runs every other package, so the two finish around the same
+  # time. The second shard lists packages with `go list`, so a new package
+  # lands in it without editing this file.
   test:
-    name: test (PostgreSQL ${{ matrix.pg }})
+    name: test (PostgreSQL ${{ matrix.pg }}${{ matrix.shard && format(', {0}', matrix.shard) || '' }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pg: ["14", "15", "16", "17", "18"]
+        pg: ["14", "15", "16", "17"]
         include:
           - pg: "18"
             race: "-race"
+            shard: schemachange
+          - pg: "18"
+            race: "-race"
+            shard: other packages
     env:
       PG_VERSION: ${{ matrix.pg }}
       RACE: ${{ matrix.race }}
@@ -173,14 +184,27 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      - name: Choose this shard's packages
+        if: matrix.shard != ''
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          if [ "$SHARD" = schemachange ]; then
+            pkgs=./pkg/schemachange
+          else
+            pkgs=$(go list ./... | grep -vx 'github.com/block/pg-sprite/pkg/schemachange' | tr '\n' ' ')
+          fi
+          echo "PKGS=$pkgs" >> "$GITHUB_ENV"
       - name: Start the test database
         run: make db-up
       - name: Test against the long-lived database
         run: make test-db
       # The tests that create cluster-level objects skip on a shared server
       # and would otherwise run on no gate at all; they get their own
-      # containers, few enough not to oversubscribe the runner.
+      # containers, few enough not to oversubscribe the runner. They run in
+      # one shard of a split job, not both.
       - name: Test the tests that need a server of their own
+        if: matrix.shard != 'schemachange'
         run: make test-own-server
 
   # Supabase uses its own PostgreSQL image, roles, pooler and API services.

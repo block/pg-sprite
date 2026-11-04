@@ -37,10 +37,14 @@ test-unit:
 # down. `make test-db RACE=` is the faster local loop.
 RACE ?= -race
 
+# Packages test-db runs. CI's race job sets it to split the suite across two
+# runners; `make test-db PKGS=./pkg/schemachange` runs one package locally.
+PKGS ?= ./...
+
 # Integration suite against the long-lived compose database (no per-test
 # containers). Start it first: make db-up [PG_VERSION=14]
 test-db:
-	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test $(RACE) -count=1 ./...
+	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test $(RACE) -count=1 $(PKGS)
 
 # The tests that need a server of their own (testutil.SkipOnSharedServer):
 # they create a cluster-level role or a tablespace, or check which image the
