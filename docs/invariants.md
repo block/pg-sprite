@@ -288,8 +288,14 @@ and inserts only the keys still pending, never the range again, so a value that 
 range after the second pass is the applier's to write and cannot make the chunk collide anew.
 The pending keys only shrink: the flush rewrites the row holding a pending row's value and the
 next pass lands it, or the source deletes the pending row and the next pass no longer reads
-it. The chunk lands when they are gone. A chunk whose pending keys outlast
-`copier.Options.CollisionAttempts` passes stops the copy with the server's error and no cause
+it. The chunk lands when they are gone. A pass the server rolls back with `deadlock_detected`
+(SQLSTATE `40P01`) is treated the same way: the shadow's writers insert under the same unique
+indexes, so two of them can each wait on a value the other holds, and the server breaks the
+cycle by rolling one back. The rolled-back pass committed nothing and leaves the pending keys
+unchanged, so the chunk takes its next pass, on every path including the `DEFERRABLE` rerun
+below. Only the copier's side is retried: when the server picks the flush as the victim, the
+catch-up fails closed. A chunk whose pending keys outlast
+`copier.Options.CollisionAttempts` passes stops the copy with the latest pass's error and no cause
 of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
 as copied and the resume clear removes the rows committed around them. A shadow with a
 `DEFERRABLE` unique or exclusion constraint cannot be copied around, because the server

@@ -54,7 +54,10 @@ type Options struct {
 	// keys lands once the applier has flushed the move's other half into
 	// the shadow. On a shadow with a DEFERRABLE unique or exclusion
 	// constraint, which cannot be copied around, the passes after the first
-	// rerun the refused insert over the whole chunk.
+	// rerun the refused insert over the whole chunk. A pass the server
+	// rolls back to break a deadlock with another shadow writer spends one
+	// attempt from the same budget, after waiting up to the server's
+	// deadlock_timeout to be chosen.
 	CollisionAttempts int
 	// CollisionBackoff is the wait before a collided chunk's first pass over
 	// the rows it held off; each later wait is one backoff longer. The pass
@@ -267,7 +270,10 @@ func (c *Copier) Position() Position {
 // each after a wait, copy only the held-off rows once the flush has
 // rewritten the rows holding their values. A collision no pass outlasts
 // returns the server's error wrapped, the chunk in flight with its pending
-// keys, and Collisions counts every pass that left a row held off.
+// keys, and Collisions counts every pass that left a row held off. A pass
+// the server rolls back to break a deadlock (SQLSTATE 40P01) — two shadow
+// writers each waiting on a value the other holds — is treated as a
+// collision: it committed nothing, so the chunk takes its next pass.
 //
 // Cancellation reaches the server as a closed connection, so a statement
 // that was running keeps running until it finishes or hits the transaction's
