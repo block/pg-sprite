@@ -205,6 +205,7 @@ execute_data_fault() {
         assert_eq "code of [$sql]" "data-fault" "$(jq -r '.code' <<<"$out")"
         assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
         assert_eq "forced of [$sql]" false "$(jq -r '.forced // false' <<<"$out")"
+        assert_eq "abandoned of [$sql]" true "$(jq -r '.abandoned // false' <<<"$out")"
     else
         "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql" \
             || echo "(exit $? — expected 1: a row will not fit the new type; the run abandoned itself and dropped its shadow, slot, and checkpoint row)"

@@ -113,6 +113,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "drops the replication slot", "a live run's hold is its slot")
 		assert.NotContains(t, v.Detail, "resumes")
 		assert.False(t, v.WritesBlocked, "a live run never took the table offline for writes")
+		assert.False(t, v.Abandoned, "a divergence leaves the run standing for --restart")
 	})
 
 	t.Run("a quiesced divergence names the fence as the hold to release", func(t *testing.T) {
@@ -141,6 +142,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "starts from the beginning")
 		assert.NotContains(t, v.Detail, "--restart")
 		assert.NotContains(t, v.Detail, "resumes")
+		assert.True(t, v.Abandoned, "the verdict says the run was discarded without the consumer reading the detail")
 	})
 
 	t.Run("a constraint the copied rows break is an abandoned run that names the slot as released", func(t *testing.T) {
@@ -153,6 +155,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "the run was abandoned")
 		assert.Contains(t, v.Detail, "its replication slot is dropped", "a live run's hold was its slot")
 		assert.NotContains(t, v.Detail, "--restart")
+		assert.True(t, v.Abandoned)
 	})
 
 	t.Run("a data fault whose abandon did not finish is coded as a data fault with the restart remedy", func(t *testing.T) {
@@ -169,6 +172,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "start the run over")
 		assert.Contains(t, v.Detail, "takes the write fence off the source", "a quiesced run's hold is its fence")
 		assert.NotContains(t, v.Detail, "resumes")
+		assert.False(t, v.Abandoned, "the same code as an abandoned run, told apart by the typed field")
 	})
 
 	t.Run("a server fault outside the data classes is resumed", func(t *testing.T) {

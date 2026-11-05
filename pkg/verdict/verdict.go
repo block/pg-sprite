@@ -544,6 +544,17 @@ type Verdict struct {
 	// kept taking writes. False for every other verdict, including a live
 	// run's.
 	WritesBlocked bool `json:"writes_blocked,omitempty"`
+	// Abandoned is true on a failed copy-and-swap verdict whose run the
+	// engine abandoned on a data fault: the shadow is dropped, the hold on
+	// the source — write fence or replication slot — is released, and the
+	// checkpoint row is deleted, so nothing remains and the corrected
+	// statement runs from the beginning without any acknowledgement. A
+	// data-fault verdict with it false is a run whose abandon did not
+	// finish: the row and the hold stand as far as the discard got, and
+	// the run is started over with the restart acknowledgement. It is the
+	// field automation branches on; Detail says the same for a reader.
+	// False for every other verdict.
+	Abandoned bool `json:"abandoned,omitempty"`
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
@@ -723,6 +734,9 @@ func (v Verdict) String() string {
 	}
 	if v.WritesBlocked {
 		b.WriteString("\n  blocked:   writes to the table were refused (55006) while the run held it")
+	}
+	if v.Abandoned {
+		b.WriteString("\n  abandoned: the run was discarded; the corrected statement starts from the beginning")
 	}
 	if v.IndexUsage != nil {
 		fmt.Fprintf(&b, "\n  usage:     %s", v.IndexUsage.Summary())
