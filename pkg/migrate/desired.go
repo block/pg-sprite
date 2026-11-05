@@ -185,7 +185,8 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 //
 // Every typed acknowledgement — Options.Force, AcceptBlocking,
 // AllowDestructive, CopySwap.Restart and CopySwap.BlockWrites — is rejected
-// with its own sentinel: each accepts a loss for one statement the operator
+// with its own sentinel, the first set in that order when several are, before
+// the policy is validated: each accepts a loss for one statement the operator
 // wrote, and the declarative front door runs statements the plan derived. A
 // destructive, blocking, force-worthy, restarted or offline change belongs
 // on the imperative front door where the operator states it explicitly.
@@ -195,14 +196,14 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 //
 // RunDesired does not close the pool; one pool serves any number of calls.
 func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
-	if err := opts.validate(); err != nil {
-		return DesiredResult{}, err
-	}
+	// The acknowledgements are rejected before the policy is validated, so
+	// a caller that left two set gets the first one's sentinel rather than
+	// the validation error for the pair.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
-	if opts.CopySwap.BlockWrites != "" {
-		return DesiredResult{}, ErrBlockWritesNotSupported
+	if err := opts.validate(); err != nil {
+		return DesiredResult{}, err
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if ref, ok := desiredShapeRefusal(err); ok {

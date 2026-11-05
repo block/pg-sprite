@@ -474,11 +474,10 @@ its `_old` name, and whether the run blocks the table's writes — offline mode,
 write to the table with `55006` until the swap — or is live. `BlockWrites` is a typed acknowledgement, not a switch: it must name the resolved target
 as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before anything
 executes, and an acknowledged run records a warn-level audit naming the table before the
-fence goes on. `RunDesired` rejects `BlockWrites` (`ErrBlockWritesNotSupported`): the derived
-plan, not the operator, would decide how many fenced copies run, so a value left on the
-adapter's configuration cannot take the table offline for a later plan. An adapter that builds
-one `Options` for both front doors passes `RunDesired` a copy with `CopySwap.BlockWrites`
-cleared. Three further fields let the adapter size and watch the run:
+fence goes on. `RunDesired` rejects it, as it rejects every acknowledgement
+([below](#rundesired-takes-no-acknowledgement)). An adapter that builds one `Options` for both
+front doors passes `RunDesired` a copy with `CopySwap.BlockWrites` cleared. Three further
+fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
 a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
@@ -656,16 +655,17 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   operator before asking for that consent. If that read fails, `Run` returns the error with a
   zero verdict and nothing executed rather than the refusal: route it as a retryable
   failure, like a connection fault, not as a refusal.
-  `RunDesired`
-  rejects `AllowDestructive` (`ErrAllowDestructiveNotSupported`) and keeps refusing a
-  destructive plan whole, so a declarative drop the operator approves runs as its own
-  imperative statement.
-- **`RunDesired` takes no acknowledgement.** Each of `Force`, `AcceptBlocking`,
+  `RunDesired` rejects it ([below](#rundesired-takes-no-acknowledgement)) and keeps
+  refusing a destructive plan whole, so a declarative drop the operator approves runs as its
+  own imperative statement.
+- <a id="rundesired-takes-no-acknowledgement"></a>**`RunDesired` takes no acknowledgement.** Each of `Force`, `AcceptBlocking`,
   `AllowDestructive`, `CopySwap.Restart`, and `CopySwap.BlockWrites` accepts a loss for one
   statement the operator wrote, and a desired-state run executes statements the plan derived.
-  Setting any of them returns its own sentinel before any database work:
-  `ErrForceNotSupported`, `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`,
-  `ErrRestartNotSupported`, or `ErrBlockWritesNotSupported`. An adapter that reuses one
+  Setting one returns its own sentinel before any database work, and setting several returns
+  the first one's, in this order: `ErrForceNotSupported`, `ErrAcceptBlockingNotSupported`,
+  `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`, `ErrBlockWritesNotSupported`.
+  A `BlockWrites` value would let the derived plan, not the operator, decide how many fenced
+  copies take the table offline. An adapter that reuses one
   `Options` value for both front doors clears them before calling `RunDesired`.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
