@@ -1,6 +1,9 @@
 package migrate
 
 import (
+	"context"
+	"log/slog"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,6 +46,50 @@ func TestRunRestartDiscardsALeftoverAndCompletesTheChange(t *testing.T) {
 	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
 	assert.False(t, f.relationExists(t, shadow), "the leftover is gone with the run that replaced it")
 }
+
+// An acknowledgement on a run the closed route refuses is not acted on and
+// not audited: the refusal carries the route's cause, the leftover under
+// the shadow's name still stands, the source is untouched, and the audit
+// trail records nothing, because no run discarded anything.
+func TestRunRefusesARestartAckWhileTheRouteIsClosed(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	shadow := schemachange.ShadowName(f.schema, "orders")
+	f.exec(t, `CREATE TABLE {schema}.`+shadow+` (id bigint PRIMARY KEY)`)
+	st, err := statement.ParseOne(f.inSchema(restartRetype))
+	require.NoError(t, err)
+
+	audit := &countingHandler{}
+	opts := f.options()
+	opts.CopySwap.Enabled = false
+	opts.CopySwap.Restart = f.schema + ".orders"
+	opts.Audit = slog.New(audit)
+	v, err := Run(t.Context(), f.pool, st, opts)
+	require.NoError(t, err, "a refusal is a verdict, not an error")
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
+	assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, v.Cause)
+	assert.True(t, f.relationExists(t, shadow), "nothing was discarded")
+	assert.Equal(t, "integer", f.columnType(t, "orders", "qty"), "nothing was executed")
+	assert.Zero(t, audit.records.Load(), "a run that acts on nothing audits no acknowledgement")
+}
+
+// countingHandler is an audit sink that counts the records it receives; the
+// count is the test's surface, never the records' text.
+type countingHandler struct {
+	records atomic.Int64
+}
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *countingHandler) Handle(context.Context, slog.Record) error {
+	h.records.Add(1)
+	return nil
+}
+
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *countingHandler) WithGroup(string) slog.Handler { return h }
 
 // An acknowledgement that names another table is an error before any
 // verdict, and nothing is discarded: the leftover under the shadow's name

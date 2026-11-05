@@ -26,8 +26,9 @@ import (
 //
 // A plan with no copy-and-swap statement is admitted without a read. A
 // routed plan whose policy keeps the route closed (CopySwapOptions.Enabled
-// unset) is refused whole before any connection check or read, with the
-// same reason and cause the imperative door gives. The preflight is run
+// unset) is refused whole before the preflight reads anything, with the
+// same reason and cause the imperative door gives; planning has already
+// read the catalog to produce the plan. The preflight is run
 // once: every statement in a plan is on the one table the plan converges.
 // The route runs the same preflight again at execution, in the session that
 // executes, and that reading is the one that decides; this one keeps

@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -55,10 +56,11 @@ type CopySwapOptions struct {
 	// whenever the router assigns a statement to the backend. While it is
 	// false, a statement the router assigns to copy-and-swap is refused
 	// with reason copy-and-swap-refused and cause
-	// copy-and-swap-not-enabled before any connection check or catalog
-	// read, on both front doors; Options.Force still runs the statement
-	// natively, as it does with the route open. The CLI sets it from
-	// --copy-and-swap.
+	// copy-and-swap-not-enabled before the route's preflight runs or
+	// anything is written, on both front doors (target resolution and
+	// planning still read the catalog ahead of the gate); Options.Force
+	// still runs the statement natively, as it does with the route open.
+	// The CLI sets it from --copy-and-swap.
 	Enabled bool
 
 	// Connection is the database the pool handed to Run was dialed with.
@@ -204,7 +206,9 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 // remains so the next run resumes it; success is
 // verdict.OutcomeExecutedViaCopyAndSwap. A route the policy has not opened
 // (CopySwapOptions.Enabled) is a refused verdict with cause
-// copy-and-swap-not-enabled before anything else is checked. An option set
+// copy-and-swap-not-enabled before the route checks or writes anything;
+// the caller's target resolution and planning have already read the
+// catalog by then. An option set
 // the Runner refuses is a caller wiring error like the missing connection:
 // a plain error, no verdict, before the preflight reads anything. A pool
 // smaller than CopySwapMinConns is a failed verdict with the pool-too-small
@@ -414,6 +418,20 @@ func copySwapFailureCode(err error) executor.Code {
 const copySwapNotEnabledDetail = "copy-and-swap is in preview and not enabled for this run: " +
 	"the change needs a shadow-table copy and cutover, which runs only when the policy opts in " +
 	"(migrate --copy-and-swap on the CLI, Options.CopySwap.Enabled in the library); nothing was executed"
+
+// routesToClosedCopySwap reports whether a routed statement would run
+// through copy-and-swap under opts while the policy keeps the route closed:
+// the router sends it to the route, no acknowledged override (Options.Force)
+// takes it off the route, and CopySwapOptions.Enabled is unset.
+func routesToClosedCopySwap(rs router.Statement, opts Options) bool {
+	if rs.Disposition != router.DispositionExecute || rs.Backend != router.BackendCopyAndSwap {
+		return false
+	}
+	if opts.Force != "" {
+		return false
+	}
+	return !opts.CopySwap.Enabled
+}
 
 // copySwapNotEnabledVerdict is the refusal for a statement that routes to
 // copy-and-swap while the policy keeps the route closed.

@@ -21,8 +21,9 @@ import (
 // policy has not opened the route (CopySwapOptions.Enabled). The route is
 // in preview, so the boundary is the engine's: the same statement runs
 // once the caller opts in, and a release that opens the route by default
-// lifts the refusal for every caller. Minted before any connection check
-// or catalog read, on both front doors.
+// lifts the refusal for every caller. Minted on both front doors before
+// the route's preflight runs or anything is written; the front door's own
+// target resolution and planning have already read the catalog by then.
 func copySwapNotEnabledRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonCopyAndSwapRefused).
 		WithCause(verdict.CauseCopyAndSwapNotEnabled)

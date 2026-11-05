@@ -24,7 +24,8 @@ choose, what each needs, and how to stop, resume, and start over. The design is 
 Copy-and-swap is in preview: it has not yet been exercised under production-like load, so it
 runs only when you open it for the run with `--copy-and-swap` (`CopySwapOptions.Enabled` as a
 library caller). Without the flag, a statement the planner routes to copy-and-swap is refused
-before anything is read or run, and every native change is unaffected:
+before the route's preflight runs or anything is written — target resolution and planning
+still read the catalog to route it — and every native change is unaffected:
 
 ```console
 $ pg-sprite migrate --free-disk 1GiB --json \
@@ -93,7 +94,7 @@ Both:
 Live runs also need logical decoding. Without it, a live run is refused before anything is built:
 
 ```console
-$ pg-sprite migrate --free-disk 1GiB --json \
+$ pg-sprite migrate --copy-and-swap --free-disk 1GiB --json \
     --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 {
   "outcome": "refused",
@@ -136,11 +137,11 @@ pg-sprite migrate --dry-run \
   --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
 
 # Live: the application keeps writing
-pg-sprite migrate --free-disk 50GiB \
+pg-sprite migrate --copy-and-swap --free-disk 50GiB \
   --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
 
 # Offline: the table's writes are blocked for the length of the run
-pg-sprite migrate --free-disk 50GiB --block-writes public.order_archive \
+pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_archive \
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 
@@ -165,12 +166,12 @@ name for a rollback window; you drop it yourself when the window ends.
 | You want to | Do this |
 | --- | --- |
 | Stop a running change | Press Ctrl-C, or send `SIGTERM`, once. The run saves where its copy reached and exits. The table keeps its fence (offline) or its replication slot (live) until you resume or start over. |
-| Resume it | Run the same command again, including `--block-writes SCHEMA.TABLE` if the run blocked writes. It continues from where it stopped; unless the slot was lost, nothing is copied twice. If a live run's replication slot is gone or the server reports it lost (after a failover, or when the server drops a slot that retained too much WAL), or a reconcile stopped partway, the resume reconciles first, with no flag needed: it creates a new slot, compares every landed chunk against the source, recopies only those that differ, and then continues. The comparison takes time in proportion to the rows already copied ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)). |
-| Start over | Run the same command with `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. |
+| Resume it | Run the same command again — `--copy-and-swap` included, since the resume is a copy-and-swap run too — with `--block-writes SCHEMA.TABLE` if the run blocked writes. It continues from where it stopped; unless the slot was lost, nothing is copied twice. If a live run's replication slot is gone or the server reports it lost (after a failover, or when the server drops a slot that retained too much WAL), or a reconcile stopped partway, the resume reconciles first, with no flag needed: it creates a new slot, compares every landed chunk against the source, recopies only those that differ, and then continues. The comparison takes time in proportion to the rows already copied ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)). |
+| Start over | Run the same command (again with `--copy-and-swap`) plus `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. |
 | Recover from bad data | When the server rejects a row under the new type or a constraint, the run reports `code: data-fault` and tries to abandon itself. Follow the verdict's detail: if it says the run was abandoned, nothing is left behind, so fix the data or the statement and run it again. If it says the run could not be abandoned, the shadow and the fence or slot remain, so fix the data or the statement and run it with `--restart SCHEMA.TABLE`. |
 
 ```sh
-pg-sprite migrate --free-disk 50GiB --block-writes public.order_archive --restart public.order_archive \
+pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_archive --restart public.order_archive \
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 

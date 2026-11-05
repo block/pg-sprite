@@ -40,6 +40,7 @@ func TestAdmitCopySwap(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeRefused, refused.Outcome)
 		assert.Equal(t, verdict.ReasonCopyAndSwapRefused, refused.Reason)
 		assert.Equal(t, verdict.ClassCapabilityBoundary, refused.Class)
+		assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, refused.Cause, "the result carries the gate's cause, as the statement verdict would")
 		assert.Empty(t, refused.Verdicts, "no statement was attempted, not even the native one planned first")
 		assert.Equal(t, report, refused.Plan)
 		assert.Contains(t, refused.Detail, "planned statement 2 (ALTER TABLE billing.orders ALTER COLUMN id TYPE bigint)")

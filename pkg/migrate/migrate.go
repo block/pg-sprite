@@ -320,6 +320,13 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		allowedDestructive = true
 		auditAllowDestructive(opts.audit(), st, qualified(st))
 	}
+	// A route the policy has not opened refuses here, ahead of the restart
+	// audit line: an acknowledgement is audited only by a run that acts on
+	// it, and the closed route acts on nothing. copyAndSwap keeps its own
+	// gate for callers that reach it directly.
+	if routesToClosedCopySwap(rs, opts) {
+		return copySwapNotEnabledVerdict(st), nil
+	}
 	if opts.CopySwap.Restart != "" {
 		auditRestart(opts.audit(), st)
 	}
