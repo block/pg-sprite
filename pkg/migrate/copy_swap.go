@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -34,10 +35,11 @@ var ErrCopySwapConnectionRequired = errors.New(
 	"Options.CopySwap.Connection must name the database the pool was dialed with; the copy-and-swap route opens dedicated sessions from it")
 
 // CopySwapOptions is the policy for a statement the router assigns to the
-// copy-and-swap backend. The zero value is not runnable: the route opens
-// dedicated sessions of its own — the table lock, the copy workers, the
-// replication stream — so it needs the connection the pool was built from,
-// not the pool alone.
+// copy-and-swap backend. The zero value keeps the route closed: Enabled is
+// the opt-in, and a statement that reaches the closed route is refused. An
+// opened route needs the connection the pool was built from, not the pool
+// alone, because it opens dedicated sessions of its own — the table lock,
+// the copy workers, the replication stream.
 //
 // A table that already carries the done row of an earlier copy-and-swap is
 // run again without ceremony: the route replaces the row inside its own
@@ -48,6 +50,19 @@ var ErrCopySwapConnectionRequired = errors.New(
 // (KeepOld): that is an open rollback window, and the run is refused until
 // the operator ends it.
 type CopySwapOptions struct {
+	// Enabled opens the copy-and-swap route. The route is in preview: it
+	// has not been exercised under production-like load, so a caller opts
+	// into it deliberately, per run, rather than reaching it by default
+	// whenever the router assigns a statement to the backend. While it is
+	// false, a statement the router assigns to copy-and-swap is refused
+	// with reason copy-and-swap-refused and cause
+	// copy-and-swap-not-enabled before the route's preflight runs or
+	// anything is written, on both front doors (target resolution and
+	// planning still read the catalog ahead of the gate); Options.Force
+	// still runs the statement natively, as it does with the route open.
+	// The CLI sets it from --copy-and-swap.
+	Enabled bool
+
 	// Connection is the database the pool handed to Run was dialed with.
 	// The route's dedicated sessions are opened from it. Before the
 	// preflight the route proves the two reach one database on one
@@ -189,14 +204,21 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 // the route's own cause and a nil error; a run that stops is a failed
 // verdict together with the error, and the checkpoint row it stopped at
 // remains so the next run resumes it; success is
-// verdict.OutcomeExecutedViaCopyAndSwap. An option set the Runner refuses
-// is a caller wiring error like the missing connection: a plain error, no
-// verdict, before the preflight reads anything. A pool smaller than
-// CopySwapMinConns is a failed verdict with the pool-too-small code and an
-// error wrapping executor.ErrPoolTooSmall, also before the preflight, so
-// nothing is created.
+// verdict.OutcomeExecutedViaCopyAndSwap. A route the policy has not opened
+// (CopySwapOptions.Enabled) is a refused verdict with cause
+// copy-and-swap-not-enabled before the route checks or writes anything;
+// the caller's target resolution and planning have already read the
+// catalog by then. An option set
+// the Runner refuses is a caller wiring error like the missing connection:
+// a plain error, no verdict, before the preflight reads anything. A pool
+// smaller than CopySwapMinConns is a failed verdict with the pool-too-small
+// code and an error wrapping executor.ErrPoolTooSmall, also before the
+// preflight, so nothing is created.
 func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
+	if !opts.CopySwap.Enabled {
+		return copySwapNotEnabledVerdict(st), nil
+	}
 	if opts.CopySwap.Connection.URL == "" {
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", ErrCopySwapConnectionRequired)
 	}
@@ -398,6 +420,34 @@ func copySwapFailureCode(err error) executor.Code {
 	default:
 		return executor.OutcomeCode(err)
 	}
+}
+
+// copySwapNotEnabledDetail is the prose behind the closed route, shared by
+// both front doors so an operator reads one explanation whichever door
+// refused: what the route is, why it is closed, and how to open it on the
+// CLI.
+const copySwapNotEnabledDetail = "copy-and-swap is in preview and not enabled for this run: " +
+	"the change needs a shadow-table copy and cutover, which runs only when the policy opts in " +
+	"(migrate --copy-and-swap on the CLI, Options.CopySwap.Enabled in the library); nothing was executed"
+
+// routesToClosedCopySwap reports whether a routed statement would run
+// through copy-and-swap under opts while the policy keeps the route closed:
+// the router sends it to the route, no acknowledged override (Options.Force)
+// takes it off the route, and CopySwapOptions.Enabled is unset.
+func routesToClosedCopySwap(rs router.Statement, opts Options) bool {
+	if rs.Disposition != router.DispositionExecute || rs.Backend != router.BackendCopyAndSwap {
+		return false
+	}
+	if opts.Force != "" {
+		return false
+	}
+	return !opts.CopySwap.Enabled
+}
+
+// copySwapNotEnabledVerdict is the refusal for a statement that routes to
+// copy-and-swap while the policy keeps the route closed.
+func copySwapNotEnabledVerdict(st statement.Statement) verdict.Verdict {
+	return refusedVerdict(st, copySwapNotEnabledRefusal(), copySwapNotEnabledDetail)
 }
 
 // refusedVerdict is the refused verdict for st under r, with detail as the

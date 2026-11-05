@@ -23,6 +23,7 @@ import (
 func copySwapRunOptions(serverURL, table string) migrate.Options {
 	opts := runOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
+		Enabled:       true,
 		Connection:    dbconn.Config{URL: serverURL},
 		FreeDiskBytes: testutil.UnlimitedDisk,
 		BlockWrites:   table,
@@ -84,8 +85,52 @@ func TestRunDesiredCopyAndSwap(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonCopyAndSwapRefused, res.Reason)
 		assert.Equal(t, verdict.ClassEnvironmental, res.Class)
+		assert.Equal(t, verdict.Cause(preflight.CopySwapCauseDiskHeadroom), res.Cause, "the result carries the preflight's cause, as the statement verdict would")
 		assert.Empty(t, res.Verdicts, "no statement was attempted")
 		assert.Contains(t, res.Detail, string(preflight.CopySwapCauseDiskHeadroom))
+		assert.Contains(t, res.Detail, "nothing was executed")
+		require.Len(t, res.Plan.Statements, 2, "the plan carried the native statement and the retype")
+		assert.Equal(t, router.BackendCopyAndSwap, res.Plan.Statements[1].Backend)
+
+		var columns int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = 't'`, schema).Scan(&columns))
+		assert.Equal(t, 2, columns, "the native ADD COLUMN ahead of the refused retype did not commit")
+		assert.Equal(t, "integer", columnType(t, schema, "owner_id"))
+	})
+
+	t.Run("a plan under the closed route is refused whole with the gate's cause", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %s.t (
+				id       int PRIMARY KEY,
+				owner_id int NOT NULL
+			)`, schema))
+		require.NoError(t, err)
+
+		// The same plan — a native ADD COLUMN, then a retype routed to
+		// copy-and-swap — with free disk declared and logical decoding
+		// available, so only the route being closed stands in its way.
+		// The gate refuses the whole plan at admission, before the
+		// preflight reads anything, and the native statement planned ahead
+		// of the retype does not commit.
+		opts := desiredCopySwapOptions(serverURL)
+		opts.CopySwap.Enabled = false
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema: schema,
+			Desired: parseDesired(t, `CREATE TABLE t (
+				id       int PRIMARY KEY,
+				owner_id bigint NOT NULL,
+				note     text
+			)`),
+		}, opts)
+		require.NoError(t, err, "a closed route is a refusal, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonCopyAndSwapRefused, res.Reason)
+		assert.Equal(t, verdict.ClassCapabilityBoundary, res.Class)
+		assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, res.Cause)
+		assert.Empty(t, res.Verdicts, "no statement was attempted")
 		assert.Contains(t, res.Detail, "nothing was executed")
 		require.Len(t, res.Plan.Statements, 2, "the plan carried the native statement and the retype")
 		assert.Equal(t, router.BackendCopyAndSwap, res.Plan.Statements[1].Backend)

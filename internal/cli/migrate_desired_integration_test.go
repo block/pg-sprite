@@ -165,6 +165,34 @@ func TestMigrateDesiredTableRefusesDestructiveChange(t *testing.T) {
 	assert.Equal(t, before, after, "whole-plan admission must leave both columns and indexes unchanged")
 }
 
+// A desired file that retypes a column routes that statement to
+// copy-and-swap. Without --copy-and-swap the whole plan is refused at
+// admission, and the JSON result names the closed route by its cause so
+// an importer can tell this refusal from any other capability boundary;
+// the native ADD COLUMN ahead of the retype does not run either.
+func TestMigrateDesiredTableRefusesACopyWhileTheRouteIsClosed(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	cmd := desiredCommand(t, url, schema, `CREATE TABLE documents (
+ id int PRIMARY KEY,
+ owner_id bigint NOT NULL,
+ body text
+ );`)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	var out strings.Builder
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var result migrate.DesiredResult
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &result))
+	assert.Equal(t, verdict.OutcomeRefused, result.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, result.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, result.Class)
+	assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, result.Cause)
+	assert.Empty(t, result.Verdicts, "whole-plan admission runs no statement")
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "neither the retype nor the add-column ran")
+}
+
 func TestMigrateDesiredCreatesMissingTable(t *testing.T) {
 	url, schema, pool := desiredFixture(t)
 	_, err := pool.Exec(t.Context(), "DROP TABLE "+schema+".documents")

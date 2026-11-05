@@ -59,6 +59,7 @@ func TestMigrateReportsABlockWritesDataFaultAndLeavesNothingBehind(t *testing.T)
 	plantDataFault(t, pool, table)
 
 	cmd := newMigrateCmd(url, dataFaultAlter(table))
+	cmd.CopyAndSwap = true
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	cmd.BlockWrites = table.Schema + "." + table.Table
 	cmd.JSON = true
@@ -94,6 +95,7 @@ func TestMigrateReportsALiveDataFaultAndLeavesNothingBehind(t *testing.T) {
 	})
 
 	cmd := newMigrateCmd(url, dataFaultAlter(table))
+	cmd.CopyAndSwap = true
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	cmd.JSON = true
 	var out strings.Builder

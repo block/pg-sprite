@@ -24,11 +24,15 @@ import (
 // refused whole and the native statements planned ahead of the retype do
 // not commit first and leave the table half-converged.
 //
-// A plan with no copy-and-swap statement is admitted without a read. The
-// preflight is run once: every statement in a plan is on the one table the
-// plan converges. The route runs the same preflight again at execution, in
-// the session that executes, and that reading is the one that decides; this
-// one keeps admission all-or-nothing.
+// A plan with no copy-and-swap statement is admitted without a read. A
+// routed plan whose policy keeps the route closed (CopySwapOptions.Enabled
+// unset) is refused whole before the preflight reads anything, with the
+// same reason and cause the imperative door gives; planning has already
+// read the catalog to produce the plan. The preflight is run
+// once: every statement in a plan is on the one table the plan converges.
+// The route runs the same preflight again at execution, in the session that
+// executes, and that reading is the one that decides; this one keeps
+// admission all-or-nothing.
 //
 // Two shapes, as RunDesired's: a refusal is the refused result with a nil
 // error; a stop — the route's connection not wired, which is
@@ -41,6 +45,11 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 	first, routed := firstCopySwapStatement(report)
 	if !routed {
 		return DesiredResult{}, true, nil
+	}
+	if !opts.CopySwap.Enabled {
+		return DesiredResult{Plan: report}.refused(copySwapNotEnabledRefusal(), fmt.Sprintf(
+			"planned statement %d (%s) routes to copy-and-swap, which is not enabled for this run: %s",
+			first+1, report.Statements[first].SQL, copySwapNotEnabledDetail)), false, nil
 	}
 	stopped := func(what string, err error) (DesiredResult, bool, error) {
 		return DesiredResult{
