@@ -123,6 +123,7 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 		"create-admission:" + executor.ErrDuplicateCreateName.Error(),
 		"gate:" + statement.KindOther.String() + "/concurrent=false",
 		"site:plan-incoherent",
+		"site:copy-and-swap-not-enabled",
 	} {
 		assert.True(t, hasKey(keys, sentinel), "sentinel key %q missing from the walk", sentinel)
 	}

@@ -293,6 +293,7 @@ func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.CopyAndSwap = true
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	cmd.BlockWrites = schema + ".t"
 	cmd.JSON = true
@@ -322,6 +323,53 @@ func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 	assert.Equal(t, 0, retained, "without --keep-old the retained source is dropped")
 }
 
+// Without --copy-and-swap the route stays closed: a statement the planner
+// routes to it is refused with the refusal exit code before the route's
+// preflight reads the table, and the verdict names the opt-in's own cause
+// so an operator or orchestrator can tell "not enabled" from "the table
+// cannot take the route". The other policy flags are set here to show
+// they open nothing on their own. Nothing about the table changes.
+func TestMigrateCopyAndSwapIsClosedWithoutTheFlag(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.t (
+			id int PRIMARY KEY,
+			v  text
+		)`, schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
+	cmd.BlockWrites = schema + ".t"
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
+	assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, v.Cause)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+	assert.False(t, v.WritesBlocked, "the closed route never put the fence on")
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
+	var shadows int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relkind = 'r' AND c.relname <> 't'`, schema).Scan(&shadows))
+	assert.Equal(t, 0, shadows, "no shadow table was built")
+}
+
 // Without --free-disk a copy-and-swap route is refused by its preflight
 // before any session of the route opens: the verdict carries the route's
 // own cause and nothing about the table changes.
@@ -335,6 +383,7 @@ func TestMigrateCopyAndSwapRefusesWithoutFreeDisk(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.CopyAndSwap = true
 	cmd.BlockWrites = schema + ".t"
 	cmd.JSON = true
 	var out strings.Builder

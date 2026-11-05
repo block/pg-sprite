@@ -65,6 +65,7 @@ func newLiveFixture(t *testing.T, shape testutil.WorkloadShape) liveFixture {
 func (f liveFixture) options() migrate.Options {
 	opts := runOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
+		Enabled:       true,
 		Connection:    dbconn.Config{URL: f.url},
 		FreeDiskBytes: testutil.UnlimitedDisk,
 		KeepOld:       true,

@@ -74,6 +74,7 @@ func TestMigrateSignalDuringCopyReportsCancelledByCaller(t *testing.T) {
 	}()
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.CopyAndSwap = true
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	cmd.BlockWrites = schema + ".t"
 	cmd.JSON = true

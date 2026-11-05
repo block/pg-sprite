@@ -84,6 +84,7 @@ func (f destructiveFixture) table() string { return f.schema + ".orders" }
 func (f destructiveFixture) copySwapOptions() migrate.Options {
 	opts := runOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
+		Enabled:       true,
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
 		BlockWrites:   f.table(),
