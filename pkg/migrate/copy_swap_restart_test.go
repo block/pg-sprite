@@ -93,3 +93,23 @@ func TestRunDesiredRejectsRestart(t *testing.T) {
 	require.ErrorIs(t, err, ErrRestartNotSupported)
 	assert.Equal(t, DesiredResult{}, res)
 }
+
+// An embedder branching on the sentinels sees the acknowledgement the
+// desired-state door rejects even when the Options value also breaks
+// validate's rule that Restart excludes Force and AcceptBlocking. Force is
+// checked first, so Restart beside Force reads as ErrForceNotSupported;
+// AcceptBlocking is not rejected by this door, so Restart beside it reads
+// as ErrRestartNotSupported.
+func TestRunDesiredNamesTheRejectedAcknowledgementBesideAnother(t *testing.T) {
+	opts := DefaultOptions()
+	opts.CopySwap.Restart = "app.orders"
+	opts.Force = "app.orders"
+	_, err := RunDesired(t.Context(), nil, DesiredRequest{Schema: "app"}, opts)
+	require.ErrorIs(t, err, ErrForceNotSupported)
+
+	opts = DefaultOptions()
+	opts.CopySwap.Restart = "app.orders"
+	opts.AcceptBlocking = "app.orders"
+	_, err = RunDesired(t.Context(), nil, DesiredRequest{Schema: "app"}, opts)
+	require.ErrorIs(t, err, ErrRestartNotSupported)
+}
