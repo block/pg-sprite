@@ -24,6 +24,7 @@ import (
 func copySwapOptions(st statement.Statement) migrate.Options {
 	opts := migrate.DefaultOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
+		Enabled:     true,
 		Connection:  dbconn.Config{URL: directURL},
 		BlockWrites: st.Schema() + "." + st.Table(),
 	}

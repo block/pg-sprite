@@ -93,6 +93,12 @@ type DesiredResult struct {
 	// Owner identifies who owns work with no online-safety problem; present
 	// exactly when Class is no-online-safety-problem.
 	Owner verdict.Owner `json:"owner,omitempty"`
+	// Cause narrows the refusal reason to its typed discriminator, the
+	// same token the statement verdict would carry: the copy-and-swap
+	// gate or preflight cause of a whole-plan refusal at admission, or the
+	// cause of the statement verdict that stopped execution. Empty when
+	// the reason has none or Outcome is not refused.
+	Cause verdict.Cause `json:"cause,omitempty"`
 	// Detail is the human explanation: why refused, what committed, or
 	// that there was nothing to do.
 	Detail string `json:"detail,omitempty"`
@@ -133,9 +139,10 @@ type Convergence struct {
 // its explanation. It is the one path from a refusal onto DesiredResult, so
 // a site cannot set a reason without a class.
 func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult {
-	// INV: RF-7 — class and owner come from the proof, never from the site.
+	// INV: RF-7 — class, owner, and cause come from the proof, never from
+	// the site.
 	r.Outcome = verdict.OutcomeRefused
-	r.Reason, r.Class, r.Owner = ref.Reason(), ref.Class(), ref.Owner()
+	r.Reason, r.Class, r.Owner, r.Cause = ref.Reason(), ref.Class(), ref.Owner(), ref.Cause()
 	r.Detail = detail
 	return r
 }
@@ -196,9 +203,9 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 //
 // RunDesired does not close the pool; one pool serves any number of calls.
 func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
-	if err := opts.validate(); err != nil {
-		return DesiredResult{}, err
-	}
+	// The acknowledgements this door rejects are named before Options is
+	// validated, so a value that also breaks a mutual-exclusion rule still
+	// returns the sentinel an embedder branches on.
 	if opts.Force != "" {
 		return DesiredResult{}, ErrForceNotSupported
 	}
@@ -210,6 +217,9 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	}
 	if opts.CopySwap.Restart != "" {
 		return DesiredResult{}, ErrRestartNotSupported
+	}
+	if err := opts.validate(); err != nil {
+		return DesiredResult{}, err
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if ref, ok := desiredShapeRefusal(err); ok {

@@ -483,6 +483,11 @@ const (
 	// CauseParentNotValidForeignKey identifies a NOT VALID foreign key on a
 	// partitioned parent.
 	CauseParentNotValidForeignKey Cause = "parent-not-valid-foreign-key"
+	// CauseCopyAndSwapNotEnabled: the statement routes to the copy-and-swap
+	// backend, which the caller has not opted into; nothing was read or
+	// executed. The route is in preview, so it runs only when the policy
+	// opens it.
+	CauseCopyAndSwapNotEnabled Cause = "copy-and-swap-not-enabled"
 )
 
 // Verdict is the structured outcome of one migrate invocation.

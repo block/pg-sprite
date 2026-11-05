@@ -29,12 +29,33 @@ func parseCopySwapStatement(t *testing.T) statement.Statement {
 	return st
 }
 
+// The route is in preview and closed until the policy opens it: a
+// statement that routes to copy-and-swap under the zero CopySwapOptions is
+// refused as a capability boundary, with its own cause, before the route's
+// connection is even looked at — the connection here is unset and the pool
+// nil, and neither is reached. The refusal is a verdict, not an error: the
+// caller wired nothing wrong, the route is simply not open to it.
+func TestCopyAndSwapIsClosedUntilEnabled(t *testing.T) {
+	st := parseCopySwapStatement(t)
+	v, err := copyAndSwap(t.Context(), nil, st, Options{}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
+	assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, v.Cause)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+	assert.Equal(t, "billing.orders", v.Table)
+	assert.Equal(t, st.SQL(), v.Statement)
+	assert.Empty(t, v.Code, "a refusal is not a failure")
+	assert.Contains(t, v.Detail, "nothing was executed")
+}
+
 // The route cannot open its dedicated sessions from a pool alone, so a
-// caller that routes a statement to copy-and-swap without naming the
+// caller that opens the route for a statement without naming the
 // connection stops before any database work, with the zero verdict that
 // means "nothing was executed".
 func TestCopyAndSwapRequiresTheConnection(t *testing.T) {
-	v, err := copyAndSwap(t.Context(), nil, parseCopySwapStatement(t), Options{}, slog.New(slog.DiscardHandler))
+	opts := Options{CopySwap: CopySwapOptions{Enabled: true}}
+	v, err := copyAndSwap(t.Context(), nil, parseCopySwapStatement(t), opts, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, ErrCopySwapConnectionRequired)
 	assert.Zero(t, v)
 }

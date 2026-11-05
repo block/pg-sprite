@@ -168,8 +168,9 @@ execute_native() {
 # execute_copy_swap sql
 #
 # Runs a schema change the planner routes to copy-and-swap and requires the
-# route's own outcome and exit 0. The free-disk declaration is the route's
-# admission for the shadow table and its indexes; the demo tables are tiny,
+# route's own outcome and exit 0. --copy-and-swap opens the route, which is
+# a preview and stays closed without it. The free-disk declaration is the
+# route's admission for the shadow table and its indexes; the demo tables are tiny,
 # so the figure only has to be non-zero. The compose database runs with
 # logical decoding on, so the run streams the source's writes through a
 # replication slot the way it does against a production server.
@@ -177,11 +178,11 @@ execute_copy_swap() {
     local sql="$1" out status=0
     step "execute (copy-and-swap): $sql"
     if [ "$CHECK" = 1 ]; then
-        out=$("$PGS" migrate --url "$PG_DSN" --json --free-disk 1GiB --alter "$sql") || status=$?
+        out=$("$PGS" migrate --url "$PG_DSN" --json --copy-and-swap --free-disk 1GiB --alter "$sql") || status=$?
         assert_eq "exit of [$sql]" 0 "$status"
         assert_eq "outcome of [$sql]" "executed-via-copy-and-swap" "$(jq -r '.outcome' <<<"$out")"
     else
-        "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql"
+        "$PGS" migrate --url "$PG_DSN" --copy-and-swap --free-disk 1GiB --alter "$sql"
     fi
 }
 
@@ -199,14 +200,14 @@ execute_data_fault() {
     local table="$1" sql="$2" out status=0
     step "execute (copy-and-swap, expect a data fault): $sql"
     if [ "$CHECK" = 1 ]; then
-        out=$("$PGS" migrate --url "$PG_DSN" --json --free-disk 1GiB --alter "$sql" 2>/dev/null) || status=$?
+        out=$("$PGS" migrate --url "$PG_DSN" --json --copy-and-swap --free-disk 1GiB --alter "$sql" 2>/dev/null) || status=$?
         assert_eq "data-fault exit of [$sql]" 1 "$status"
         assert_eq "outcome of [$sql]" "failed" "$(jq -r '.outcome' <<<"$out")"
         assert_eq "code of [$sql]" "data-fault" "$(jq -r '.code' <<<"$out")"
         assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
         assert_eq "forced of [$sql]" false "$(jq -r '.forced // false' <<<"$out")"
     else
-        "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql" \
+        "$PGS" migrate --url "$PG_DSN" --copy-and-swap --free-disk 1GiB --alter "$sql" \
             || echo "(exit $? — expected 1: a row will not fit the new type; the run abandoned itself and dropped its shadow, slot, and checkpoint row)"
     fi
 }

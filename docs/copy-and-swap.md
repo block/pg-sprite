@@ -5,18 +5,50 @@ type change such as `integer` to `numeric(12,2)`. pg-sprite routes these to **co
 it builds the new shape as a shadow table, copies the rows into it in chunks, verifies the
 copy, and swaps it in under the table's name with a short, bounded lock.
 
-This page is the operator's guide: the two ways to run it, how to choose, what each needs,
-and how to stop, resume, and start over. The design is in
+This page is the operator's guide: how to open the route, the two ways to run it, how to
+choose, what each needs, and how to stop, resume, and start over. The design is in
 [copy-and-swap-design.md](copy-and-swap-design.md); every refusal is in
 [limitations.md](limitations.md) and [refusal-classes.md](refusal-classes.md).
 
 ## Contents
 
+- [Preview: the route is closed until you open it](#preview-the-route-is-closed-until-you-open-it)
 - [Live or offline](#live-or-offline)
 - [What each run needs](#what-each-run-needs)
 - [Free disk space](#free-disk-space)
 - [Run it](#run-it)
 - [Stop, resume, and start over](#stop-resume-and-start-over)
+
+## Preview: the route is closed until you open it
+
+Copy-and-swap is in preview: it has not yet been exercised under production-like load, so it
+runs only when you open it for the run with `--copy-and-swap` (`CopySwapOptions.Enabled` as a
+library caller). Without the flag, a statement the planner routes to copy-and-swap is refused
+before the route's preflight runs or anything is written — target resolution and planning
+still read the catalog to route it — and every native change is unaffected:
+
+```console
+$ pg-sprite migrate --free-disk 1GiB --json \
+    --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
+{
+  "outcome": "refused",
+  "reason": "copy-and-swap-refused",
+  "class": "capability-boundary",
+  "cause": "copy-and-swap-not-enabled",
+  "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
+  "table": "public.order_archive",
+  "detail": "copy-and-swap is in preview and not enabled for this run: the change needs a shadow-table copy and cutover, which runs only when the policy opts in (migrate --copy-and-swap on the CLI, Options.CopySwap.Enabled in the library); nothing was executed"
+}
+```
+
+The other route flags — `--free-disk`, `--block-writes`, `--keep-old`, `--restart` — open
+nothing on their own; they govern a run that `--copy-and-swap` has opened. The flag does not
+combine with `--dry-run`, which never runs anything and so needs no opening. With
+`--desired`, a derived plan that routes any statement to copy-and-swap is refused whole,
+native statements included, unless the flag is set. `--force` keeps its meaning: it runs the
+statement natively, bypassing the route and this gate alike.
+
+Every example on this page that runs a copy-and-swap carries the flag.
 
 ## Live or offline
 
@@ -62,7 +94,7 @@ Both:
 Live runs also need logical decoding. Without it, a live run is refused before anything is built:
 
 ```console
-$ pg-sprite migrate --free-disk 1GiB --json \
+$ pg-sprite migrate --copy-and-swap --free-disk 1GiB --json \
     --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 {
   "outcome": "refused",
@@ -105,11 +137,11 @@ pg-sprite migrate --dry-run \
   --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
 
 # Live: the application keeps writing
-pg-sprite migrate --free-disk 50GiB \
+pg-sprite migrate --copy-and-swap --free-disk 50GiB \
   --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
 
 # Offline: the table's writes are blocked for the length of the run
-pg-sprite migrate --free-disk 50GiB --block-writes public.order_archive \
+pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_archive \
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 
@@ -134,12 +166,12 @@ name for a rollback window; you drop it yourself when the window ends.
 | You want to | Do this |
 | --- | --- |
 | Stop a running change | Press Ctrl-C, or send `SIGTERM`, once. The run saves where its copy reached and exits. The table keeps its fence (offline) or its replication slot (live) until you resume or start over. |
-| Resume it | Run the same command again, including `--block-writes SCHEMA.TABLE` if the run blocked writes. It continues from where it stopped; unless the slot was lost, nothing is copied twice. If a live run's replication slot is gone or the server reports it lost (after a failover, or when the server drops a slot that retained too much WAL), or a reconcile stopped partway, the resume reconciles first, with no flag needed: it creates a new slot, compares every landed chunk against the source, recopies only those that differ, and then continues. The comparison takes time in proportion to the rows already copied ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)). |
-| Start over | Run the same command with `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. `--restart` applies to `migrate --alter` only: `migrate --desired` rejects it, because there the derived plan, not you, decides which run the flag would discard. A stopped `--desired` copy resumes when you run the plan again; to start it over, run the stopped statement with `migrate --alter --restart SCHEMA.TABLE` first. |
+| Resume it | Run the same command again — `--copy-and-swap` included, since the resume is a copy-and-swap run too — with `--block-writes SCHEMA.TABLE` if the run blocked writes. It continues from where it stopped; unless the slot was lost, nothing is copied twice. If a live run's replication slot is gone or the server reports it lost (after a failover, or when the server drops a slot that retained too much WAL), or a reconcile stopped partway, the resume reconciles first, with no flag needed: it creates a new slot, compares every landed chunk against the source, recopies only those that differ, and then continues. The comparison takes time in proportion to the rows already copied ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)). |
+| Start over | Run the same command (again with `--copy-and-swap`) plus `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. `--restart` applies to `migrate --alter` only: `migrate --desired` rejects it, because there the derived plan, not you, decides which run the flag would discard. A stopped `--desired` copy resumes when you run the plan again; to start it over, run the stopped statement with `migrate --alter --copy-and-swap --restart SCHEMA.TABLE` first. |
 | Recover from bad data | When the server rejects a row under the new type or a constraint, the run reports `code: data-fault` and tries to abandon itself. Follow the verdict's detail: if it says the run was abandoned, nothing is left behind, so fix the data or the statement and run it again. If it says the run could not be abandoned, the shadow and the fence or slot remain, so fix the data or the statement and run it with `--restart SCHEMA.TABLE`. |
 
 ```sh
-pg-sprite migrate --free-disk 50GiB --block-writes public.order_archive --restart public.order_archive \
+pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_archive --restart public.order_archive \
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 

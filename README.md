@@ -64,7 +64,13 @@ and the mechanics of each current refusal are
 wherever an operation meets a boundary below, it fails closed with a typed
 refusal — never a silently wrong or incomplete result:
 
-- **Copy-and-swap** (genuine table rewrites) carries a general
+- **Copy-and-swap** (genuine table rewrites) is in preview: it has not yet
+  been exercised under production-like load, so the route stays closed until
+  a run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled` as a
+  library caller); without it a statement routed there is refused before
+  anything runs, and every native change is unaffected
+  ([running a copy-and-swap](docs/copy-and-swap.md#preview-the-route-is-closed-until-you-open-it)).
+  Open, it carries a general
   `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
   `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE`) refuse rather than fall
   through to a blocking rewrite, and the route's preflight refuses table shapes
@@ -263,7 +269,7 @@ read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--copy-and-swap` (the route is in preview and closed without it) and `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |
