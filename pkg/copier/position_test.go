@@ -36,6 +36,32 @@ func TestPositionClassifiesKeysAgainstTheCutFrontier(t *testing.T) {
 	assert.Equal(t, KeyUncut, nothingCut.Classify(0))
 }
 
+// An in-flight chunk that has committed around a few pending keys still
+// defers those keys, and only those: every other key of the chunk has
+// landed, while a chunk without a pending entry defers all of its keys.
+func TestPositionClassifiesOnlyThePendingKeysOfASettledChunkAsInFlight(t *testing.T) {
+	settled := mustChunk(t, 11, 20)
+	unsettled := mustChunk(t, 21, 30)
+	pos := Position{
+		Cut:      NewWatermark(30),
+		InFlight: []Chunk{settled, unsettled},
+		Pending:  []PendingKeys{{Chunk: settled, Keys: []int64{12, 15}}},
+	}
+	cases := map[int64]KeyState{
+		11: KeyLanded,
+		12: KeyInFlight,
+		13: KeyLanded,
+		15: KeyInFlight,
+		20: KeyLanded,
+		21: KeyInFlight,
+		30: KeyInFlight,
+		31: KeyUncut,
+	}
+	for key, want := range cases {
+		assert.Equal(t, want, pos.Classify(key), "key %d", key)
+	}
+}
+
 func TestKeyStateStrings(t *testing.T) {
 	assert.Equal(t, "uncut", KeyUncut.String())
 	assert.Equal(t, "in-flight", KeyInFlight.String())

@@ -275,6 +275,121 @@ func TestDiffTextNoChanges(t *testing.T) {
 `, out.String())
 }
 
+// An empty plan over a table carrying an invalid index the diff declined to
+// drop must not read as converged: the advisory renders as a warning coded
+// with its typed kind, the docs entry points at the runbook, and the plan
+// line says what the table carries instead of claiming a match.
+func TestDiffTextEmptyPlanWithAdvisoryIsNotConverged(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	report.Advisories = []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexUndeclared, Index: "users_email_idx_ccnew"},
+	}
+
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, report))
+	text := out.String()
+	assert.True(t, strings.HasPrefix(text, "warning[invalid-index-undeclared]:\n  index \"users_email_idx_ccnew\" is an unfinished concurrent build"),
+		"the advisory leads with its typed kind as the rule code: %s", text)
+	assert.Contains(t, text, "docs:\n  "+invalidIndexRunbookURL+"\n")
+	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — no changes to run; the live table carries 1 unfinished index build the plan leaves alone\n")
+	assert.NotContains(t, text, "matches the desired schema")
+	assert.NotContains(t, text, "apply:", "nothing to run, so no apply pointer")
+}
+
+// A rebuild advisory rides alongside the create it explains: the statement
+// renders as usual, and the warning after it says the create completes
+// only through the proven-removal path. The plan stays executable — the
+// warning changes neither the counts nor the apply pointer.
+func TestDiffTextRebuildAdvisoryFollowsStatements(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	sql := `CREATE UNIQUE INDEX "users_email_key" ON "public"."users" USING btree ("email")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Kind:        schemadiff.ChangeCreateIndex,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "create index",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonSaferIdiom,
+		}},
+		ExecSQL:   []string{`CREATE UNIQUE INDEX CONCURRENTLY "users_email_key" ON "public"."users" USING btree ("email")`},
+		Execution: planner.ExecutionAutocommit,
+	})
+	report.Advisories = []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "users_email_key"},
+	}
+
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, report))
+	text := out.String()
+	statementAt := strings.Index(text, "statement 1:\n  "+sql+";\n")
+	advisoryAt := strings.Index(text, "warning[invalid-index-rebuild]:\n  index \"users_email_key\" is an unfinished concurrent build")
+	planAt := strings.Index(text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	require.NotEqual(t, -1, statementAt, text)
+	require.NotEqual(t, -1, advisoryAt, text)
+	require.NotEqual(t, -1, planAt, text)
+	assert.Less(t, statementAt, advisoryAt, "the advisory follows the statements it explains")
+	assert.Less(t, advisoryAt, planAt, "the advisory precedes the plan summary")
+	assert.Contains(t, text, "docs:\n  "+invalidIndexRunbookURL+"\n")
+	assert.Contains(t, text, "apply:", "the plan is still executable")
+}
+
+// The --sql script carries advisories as comment lines only, and an empty
+// plan with an advisory does not claim the table matches.
+func TestPlanTextCommentsAdvisories(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	report.Advisories = []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexUndeclared, Index: "users_email_idx_ccnew"},
+	}
+
+	var out strings.Builder
+	require.NoError(t, writePlanText(&out, report))
+	text := out.String()
+	assert.Equal(t, "-- no changes to run; the live table carries an unfinished index build the plan leaves alone\n"+
+		"-- invalid-index-undeclared: index \"users_email_idx_ccnew\" "+schemadiff.AdvisoryInvalidIndexUndeclared.Description()+"\n", text)
+
+	sql := `CREATE INDEX "users_email_idx" ON "public"."users" USING btree ("email")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Kind:        schemadiff.ChangeCreateIndex,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionAutocommit,
+		Decisions: []planner.Decision{{
+			Operation: "create index",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonMetadataOnly,
+		}},
+	})
+	report.Advisories[0] = schemadiff.Advisory{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "users_email_idx"}
+	out.Reset()
+	require.NoError(t, writePlanText(&out, report))
+	text = out.String()
+	assert.True(t, strings.HasSuffix(text, sql+";\n-- invalid-index-rebuild: index \"users_email_idx\" "+schemadiff.AdvisoryInvalidIndexRebuild.Description()+"\n"), text)
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		if strings.HasPrefix(line, "--") {
+			continue
+		}
+		assert.Equal(t, sql+";", line, "the only bare statement is the planned create")
+	}
+}
+
 // A plan containing a statement this build cannot execute renders the same
 // leading error diagnostic as the dry run, counts it refused, and drops the
 // apply pointer — there is nothing migrate would run.
@@ -304,6 +419,46 @@ func TestDiffTextRefusedStatementDropsApply(t *testing.T) {
 	assert.Contains(t, text, "sql:\n  re-run with --sql")
 	assert.NotContains(t, text, "apply:")
 	assert.True(t, diffRefused(report))
+}
+
+// Desired-state execution rejects --block-writes, so a desired plan's
+// copy-and-swap note points offline mode at migrate --alter for its table,
+// while the imperative dry run of the same statement keeps the flag.
+func TestDiffTextCopyAndSwapNotePointsOfflineModeAtAlter(t *testing.T) {
+	statement := plan.Statement{
+		SQL:         `ALTER TABLE "orders" ALTER COLUMN "qty" TYPE bigint`,
+		Route:       planner.RouteCopyAndSwap,
+		Backend:     router.BackendCopyAndSwap,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "alter column type",
+			Route:     planner.RouteCopyAndSwap,
+			Reason:    planner.ReasonTypeRewrite,
+		}},
+	}
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+	desired := plan.NewReport(plan.SourceDiff)
+	desired.Schema, desired.Table, desired.ServerVersion = "app", "orders", "16.10"
+	desired.Disposition = router.DispositionExecute
+	exists := true
+	desired.TableExists = &exists
+	desired.Statements = append(desired.Statements, statement)
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, desired))
+	text := flat(out.String())
+	assert.Contains(t, text, "offline mode, which blocks the table's writes until the swap, runs one statement at a time with pg-sprite migrate --alter --block-writes app.orders")
+	assert.NotContains(t, text, "--block-writes instead")
+
+	imperative := plan.NewReport(plan.SourceAlter)
+	imperative.Schema, imperative.Table, imperative.ServerVersion = "app", "orders", "16.10"
+	imperative.Disposition = router.DispositionExecute
+	imperative.Statements = append(imperative.Statements, statement)
+	out.Reset()
+	require.NoError(t, writeDryRunText(&out, palette{}, imperative))
+	text = flat(out.String())
+	assert.Contains(t, text, "--block-writes instead blocks the table's writes until the swap (offline mode)")
+	assert.NotContains(t, text, "migrate --alter --block-writes")
 }
 
 // The refusal exit contract keys off the report's disposition, and a

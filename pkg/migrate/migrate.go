@@ -116,8 +116,9 @@ type Options struct {
 
 	// CopySwap is the policy for a statement the router assigns to the
 	// copy-and-swap backend. A statement the router keeps on the native
-	// backend never reads it; a statement routed to copy-and-swap cannot
-	// run without CopySwap.Connection.
+	// backend never reads it; a statement routed to copy-and-swap is
+	// refused unless CopySwap.Enabled opens the route, and cannot run
+	// without CopySwap.Connection.
 	CopySwap CopySwapOptions
 
 	// Logger receives decision diagnostics (routing, preflight, execution
@@ -318,6 +319,13 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		}
 		allowedDestructive = true
 		auditAllowDestructive(opts.audit(), st, qualified(st))
+	}
+	// A route the policy has not opened refuses here, ahead of the restart
+	// audit line: an acknowledgement is audited only by a run that acts on
+	// it, and the closed route acts on nothing. copyAndSwap keeps its own
+	// gate for callers that reach it directly.
+	if routesToClosedCopySwap(rs, opts) {
+		return copySwapNotEnabledVerdict(st), nil
 	}
 	if opts.CopySwap.Restart != "" {
 		auditRestart(opts.audit(), st)

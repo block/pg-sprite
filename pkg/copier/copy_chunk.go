@@ -41,17 +41,35 @@ const (
 
 // copyChunk copies one chunk in its own guarded transaction: it inserts the
 // chunk's live rows into the shadow without overwriting any row already
-// there and returns the number of rows the insert added. A copy that
-// evaluates conversion expressions confirms their resolution once more
-// after the insert and before the commit (CO-9), so a catalog change that
-// committed between the guard's check and the insert rolls the chunk back.
-// The transaction is READ COMMITTED whatever the server or role
-// configures, so that repeated read takes a snapshot after the insert's;
-// the insert is one statement and relies on no snapshot beyond its own.
+// there and returns the number of rows the insert added. The insert is one
+// statement and relies on no snapshot beyond its own.
 func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk) (int64, error) {
+	var tag pgconn.CommandTag
+	err := c.chunkTx(ctx, pool, chunk, func(tx pgx.Tx) error {
+		var err error
+		tag, err = tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
+		if err != nil {
+			return fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// chunkTx runs write, one chunk's insert into the shadow, in its own guarded
+// transaction and commits it. A copy that evaluates conversion expressions
+// confirms their resolution once more after the write and before the
+// commit (CO-9), so a catalog change that committed between the guard's
+// check and the write rolls the chunk back. The transaction is READ
+// COMMITTED whatever the server or role configures, so that repeated read
+// takes a snapshot after the write's.
+func (c *Copier) chunkTx(ctx context.Context, pool *pgxpool.Pool, chunk Chunk, write func(tx pgx.Tx) error) error {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite})
 	if err != nil {
-		return 0, fmt.Errorf("begin copy of chunk [%d, %d]: %w", chunk.Lower(), chunk.Upper(), err)
+		return fmt.Errorf("begin copy of chunk [%d, %d]: %w", chunk.Lower(), chunk.Upper(), err)
 	}
 	defer func() {
 		// Redundant safety closer: after a successful Commit this returns
@@ -60,19 +78,18 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 	if err := c.guard(ctx, tx, lockRowExclusive); err != nil {
-		return 0, err
+		return err
 	}
-	tag, err := tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
-	if err != nil {
-		return 0, fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), err)
+	if err := write(tx); err != nil {
+		return err
 	}
 	if err := c.confirmResolution(ctx, tx); err != nil {
-		return 0, err
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0, fmt.Errorf("commit chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), err)
+		return fmt.Errorf("commit chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), err)
 	}
-	return tag.RowsAffected(), nil
+	return nil
 }
 
 // guard prepares the transaction every write into the shadow runs in: it

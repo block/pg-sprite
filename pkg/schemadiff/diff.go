@@ -158,7 +158,9 @@ type ConstraintValidation struct {
 // order for columns, name order for constraints and indexes. schema
 // qualifies the emitted statements' table references. Columns are compared
 // by name only: attribute order carries no semantics in PostgreSQL and is
-// deliberately out of scope for convergence.
+// deliberately out of scope for convergence. An invalid index on a plain
+// table never yields a drop (see indexNeedsDrop); [Advisories] over the same
+// models reports each such entry so the observation is not lost.
 // RowSecurity is observational only: table-only desired files do not claim
 // ownership of access control, so missing policies never produce policy drops.
 func Diff(schema string, live, desired Model) ([]Change, error) {

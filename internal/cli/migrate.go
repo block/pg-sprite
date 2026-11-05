@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
@@ -54,7 +55,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	defer pool.Close()
 
 	v, runErr := migrate.Run(ctx, pool, st, c.options(logger))
-	v = c.cliDiskHeadroomIdiom(v)
+	v = cliPoolSizeIdiom(c.cliDiskHeadroomIdiom(v))
 	if runErr != nil {
 		// The failed verdict is the error's machine-readable twin on
 		// stdout, while the error itself still returns so the process
@@ -92,6 +93,7 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 		Logger: logger,
 		Audit:  c.audit(),
 		CopySwap: migrate.CopySwapOptions{
+			Enabled:       c.CopyAndSwap,
 			Connection:    c.Config(),
 			FreeDiskBytes: int64(c.FreeDisk),
 			KeepOld:       c.KeepOld,
@@ -134,6 +136,19 @@ func (c *MigrateCmd) cliDiskHeadroomIdiom(v verdict.Verdict) verdict.Verdict {
 		return v
 	}
 	v.Detail += "; pass --free-disk SIZE with the free space on the volume the table lives on"
+	return v
+}
+
+// cliPoolSizeIdiom attaches this front door's spelling to a pool-too-small
+// verdict. The CLI sizes its own pool to what copy-and-swap needs, so the
+// refusal only reaches an operator whose --url names a smaller
+// pool_max_conns; the copy's worker count is not a CLI setting.
+func cliPoolSizeIdiom(v verdict.Verdict) verdict.Verdict {
+	if v.Code != string(executor.CodePoolTooSmall) {
+		return v
+	}
+	v.Detail += fmt.Sprintf("; with the CLI, set pool_max_conns to %d or more in --url, or leave it out and the CLI sizes the pool",
+		migrate.CopySwapMinConns(copier.Options{}))
 	return v
 }
 

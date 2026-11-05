@@ -38,7 +38,7 @@ func writeDryRunText(out io.Writer, pal palette, report plan.Report) error {
 	w := &stickyWriter{out: out, pal: pal}
 	steps, refused := 0, 0
 	for i, ps := range report.Statements {
-		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite")
+		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite", "")
 		steps += s
 		refused += r
 	}
@@ -67,8 +67,9 @@ func writeDryRunText(out io.Writer, pal palette, report plan.Report) error {
 // runner names what executes the plan in the substitution note: the dry-run
 // report speaks as the invocation itself ("pg-sprite" — re-run without
 // --dry-run), while the diff report never executes and routes execution
-// through the migrate front door ("pg-sprite migrate").
-func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner string) (steps, refused int) {
+// through the migrate front door ("pg-sprite migrate"). desiredTable is as
+// writeExecutionNotes takes it.
+func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner, desiredTable string) (steps, refused int) {
 	w.entry(fmt.Sprintf("statement %d:", n))
 	w.printf("  %s;\n", ps.SQL)
 	codes := writeRefusal(w, ps)
@@ -96,7 +97,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		w.diag("help", string(ps.Guidance), suggest.ManualPath(ps.Guidance))
 	}
 	if ps.Disposition == router.DispositionExecute {
-		steps = writeExecutionNotes(w, ps, runner)
+		steps = writeExecutionNotes(w, ps, runner, desiredTable)
 	}
 	if len(codes) > 0 {
 		w.entry("docs:")
@@ -175,9 +176,17 @@ func rewriteRequiredRefusalText(ps plan.Statement) string {
 // runs no literal SQL the plan can list: the whole shadow-table change is
 // one step, and the note tells the operator what that step does and that
 // the run needs the free-disk declaration.
-func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner string) int {
+//
+// desiredTable is the table a desired-state plan converges, or "" for an
+// imperative statement. Desired-state execution rejects --block-writes, so
+// a desired plan's note points offline mode at migrate --alter instead.
+func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner, desiredTable string) int {
 	if ps.Backend == router.BackendCopyAndSwap {
-		w.diag("note", "", runner+" will run it as a copy-and-swap: build a shadow table with the change applied, copy the rows into it while streaming live writes, verify, then swap the two under a brief lock (needs --free-disk and logical decoding on the server; --block-writes instead blocks the table's writes until the swap (offline mode))")
+		offline := "--block-writes instead blocks the table's writes until the swap (offline mode)"
+		if desiredTable != "" {
+			offline = "offline mode, which blocks the table's writes until the swap, runs one statement at a time with pg-sprite migrate --alter --block-writes " + desiredTable
+		}
+		w.diag("note", "", runner+" will run it as a copy-and-swap: build a shadow table with the change applied, copy the rows into it while streaming live writes, verify, then swap the two under a brief lock (needs --copy-and-swap to open the preview route, --free-disk, and logical decoding on the server; "+offline+")")
 		w.diag("note", "", "the route's preflight — free disk, logical decoding, triggers, dependent views, publication membership — is not part of this dry run; the run reads it before anything executes and refuses with nothing run when it fails")
 		return 1
 	}

@@ -54,7 +54,9 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
 - [Migrate](#migrate)
   - [Runs as written (`metadata-only`) — exit 0](#runs-as-written-metadata-only--exit-0)
   - [Safer-sequence substitution (`safer-idiom`) — exit 0](#safer-sequence-substitution-safer-idiom--exit-0)
-  - [Real execution](#real-execution)
+  - [Real execution — exit 0](#real-execution--exit-0)
+  - [Accepted blocking refusal (`index-statement`) — exit 3](#accepted-blocking-refusal-index-statement--exit-3)
+  - [Failed mid-sequence (`execution-failed`) — exit 1](#failed-mid-sequence-execution-failed--exit-1)
   - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
   - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
   - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
@@ -134,7 +136,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; desired-state execution runs no destructive statement, so run the drop deliberately through `migrate --alter` instead ([execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
-| `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. |
+| `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. |
 | `create-collision` | The greenfield create plan's table name or a claimed index, constraint-index, or sequence name is occupied. Nothing runs; re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal. Catalog absence checks handle existing occupants. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff. |
 
 Two codes that look like refusals are not: `create-name-mismatch` and
@@ -160,7 +162,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -201,7 +203,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -239,7 +241,7 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UN
 }
 ```
 
-### Real execution
+### Real execution — exit 0
 
 The same statement without `--dry-run` runs the substituted sequence for
 real. The verdict names what was executed and every step that committed
@@ -258,6 +260,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UN
   ]
 }
 ```
+
+### Accepted blocking refusal (`index-statement`) — exit 3
 
 An operator-accepted blocking refusal has a distinct marked outcome and exit
 3; exit 0 remains exclusive to online-safe execution. `--accept-blocking`
@@ -295,6 +299,85 @@ $ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blockin
 }
 ```
 
+### Failed mid-sequence (`execution-failed`) — exit 1
+
+Exit 1 means execution started and PostgreSQL refused a step, or the command
+stopped before anything ran. Here the safer sequence for a `CHECK` constraint
+adds it `NOT VALID`, which commits, and then fails to validate it because a
+row has an upper-case email. The verdict on stdout names the failed step and
+the committed prefix that remains (`executed_sql`); the PostgreSQL error,
+with its SQLSTATE, goes to stderr. The constraint now exists `NOT VALID`, so
+fix the rows and then run the failed step (`failed_step_sql`) to finish. Do
+not rerun the original `ADD CONSTRAINT`: the constraint already exists, so it
+fails with `duplicate_object` (see the
+[retry paths](execution-model.md#the-committed-prefix)):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))' --json
+{
+  "outcome": "failed",
+  "code": "execution-failed",
+  "failed_step": 2,
+  "failed_step_sql": "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_lower\"",
+  "statement": "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))",
+  "table": "public.users",
+  "detail": "sequence step 2 of 2 failed; the 1 committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
+  "executed_sql": [
+    "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email)) NOT VALID"
+  ]
+}
+```
+
+```text
+pg-sprite: error: run schema change on public.users: sequence step 2 of 2 (validate-constraint) failed; steps before it committed and their state remains: optimistic attempt: ERROR: check constraint "users_email_lower" of relation "users" is violated by some row (SQLSTATE 23514)
+```
+
+When `code` is `commit-outcome-unknown`, the failed step's `COMMIT` may have
+landed; inspect the catalog before retrying.
+
+The other exit 1 is an error before anything runs — bad flags, an unreachable
+database, or an acknowledgement that names the wrong table. It prints no
+verdict, even with `--json`; stdout is empty and the error is on stderr:
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --allow-destructive public.orders
+pg-sprite: error: the destructive acknowledgement must name the resolved target table "public.users", got "public.orders"; nothing was executed
+$ echo $?
+1
+```
+
+### Data fault in a copy-and-swap run (`data-fault`) — exit 1
+
+A copy-and-swap run whose rows the server rejects under the new shape stops with
+`code: data-fault`. Here one `orders.note` is longer than the narrowed type
+holds, so a chunk's insert into the shadow fails with SQLSTATE `22001`. The same
+statement would fail the same way on every resume, so the run abandons itself
+before returning. It drops the shadow, drops its replication slot (or takes the
+write fence off the source), and deletes the checkpoint row, and the verdict
+says so with `"abandoned": true`. Fix the data or the statement, then run it
+again; the run starts from the beginning. When the discard itself does not
+finish, the verdict carries the same `code: data-fault` without `abandoned`,
+its hold and checkpoint row remain, and the detail says so: fix the data or the
+statement and rerun with `--restart SCHEMA.TABLE`. A consumer branches on the
+`abandoned` field, not on the detail's wording
+([execution model](execution-model.md)):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)' --copy-and-swap --free-disk 1GiB --json
+{
+  "outcome": "failed",
+  "code": "data-fault",
+  "statement": "ALTER TABLE public.orders ALTER COLUMN note TYPE varchar(32)",
+  "table": "public.orders",
+  "detail": "the copy-and-swap run stopped: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001); the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, its replication slot is dropped, and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning",
+  "abandoned": true
+}
+```
+
+```text
+pg-sprite: error: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001)
+```
+
 ### Refused: no online rewrite exists (`rewrite-required`) — exit 2
 
 The column and its constraint arrive in one statement, so no online
@@ -308,7 +391,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -350,7 +433,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -378,16 +461,19 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-
 }
 ```
 
-Without `--dry-run` the run needs `--free-disk` (the preflight refuses with
-`copy-and-swap-refused` / cause `copy-and-swap-disk-headroom` when the shadow
-and its indexes would not fit the declared space) and either logical
-decoding on the server or `--block-writes SCHEMA.TABLE`, which names the table
-whose writes it blocks until the swap. The verdict's outcome is distinct
+Without `--dry-run` the run needs `--copy-and-swap`, which opens the route for
+the run (the route is in preview; without the flag the front door refuses with
+`copy-and-swap-refused` / cause `copy-and-swap-not-enabled` before the route's
+preflight runs or anything is written), `--free-disk` (the preflight refuses with `copy-and-swap-refused` /
+cause `copy-and-swap-disk-headroom` when the shadow and its indexes would not
+fit the declared space), and either logical decoding on the server or
+`--block-writes SCHEMA.TABLE`, which names the table whose writes it blocks
+until the swap. The verdict's outcome is distinct
 from `executed-natively`, and `detail` says what the verification pass
 covered and what became of the retained source:
 
 ```console
-$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --free-disk 20GiB --json
+$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy-and-swap --free-disk 20GiB --json
 {
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE users ALTER COLUMN id TYPE text",
@@ -410,7 +496,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -447,7 +533,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -512,7 +598,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -639,7 +725,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 14,
+  "format_version": 15,
   "source": "diff",
   "schema": "public",
   "table": "users",

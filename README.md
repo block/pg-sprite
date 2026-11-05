@@ -64,13 +64,21 @@ and the mechanics of each current refusal are
 wherever an operation meets a boundary below, it fails closed with a typed
 refusal — never a silently wrong or incomplete result:
 
-- **Copy-and-swap** (genuine table rewrites) carries a general
+- **Copy-and-swap** (genuine table rewrites) is in preview: it has not yet
+  been exercised under production-like load, so the route stays closed until
+  a run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled` as a
+  library caller); without it a statement routed there is refused before
+  anything runs, and every native change is unaffected
+  ([running a copy-and-swap](docs/copy-and-swap.md#preview-the-route-is-closed-until-you-open-it)).
+  Open, it carries a general
   `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
   `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE`) refuse rather than fall
   through to a blocking rewrite, and the route's preflight refuses table shapes
   and environments it cannot run against. The shadow build also refuses a
   statement the copy cannot carry: a `USING` expression it cannot reproduce,
-  or a dropped-and-re-added column it cannot fill.
+  a dropped-and-re-added or new column it cannot fill, a key it would not
+  keep, or a new identity or `serial` column whose sequence the swap cannot
+  carry.
 - **Connection poolers**: point pg-sprite directly at the primary; the
   application keeps whatever pooling it uses. pg-sprite's own connection
   through a pooler is unsupported, except Supabase's Supavisor session
@@ -135,7 +143,8 @@ refusal — never a silently wrong or incomplete result:
   which keeps its values. A `DROP INDEX` run under `--accept-blocking` needs
   `--allow-destructive` too: accepting the lock is not accepting the loss,
   and the refusal lists the checks (`idx_scan` on every replica, foreign
-  keys, uniqueness) that catch an index the application still uses.
+  keys, uniqueness) that catch an index the application still uses, with
+  the connected server's own scan count for the index in `index_usage`.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
   to discard live structure. A new primary key or unique constraint over a live
@@ -145,7 +154,8 @@ refusal — never a silently wrong or incomplete result:
   with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
   refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
-  build's leftover is reported with a typed state, and the proven removal
+  build's leftover is reported with a typed state (and named by `diff` as a
+  typed plan advisory), and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
   the caller must not rebuild) is library-only; from the CLI the
   [runbook](docs/invalid-index-recovery.md) applies.
@@ -249,12 +259,17 @@ Half the CLI works offline on DDL text alone; the other half connects to a
 live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
 and `statement_timeout`; a `search_path` that lists `pg_catalog` after a user
 schema has that entry removed so the schema no longer shadows the catalog, and
-every other entry is left as configured). Only `migrate` without `--dry-run`
-ever commits a change — every other command is read-only or fully offline.
+every other entry is left as configured). The connection pool holds at least
+six connections unless the URL sets `pool_max_conns`: a copy-and-swap run's
+four copy workers, its catch-up, and its checkpoint saves each need one. A
+`pool_max_conns` in the URL is kept as given, and a copy-and-swap run refuses a
+pool below six before it creates anything (`code: pool-too-small`). Only
+`migrate` without `--dry-run` ever commits a change — every other command is
+read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--copy-and-swap` (the route is in preview and closed without it) and `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |
@@ -359,12 +374,13 @@ long-lived local database instead of per-test containers:
 
 ```sh
 make db-up PG_VERSION=14   # start PostgreSQL 14 on localhost via compose
-make test-db               # run the suite against it (PG_DSN)
+make test-db               # run the suite against it (PG_DSN); RACE= skips -race
 make db-down               # stop and discard it
 ```
 
 `make test-supported-postgres` runs the full suite against every supported
-major (14 → 18) — the local mirror of the CI matrix. See
+major (14 → 18) — the local mirror of the CI matrix, except that CI runs the
+race detector on PostgreSQL 18 only. See
 [docs/testing.md](docs/testing.md) for the test-suite layout, what each build
 phase owes, and the vanilla-PostgreSQL-vs-real-Aurora validation boundary.
 

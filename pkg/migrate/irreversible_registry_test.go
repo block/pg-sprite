@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -87,6 +88,89 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			require.ErrorIs(t, err, a.desiredErr(), "acknowledgement %q", a)
 			assert.Equal(t, DesiredResult{}, res)
 		}
+	})
+
+	// Two acknowledgements left set together are also an unrunnable pair on
+	// the imperative front door; desired-state execution still names the
+	// first one's sentinel, so an adapter keying on the sentinels sees it.
+	t.Run("desired-state execution names the first of several acknowledgements", func(t *testing.T) {
+		opts := DefaultOptions()
+		opts.Force = "public.t"
+		opts.CopySwap.Restart = "public.t"
+		_, err := RunDesired(t.Context(), nil, DesiredRequest{Schema: "public"}, opts)
+		require.ErrorIs(t, err, ErrForceNotSupported)
+	})
+
+	// Every string field on the policy either carries one of the
+	// acknowledgements or is listed here as not one. A new acknowledgement
+	// field added without a registry entry would otherwise reach every
+	// statement a desired-state plan derives.
+	t.Run("every string field on the policy is an acknowledgement or declared not one", func(t *testing.T) {
+		notAcks := map[string]bool{"Options.CreateOwner": true}
+		var unaccounted []string
+		check := func(typ reflect.Type, set func(name string) Options) {
+			for f := range typ.Fields() {
+				if f.Type.Kind() != reflect.String {
+					continue
+				}
+				name := typ.Name() + "." + f.Name
+				if notAcks[name] {
+					continue
+				}
+				opts := set(f.Name)
+				read := false
+				for _, a := range acks {
+					if v, _ := a.value(opts); v == "app.orders" {
+						read = true
+					}
+				}
+				if !read {
+					unaccounted = append(unaccounted, name)
+				}
+			}
+		}
+		check(reflect.TypeFor[Options](), func(name string) Options {
+			opts := DefaultOptions()
+			reflect.ValueOf(&opts).Elem().FieldByName(name).SetString("app.orders")
+			return opts
+		})
+		check(reflect.TypeFor[CopySwapOptions](), func(name string) Options {
+			opts := DefaultOptions()
+			reflect.ValueOf(&opts.CopySwap).Elem().FieldByName(name).SetString("app.orders")
+			return opts
+		})
+		assert.Empty(t, unaccounted, "string fields that are neither an acknowledgement nor declared not one")
+	})
+
+	// The hand-listed entries name the acknowledgement and refusal their
+	// real gate uses, not merely members of the closed sets.
+	t.Run("each listed entry names its gate's acknowledgement and refusal", func(t *testing.T) {
+		want := map[string]struct {
+			ack     ackKind
+			refusal verdict.Reason
+		}{
+			"blocking DROP INDEX":                           {ackAcceptBlocking, verdict.ReasonIndexStatement},
+			"blocking REINDEX":                              {ackAcceptBlocking, verdict.ReasonIndexStatement},
+			"submitted form that blocks the table":          {ackForce, verdict.ReasonRewriteRequired},
+			"copy-and-swap restart":                         {ackRestart, ""},
+			"copy-and-swap with the table's writes blocked": {ackBlockWrites, verdict.ReasonCopyAndSwapRefused},
+		}
+		seen := 0
+		for _, op := range ops {
+			if op.desired == desiredRefusesPlan {
+				assert.Equal(t, ackAllowDestructive, op.ack, "entry %q", op.key)
+				assert.Equal(t, verdict.ReasonDestructiveChange, op.refusal, "entry %q", op.key)
+				continue
+			}
+			w, ok := want[op.key]
+			if !assert.True(t, ok, "entry %q has no expected gate", op.key) {
+				continue
+			}
+			seen++
+			assert.Equal(t, w.ack, op.ack, "entry %q", op.key)
+			assert.Equal(t, w.refusal, op.refusal, "entry %q", op.key)
+		}
+		assert.Equal(t, len(want), seen)
 	})
 
 	t.Run("every destructive shape has exactly one entry", func(t *testing.T) {

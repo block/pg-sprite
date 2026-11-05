@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/cli"
+	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/migrate"
 )
 
 func newKong(t *testing.T, c *cli.CLI) *kong.Kong {
@@ -52,6 +54,27 @@ func TestMigrateFlagsWireIntoDBConfig(t *testing.T) {
 	assert.Equal(t, 5*time.Second, cfg.LockTimeout)
 	assert.Equal(t, 30*time.Second, cfg.StatementTimeout, "statement_timeout keeps its default")
 	assert.Empty(t, cfg.CACertPath)
+}
+
+// The CLI builds its own pool, so it raises the pool's default size to what
+// a copy-and-swap run with the copier's four default workers needs: one
+// connection per worker, one for the catch-up's flushes, one for checkpoint
+// saves and progress reads. Without it a host with four CPUs or fewer gets
+// pgxpool's default of four, which the route refuses.
+func TestDBConfigRaisesThePoolToWhatCopyAndSwapNeeds(t *testing.T) {
+	c := cli.New("test")
+	k := newKong(t, c)
+	_, err := k.Parse([]string{
+		"migrate",
+		"--url", "postgres://user@localhost:5432/app",
+		"--alter", "ALTER TABLE t ALTER COLUMN id TYPE bigint",
+	})
+	require.NoError(t, err)
+
+	cfg := c.Migrate.Config()
+	assert.Equal(t, int32(6), cfg.MaxConnsFloor)
+	assert.Equal(t, migrate.CopySwapMinConns(copier.Options{}), cfg.MaxConnsFloor)
+	assert.Zero(t, cfg.MaxConns, "an explicit size would override the operator's pool_max_conns")
 }
 
 func TestURLIsRequiredForDatabaseCommands(t *testing.T) {
