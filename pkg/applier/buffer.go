@@ -5,6 +5,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 )
 
 // ErrInvariantViolation aliases dbconn's fail-closed error class so one
@@ -14,6 +15,12 @@ var ErrInvariantViolation = dbconn.ErrInvariantViolation
 // ErrTableLockLost aliases dbconn's table lock loss: every LK-1 error the
 // applier returns for a lost lock wraps it, with ErrInvariantViolation.
 var ErrTableLockLost = dbconn.ErrTableLockLost
+
+// ErrConversionDrift aliases the one sentinel every guarded transaction
+// wraps when the catalog the conversion expressions resolve in has changed
+// since the shadow build (CO-9); the flusher's drift wraps it together with
+// ErrInvariantViolation, so a caller can tell this breach from any other.
+var ErrConversionDrift = chunksql.ErrConversionDrift
 
 // Buffer holds the latest knowledge of every primary key captured since the
 // last flush: one Entry per key, merged rather than replaced, so a flush

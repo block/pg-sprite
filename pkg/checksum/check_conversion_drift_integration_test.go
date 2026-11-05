@@ -43,6 +43,7 @@ func TestCheckRefusesWhenAConversionResolvesDifferentlyThanAtTheBuild(t *testing
 
 	outcome, err := f.check(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64), checksum.DivergenceRepair)
 	require.ErrorIs(t, err, checksum.ErrInvariantViolation)
+	assert.ErrorIs(t, err, checksum.ErrConversionDrift, "the breach names itself as drift")
 	assert.Equal(t, checksum.Report{}, outcome.Report, "the pass compared nothing")
 	assert.Empty(t, outcome.Repairs, "the pass repaired nothing")
 	qty, exists := f.shadowRow(t, shadow, 1500)
