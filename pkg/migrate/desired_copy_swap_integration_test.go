@@ -38,6 +38,43 @@ func desiredCopySwapOptions(serverURL string) migrate.Options {
 	return copySwapRunOptions(serverURL, "")
 }
 
+// A data fault on the declarative front door is abandoned the same way as
+// on the imperative one, and the failed statement's verdict says so: the
+// plan retypes body to varchar(2) while every row holds eight characters,
+// so the copy fails with 22001 and the Runner discards the run. The
+// aggregate result carries neither the code nor the field; an importer
+// reads them on the failed entry of Verdicts.
+func TestRunDesiredReportsAnAbandonedRunOnItsVerdict(t *testing.T) {
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", "wal_sender_timeout=2s")
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.t (
+			id   int PRIMARY KEY,
+			body text
+		)`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		INSERT INTO %s.t (id, body)
+		SELECT g, repeat('x', 8) FROM generate_series(1, 50) AS g`, schema))
+	require.NoError(t, err)
+
+	res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+		Schema: schema,
+		Desired: parseDesired(t, `CREATE TABLE t (
+			id   int PRIMARY KEY,
+			body varchar(2)
+		)`),
+	}, desiredCopySwapOptions(serverURL))
+	require.Error(t, err)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	require.Len(t, res.Verdicts, 1)
+	assert.Equal(t, "data-fault", res.Verdicts[0].Code)
+	assert.True(t, res.Verdicts[0].Abandoned, "the Runner discarded the run, so the corrected plan runs fresh")
+}
+
 // Desired-state execution runs a plan through the copy-and-swap backend as
 // a unit: a plan whose preflight would refuse is refused whole before the
 // native statements ahead of the retype commit, and a plan that retypes two

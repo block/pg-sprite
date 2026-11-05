@@ -47,8 +47,7 @@ const (
 // the claim that sends the operator to look rather than one that tells
 // them the table is untouched, and the read's error joins the run's.
 func fenceAfterStop(ctx context.Context, store *checkpoint.Store, st statement.Statement, runErr error) (sourceHold, error) {
-	var abandoned *schemachange.AbandonedError
-	if errors.As(runErr, &abandoned) {
+	if runAbandoned(runErr) {
 		return holdFence, runErr
 	}
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)

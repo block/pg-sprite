@@ -721,7 +721,10 @@ says the run "could not be abandoned" and names the discard error). For both, co
 data or the statement, then run it with `--restart`; the corrected run builds its shadow from
 the source as it now is. An adapter tells the two data-fault outcomes apart by the verdict's
 `abandoned` field, not by the detail's wording: `code: data-fault` with `abandoned: true` is
-rerun as written; `code: data-fault` without it is rerun with `--restart`.
+rerun as written; `code: data-fault` without it is rerun with `--restart`. On `RunDesired` the
+field is on the failed entry of `DesiredResult.Verdicts`, not on the aggregate. An engine from
+before the field existed abandons the same way but never writes it, so an adapter that reads
+CLI output from binaries of mixed age keeps reading the detail for those.
 
 **What a restart will not discard.** A `cutover` row whose swap the catalog shows committed
 is refused with `restart-swap-committed` and left as found: the shadow already bears the
