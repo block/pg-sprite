@@ -220,6 +220,7 @@ hosted-project or complete Supabase stack test.
 | Check and unique constraints, column removal, and a column rename run with `--force` (refused by default as app-breaking) | Catalog changes verified; tenant API access and existing protections preserved | [Native DDL matrix](../integration/supabase/ddl_matrix_test.go) |
 | Foreign key from an app table to `auth.users` | Statement workflow added and validated the constraint; orphan writes rejected | [Auth foreign key](../integration/supabase/failure_test.go) |
 | Integer widening, text-to-integer, `varchar` shrinking, numeric scale changes, and volatile defaults | Both statement and desired-schema workflows refused with `backend-unavailable`; full schema/data snapshots unchanged, including a safe addition in the same plan | [Copy-and-swap refusals](../integration/supabase/ddl_matrix_test.go) |
+| Retype a column a policy reads, such as `owner_id` compared to `auth.uid()` or a `varchar` a restrictive policy filters on | Both statement and desired-schema workflows refused at plan time with `dependent-policy`, naming the policies; schema, data, policies, and tenant API access unchanged | [Dependent policies](../integration/supabase/dependent_policy_test.go) |
 | Stored generated column or explicit `USING` expression | Statement workflow refused with `backend-unavailable`; schema and data unchanged | [Additional refusals](../integration/supabase/failure_test.go) |
 | Desired plan containing a column removal | Refused with `destructive-change`; no safe prefix applied | [Whole-plan admission](../integration/supabase/failure_test.go) |
 | Lock contention, null rows during `SET NOT NULL`, and duplicate rows during a unique index build | Typed outcomes and durable database state verified; tenant API access preserved | [Failure paths](../integration/supabase/failure_test.go) |
@@ -262,6 +263,11 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 - Desired schema files plan foreign keys but do not apply them, and refuse
   a reference to another schema such as `auth.users`. Use the supported
   statement workflow where available; see [capabilities.md](capabilities.md)
+- PostgreSQL refuses to retype or drop a column an RLS policy reads, even a
+  `varchar` widening it would otherwise run in place. pg-sprite refuses the change
+  at plan time with `dependent-policy` and names the policies. Drop them, run the
+  change, and recreate them in one transaction, so no request sees the table
+  without them
 - Work on tables your app owns. Leave Supabase-managed schemas such as
   `auth` and `storage` to Supabase
 - Realtime coverage is limited to INSERT/UPDATE subscriptions during the tested

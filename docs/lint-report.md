@@ -15,13 +15,15 @@ and the closed vocabularies below (codes, severities, and the embedded planner r
 adding a value to any of them is a contract change and bumps `format_version`, even if no
 field is added or renamed.
 
-The current version is **6**: version 6 raised `app-breaking-rename` from `warning` to
+The current version is **7**: version 7 added the `dependent-policy` reason to the embedded
+Reasons vocabulary. Version 6 raised `app-breaking-rename` from `warning` to
 `error`, because the engine now refuses a column or table rename unless `--force` names the
 table. Version 5 added the `cascading-drop` reason to the embedded
 Reasons vocabulary. Version 4 added the `dependent-view` reason. Version 3 added the
 `concurrent-in-transaction` code. Version 2 added the `replica-identity` reason. The linter
-never reports `replica-identity` or `dependent-view`, because each is judged from live facts
-(the table's replica identity, the views that read a column) the linter does not have. It does
+never reports `replica-identity`, `dependent-view`, or `dependent-policy`, because each is
+judged from live facts (the table's replica identity, the views and policies that read a
+column) the linter does not have. It does
 report `cascading-drop`, which it reads from the statement, on an `unsupported-operation`
 finding.
 

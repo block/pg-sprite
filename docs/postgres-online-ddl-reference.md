@@ -55,7 +55,8 @@ the lock queue below applies to every query on the parent) and `app-breaking-ren
 catalog change is instant; the running application code that still uses the old name is
 what breaks, so `migrate` refuses it as `rewrite-required` unless forced). `replica-identity` is a refusal: the operation would drop what the table's
 replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
-drops a column a view reads, which PostgreSQL refuses. `cascading-drop` is a refusal as well:
+drops a column a view reads, which PostgreSQL refuses, and `dependent-policy` is the same
+refusal for a column a row-level security policy reads. `cascading-drop` is a refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
@@ -549,6 +550,32 @@ The planner reads the views from live facts, so the linter, which has none, neve
 reports it, and the server's own refusal remains the backstop for a view created
 after planning.
 
+### `dependent-policy`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a row-level security
+policy reads in its `USING` or `WITH CHECK` expression. PostgreSQL refuses both
+while the policy exists (`cannot alter type of a column used in a policy
+definition`), even a type change it would otherwise relabel without a rewrite, such
+as `varchar(36)` → `varchar(64)`, so the statement could only fail. The policy
+counts wherever it is defined: a policy on another table whose expression reads the
+column through a subquery blocks the change too. The change reaches partitions and
+inheritance children the same way as for `dependent-view`. The plan names each
+policy as `"policy" ON "schema"."table"` in `decisions[].dependent_policies`, and a
+refused run's verdict in `dependent_policies`. Drop the policies, run the change,
+and recreate them in one transaction: outside one, the table is briefly without
+them, which hides the rows a permissive policy admitted and shows the rows a
+restrictive policy filtered out. A rename is not refused, because a policy follows
+the column. `DROP COLUMN … CASCADE`, which drops the policies with the column, is
+refused as `cascading-drop` instead. When a view and a policy both read the column,
+the decision is `dependent-view`; re-plan after the views are handled. The planner
+reads the policies from live facts, so the linter, which has none, never reports it,
+and the server's own refusal remains the backstop for a policy created after
+planning.
+
 ### `cascading-drop`
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |
@@ -556,8 +583,8 @@ after planning.
 | refused — never executed | — | — | 2 |
 
 The operation is a `DROP COLUMN`, `DROP CONSTRAINT`, or `DROP INDEX` with `CASCADE`.
-PostgreSQL then also drops whatever depends on the target: a view or materialized
-view that reads the column, or another table's foreign key on a dropped primary key
+PostgreSQL then also drops whatever depends on the target: a view, materialized
+view, or row-level security policy that reads the column, or another table's foreign key on a dropped primary key
 or unique constraint. Those objects are not named in the statement, so the plan
 cannot show them, and dropping a foreign key locks the table that holds it, which the
 one-table lock does not cover. `DROP INDEX CONCURRENTLY` does not accept `CASCADE`

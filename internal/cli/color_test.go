@@ -179,6 +179,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		SaferIdiom:          "DROP INDEX CONCURRENTLY",
 		Guidance:            suggest.GuidanceUniqueIndexThenConstraint,
 		DependentViews:      []string{`"public"."v"`},
+		DependentPolicies:   []string{`"p" ON "public"."t"`},
 		ExecutedSQL:         []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
 		Forced:              true,
 		AllowedDestructive:  true,

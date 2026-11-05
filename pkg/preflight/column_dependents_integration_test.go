@@ -14,12 +14,12 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
-// ColumnDependentViews maps each column to the views and materialized views
+// ReadColumnDependents maps each column to the views and materialized views
 // that read it, from any schema. A view that reads the table without naming
 // a column, or reads another table, does not count against the column, and
 // a column no view reads is absent. A view on an inheritance child counts
 // for the tree, not for the table alone.
-func TestColumnDependentViews(t *testing.T) {
+func TestReadColumnDependentsViews(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -38,8 +38,9 @@ func TestColumnDependentViews(t *testing.T) {
 		CREATE VIEW %[1]s.admin_notes AS SELECT note, level FROM %[1]s.admins`, schema, other))
 	require.NoError(t, err)
 
-	views, err := preflight.ColumnDependentViews(t.Context(), pool, schema, "users")
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "users")
 	require.NoError(t, err)
+	views := deps.Views
 	assert.Equal(t, map[string][]string{
 		"id":    {fmt.Sprintf(`"%s"."contacts"`, schema)},
 		"email": sortedQualified([2]string{schema, "contacts"}, [2]string{other, "Notes"}),
@@ -51,6 +52,7 @@ func TestColumnDependentViews(t *testing.T) {
 		"note":  sortedQualified([2]string{schema, "admin_notes"}, [2]string{other, "Notes"}),
 	}, views.Tree)
 	assert.Equal(t, views.Tree, views.Drop, "admins inherits every column from users alone, so a drop reaches it")
+	assert.Empty(t, deps.Policies.Tree, "no policy reads users")
 }
 
 // A recursive DROP COLUMN drops a child's copy only when the child does
@@ -59,7 +61,7 @@ func TestColumnDependentViews(t *testing.T) {
 // through the copies it drops; a type change reaches every copy. The server is the oracle: with the views Drop names removed the
 // drop succeeds, so no other view blocks it, and each view Drop names
 // blocks it on its own.
-func TestColumnDependentViewsForADrop(t *testing.T) {
+func TestReadColumnDependentsViewsForADrop(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -101,8 +103,9 @@ func TestColumnDependentViewsForADrop(t *testing.T) {
 		return out
 	}
 
-	views, err := preflight.ColumnDependentViews(t.Context(), pool, schema, "users")
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "users")
 	require.NoError(t, err)
+	views := deps.Views
 	assert.Equal(t, qualified("v_attached", "v_below_declared", "v_below_inherited", "v_declared",
 		"v_diamond", "v_inherited", "v_two_parents", "v_uneven", "v_users"), views.Tree["email"])
 	assert.Equal(t, qualified("v_below_inherited", "v_diamond", "v_inherited", "v_uneven", "v_users"), views.Drop["email"])
@@ -129,12 +132,12 @@ func TestColumnDependentViewsForADrop(t *testing.T) {
 		assert.Equal(t, "2BP01", pgErr.Code, view)
 	}
 
-	partitioned, err := preflight.ColumnDependentViews(t.Context(), pool, schema, "events")
+	partitioned, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "events")
 	require.NoError(t, err)
-	assert.Equal(t, qualified("v_events_1"), partitioned.Drop["email"], "a partition never declares a column")
+	assert.Equal(t, qualified("v_events_1"), partitioned.Views.Drop["email"], "a partition never declares a column")
 }
 
-// sortedQualified renders the views as ColumnDependentViews orders them: by
+// sortedQualified renders the views as ReadColumnDependents orders them: by
 // schema, then name, bytewise.
 func sortedQualified(views ...[2]string) []string {
 	if views[0][0] > views[1][0] {
@@ -145,4 +148,89 @@ func sortedQualified(views ...[2]string) []string {
 		out[i] = fmt.Sprintf(`"%s"."%s"`, v[0], v[1])
 	}
 	return out
+}
+
+// ReadColumnDependents maps each column to the row-level security
+// policies that read it: the table's own, a policy on another table that
+// reads the column through a subquery, and a policy on a partition, which
+// counts for the tree and not for the table alone. A policy whose
+// expression names no column does not count against any column. The
+// server is the oracle: each policy named for a column refuses its type
+// change on its own, and with every named policy dropped the change
+// succeeds.
+func TestReadColumnDependentsPolicies(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	other := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.documents (
+			id bigint NOT NULL,
+			owner_id varchar(36),
+			team_id varchar(36),
+			label varchar(100)
+		) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.documents_1 PARTITION OF %[1]s.documents
+			FOR VALUES FROM (0) TO (100);
+		CREATE TABLE %[2]s.audit (
+			id bigint PRIMARY KEY,
+			actor varchar(36)
+		);
+		CREATE POLICY own_rows ON %[1]s.documents
+			USING (owner_id = current_user);
+		CREATE POLICY "Insert Own" ON %[1]s.documents
+			FOR INSERT
+			WITH CHECK (owner_id = current_user AND team_id IS NOT NULL);
+		CREATE POLICY see_all ON %[1]s.documents
+			USING (true);
+		CREATE POLICY partition_label ON %[1]s.documents_1
+			USING (label <> 'hidden');
+		CREATE POLICY actor_documents ON %[2]s.audit
+			USING (actor IN (SELECT d.owner_id FROM %[1]s.documents d))`, schema, other))
+	require.NoError(t, err)
+
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	onDocuments := func(policy string) string { return fmt.Sprintf(`%s ON "%s"."documents"`, policy, schema) }
+	ownerPolicies := []string{onDocuments(`"Insert Own"`), onDocuments(`"own_rows"`), fmt.Sprintf(`"actor_documents" ON "%s"."audit"`, other)}
+	if other < schema {
+		ownerPolicies = []string{ownerPolicies[2], ownerPolicies[0], ownerPolicies[1]}
+	}
+	assert.Equal(t, map[string][]string{
+		"owner_id": ownerPolicies,
+		"team_id":  {onDocuments(`"Insert Own"`)},
+	}, deps.Policies.Own)
+	assert.Equal(t, map[string][]string{
+		"owner_id": ownerPolicies,
+		"team_id":  {onDocuments(`"Insert Own"`)},
+		"label":    {fmt.Sprintf(`"partition_label" ON "%s"."documents_1"`, schema)},
+	}, deps.Policies.Tree)
+	assert.Equal(t, deps.Policies.Tree, deps.Policies.Drop, "a partition never declares a column")
+	assert.Empty(t, deps.Views.Tree, "no view reads documents")
+
+	retype := func(t *testing.T, column, keep string) error {
+		t.Helper()
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		for _, policy := range deps.Policies.Tree[column] {
+			if policy != keep {
+				_, err := tx.Exec(t.Context(), "DROP POLICY "+policy)
+				require.NoError(t, err)
+			}
+		}
+		_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.documents ALTER COLUMN %s TYPE text", schema, column))
+		return err
+	}
+	for _, column := range []string{"owner_id", "team_id", "label"} {
+		require.NoError(t, retype(t, column, ""), "no policy outside Tree blocks retyping %s", column)
+		for _, policy := range deps.Policies.Tree[column] {
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, retype(t, column, policy), &pgErr, policy)
+			assert.Equal(t, "0A000", pgErr.Code, policy)
+		}
+	}
 }

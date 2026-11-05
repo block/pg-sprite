@@ -84,6 +84,7 @@ func Reasons() []Reason {
 		ReasonPartitionParentLock,
 		ReasonReplicaIdentity,
 		ReasonDependentView,
+		ReasonDependentPolicy,
 		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
@@ -167,13 +168,21 @@ const (
 	// nothing, so the statement could only fail. The decision names the
 	// views; change or drop them first, then re-plan.
 	ReasonDependentView Reason = "dependent-view"
+	// ReasonDependentPolicy: the operation changes the type of, or drops,
+	// a column that a row-level security policy reads, in its USING or
+	// WITH CHECK expression, on this table or on another table that reads
+	// the column through a subquery. PostgreSQL refuses both while the
+	// policy exists, even a type change that rewrites nothing, so the
+	// statement could only fail. The decision names the policies; drop
+	// them first and recreate them after the change, then re-plan.
+	ReasonDependentPolicy Reason = "dependent-policy"
 	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
-	// depends on what it drops: a view that reads a dropped column, or
-	// another table's foreign key on a dropped key. Those objects are not
-	// in the statement, so neither the plan nor the table's lock covers
-	// them. Drop each dependent object as its own change, then resubmit
-	// without CASCADE, which PostgreSQL refuses while anything still
-	// depends on the target.
+	// depends on what it drops: a view or policy that reads a dropped
+	// column, or another table's foreign key on a dropped key. Those
+	// objects are not in the statement, so neither the plan nor the
+	// table's lock covers them. Drop each dependent object as its own
+	// change, then resubmit without CASCADE, which PostgreSQL refuses
+	// while anything still depends on the target.
 	ReasonCascadingDrop Reason = "cascading-drop"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
@@ -255,6 +264,10 @@ type Decision struct {
 	// column, each schema-qualified with every identifier quoted, present
 	// exactly for dependent-view decisions.
 	DependentViews []string `json:"dependent_views,omitempty"`
+	// DependentPolicies names the row-level security policies that read
+	// the column, each rendered "policy" ON "schema"."table" with every
+	// identifier quoted, present exactly for dependent-policy decisions.
+	DependentPolicies []string `json:"dependent_policies,omitempty"`
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -293,7 +306,7 @@ type Plan struct {
 // wrong fact can upgrade a rewrite to native. Missing facts never let an
 // unsafe change succeed: the zero value is valid, routes every type change
 // to copy-and-swap, and only defers some refusals, such as a column a view
-// reads, to the server's own refusal at execution.
+// or a policy reads, to the server's own refusal at execution.
 type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
@@ -318,7 +331,7 @@ type Facts struct {
 	// DependentViews maps a column to the views and materialized views that
 	// read it, on the table or on any table below it, which is what a
 	// recursive ALTER COLUMN TYPE changes
-	// (preflight.ColumnDependentViews). A column absent from the map has
+	// (preflight.ReadColumnDependents). A column absent from the map has
 	// none, or the facts were not read, as in an offline lint; either way
 	// the server's own refusal at execution remains the backstop.
 	DependentViews map[string][]string
@@ -330,6 +343,18 @@ type Facts struct {
 	// OwnDependentViews is DependentViews for the table alone, which is
 	// all an ALTER TABLE ONLY changes.
 	OwnDependentViews map[string][]string
+	// DependentPolicies maps a column to the row-level security policies
+	// that read it, wherever they are defined, on the table or on any
+	// table below it (preflight.ReadColumnDependents), each rendered
+	// "policy" ON "schema"."table". A column absent from the map has none,
+	// or the facts were not read; either way the server's own refusal at
+	// execution remains the backstop.
+	DependentPolicies map[string][]string
+	// DropDependentPolicies is DependentPolicies for the tables whose copy
+	// of the column a recursive DROP COLUMN drops.
+	DropDependentPolicies map[string][]string
+	// OwnDependentPolicies is DependentPolicies for the table alone.
+	OwnDependentPolicies map[string][]string
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -362,20 +387,33 @@ func FactsFrom(live schemadiff.Model) Facts {
 }
 
 // viewsReadingColumn returns the views that read the column op retypes or
-// drops: the two column changes PostgreSQL refuses while a view reads the
-// column. A rename is not one of them, since a view follows the column.
-// Under ONLY the change stops at the table, so only its own views count,
-// and a recursive drop counts only the copies of the column it drops.
+// drops (dependentsReached).
 func viewsReadingColumn(op statement.Op, facts Facts) []string {
+	return dependentsReached(op, facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews)
+}
+
+// policiesReadingColumn returns the policies that read the column op
+// retypes or drops (dependentsReached).
+func policiesReadingColumn(op statement.Op, facts Facts) []string {
+	return dependentsReached(op, facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies)
+}
+
+// dependentsReached returns the dependents, views or policies, that read
+// the column op retypes or drops: the two column changes PostgreSQL
+// refuses while a view or a policy reads the column. A rename is not one
+// of them, since both follow the column. Under ONLY the change stops at
+// the table, so only its own dependents count, and a recursive drop
+// counts only the copies of the column it drops.
+func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []string {
 	switch {
 	case op.Kind != statement.OpAlterColumnType && op.Kind != statement.OpDropColumn:
 		return nil
 	case op.Only:
-		return facts.OwnDependentViews[op.Column]
+		return own[op.Column]
 	case op.Kind == statement.OpDropColumn:
-		return facts.DropDependentViews[op.Column]
+		return drop[op.Column]
 	default:
-		return facts.DependentViews[op.Column]
+		return tree[op.Column]
 	}
 }
 
@@ -438,6 +476,10 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	}
 	if views := viewsReadingColumn(op, facts); len(views) > 0 {
 		d.Route, d.Reason, d.DependentViews = RouteRefuse, ReasonDependentView, views
+		return d
+	}
+	if policies := policiesReadingColumn(op, facts); len(policies) > 0 {
+		d.Route, d.Reason, d.DependentPolicies = RouteRefuse, ReasonDependentPolicy, policies
 		return d
 	}
 	switch op.Kind {
