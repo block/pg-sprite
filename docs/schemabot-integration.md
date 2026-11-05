@@ -479,9 +479,14 @@ as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before
 executes, and an acknowledged run records a warn-level audit naming the table before the
 fence goes on. `RunDesired` rejects `BlockWrites` (`ErrBlockWritesNotSupported`): the derived
 plan, not the operator, would decide how many fenced copies run, so a value left on the
-adapter's configuration cannot take the table offline for a later plan. An adapter that builds
-one `Options` for both front doors passes `RunDesired` a copy with `CopySwap.BlockWrites`
-cleared. Three further fields let the adapter size and watch the run:
+adapter's configuration cannot take the table offline for a later plan. `RunDesired` rejects
+`Restart` the same way (`ErrRestartNotSupported`): the plan decides which run the
+acknowledgement would discard, so a value left on the configuration would throw away a
+stopped run's checkpoint, shadow, and fence or slot on every later plan; a stopped
+desired-plan copy is resumed by running the plan again, or started over by running the
+stopped statement through `Run` with `CopySwap.Restart`. An adapter that builds one `Options`
+for both front doors passes `RunDesired` a copy with `CopySwap.BlockWrites` and
+`CopySwap.Restart` cleared. Three further fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
 a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
@@ -744,7 +749,11 @@ both.
 
 Through the library, the verbs are `migrate.Run` with `CopySwapOptions.Restart` set to the
 acknowledgement, and `schemachange.RunOptions.Restart` on the `Runner` directly; the
-`Runner` refuses the committed-swap case as `CauseRestartSwapCommitted`.
+`Runner` refuses the committed-swap case as `CauseRestartSwapCommitted`. `migrate.RunDesired`
+rejects the field with `ErrRestartNotSupported` before planning anything: a desired plan
+resumes a stopped copy-and-swap on its own, and a run that must start over is the stopped
+statement run through `Run` — `migrate --alter … --restart SCHEMA.TABLE` on the CLI — before
+the plan is run again.
 
 ## Design constraints the integration imposes
 

@@ -190,20 +190,22 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // the operational error. An error with a zero result means the pipeline
 // stopped before planning or executing anything.
 //
-// Options.Force, Options.AllowDestructive and Options.CopySwap.BlockWrites
-// are rejected: the declarative front door never runs a submitted form
-// blind, refuses a destructive plan whole, and never takes a table offline
-// for writes. A destructive, force-worthy or offline change belongs on the
-// imperative front door where the operator states it explicitly.
+// Options.Force, Options.AllowDestructive, Options.CopySwap.BlockWrites
+// and Options.CopySwap.Restart are rejected: the declarative front door
+// never runs a submitted form blind, refuses a destructive plan whole,
+// never takes a table offline for writes, and never starts a stopped run
+// over. A destructive, force-worthy, offline or started-over change
+// belongs on the imperative front door where the operator states it
+// explicitly.
 //
 // Every planned statement runs back through [Run], so Run's note on the
 // pool's search_path applies to the pool passed here.
 //
 // RunDesired does not close the pool; one pool serves any number of calls.
 func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
-	if err := opts.validate(); err != nil {
-		return DesiredResult{}, err
-	}
+	// The acknowledgements this door rejects are named before Options is
+	// validated, so a value that also breaks a mutual-exclusion rule still
+	// returns the sentinel an embedder branches on.
 	if opts.Force != "" {
 		return DesiredResult{}, ErrForceNotSupported
 	}
@@ -212,6 +214,12 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	}
 	if opts.CopySwap.BlockWrites != "" {
 		return DesiredResult{}, ErrBlockWritesNotSupported
+	}
+	if opts.CopySwap.Restart != "" {
+		return DesiredResult{}, ErrRestartNotSupported
+	}
+	if err := opts.validate(); err != nil {
+		return DesiredResult{}, err
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if ref, ok := desiredShapeRefusal(err); ok {
