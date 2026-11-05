@@ -321,10 +321,11 @@ func classifyCopySwapPreflight(err error) (verdict.Refusal, string, error) {
 // run never started, or stopped at a fact about the table that a retry
 // cannot change. Every other error is a failure with the error alongside,
 // and the detail says what a rerun does: for a run the Runner abandoned on
-// a data fault, nothing remains and the rerun starts from the beginning;
-// for every other stop the checkpoint row stays at its last save, and what
-// the rerun does with it depends on the error and on which hold the run
-// keeps on the source while it is stopped.
+// a data fault, nothing remains and the rerun starts from the beginning,
+// which the verdict's Abandoned field says for automation; for every other
+// stop the checkpoint row stays at its last save, and what the rerun does
+// with it depends on the error and on which hold the run keeps on the
+// source while it is stopped.
 func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (verdict.Verdict, error) {
 	if cause := schemachange.RefusalCauseOf(err); cause != "" {
 		r, ok := shadowRefusal(cause)
@@ -341,7 +342,18 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 		Table:         qualified(st),
 		Detail:        "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(hold, err),
 		WritesBlocked: hold == holdFence,
+		Abandoned:     runAbandoned(err),
 	}, err
+}
+
+// runAbandoned reports whether the Runner discarded the stopped run — the
+// shadow dropped, the hold released, the checkpoint row deleted — so that
+// nothing remains for a rerun to resume or to start over. The Runner says so
+// with *schemachange.AbandonedError; a data fault whose discard did not
+// finish carries the fault without it.
+func runAbandoned(err error) bool {
+	var abandoned *schemachange.AbandonedError
+	return errors.As(err, &abandoned)
 }
 
 // copySwapStoppedRemedy says what the operator does with a stopped run.
@@ -377,8 +389,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		release = "takes the write fence off the source"
 		released = "the write fence is off the source"
 	}
-	var abandoned *schemachange.AbandonedError
-	if errors.As(err, &abandoned) {
+	if runAbandoned(err) {
 		return "the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, " + released + ", and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
 	}
 	startOver := "correct the data or the statement, then start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release + ", deletes the checkpoint row, and runs the change from the start"
