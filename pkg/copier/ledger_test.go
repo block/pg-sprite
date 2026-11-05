@@ -127,6 +127,47 @@ func TestLedgerUnlandedChunkStaysInFlight(t *testing.T) {
 	assert.Equal(t, int64(10), l.position().RowsInserted, "a refused landing counts no rows")
 }
 
+// A settled chunk stays in flight — the watermark waits for it — but its
+// Position names the keys it still owes, its committed rows count as
+// inserted, and each later settlement replaces the earlier one's rows and
+// keys rather than adding to them; landing it counts its rows once in all
+// and drops the pending entry. A settlement of a chunk not in flight, or
+// with nothing pending, is refused and records nothing.
+func TestLedgerSettledChunkStaysInFlightWithItsPendingKeys(t *testing.T) {
+	l := newLedger(Watermark{})
+	first := mustChunk(t, math.MinInt64, 10)
+	second := mustChunk(t, 11, 20)
+	require.True(t, l.claim(first))
+	require.True(t, l.claim(second))
+	require.True(t, l.land(second, 10))
+
+	require.True(t, l.settle(first, 7, []int64{3, 5}))
+	settled := l.position()
+	assert.Equal(t, []Chunk{first}, settled.InFlight, "a settled chunk is still in flight")
+	assert.Equal(t, []PendingKeys{{Chunk: first, Keys: []int64{3, 5}}}, settled.Pending)
+	assert.False(t, settled.Watermark.Valid(), "the watermark waits for the pending keys")
+	assert.Equal(t, int64(17), settled.RowsInserted, "the rows committed around the pending keys count")
+
+	require.True(t, l.settle(first, 8, []int64{5}))
+	shrunk := l.position()
+	assert.Equal(t, []PendingKeys{{Chunk: first, Keys: []int64{5}}}, shrunk.Pending)
+	assert.Equal(t, int64(18), shrunk.RowsInserted, "a later settlement's total replaces the earlier one's")
+
+	require.True(t, l.land(first, 9))
+	landed := l.position()
+	assert.Empty(t, landed.InFlight)
+	assert.Empty(t, landed.Pending)
+	assert.Equal(t, NewWatermark(20), landed.Watermark)
+	assert.Equal(t, int64(19), landed.RowsInserted, "landing counts the chunk's rows once in all")
+
+	assert.False(t, l.settle(first, 1, []int64{1}), "a landed chunk cannot settle")
+	assert.False(t, l.settle(mustChunk(t, 21, 30), 1, []int64{21}), "an unclaimed chunk cannot settle")
+	require.True(t, l.claim(mustChunk(t, 21, 30)))
+	assert.False(t, l.settle(mustChunk(t, 21, 30), 1, nil), "a chunk owing nothing lands instead")
+	assert.Equal(t, int64(19), l.position().RowsInserted, "a refused settlement counts no rows")
+	assert.Empty(t, l.position().Pending)
+}
+
 // Resuming after a watermark treats every key at or below it as landed and
 // continues the contiguous prefix from just above it.
 func TestLedgerResumesAfterTheWatermark(t *testing.T) {

@@ -254,9 +254,11 @@ func ReadTableUsage(ctx context.Context, pool *pgxpool.Pool, schema, table strin
 	if err := readUsageServerFacts(ctx, tx, &u); err != nil {
 		return TableUsage{}, err
 	}
-	if err := readUsageTrackCountsSettings(ctx, tx, &u); err != nil {
+	offBySetting, err := readUsageTrackCountsOffBySetting(ctx, tx)
+	if err != nil {
 		return TableUsage{}, err
 	}
+	u.trackCountsOffBySetting = offBySetting
 	tree, err := readUsageRelations(ctx, tx, &u)
 	if err != nil {
 		return TableUsage{}, err

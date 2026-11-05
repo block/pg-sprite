@@ -78,7 +78,7 @@ dry_run() {
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 14 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 15 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -185,6 +185,32 @@ execute_copy_swap() {
     fi
 }
 
+# execute_data_fault table sql
+#
+# Runs a copy-and-swap change whose statement the seeded data cannot
+# satisfy — one row will not fit the narrowed type — and requires the
+# failed verdict coded data-fault for the table, the operational exit code
+# 1 (not the refusal's 2: the planner accepted the statement; the rows
+# rejected it), and no --force in play. The run abandons itself before it
+# returns, so the next copy-and-swap on the same table finds no shadow,
+# no replication slot, and no checkpoint row of the faulted run's — which
+# the row that follows this one in run_exec shows by succeeding.
+execute_data_fault() {
+    local table="$1" sql="$2" out status=0
+    step "execute (copy-and-swap, expect a data fault): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --free-disk 1GiB --alter "$sql" 2>/dev/null) || status=$?
+        assert_eq "data-fault exit of [$sql]" 1 "$status"
+        assert_eq "outcome of [$sql]" "failed" "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "code of [$sql]" "data-fault" "$(jq -r '.code' <<<"$out")"
+        assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+        assert_eq "forced of [$sql]" false "$(jq -r '.forced // false' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql" \
+            || echo "(exit $? — expected 1: a row will not fit the new type; the run abandoned itself and dropped its shadow, slot, and checkpoint row)"
+    fi
+}
+
 # execute_refused reason sql
 #
 # Runs a schema change the engine must refuse and requires the refusal
@@ -246,6 +272,7 @@ execute_accepted_needs_loss() {
         assert_eq "refusal exit of [$sql]" 2 "$status"
         assert_eq "reason of [$sql]" "destructive-change" "$(jq -r '.reason' <<<"$out")"
         assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+        assert_eq "index_usage.idx_scan is a number in [$sql]" number "$(jq -r '.index_usage.idx_scan | type' <<<"$out")"
     else
         "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
             || echo "(refused, exit $? — expected 2: a dropped index also needs --allow-destructive)"
@@ -278,12 +305,39 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 14 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
         *) fail "first statement of [$desired]: expected it to contain '$fragment'" ;;
         esac
+    else
+        "$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public || echo "(exit $?)"
+    fi
+}
+
+# diff_advisory desired_file statement_count advisory_kind
+#
+# A desired file for the seeded table that carries an invalid index (the
+# leftover of the failed unique build in seed.sql). The diff never drops an
+# unfinished build, so the plan carries an advisory naming it instead
+# (plan.Report.Advisories, schemadiff.AdvisoryKinds()): the rebuild kind when
+# the desired file names the index, the undeclared kind when it does not —
+# in which case the plan has zero statements but is not silent about the
+# leftover. The advisory sits outside the statements and the fingerprint, so
+# the exit code stays 0.
+diff_advisory() {
+    local desired="$1" count="$2" kind="$3" out status=0
+    step "diff --desired $desired (expect advisory)"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
+        assert_eq "diff exit of [$desired]" 0 "$status"
+        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
+        assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
+        assert_eq "advisory count of [$desired]" 1 "$(jq -r '.advisories | length' <<<"$out")"
+        assert_eq "advisory kind of [$desired]" "$kind" "$(jq -r '.advisories[0].kind' <<<"$out")"
+        assert_eq "advisory index of [$desired]" contacts_email_key "$(jq -r '.advisories[0].index' <<<"$out")"
     else
         "$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public || echo "(exit $?)"
     fi
@@ -306,7 +360,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 14 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -328,12 +382,18 @@ run_pull() {
         "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" >/dev/null || status=$?
         assert_eq "pull exit" 0 "$status"
         file_count=$(find "$out_dir" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')
-        # One file per table in demo/seed.sql (orders, users).
-        assert_eq "pulled file count" 2 "$file_count"
+        # One file per table in demo/seed.sql (contacts, orders, users).
+        assert_eq "pulled file count" 3 "$file_count"
     else
         "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" || echo "(exit $?)"
     fi
 
+    # Every exported file re-diffs to zero statements — except the one table
+    # carrying an invalid index (contacts, seeded that way): pull renders the
+    # index like any other, so its baseline re-diffs to exactly one
+    # create-index, and the plan's rebuild advisory names the entry. That
+    # lone create is the signal that a just-exported table carries an
+    # unfinished build (docs/pull.md).
     for desired in "$out_dir"/*.sql; do
         step "zero-diff proof: $desired"
         status=0
@@ -341,9 +401,19 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 14 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
-            assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
+            case "$(basename "$desired")" in
+            contacts.sql)
+                assert_eq "rebuild diff of [$desired]" 1 "$(jq -r '.statements | length' <<<"$out")"
+                assert_eq "rebuild kind of [$desired]" create-index "$(jq -r '.statements[0].kind' <<<"$out")"
+                assert_eq "advisory kind of [$desired]" invalid-index-rebuild "$(jq -r '.advisories[0].kind' <<<"$out")"
+                ;;
+            *)
+                assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
+                assert_eq "no advisories of [$desired]" 0 "$(jq -r '.advisories | length' <<<"$out")"
+                ;;
+            esac
         else
             "$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" || echo "(exit $?)"
         fi
@@ -394,6 +464,8 @@ run_diff() {
     heading "Declarative front door: routed convergence plans (read-only)"
     diff_plan desired/users_v2.sql 2 "ADD COLUMN bio"
     diff_plan desired/widgets_v1.sql 2 "CREATE TABLE"
+    diff_advisory desired/contacts_rebuild.sql 1 invalid-index-rebuild
+    diff_advisory desired/contacts_no_index.sql 0 invalid-index-undeclared
     diff_refused desired/gadgets_if_not_exists.sql if-not-exists
 }
 
@@ -504,6 +576,13 @@ run_exec() {
     # retained source is dropped. It runs before the DROP INDEX rows so the
     # swap carries orders_total_idx across for them to drop.
     execute_copy_swap                   "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+    # A data fault: the seed plants one note wider than varchar(32), so the
+    # copy meets a row the narrowed type will not hold. The run abandons
+    # itself; the widening that follows runs through copy-and-swap on the
+    # same table, which it could not if the faulted run had left its
+    # shadow, its slot, or its checkpoint row behind.
+    execute_data_fault      public.orders   "ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)"
+    execute_copy_swap                       "ALTER TABLE orders ALTER COLUMN note TYPE varchar(200)"
     execute_refused backend-unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     # The plain DROP INDEX is refused (the concurrent drop is the safe
     # idiom); the acknowledgement runs it anyway under budgets. The mismatch
@@ -543,6 +622,8 @@ elif [ "$section" = all ]; then
     echo "Every statement above was classified before anything ran. The"
     echo "executions committed online — where the submitted form would have"
     echo "blocked, pg-sprite ran the safer native sequence instead; a genuine"
-    echo "rewrite went through copy-and-swap — and the changes it cannot yet do"
-    echo "safely were refused before they could hurt."
+    echo "rewrite went through copy-and-swap; one whose rows would not fit the new"
+    echo "type abandoned itself and dropped its shadow, slot, and checkpoint row —"
+    echo "and the changes it cannot"
+    echo "yet do safely were refused before they could hurt."
 fi

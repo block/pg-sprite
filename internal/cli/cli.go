@@ -15,7 +15,9 @@ import (
 
 	"github.com/alecthomas/kong"
 
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/migrate"
 )
 
 // CLI is the root command tree.
@@ -56,13 +58,17 @@ type DBFlags struct {
 
 // Config translates the flags into the connectivity layer's configuration.
 // The tracer is wired only under --debug: dbconn skips statement tracing
-// entirely for a nil logger.
+// entirely for a nil logger. The pool's default size is raised to what a
+// copy-and-swap run with the copier's default workers needs, so a small
+// host's default pool is not refused; a pool_max_conns in the URL is the
+// operator's choice and is kept as given.
 func (f DBFlags) Config() dbconn.Config {
 	cfg := dbconn.Config{
 		URL:              f.URL,
 		CACertPath:       f.CACert,
 		LockTimeout:      f.LockTimeout,
 		StatementTimeout: f.StatementTimeout,
+		MaxConnsFloor:    migrate.CopySwapMinConns(copier.Options{}),
 	}
 	if f.Debug {
 		cfg.Logger = f.diag()

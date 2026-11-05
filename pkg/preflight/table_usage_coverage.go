@@ -35,13 +35,13 @@ func pinUsageStatsSnapshot(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-// readUsageTrackCountsSettings records on u whether a saved per-role or
+// readUsageTrackCountsOffBySetting reports whether a saved per-role or
 // per-database setting turns track_counts off for some role or for this
 // database. The reading session's own value already reflects the server's
 // configuration and the reading role's settings; this catches the
 // settings of every other role. Each saved value was validated as a
 // boolean when it was set, so the cast cannot fail.
-func readUsageTrackCountsSettings(ctx context.Context, tx pgx.Tx, u *TableUsage) error {
+func readUsageTrackCountsOffBySetting(ctx context.Context, tx pgx.Tx) (bool, error) {
 	// INV: CO-9 — every function, operator, relation, and type is
 	// pg_catalog-qualified.
 	const q = `
@@ -55,12 +55,11 @@ func readUsageTrackCountsSettings(ctx context.Context, tx pgx.Tx, u *TableUsage)
 		WHERE pg_catalog.split_part(setting.entry, '=', 1) OPERATOR(pg_catalog.=) 'track_counts'`
 	rows, err := tx.Query(ctx, q)
 	if err != nil {
-		return fmt.Errorf("read track_counts settings: %w", err)
+		return false, fmt.Errorf("read track_counts settings: %w", err)
 	}
 	values, err := pgx.CollectRows(rows, pgx.RowTo[bool])
 	if err != nil {
-		return fmt.Errorf("read track_counts settings: %w", err)
+		return false, fmt.Errorf("read track_counts settings: %w", err)
 	}
-	u.trackCountsOffBySetting = slices.Contains(values, false)
-	return nil
+	return slices.Contains(values, false), nil
 }

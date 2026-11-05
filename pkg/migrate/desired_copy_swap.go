@@ -17,8 +17,9 @@ import (
 // the router sends in part through the copy-and-swap backend. The router
 // decides the route from the statement alone; whether the route can run is
 // a fact about the table and the server — a primary key, no foreign keys or
-// triggers or dependent views, logical decoding or a block-writes acknowledgement,
-// disk for the shadow — that only the route's preflight reads. Read it
+// triggers or dependent views, logical decoding (desired-state execution
+// takes no block-writes acknowledgement, so the route is always live), disk
+// for the shadow — that only the route's preflight reads. Read it
 // here, before any statement runs, so a plan the preflight would refuse is
 // refused whole and the native statements planned ahead of the retype do
 // not commit first and leave the table half-converged.
@@ -32,8 +33,9 @@ import (
 // Two shapes, as RunDesired's: a refusal is the refused result with a nil
 // error; a stop — the route's connection not wired, which is
 // ErrCopySwapConnectionRequired, wired to another database than the pool,
-// which is a CopySwapConnectionMismatchError, or a preflight that could
-// not finish — is a failed result carrying the plan and no verdict, with
+// which is a CopySwapConnectionMismatchError, a pool smaller than
+// CopySwapMinConns, which wraps executor.ErrPoolTooSmall, or a preflight
+// that could not finish — is a failed result carrying the plan and no verdict, with
 // its error. Nothing has executed in either case and the detail says so.
 func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options) (DesiredResult, bool, error) {
 	first, routed := firstCopySwapStatement(report)
@@ -58,13 +60,24 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 		}
 		return stopped("the route's connection could not be checked against the pool", err)
 	}
+	if err := checkCopySwapPool(pool, opts.CopySwap); err != nil {
+		return stopped("the pool is too small for the route", err)
+	}
 	_, err := preflight.CheckCopySwap(ctx, pool, report.Schema, report.Table, opts.CopySwap.environment())
 	if err == nil {
 		return DesiredResult{}, true, nil
 	}
+	noLogicalDecoding := preflight.CopySwapRefusalCauseOf(err) == preflight.CopySwapCauseLogicalDecodingUnavailable
 	r, detail, err := classifyCopySwapPreflight(err)
 	if err != nil {
 		return stopped("the route's preflight could not finish", err)
+	}
+	if noLogicalDecoding {
+		// Desired-state execution takes no block-writes acknowledgement,
+		// so the offline route is the imperative door, one statement at a
+		// time.
+		detail += fmt.Sprintf("; to run offline instead, blocking the table's writes until each swap, run each planned statement with migrate --alter --block-writes %s.%s",
+			report.Schema, report.Table)
 	}
 	return DesiredResult{Plan: report}.refused(r, fmt.Sprintf(
 		"planned statement %d (%s) routes to copy-and-swap, whose preflight refused the table: %s; nothing was executed",

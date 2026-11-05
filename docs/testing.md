@@ -25,7 +25,11 @@ Concretely:
   the bug and fails on the pre-fix code.
 - **Real database, race-enabled.** Unit tests run with `-race`; core (`pkg/`)
   logic is never validated against mocks — integration tests run against
-  real PostgreSQL, across every supported major in CI.
+  real PostgreSQL, across every supported major in CI. The integration
+  suite runs under `-race` on the newest major only (PostgreSQL 18): the
+  code that runs goroutines does not branch on the server version, so a
+  data race CI catches surfaces on that job whatever version it is named
+  for. The other majors run the suite without the detector.
 - **The matrix is a gate, not advisory.** The `all-green` sentinel job
   requires the full version matrix; docs-only changes are the only path
   that skips it, and even they must pass the unit job — the guards that
@@ -191,8 +195,9 @@ capability no peer suite has.
 | --- | --- |
 | `make test-unit` | Race-enabled unit tests, no Docker (`SKIP_INTEGRATION=1`). |
 | `make test` | Full suite; integration tests start disposable PostgreSQL containers (testcontainers). `PG_VERSION` selects the major (default 16). |
-| `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix. |
-| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. |
+| `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix, except that it runs `-race` on every major where CI runs it on PostgreSQL 18 only. |
+| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. Runs under `-race` by default; `make test-db RACE=` drops the detector for a faster loop. |
+| `make test-own-server` | The tests that need a server of their own — they create a cluster-level role or a tablespace, or check which image the harness chose — and therefore skip when `PG_DSN` is set. Runs exactly those tests against disposable containers, with `PG_DSN` cleared. CI's version matrix and the release workflow run it right after `make test-db`, so a `PG_DSN` run plus this target is the whole suite. A test opts in through `testutil.SkipOnSharedServer`, and a completeness test holds the target's `-run` list to the set of callers. |
 | `make test-aws-boundary` | AWS-boundary tests against Ministack's RDS/Aurora control plane. Needs Docker only; see the tier table below. |
 | `make demo-check` | The demo tour in check mode against the built `bin/pg-sprite` and the compose database — CI's artifact smoke test (TM-8). Needs Docker and `jq`. |
 | `make check-capabilities` | Regenerates the generated regions of [capabilities.md](capabilities.md) from `pkg/capabilities/capabilities.yaml` and fails if the committed page differs. CI runs it; no Docker. |
@@ -409,6 +414,7 @@ same package cover the rest of it.
 | Library front door (`diffplan.Plan`): ordered routed plan, missing-table, no-op, copy-and-swap refusal, never-writes, deterministic fingerprint | [diffplan unit](../pkg/diffplan/diffplan_test.go), [diffplan integration](../pkg/diffplan/diffplan_integration_test.go) |
 | Bounded optimistic native attempt and table preflight | [pkg/executor](../pkg/executor/optimistic_integration_test.go), [pkg/preflight](../pkg/preflight/preflight_integration_test.go) |
 | Table usage evidence (`ReadTableUsage`, `Judge`): window edges, recent scans and lock holders, PostgreSQL 14/15 unknown, resets never idle, one statistics snapshot per read, `track_counts` turned off by a saved setting, partitioned tables judged across every leaf partition | [pkg/preflight](../pkg/preflight/table_usage_integration_test.go), [coverage](../pkg/preflight/table_usage_coverage_integration_test.go), [partitions](../pkg/preflight/table_usage_partitions_integration_test.go), [verdict (unit)](../pkg/preflight/table_usage_verdict_test.go), [partition aggregation (unit)](../pkg/preflight/table_usage_partitions_test.go) |
+| Index usage evidence (`ReadIndexUsage`): each index's own scan count, uniqueness, last scan time on PostgreSQL 16+, a partitioned index summed over its leaf indexes at any depth, `track_counts` turned off by a saved setting, a non-index OID refused | [pkg/preflight](../pkg/preflight/index_usage_integration_test.go), [partitions](../pkg/preflight/index_usage_partitions_integration_test.go), [evidence and detail (unit)](../pkg/migrate/index_usage_evidence_test.go) |
 | Safer-sequence runner: autocommit steps, committed-prefix semantics on a mid-sequence failure | [pkg/executor](../pkg/executor/sequence_integration_test.go) |
 | Concurrent index build: caller-owned session, invalid-index detection into a typed state, and the proven recovery (`RebuildAbandonedIndex`, `DropAbandonedIndex`) | [pkg/executor](../pkg/executor/recover_integration_test.go) |
 | Greenfield `CREATE TABLE` path: shape refusals, claimed-name collisions, post-commit name verification | [pkg/executor](../pkg/executor/create_integration_test.go) |

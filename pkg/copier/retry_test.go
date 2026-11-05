@@ -35,6 +35,32 @@ func TestCollidedClassifiesByServerCode(t *testing.T) {
 	}
 }
 
+// A chunk's pass earns another pass only when the server refused a row on
+// a unique index or an exclusion constraint, or rolled the pass back to
+// break a deadlock. A lock wait that timed out and a serialization failure
+// are the pass's error as they stand, though dbconn.Retryable lists both.
+func TestEarnsAnotherPassClassifiesByServerCode(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		earn bool
+	}{
+		"unique violation":           {&pgconn.PgError{Code: "23505"}, true},
+		"exclusion violation":        {&pgconn.PgError{Code: "23P01"}, true},
+		"deadlock":                   {&pgconn.PgError{Code: "40P01"}, true},
+		"deadlock when wrapped":      {fmt.Errorf("copy chunk: %w", &pgconn.PgError{Code: "40P01"}), true},
+		"lock timeout":               {&pgconn.PgError{Code: "55P03"}, false},
+		"serialization failure":      {&pgconn.PgError{Code: "40001"}, false},
+		"deferrable arbiter refused": {&pgconn.PgError{Code: "55000"}, false},
+		"no error":                   {nil, false},
+		"not a server error":         {errors.New("connection reset"), false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.earn, earnsAnotherPass(tc.err))
+		})
+	}
+}
+
 func TestCopierCollisionOptionsDefault(t *testing.T) {
 	opts := Options{}.withDefaults()
 	assert.Equal(t, DefaultCollisionAttempts, opts.CollisionAttempts)

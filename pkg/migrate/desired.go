@@ -201,6 +201,9 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
+	if opts.CopySwap.BlockWrites != "" {
+		return DesiredResult{}, ErrBlockWritesNotSupported
+	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if ref, ok := desiredShapeRefusal(err); ok {
 		return DesiredResult{}.refused(ref, fmt.Sprintf("%v; nothing was planned or executed", err)), nil

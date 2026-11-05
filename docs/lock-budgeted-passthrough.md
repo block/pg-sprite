@@ -142,7 +142,16 @@ A `DROP INDEX` needs both acknowledgements, each naming the owning table: `--acc
 accepts the lock, and `--allow-destructive` accepts losing the index (RF-10). The second is
 checked after the owning table resolves and before anything executes; without it the drop is
 refused with `destructive-change`, and the detail lists the checks that catch an index the
-application still uses. `REINDEX INDEX` and `REINDEX TABLE` discard nothing and need only
+application still uses. The refusal also carries `index_usage`, the connected server's live
+evidence for the index (`preflight.ReadIndexUsage`, keyed on the index OID the owning-table
+lookup resolved): its `idx_scan` since `stats_reset` (or since the index was created, if
+later, which the server does not record), `last_idx_scan` on PostgreSQL 16 and later, whether
+it is unique, whether `track_counts` was on, and whether a saved role or database setting
+turns it off. A partitioned index has no statistics of its own, so its `idx_scan` is the sum
+over its leaf indexes and `partitions` counts them. It is one server's view —
+replicas keep their own counters — so it is evidence for the operator, not a gate. Its times
+are UTC. The read takes no lock; if it fails, including when the server lists no statistics
+for a leaf index, nothing executes and the error is returned instead of the refusal. `REINDEX INDEX` and `REINDEX TABLE` discard nothing and need only
 `--accept-blocking`.
 
 The value names the table whose lock the operator accepts, because that is the relation the

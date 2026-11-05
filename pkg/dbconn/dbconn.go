@@ -75,7 +75,14 @@ type Config struct {
 	// session-scoped locks die with their session, and lifetime/idle
 	// recycling would silently release the lock. The lock helper owns a bare
 	// dedicated connection exempt from pool recycling.
-	MaxConns              int32
+	MaxConns int32
+	// MaxConnsFloor raises the pool's default size to at least this many
+	// connections, for a caller that knows how many sessions its work holds
+	// at once. It applies only to the default: when MaxConns is zero and the
+	// URL carries no pool_max_conns. A size the caller or the URL sets is
+	// kept as given, even below the floor, so the work that needs more
+	// connections refuses the pool rather than overriding the operator.
+	MaxConnsFloor         int32
 	MinConns              int32
 	MaxConnLifetime       time.Duration
 	MaxConnLifetimeJitter time.Duration
@@ -193,21 +200,27 @@ func resolveTimeouts(cfg Config) (lock, statement time.Duration) {
 // ServerVersion reads the connected server's server_version setting.
 // Plan reports carry it because classification is version-sensitive: a
 // stored report names the server whose rules produced it.
+//
+// INV: CO-9 — the pool may be the caller's own, with a path that lists
+// another schema ahead of pg_catalog, so the function is qualified.
 func ServerVersion(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 	var v string
-	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version')").Scan(&v); err != nil {
+	if err := pool.QueryRow(ctx, "SELECT pg_catalog.current_setting('server_version')").Scan(&v); err != nil {
 		return "", fmt.Errorf("read server_version: %w", err)
 	}
 	return v, nil
 }
 
 // ServerMajor reads the connected server's numeric major version.
+//
+// INV: CO-9 — as ServerVersion; the division is done here rather than in
+// SQL, where `/` would resolve through the caller's path.
 func ServerMajor(ctx context.Context, pool *pgxpool.Pool) (int, error) {
-	var major int
-	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int / 10000").Scan(&major); err != nil {
+	var num int
+	if err := pool.QueryRow(ctx, "SELECT pg_catalog.current_setting('server_version_num')::int").Scan(&num); err != nil {
 		return 0, fmt.Errorf("read server major version: %w", err)
 	}
-	return major, nil
+	return num / 10000, nil
 }
 
 // IndexBuildProgress is one server observation of a concurrent index build.
@@ -293,8 +306,8 @@ func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
 		return nil, err
 	}
 
-	if cfg.MaxConns > 0 {
-		pc.MaxConns = cfg.MaxConns
+	if err := sizePool(pc, cfg); err != nil {
+		return nil, err
 	}
 	if cfg.MinConns > 0 {
 		pc.MinConns = cfg.MinConns

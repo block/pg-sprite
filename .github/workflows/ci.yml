@@ -143,6 +143,14 @@ jobs:
   # throwaway-schema harness keeps tests isolated on a shared server
   # anyway. TLS tests are the exception — they still start their own
   # containers because they control the server's TLS posture.
+  #
+  # Only the job for the newest major runs the suite under the race
+  # detector. The code that runs goroutines (copier, applier, checksum,
+  # catch-up) does not branch on the server version, so the other majors
+  # would repeat the same check at several times the cost. The newest major
+  # is the one where a new version-specific branch lands first. The unit job
+  # also runs with -race. A timing-dependent race gets one sample per push
+  # here instead of five.
   test:
     name: test (PostgreSQL ${{ matrix.pg }})
     needs: changes
@@ -152,8 +160,12 @@ jobs:
       fail-fast: false
       matrix:
         pg: ["14", "15", "16", "17", "18"]
+        include:
+          - pg: "18"
+            race: "-race"
     env:
       PG_VERSION: ${{ matrix.pg }}
+      RACE: ${{ matrix.race }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -165,6 +177,11 @@ jobs:
         run: make db-up
       - name: Test against the long-lived database
         run: make test-db
+      # The tests that create cluster-level objects skip on a shared server
+      # and would otherwise run on no gate at all; they get their own
+      # containers, few enough not to oversubscribe the runner.
+      - name: Test the tests that need a server of their own
+        run: make test-own-server
 
   # Supabase uses its own PostgreSQL image, roles, pooler and API services.
   # Keep this required: ordinary PostgreSQL tests cannot cover those boundaries.
