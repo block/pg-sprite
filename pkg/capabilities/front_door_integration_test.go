@@ -261,6 +261,7 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 			executed := verdict.OutcomeExecuted
 			if claim.copyAndSwap {
 				opts.CopySwap = migrate.CopySwapOptions{
+					Enabled:       true,
 					Connection:    dbconn.Config{URL: url},
 					FreeDiskBytes: testutil.UnlimitedDisk,
 				}
