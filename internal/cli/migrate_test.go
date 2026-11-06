@@ -101,23 +101,26 @@ func TestAcceptBlockingFlagGrammar(t *testing.T) {
 }
 
 // The copy-and-swap policy flags govern a run the planner routes to that
-// backend: the connection the route's dedicated sessions dial from, the
-// free space the preflight sizes the shadow against, and the two operator
-// choices. They reach the engine policy as typed values — a size in bytes,
-// not the flag's spelling — and they are refused on a dry run, which
-// executes nothing for them to govern.
+// backend: the preview opt-in that opens the route at all, the connection
+// the route's dedicated sessions dial from, the free space the preflight
+// sizes the shadow against, and the two operator choices. They reach the
+// engine policy as typed values — a size in bytes, not the flag's spelling
+// — and they are refused on a dry run, which executes nothing for them to
+// govern.
 func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
-	t.Run("wires connection, free space, and choices", func(t *testing.T) {
-		c := parseMigrate(t, "--free-disk", "20GiB", "--keep-old", "--block-writes", "app.orders")
+	t.Run("wires the opt-in, connection, free space, and choices", func(t *testing.T) {
+		c := parseMigrate(t, "--copy-and-swap", "--free-disk", "20GiB", "--keep-old", "--block-writes", "app.orders")
 		got := c.options(nil).CopySwap
+		assert.True(t, got.Enabled)
 		assert.Equal(t, c.Config(), got.Connection)
 		assert.Equal(t, int64(20<<30), got.FreeDiskBytes)
 		assert.True(t, got.KeepOld)
 		assert.Equal(t, "app.orders", got.BlockWrites)
 	})
 
-	t.Run("defaults to no free space and the live path", func(t *testing.T) {
+	t.Run("defaults to the closed route, no free space, and the live path", func(t *testing.T) {
 		got := parseMigrate(t).options(nil).CopySwap
+		assert.False(t, got.Enabled, "the preview route opens only on the explicit flag")
 		assert.Zero(t, got.FreeDiskBytes)
 		assert.False(t, got.KeepOld)
 		assert.Empty(t, got.BlockWrites)
@@ -161,7 +164,28 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "--block-writes cannot be combined with --desired")
 	})
 
-	for _, flag := range []string{"--free-disk=1GiB", "--keep-old", "--block-writes=public.t"} {
+	// Under --desired the derived plan, not the operator, decides which
+	// stopped run --restart would discard, so the flag is a usage error
+	// there that points at the imperative door, decided at parse like the
+	// --block-writes case above.
+	t.Run("rejects --restart with --desired", func(t *testing.T) {
+		desired := filepath.Join(t.TempDir(), "orders.sql")
+		require.NoError(t, os.WriteFile(desired, []byte("this is not SQL"), 0o600))
+		c := New("test")
+		k, err := kong.New(c, kong.Vars{"version": "test"})
+		require.NoError(t, err)
+		_, err = k.Parse([]string{
+			"migrate",
+			"--url", "postgres://user@127.0.0.1:1/app",
+			"--desired", desired,
+			"--restart", "public.orders",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--restart cannot be combined with --desired")
+		assert.Contains(t, err.Error(), "migrate --alter --copy-and-swap --restart")
+	})
+
+	for _, flag := range []string{"--copy-and-swap", "--free-disk=1GiB", "--keep-old", "--block-writes=public.t"} {
 		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
 			c := New("test")
 			k, err := kong.New(c, kong.Vars{"version": "test"})

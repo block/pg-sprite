@@ -565,20 +565,16 @@ func TestVerifierAbortsWhenTheLockIsLostMidPass(t *testing.T) {
 
 // goneLock acquires the table lock and then terminates the session's
 // backend, so the server no longer grants the lock while the session still
-// believes it holds it: the default keepalive is long enough that only an
-// in-transaction confirmation can catch the loss.
+// believes it holds it. The keepalive is an hour away, so only an
+// in-transaction confirmation can catch the loss during the test. The
+// cleanup releases without waiting for the keepalive to notice;
+// TestTableLockKeepaliveLoss in pkg/dbconn covers that detection.
 func (f verifierFixture) goneLock(t *testing.T, table string) *dbconn.TableLockSession {
 	t.Helper()
-	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table)
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table, dbconn.WithTableLockKeepalive(time.Hour))
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		const lockLossDeadline = 30 * time.Second
-		select {
-		case <-lock.Done():
-		case <-time.After(lockLossDeadline):
-			t.Errorf("lock session did not report loss within %s", lockLossDeadline)
-		}
-		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())))
+		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())), "releasing a session whose backend is gone fails")
 	})
 	f.terminateBackend(t, lock.BackendPID())
 	require.NoError(t, lock.Err(), "the keepalive has not yet noticed the loss; the in-transaction check must")

@@ -165,10 +165,11 @@ const (
 	// fault, not what was left behind: any rerun meets the same rows, so
 	// the copy-and-swap run tries to abandon itself — shadow, hold on the
 	// source, and checkpoint row discarded — and returns
-	// *schemachange.AbandonedError only when that finished. Correct the
-	// data or the statement, then run it again from the beginning; when
-	// the abandon did not finish, start it over with the restart
-	// acknowledgement, as the verdict's detail says.
+	// *schemachange.AbandonedError only when that finished, which the
+	// verdict reports as Abandoned. Correct the data or the statement,
+	// then run it again from the beginning; when the abandon did not
+	// finish, start it over with the restart acknowledgement, as the
+	// verdict's detail says.
 	CodeDataFault Code = "data-fault"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
 	// retry candidate.

@@ -331,6 +331,32 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	assert.NotContains(t, s, "attempts")
 	assert.NotContains(t, s, "code")
 	assert.NotContains(t, s, "failed_step")
+	assert.NotContains(t, s, "abandoned")
+}
+
+// Abandoned is the field an adapter branches on to tell an abandoned
+// data-fault run from a held one, so its wire key and its text line are
+// pinned here: present on the abandoned verdict, absent on the held one
+// that differs from it only in the field. The CLI's text renderer is held
+// equal to String by TestVerdictTextColorWrapsLabelsOnly.
+func TestAbandonedVerdictRendersOnlyWhenSet(t *testing.T) {
+	held := Verdict{
+		Outcome:   OutcomeFailed,
+		Code:      "data-fault",
+		Statement: "ALTER TABLE t ALTER COLUMN c TYPE varchar(2)",
+	}
+	abandoned := held
+	abandoned.Abandoned = true
+
+	assert.NotContains(t, held.String(), "abandoned:")
+	assert.Contains(t, abandoned.String(), "\n  abandoned: ")
+
+	heldJSON, err := held.JSON()
+	require.NoError(t, err)
+	assert.NotContains(t, heldJSON, "abandoned")
+	abandonedJSON, err := abandoned.JSON()
+	require.NoError(t, err)
+	assert.Contains(t, abandonedJSON, `"abandoned": true`)
 }
 
 // Reason and Cause values are the machine contract automation switches on:
@@ -340,6 +366,7 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(CauseLockBudget), string(CauseStatementBudget),
 		string(CauseParentBlockingIndexBuild), string(CauseParentConcurrentIndexBuild),
 		string(CauseParentIndexAdoption), string(CauseParentNotValidForeignKey),
+		string(CauseCopyAndSwapNotEnabled),
 	}
 	for _, r := range Reasons() {
 		toks = append(toks, string(r))

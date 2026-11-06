@@ -123,6 +123,7 @@ type MigrateCmd struct {
 	LockAttempts      int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
 	LockBackoff       time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
+	CopyAndSwap       bool          `help:"Preview: open the copy-and-swap route for this run. A statement the planner routes to copy-and-swap (a column retype and the other changes PostgreSQL can only apply by rewriting the table) is otherwise refused before anything runs (exit 2, reason copy-and-swap-refused, cause copy-and-swap-not-enabled); every native route is unaffected. The route is still preflighted, size-guarded, and governed by --free-disk, --keep-old, --block-writes, and --restart. Cannot be combined with --dry-run." name:"copy-and-swap"`
 	FreeDisk          byteSize      `help:"Free space on the volume the table lives on, for a statement the planner routes to copy-and-swap; the preflight refuses the run when the shadow table and its indexes would not fit (binary units: B, KiB, MiB, GiB, TiB). Unset means no space and refuses." name:"free-disk" placeholder:"SIZE"`
 	KeepOld           bool          `help:"After a copy-and-swap, keep the retained source table under its _old name for a rollback window you end by hand, instead of dropping it before the run reports done." name:"keep-old"`
 	BlockWrites       string        `help:"Offline mode: block the table's writes for the length of a copy-and-swap: the run fences writes instead of streaming them through a replication slot, and needs no logical decoding from the server, but every write that reaches the fence fails with SQLSTATE 55006 until the swap. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. Cannot be combined with --desired." name:"block-writes" placeholder:"SCHEMA.TABLE"`
@@ -182,7 +183,7 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 		return errors.New("--accept-blocking requires --statement-timeout on the same command line: it is the outage bound you accept after the lock is granted, and the default is not an acknowledgement")
 	}
 	if c.DryRun {
-		for _, name := range []string{"free-disk", "keep-old", "block-writes"} {
+		for _, name := range []string{"copy-and-swap", "free-disk", "keep-old", "block-writes"} {
 			if flagSupplied(kctx, name) {
 				return fmt.Errorf("--%s cannot be combined with --dry-run: the dry run executes nothing, so a copy-and-swap policy has nothing to govern", name)
 			}

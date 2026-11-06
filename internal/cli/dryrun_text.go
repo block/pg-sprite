@@ -186,7 +186,7 @@ func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner, desiredTabl
 		if desiredTable != "" {
 			offline = "offline mode, which blocks the table's writes until the swap, runs one statement at a time with pg-sprite migrate --alter --block-writes " + desiredTable
 		}
-		w.diag("note", "", runner+" will run it as a copy-and-swap: build a shadow table with the change applied, copy the rows into it while streaming live writes, verify, then swap the two under a brief lock (needs --free-disk and logical decoding on the server; "+offline+")")
+		w.diag("note", "", runner+" will run it as a copy-and-swap: build a shadow table with the change applied, copy the rows into it while streaming live writes, verify, then swap the two under a brief lock (needs --copy-and-swap to open the preview route, --free-disk, and logical decoding on the server; "+offline+")")
 		w.diag("note", "", "the route's preflight — free disk, logical decoding, triggers, dependent views, publication membership — is not part of this dry run; the run reads it before anything executes and refuses with nothing run when it fails")
 		return 1
 	}

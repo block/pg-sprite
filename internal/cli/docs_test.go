@@ -136,6 +136,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 			"the server rejected the rows as the statement would shape them, so the run was abandoned: " +
 			"the shadow is dropped, its replication slot is dropped, and the checkpoint row is deleted; " +
 			"correct the data or the statement, then run it again, which starts from the beginning",
+		Abandoned: true,
 	}
 	// The executed verdict is captured from a run; its detail is the
 	// verdict's own rendering of the verification pass and the retained
