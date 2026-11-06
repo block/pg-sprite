@@ -235,7 +235,17 @@ func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (b
 // against cannot change before the drop runs. The tree follows
 // pg_inherits, so it holds partitions and classic inheritance children
 // alike: a DROP COLUMN here recurses into both. An identity index is one
-// pg_index marks indisreplident on a table whose relreplident is 'i'. Each
+// pg_index marks indisreplident on a table whose relreplident is 'i', or
+// the primary key of a table whose relreplident is 'd' (DEFAULT) while a
+// publication publishes its updates or deletes. pg_publication_tables is
+// the server's own list of what each publication publishes, FOR ALL
+// TABLES and schema publications included; a partition counts as
+// published when it or a table above it is listed, since the server
+// applies an ancestor's publications to it. A partitioned table holds no
+// rows, so only its partitions' primary keys count, each traced up to the
+// parent's as any other identity index is. A DEFAULT table no publication
+// publishes keeps no identity worth protecting, so its primary key stays
+// free to drop. Each
 // is traced up its attachment chain to the index on this table that a DROP
 // INDEX or DROP CONSTRAINT here would cascade from; an identity index on a
 // child that is attached under nothing on this table contributes only its
@@ -257,9 +267,22 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 		), identity AS (
 		    SELECT i.indexrelid, i.indrelid, i.indkey
 		    FROM tree
-		    JOIN pg_catalog.pg_class c
-		      ON c.oid OPERATOR(pg_catalog.=) tree.relid AND c.relreplident OPERATOR(pg_catalog.=) 'i'
-		    JOIN pg_catalog.pg_index i ON i.indrelid OPERATOR(pg_catalog.=) c.oid AND i.indisreplident
+		    JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.relid
+		    JOIN pg_catalog.pg_index i ON i.indrelid OPERATOR(pg_catalog.=) c.oid
+		    WHERE (c.relreplident OPERATOR(pg_catalog.=) 'i' AND i.indisreplident)
+		       OR (c.relreplident OPERATOR(pg_catalog.=) 'd' AND i.indisprimary
+		           AND c.relkind OPERATOR(pg_catalog.=) 'r'
+		           AND EXISTS (
+		               SELECT FROM pg_catalog.pg_publication_tables pt
+		               JOIN pg_catalog.pg_publication p ON p.pubname OPERATOR(pg_catalog.=) pt.pubname
+		               JOIN pg_catalog.pg_namespace pn ON pn.nspname OPERATOR(pg_catalog.=) pt.schemaname
+		               JOIN pg_catalog.pg_class pc
+		                 ON pc.relnamespace OPERATOR(pg_catalog.=) pn.oid AND pc.relname OPERATOR(pg_catalog.=) pt.tablename
+		               WHERE (p.pubupdate OR p.pubdelete)
+		                 AND pc.oid OPERATOR(pg_catalog.=) ANY (ARRAY(
+		                     SELECT c.oid
+		                     UNION
+		                     SELECT ancestor.relid FROM pg_catalog.pg_partition_ancestors(c.oid) ancestor))))
 		), chain AS (
 		    SELECT indexrelid AS relid FROM identity
 		    UNION

@@ -218,7 +218,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive**. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop other tables' foreign keys on the constraint"
+    reason_notes: "Metadata-only; flagged **destructive**. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under; under `REPLICA IDENTITY DEFAULT` that is the primary key, while a publication publishes the table's updates or deletes. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop other tables' foreign keys on the constraint"
   - id: create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin
     area: "indexes"
     operation: "`CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN"

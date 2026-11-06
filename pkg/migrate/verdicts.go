@@ -178,7 +178,7 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 		if d.Reason == planner.ReasonReplicaIdentity {
 			v.Detail = fmt.Sprintf("%s drops what the table's replica identity index keys on, "+
 				"which makes UPDATE and DELETE fail while a publication publishes them; "+
-				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
+				"point REPLICA IDENTITY at a unique index the drop leaves in place (USING INDEX), at a primary key it leaves in place (DEFAULT), or at the whole row (FULL) first, then re-plan", d.Operation)
 		}
 		if d.Reason == planner.ReasonDependentView {
 			v.DependentViews = d.DependentViews

@@ -1,9 +1,11 @@
 package executor_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -109,4 +111,33 @@ func TestExecuteNativeChecksTheReplicaIdentityOfWhatTheDropReaches(t *testing.T)
 	err = executor.ExecuteNative(t.Context(), pool, pPreflight,
 		mustParse(t, fmt.Sprintf("ALTER TABLE %s.p DROP CONSTRAINT p_ref_key", schema)), budget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrReplicaIdentityDrop)
+}
+
+// A publication that starts publishing a DEFAULT-identity table after the
+// drop of its primary key was planned makes that primary key the table's
+// identity, and the re-check under the drop's lock refuses the drop.
+func TestExecuteNativeRefusesDroppingThePrimaryKeyAPublicationStartedOnAfterPlanning(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id bigint PRIMARY KEY, note text)", schema))
+	require.NoError(t, err)
+	preflighted := mustPreflight(t, pool, schema, "t")
+
+	publication := pgx.Identifier{schema + "_pub"}.Sanitize()
+	t.Cleanup(func() {
+		// t.Context is cancelled by cleanup time; strip the cancellation.
+		if _, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP PUBLICATION IF EXISTS "+publication); err != nil {
+			t.Logf("drop publication %s: %v", publication, err)
+		}
+	})
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s.t", publication, schema))
+	require.NoError(t, err)
+
+	err = executor.ExecuteNative(t.Context(), pool, preflighted,
+		mustParse(t, fmt.Sprintf("ALTER TABLE %s.t DROP CONSTRAINT t_pkey", schema)), budget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrReplicaIdentityDrop)
+	assert.Equal(t, executor.CodeReplicaIdentityDrop, executor.OutcomeCode(err))
+	var constraints int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 't_pkey'", schema+".t").Scan(&constraints))
+	assert.Equal(t, 1, constraints)
 }

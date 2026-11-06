@@ -72,8 +72,8 @@ func refuseReplicaIdentityLoss(ctx context.Context, tx pgx.Tx, st statement.Stat
 	for _, op := range drops {
 		if keys.DroppedBy(op) {
 			return fmt.Errorf("%w: %s on %s, which makes UPDATE and DELETE fail "+
-				"while a publication publishes them; point REPLICA IDENTITY at another unique index first "+
-				"(or DEFAULT, if a usable primary key remains after the drop), then re-plan",
+				"while a publication publishes them; point REPLICA IDENTITY at a unique index the drop leaves in place "+
+				"(USING INDEX), at a primary key it leaves in place (DEFAULT), or at the whole row (FULL) first, then re-plan",
 				ErrReplicaIdentityDrop, op.Describe(), target)
 		}
 	}
