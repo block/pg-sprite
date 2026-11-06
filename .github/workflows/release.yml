@@ -10,7 +10,56 @@ on:
 permissions: {}
 
 jobs:
+  # Belt and braces on top of the ancestry gate: re-run the suite against
+  # the exact tree being released. This runs in its own job, under
+  # read-only permissions, so the tagged tree's Makefile, compose file, and
+  # tests — and the mutable postgres image `docker compose` pulls — never
+  # execute with the token that can publish a release or sign provenance.
+  # The release job needs this job, so a failing suite leaves nothing
+  # published and the two outcomes are readable separately.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Fail before the suite runs when the tag could never be released:
+      # the release job repeats this check as the publish's own guard.
+      - name: Require the tagged commit to be on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          # The result of this job gates the release, so it must not come
+          # from a shared cache a previous workflow could have poisoned.
+          cache: false
+
+      # A tag cannot ship a capabilities matrix that disagrees with its YAML.
+      - name: Check the capabilities matrix
+        run: make check-capabilities
+
+      # Same shape as the CI matrix job: one long-lived server rather than
+      # per-test containers, which oversubscribe the runner and push the
+      # heaviest packages past go test's per-package deadline.
+      - name: Start the test database
+        run: make db-up
+      - name: Test the tagged tree
+        run: make test-db
+      # The tests that create cluster-level objects skip on a shared server
+      # and would otherwise run on no gate at all; they get their own
+      # containers, few enough not to oversubscribe the runner.
+      - name: Test the tests that need a server of their own
+        run: make test-own-server
+
   release:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       # Publish the GitHub release and its assets.
@@ -29,7 +78,8 @@ jobs:
       # to be an ancestor of main means it went through the PR gate (the
       # PG 14-18 matrix behind the required all-green check) before it could
       # be released — a tag pointing at an unmerged or never-pushed commit
-      # fails here.
+      # fails here. The test job checks this too; this copy is the publish's
+      # own guard, so it holds even if the job dependency above changes.
       - name: Require the tagged commit to be on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
@@ -40,25 +90,6 @@ jobs:
           # Release artifacts must never be built from a shared cache a
           # previous workflow could have poisoned.
           cache: false
-
-      # A tag cannot ship a capabilities matrix that disagrees with its YAML.
-      - name: Check the capabilities matrix
-        run: make check-capabilities
-
-      # Belt and braces on top of the ancestry gate: re-run the suite against
-      # the exact tree being released. Same shape as the CI matrix job: one
-      # long-lived server rather than per-test containers, which oversubscribe
-      # the runner and push the heaviest packages past go test's per-package
-      # deadline.
-      - name: Start the test database
-        run: make db-up
-      - name: Test the tagged tree
-        run: make test-db
-      # The tests that create cluster-level objects skip on a shared server
-      # and would otherwise run on no gate at all; they get their own
-      # containers, few enough not to oversubscribe the runner.
-      - name: Test the tests that need a server of their own
-        run: make test-own-server
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@9c156ee8a17a598857849441385a2041ef570552 # v6.3.0
