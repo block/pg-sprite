@@ -237,11 +237,12 @@ func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (b
 // alike: a DROP COLUMN here recurses into both. An identity index is one
 // pg_index marks indisreplident on a table whose relreplident is 'i', or
 // the primary key of a table whose relreplident is 'd' (DEFAULT) while a
-// publication publishes its updates or deletes. pg_publication_tables is
-// the server's own list of what each publication publishes, FOR ALL
-// TABLES and schema publications included; a partition counts as
-// published when it or a table above it is listed, since the server
-// applies an ancestor's publications to it. A partitioned table holds no
+// publication publishes its updates or deletes. A publication publishes a
+// permanent table when it publishes all tables, lists the table, or lists
+// its schema, and the server applies a partition's ancestors' publications
+// to it as well. The catalogs are read directly rather than through
+// pg_publication_tables, which looks each publication up again by name and
+// fails if one is dropped while the query runs. A partitioned table holds no
 // rows, so only its partitions' primary keys count, each traced up to the
 // parent's as any other identity index is. A DEFAULT table no publication
 // publishes keeps no identity worth protecting, so its primary key stays
@@ -257,8 +258,12 @@ func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (b
 // counted on its own as well.
 func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIdentityKeys, error) {
 	var keys ReplicaIdentityKeys
+	schemaPublications, err := schemaPublicationsClause(ctx, tx)
+	if err != nil {
+		return ReplicaIdentityKeys{}, err
+	}
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		WITH RECURSIVE tree AS (
 		    SELECT $1::pg_catalog.oid AS relid
 		    UNION
@@ -269,20 +274,21 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 		    FROM tree
 		    JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.relid
 		    JOIN pg_catalog.pg_index i ON i.indrelid OPERATOR(pg_catalog.=) c.oid
+		    CROSS JOIN LATERAL (SELECT ARRAY(
+		        SELECT c.oid
+		        UNION
+		        SELECT ancestor.relid FROM pg_catalog.pg_partition_ancestors(c.oid) ancestor) AS rels) self
 		    WHERE (c.relreplident OPERATOR(pg_catalog.=) 'i' AND i.indisreplident)
 		       OR (c.relreplident OPERATOR(pg_catalog.=) 'd' AND i.indisprimary
-		           AND c.relkind OPERATOR(pg_catalog.=) 'r'
+		           AND c.relkind OPERATOR(pg_catalog.=) 'r' AND c.relpersistence OPERATOR(pg_catalog.=) 'p'
 		           AND EXISTS (
-		               SELECT FROM pg_catalog.pg_publication_tables pt
-		               JOIN pg_catalog.pg_publication p ON p.pubname OPERATOR(pg_catalog.=) pt.pubname
-		               JOIN pg_catalog.pg_namespace pn ON pn.nspname OPERATOR(pg_catalog.=) pt.schemaname
-		               JOIN pg_catalog.pg_class pc
-		                 ON pc.relnamespace OPERATOR(pg_catalog.=) pn.oid AND pc.relname OPERATOR(pg_catalog.=) pt.tablename
+		               SELECT FROM pg_catalog.pg_publication p
 		               WHERE (p.pubupdate OR p.pubdelete)
-		                 AND pc.oid OPERATOR(pg_catalog.=) ANY (ARRAY(
-		                     SELECT c.oid
-		                     UNION
-		                     SELECT ancestor.relid FROM pg_catalog.pg_partition_ancestors(c.oid) ancestor))))
+		                 AND (p.puballtables
+		                      OR EXISTS (
+		                          SELECT FROM pg_catalog.pg_publication_rel pr
+		                          WHERE pr.prpubid OPERATOR(pg_catalog.=) p.oid
+		                            AND pr.prrelid OPERATOR(pg_catalog.=) ANY (self.rels))`+schemaPublications+`)))
 		), chain AS (
 		    SELECT indexrelid AS relid FROM identity
 		    UNION
@@ -328,6 +334,27 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 		keys.OwnColumns = nil
 	}
 	return keys, nil
+}
+
+// schemaPublicationsClause returns the condition, inside ReadReplicaIdentity,
+// that a publication lists the schema of the table or of a table above it,
+// or "" on a server that predates schema publications (PostgreSQL 15).
+func schemaPublicationsClause(ctx context.Context, tx pgx.Tx) (string, error) {
+	var supported bool
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_catalog.to_regclass('pg_catalog.pg_publication_namespace') IS NOT NULL`).Scan(&supported); err != nil {
+		return "", fmt.Errorf("query whether the server has schema publications: %w", err)
+	}
+	if !supported {
+		return "", nil
+	}
+	return `
+		                      OR EXISTS (
+		                          SELECT FROM pg_catalog.pg_publication_namespace pn
+		                          JOIN pg_catalog.pg_class sc ON sc.relnamespace OPERATOR(pg_catalog.=) pn.pnnspid
+		                          WHERE pn.pnpubid OPERATOR(pg_catalog.=) p.oid
+		                            AND sc.oid OPERATOR(pg_catalog.=) ANY (self.rels))`, nil
 }
 
 // introspectInheritance reads classic PostgreSQL inheritance in both

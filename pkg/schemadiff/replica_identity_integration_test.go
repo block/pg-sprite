@@ -227,6 +227,73 @@ func TestIntrospectReplicaIdentity(t *testing.T) {
 	}
 }
 
+// The replica identity is read in the transaction's own snapshot, so a
+// publication dropped by another session after the snapshot was taken is
+// still counted, and the read does not fail looking it up.
+func TestReadReplicaIdentitySurvivesAPublicationDroppedUnderneath(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	publication := schema + "_pub"
+	dropPublication(t, pool, publication)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id bigint PRIMARY KEY);
+		CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.t`, schema))
+	require.NoError(t, err)
+	var oid uint32
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", schema+".t").Scan(&oid))
+
+	tx, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+	_, err = tx.Exec(t.Context(), "SELECT 1")
+	require.NoError(t, err, "take the snapshot")
+	_, err = pool.Exec(t.Context(), "DROP PUBLICATION "+pgx.Identifier{publication}.Sanitize())
+	require.NoError(t, err)
+
+	keys, err := schemadiff.ReadReplicaIdentity(t.Context(), tx, oid)
+	require.NoError(t, err)
+	assert.Equal(t, schemadiff.ReplicaIdentityKeys{
+		Indexes:     []string{"t_pkey"},
+		Constraints: []string{"t_pkey"},
+		Columns:     []string{"id"},
+		OwnColumns:  []string{"id"},
+	}, keys)
+}
+
+// A publication FOR ALL TABLES publishes every permanent table, so the
+// primary key of a DEFAULT table is its identity, but it never publishes an
+// unlogged table, whose primary key stays free to drop. A publication for
+// all tables reaches every database on the server, so the test needs a
+// server of its own.
+func TestIntrospectReplicaIdentityUnderAPublicationForAllTables(t *testing.T) {
+	testutil.SkipOnSharedServer(t, "creates a publication FOR ALL TABLES")
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	dropPublication(t, pool, schema+"_pub")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.logged (id bigint PRIMARY KEY);
+		CREATE UNLOGGED TABLE %[1]s.unlogged (id bigint PRIMARY KEY);
+		CREATE PUBLICATION %[1]s_pub FOR ALL TABLES WITH (publish = 'update')`, schema))
+	require.NoError(t, err)
+
+	logged, err := schemadiff.Introspect(t.Context(), pool, schema, "logged")
+	require.NoError(t, err)
+	assert.Equal(t, schemadiff.ReplicaIdentityKeys{
+		Indexes:     []string{"logged_pkey"},
+		Constraints: []string{"logged_pkey"},
+		Columns:     []string{"id"},
+		OwnColumns:  []string{"id"},
+	}, logged.ReplicaIdentity)
+
+	unlogged, err := schemadiff.Introspect(t.Context(), pool, schema, "unlogged")
+	require.NoError(t, err)
+	assert.Equal(t, schemadiff.ReplicaIdentityKeys{}, unlogged.ReplicaIdentity)
+}
+
 // dropPublication drops the named publication when the test ends, if the
 // test created it. A publication belongs to the database, not to a schema,
 // so dropping the test's schema leaves it behind.
