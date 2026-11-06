@@ -455,8 +455,12 @@ logs the typed fields and shows a fixed line. The comparison cannot tell a clust
 physical copy of it — a standby, or a server restored from a base backup or a snapshot keeps
 the source's system identifier — and a run wired across such a pair stops later instead, as
 the environmental `shadow-lock-unconfirmed` refusal, when its first working transaction
-finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQL grants to
-`PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
+finds no lock to confirm. A host that calls `schemachange.Runner` directly skips this
+comparison, so a lock connection and a pool on different databases end the same way:
+`shadow-lock-unconfirmed` on the first working transaction, before anything is written.
+Although the class is `environmental`, re-acquiring the lock does not help there — every
+attempt confirms from the wrong database — so escalate it as a wiring error. The check reads
+`pg_control_system()`, which PostgreSQL grants to `PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the run blocks the table's writes — offline mode, the fenced path
 (a quiesced target, in the engine's terms) that needs no logical decoding but refuses every

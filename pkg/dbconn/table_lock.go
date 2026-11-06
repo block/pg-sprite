@@ -220,7 +220,9 @@ func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, opt
 
 // LookupTableLockHolder reports the session holding a table's lock without
 // taking it, so a read-only surface can answer "who holds this table" from
-// any connection. found is false when nobody holds the lock.
+// any connection to the table's database. found is false when nobody holds
+// the lock there; a lock held in another database of the same server is not
+// reported, because it excludes no run on this one.
 func LookupTableLockHolder(ctx context.Context, conn AdvisoryLockHolder, schema, table string) (holder TableLockHolder, found bool, err error) {
 	if schema == "" || table == "" {
 		return TableLockHolder{}, false, fmt.Errorf("%w: LK-1: table lock lookup requires non-empty schema and table", ErrInvariantViolation)
