@@ -260,8 +260,9 @@ live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
 and `statement_timeout`; a `search_path` that lists `pg_catalog` after a user
 schema has that entry removed so the schema no longer shadows the catalog, and
 every other entry is left as configured). The connection pool holds at least
-six connections unless the URL sets `pool_max_conns`: a copy-and-swap run's
-four copy workers, its catch-up, and its checkpoint saves each need one. A
+six connections unless the URL sets `pool_max_conns`: one for each of a
+copy-and-swap run's four copy workers, and two more so its catch-up's flushes
+and its checkpoint saves do not wait behind the copy. A
 `pool_max_conns` in the URL is kept as given, and a copy-and-swap run refuses a
 pool below six before it creates anything (`code: pool-too-small`). Only
 `migrate` without `--dry-run` ever commits a change — every other command is

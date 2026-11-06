@@ -45,11 +45,20 @@ type liveFixture struct {
 // load, few enough that the whole run stays well inside the test's budget.
 const liveSeededRows = 4000
 
-// newLiveFixture starts a server with logical decoding and seeds a
-// workload table of shape in a database of its own.
+// newLiveFixture starts a server with logical decoding and a short sender
+// timeout, so a stream the run stops reading is dropped within the test's
+// budget, and seeds a workload table of shape in a database of its own.
 func newLiveFixture(t *testing.T, shape testutil.WorkloadShape) liveFixture {
 	t.Helper()
-	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", "wal_sender_timeout=2s")
+	return newLiveFixtureOn(t, shape, "wal_sender_timeout=2s")
+}
+
+// newLiveFixtureOn is newLiveFixture with the caller's server settings
+// beside logical decoding, for tests whose run legitimately leaves the
+// stream unread for longer than the default fixture tolerates.
+func newLiveFixtureOn(t *testing.T, shape testutil.WorkloadShape, settings ...string) liveFixture {
+	t.Helper()
+	serverURL := testutil.StartPostgresWithSettings(t, append([]string{"wal_level=logical"}, settings...)...)
 	url := testutil.NewDatabase(t, serverURL)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url, MaxConns: 16})
 	require.NoError(t, err)
