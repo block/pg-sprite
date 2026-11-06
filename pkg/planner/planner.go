@@ -268,6 +268,58 @@ type Decision struct {
 	// the column, each rendered "policy" ON "schema"."table" with every
 	// identifier quoted, present exactly for dependent-policy decisions.
 	DependentPolicies []string `json:"dependent_policies,omitempty"`
+	// PolicyFix is the manual path for a dependent-policy decision, which
+	// depends on what the change would do with the policies out of the
+	// way. Like Kind, it is not part of the plan-report contract: it
+	// selects the help the engine's own text renders.
+	PolicyFix PolicyFix `json:"-"`
+}
+
+// PolicyFix is the manual path for a change PostgreSQL refuses while a
+// row-level security policy reads the column.
+type PolicyFix string
+
+const (
+	// PolicyFixRewritePolicies is for a column drop. The policies have to stop
+	// reading the column before it can go, and the drop then plans on its
+	// own.
+	PolicyFixRewritePolicies PolicyFix = "rewrite-policies"
+	// PolicyFixRecreateAroundChange is for a type change PostgreSQL runs in
+	// place. Dropping the policies, running the change, and recreating
+	// them in one transaction holds the table's exclusive lock only
+	// briefly, and no session sees the table without its policies.
+	PolicyFixRecreateAroundChange PolicyFix = "recreate-around-change"
+	// PolicyFixExpandContract is for a type change that rewrites the table.
+	// Recreating the policies around it would hold the exclusive lock for
+	// the whole rewrite, and copy-and-swap rebuilds the table's policies
+	// before it retypes the column, so it meets the same refusal. A new
+	// column of the target type takes the policies over instead.
+	PolicyFixExpandContract PolicyFix = "expand-contract"
+)
+
+// PoliciesPhrase names dependent policies after "read by": "policy" before
+// one name and "policies" before several, joined with commas.
+func PoliciesPhrase(policies []string) string {
+	noun := "policy"
+	if len(policies) > 1 {
+		noun = "policies"
+	}
+	return noun + " " + strings.Join(policies, ", ")
+}
+
+// Help is the operator-facing manual path, phrased to follow a sentence
+// that names the policies.
+func (f PolicyFix) Help() string {
+	switch f {
+	case PolicyFixRewritePolicies:
+		return "change those policies so they no longer read the column, then re-plan the drop"
+	case PolicyFixRecreateAroundChange:
+		return "this type change runs in place, without rewriting the table, so in one transaction drop those policies, run the change, and recreate them"
+	case PolicyFixExpandContract:
+		return "this type change rewrites the table, so recreating the policies around it would block the table for the whole rewrite; " +
+			"add a column of the new type instead, backfill it, point those policies at it, then drop the old column"
+	}
+	return string(f)
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -417,6 +469,20 @@ func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []s
 	}
 }
 
+// dependentPolicyFix picks the manual path for a change the policies block:
+// a drop needs the policies rewritten, and a type change is judged by the
+// route it would take with the policies out of the way.
+func dependentPolicyFix(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) PolicyFix {
+	if op.Kind == statement.OpDropColumn {
+		return PolicyFixRewritePolicies
+	}
+	facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = nil, nil, nil
+	if classifyOp(op, st, facts, sql, single).Route == RouteNative {
+		return PolicyFixRecreateAroundChange
+	}
+	return PolicyFixExpandContract
+}
+
 // addColumnProof returns what the server proved about adding op's
 // column, or "" when no proof was run.
 func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
@@ -480,6 +546,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	}
 	if policies := policiesReadingColumn(op, facts); len(policies) > 0 {
 		d.Route, d.Reason, d.DependentPolicies = RouteRefuse, ReasonDependentPolicy, policies
+		d.PolicyFix = dependentPolicyFix(op, st, facts, sql, single)
 		return d
 	}
 	switch op.Kind {

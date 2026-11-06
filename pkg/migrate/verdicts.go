@@ -187,11 +187,11 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 		}
 		if d.Reason == planner.ReasonDependentPolicy {
 			v.DependentPolicies = d.DependentPolicies
-			v.Detail = fmt.Sprintf("%s changes a column read by policy %s, and PostgreSQL refuses to retype or drop a column while a policy reads it; "+
-				"drop those policies, run the change, and recreate them in one transaction, then re-plan", d.Operation, strings.Join(d.DependentPolicies, ", "))
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a policy reads it; %s",
+				d.Operation, planner.PoliciesPhrase(d.DependentPolicies), d.PolicyFix.Help())
 		}
 		if d.Reason == planner.ReasonCascadingDrop {
-			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views or other tables' foreign keys, "+
+			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views, row-level security policies, or other tables' foreign keys, "+
 				"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+
 				"and PostgreSQL then refuses the drop if anything still depends on it", d.Operation)
 		}

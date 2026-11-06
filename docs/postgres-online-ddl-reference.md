@@ -565,10 +565,17 @@ counts wherever it is defined: a policy on another table whose expression reads 
 column through a subquery blocks the change too. The change reaches partitions and
 inheritance children the same way as for `dependent-view`. The plan names each
 policy as `"policy" ON "schema"."table"` in `decisions[].dependent_policies`, and a
-refused run's verdict in `dependent_policies`. Drop the policies, run the change,
-and recreate them in one transaction: outside one, the table is briefly without
-them, which hides the rows a permissive policy admitted and shows the rows a
-restrictive policy filtered out. A rename is not refused, because a policy follows
+refused run's verdict in `dependent_policies`. The manual path depends on the
+change, and the refusal's help names the one that applies. Before a drop, change the
+policies so they no longer read the column, then re-plan the drop. A type change
+PostgreSQL runs in place, such as that widening, can run in one transaction that
+drops the policies, runs the change, and recreates them: outside one, the table is
+briefly without them, which hides the rows a permissive policy admitted and shows the
+rows a restrictive policy filtered out. A type change that rewrites the table cannot
+take that path, because the transaction would block the table for the whole rewrite,
+and copy-and-swap rebuilds the table's policies before it retypes the column, so it
+meets the same refusal. Add a column of the new type instead, backfill it, point the
+policies at it, then drop the old column. A rename is not refused, because a policy follows
 the column. `DROP COLUMN … CASCADE`, which drops the policies with the column, is
 refused as `cascading-drop` instead. When a view and a policy both read the column,
 the decision is `dependent-view`; re-plan after the views are handled. The planner

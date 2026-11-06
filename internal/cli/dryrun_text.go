@@ -82,7 +82,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 			w.diag("help", "", "drop or redefine those views first, then re-plan")
 		}
 		if len(d.DependentPolicies) > 0 {
-			w.diag("help", "", "drop those policies, run the change, and recreate them in one transaction, then re-plan")
+			w.diag("help", "", d.PolicyFix.Help())
 		}
 	}
 	if ps.Destructive {
@@ -345,7 +345,7 @@ func impactText(r planner.Reason) string {
 	case planner.ReasonDependentPolicy:
 		return "changes a column a row-level security policy reads; PostgreSQL refuses this until the policy is dropped"
 	case planner.ReasonCascadingDrop:
-		return "CASCADE also drops the views and other tables' foreign keys that depend on it; drop those explicitly and resubmit without CASCADE"
+		return "CASCADE also drops the views, row-level security policies, and other tables' foreign keys that depend on it; drop those explicitly and resubmit without CASCADE"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}
@@ -397,7 +397,7 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			", and PostgreSQL refuses to retype or drop a column while a view reads it"
 	}
 	if d.Reason == planner.ReasonDependentPolicy {
-		return d.Operation + " changes a column read by policy " + strings.Join(d.DependentPolicies, ", ") +
+		return d.Operation + " changes a column read by " + planner.PoliciesPhrase(d.DependentPolicies) +
 			", and PostgreSQL refuses to retype or drop a column while a policy reads it"
 	}
 	return "the planner knows no safe path for " + d.Operation

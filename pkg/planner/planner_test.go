@@ -225,8 +225,11 @@ func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
 // PostgreSQL refuses to retype or drop a column a row-level security
 // policy reads, so either change on such a column is refused with the
 // policies named, even a type change that would otherwise relabel in
-// place. A rename, which the policy follows, and changes to columns no
-// policy reads classify as usual.
+// place. The manual path follows what the change would do without the
+// policies: a drop needs them rewritten, an in-place type change can run
+// between dropping and recreating them, and a rewrite needs a new column.
+// A rename, which the policy follows, and changes to columns no policy
+// reads classify as usual.
 func TestClassifyRefusesChangingAColumnAPolicyReads(t *testing.T) {
 	policies := []string{`"own_rows" ON "public"."documents"`, `"team_rows" ON "public"."teams"`}
 	facts := planner.Facts{
@@ -235,12 +238,12 @@ func TestClassifyRefusesChangingAColumnAPolicyReads(t *testing.T) {
 		DropDependentPolicies: map[string][]string{"owner_id": policies},
 		OwnDependentPolicies:  map[string][]string{"owner_id": policies},
 	}
-	for _, sql := range []string{
-		"ALTER TABLE documents ALTER COLUMN owner_id TYPE varchar(64)",
-		"ALTER TABLE documents ALTER COLUMN owner_id TYPE text",
-		"ALTER TABLE documents ALTER COLUMN owner_id TYPE uuid USING owner_id::uuid",
-		"ALTER TABLE documents DROP COLUMN owner_id",
-		"ALTER TABLE ONLY documents ALTER COLUMN owner_id TYPE text",
+	for sql, fix := range map[string]planner.PolicyFix{
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE varchar(64)":               planner.PolicyFixRecreateAroundChange,
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE text":                      planner.PolicyFixRecreateAroundChange,
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE uuid USING owner_id::uuid": planner.PolicyFixExpandContract,
+		"ALTER TABLE documents DROP COLUMN owner_id":                                 planner.PolicyFixRewritePolicies,
+		"ALTER TABLE ONLY documents ALTER COLUMN owner_id TYPE text":                 planner.PolicyFixRecreateAroundChange,
 	} {
 		plan, err := planner.Classify(sql, facts)
 		require.NoError(t, err, sql)
@@ -249,6 +252,7 @@ func TestClassifyRefusesChangingAColumnAPolicyReads(t *testing.T) {
 		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
 		assert.Equal(t, planner.ReasonDependentPolicy, d.Reason, sql)
 		assert.Equal(t, policies, d.DependentPolicies, sql)
+		assert.Equal(t, fix, d.PolicyFix, sql)
 		assert.Empty(t, d.DependentViews, sql)
 		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
 	}

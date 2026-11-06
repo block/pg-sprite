@@ -3,6 +3,7 @@ package preflight_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -233,4 +234,84 @@ func TestReadColumnDependentsPolicies(t *testing.T) {
 			assert.Equal(t, "0A000", pgErr.Code, policy)
 		}
 	}
+}
+
+// A recursive DROP COLUMN is blocked by the policies on the copies of the
+// column it drops, judged by the same reach as a view: a child that
+// declares the column, or inherits it from a parent the drop does not
+// touch, keeps its copy, so its policy does not count, while a type change
+// reaches every copy. A policy on a table outside the tree never counts.
+// The server is the oracle: with the policies Drop names removed the drop
+// succeeds, and each policy Drop names blocks it on its own.
+func TestReadColumnDependentsPoliciesForADrop(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	tables := []string{"users", "inherited", "below_inherited", "declared", "below_declared", "other_parent",
+		"two_parents", "attached", "branch_a", "branch_b", "diamond", "uneven", "events_1"}
+	var setup strings.Builder
+	fmt.Fprintf(&setup, `
+		CREATE TABLE %[1]s.users (id bigint PRIMARY KEY, email text);
+		CREATE TABLE %[1]s.inherited () INHERITS (%[1]s.users);
+		CREATE TABLE %[1]s.below_inherited () INHERITS (%[1]s.inherited);
+		CREATE TABLE %[1]s.declared (email text) INHERITS (%[1]s.users);
+		CREATE TABLE %[1]s.below_declared () INHERITS (%[1]s.declared);
+		CREATE TABLE %[1]s.other_parent (email text);
+		CREATE TABLE %[1]s.two_parents () INHERITS (%[1]s.users, %[1]s.other_parent);
+		CREATE TABLE %[1]s.attached (id bigint NOT NULL, email text);
+		ALTER TABLE %[1]s.attached INHERIT %[1]s.users;
+		CREATE TABLE %[1]s.branch_a () INHERITS (%[1]s.users);
+		CREATE TABLE %[1]s.branch_b () INHERITS (%[1]s.users);
+		CREATE TABLE %[1]s.diamond () INHERITS (%[1]s.branch_a, %[1]s.branch_b);
+		CREATE TABLE %[1]s.uneven () INHERITS (%[1]s.below_inherited, %[1]s.branch_b);
+		CREATE TABLE %[1]s.events (id bigint, email text) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (10);`, schema)
+	for _, table := range tables {
+		fmt.Fprintf(&setup, "\nCREATE POLICY p_%[2]s ON %[1]s.%[2]s USING (email IS NOT NULL);", schema, table)
+	}
+	_, err = pool.Exec(t.Context(), setup.String())
+	require.NoError(t, err)
+	policies := func(tables ...string) []string {
+		out := make([]string, len(tables))
+		for i, table := range tables {
+			out[i] = fmt.Sprintf(`"p_%[2]s" ON "%[1]s"."%[2]s"`, schema, table)
+		}
+		return out
+	}
+
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "users")
+	require.NoError(t, err)
+	assert.Equal(t, policies("attached", "below_declared", "below_inherited", "branch_a", "branch_b", "declared",
+		"diamond", "inherited", "two_parents", "uneven", "users"), deps.Policies.Tree["email"])
+	assert.Equal(t, policies("below_inherited", "branch_a", "branch_b", "diamond", "inherited", "uneven", "users"),
+		deps.Policies.Drop["email"])
+	assert.Equal(t, policies("users"), deps.Policies.Own["email"])
+
+	dropFails := func(t *testing.T, keep string) error {
+		t.Helper()
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		for _, policy := range deps.Policies.Drop["email"] {
+			if policy != keep {
+				_, err := tx.Exec(t.Context(), "DROP POLICY "+policy)
+				require.NoError(t, err)
+			}
+		}
+		_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.users DROP COLUMN email", schema))
+		return err
+	}
+	require.NoError(t, dropFails(t, ""), "no policy outside Drop blocks the drop")
+	for _, policy := range deps.Policies.Drop["email"] {
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, dropFails(t, policy), &pgErr, policy)
+		assert.Equal(t, "2BP01", pgErr.Code, policy)
+	}
+
+	partitioned, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	assert.Equal(t, policies("events_1"), partitioned.Policies.Drop["email"], "a partition never declares a column")
 }

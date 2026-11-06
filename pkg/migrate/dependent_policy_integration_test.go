@@ -2,6 +2,7 @@ package migrate_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,7 +21,10 @@ import (
 // with the policies named, the table's own and the one on another table
 // that reads the column through a subquery, so the operator learns what
 // to change before anything reaches the server, and the column is left as
-// it was. A column no policy reads still retypes.
+// it was. The detail gives the manual path that fits the change: rewrite
+// the policies before a drop, recreate them around an in-place type
+// change, and move them to a new column for a type change that rewrites.
+// A column no policy reads still retypes.
 func TestRunRefusesChangingAColumnAPolicyReads(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -52,10 +56,12 @@ func TestRunRefusesChangingAColumnAPolicyReads(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		statement string
+		fix       planner.PolicyFix
 	}{
-		{name: "a widening the server would relabel", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE varchar(64)"},
-		{name: "a type change to text", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE text"},
-		{name: "a column drop", statement: "ALTER TABLE %s.documents DROP COLUMN owner_id"},
+		{name: "a widening the server would relabel", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE varchar(64)", fix: planner.PolicyFixRecreateAroundChange},
+		{name: "a type change to text", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE text", fix: planner.PolicyFixRecreateAroundChange},
+		{name: "a type change that rewrites", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE bigint USING owner_id::bigint", fix: planner.PolicyFixExpandContract},
+		{name: "a column drop", statement: "ALTER TABLE %s.documents DROP COLUMN owner_id", fix: planner.PolicyFixRewritePolicies},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			schema := seed(t)
@@ -70,8 +76,8 @@ func TestRunRefusesChangingAColumnAPolicyReads(t *testing.T) {
 			}
 			assert.Equal(t, policies, v.DependentPolicies)
 			assert.Empty(t, v.DependentViews)
-			assert.Contains(t, v.Detail, "a column read by policy "+policies[0]+", "+policies[1])
-			assert.Contains(t, v.Detail, "drop those policies, run the change, and recreate them in one transaction, then re-plan")
+			assert.Contains(t, v.Detail, "a column read by policies "+policies[0]+", "+policies[1]+",")
+			assert.True(t, strings.HasSuffix(v.Detail, "; "+tc.fix.Help()), v.Detail)
 			assert.Equal(t, "character varying(36)", columnType(t, pool, schema, "documents", "owner_id"))
 		})
 	}

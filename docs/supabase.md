@@ -265,9 +265,11 @@ outcome; they do not assume every unsuccessful change rolls back completely.
   statement workflow where available; see [capabilities.md](capabilities.md)
 - PostgreSQL refuses to retype or drop a column an RLS policy reads, even a
   `varchar` widening it would otherwise run in place. pg-sprite refuses the change
-  at plan time with `dependent-policy` and names the policies. Drop them, run the
+  at plan time with `dependent-policy`, names the policies, and gives the manual
+  path. For an in-place change like that widening, drop the policies, run the
   change, and recreate them in one transaction, so no request sees the table
-  without them
+  without them. A change that rewrites the table, such as `uuid` to `text`, needs a
+  new column of the new type that the policies move to
 - Work on tables your app owns. Leave Supabase-managed schemas such as
   `auth` and `storage` to Supabase
 - Realtime coverage is limited to INSERT/UPDATE subscriptions during the tested
