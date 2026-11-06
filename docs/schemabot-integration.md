@@ -365,12 +365,18 @@ the pool besides; an importer running many tables from one process sizes for bot
 - **From the pool:** `Copier.Workers` connections (default `copier.DefaultWorkers`) while the
   copy runs, one at a time for the capture's flushes and the checkpoint saves, one for the
   verification pass, and one for the swap transaction. A pool smaller than the copy's workers
-  slows the copy; it does not stall the run. `Runner.Run` admits any pool, but a pool of only
-  the workers leaves the catch-up's flushes waiting behind the copy while the slot's lag
-  grows, so the front doors (`migrate.Run` and `migrate.RunDesired`) refuse a pool below
-  `migrate.CopySwapMinConns(Copier)` — the workers plus one connection for the catch-up's
-  flushes and one for the checkpoint saves and progress reads, six with the default
-  workers — before the preflight, so nothing is created. The check also runs when a stopped
+  slows the copy; it does not stall the run. `Runner.Run` admits any pool and reports nothing
+  about its size: a pool of only the workers does not fail the run, it leaves the catch-up's
+  flushes waiting behind the copy while the slot's lag grows, and a source write reaches the
+  shadow only once a worker frees its connection
+  (`TestRunnerCopySwapFlushWaitsBehindTheCopyWhenThePoolHoldsOnlyTheWorkers`). A host that
+  calls `Runner.Run` directly sizes its pool with `migrate.CopySwapMinConns(Copier)` itself;
+  the front doors (`migrate.Run` and `migrate.RunDesired`) refuse a pool below it before the
+  preflight, so nothing is created. The floor is the workers plus two, six with the default
+  workers: one connection beyond the workers keeps the flushes landing while every worker
+  holds its connection (`TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits`), and the
+  second is headroom so the flushes and the checkpoint saves and progress reads do not queue
+  behind one another. The check also runs when a stopped
   run resumes or is restarted, so a run stopped before the pool was shrunk is refused, and
   keeps its slot or fence and its checkpoint row, until the pool is raised again. The floor
   is per run: a host running several copy-and-swap runs at once from one pool sizes it for

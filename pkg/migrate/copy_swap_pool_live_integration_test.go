@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -23,18 +24,23 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// The tests here prove what the copy-and-swap route's pool floor buys. Each
-// copy worker holds a pool connection for as long as its chunk transaction
-// lasts, and a chunk whose insert meets an uncommitted shadow row under one
-// of its keys lasts until that row's transaction ends. With every worker
-// held that way, a pool of CopySwapMinConns still has a connection for the
-// catch-up's flush and one for the checkpoint saves, so a write to the
-// source lands in the shadow while the copy stands still; a pool of only
-// the workers has neither, and the same write waits in the stream until a
-// worker frees its connection. The tests stand the workers still by holding
-// shadow rows themselves: a transaction inserts, and does not commit, a
-// shadow row for one key of each held chunk, and the chunk's insert waits
-// on that transaction's id.
+// The tests here prove that the copy-and-swap route's pool needs a
+// connection beyond its copy workers. Each copy worker holds a pool
+// connection for as long as its chunk transaction lasts, and a chunk whose
+// insert meets an uncommitted shadow row under one of its keys lasts until
+// that row's transaction ends. With every worker held that way, a pool of
+// CopySwapMinConns still has a connection for the catch-up's flush, so a
+// write to the source lands in the shadow while the copy stands still; a
+// pool of only the workers has none, and the same write waits in the stream
+// until a worker frees its connection. What they pin is that one connection
+// beyond the workers is required: while every worker is held the watermark
+// does not move, so no checkpoint save is due and the floor's second spare
+// connection has nothing to serve. That second connection is headroom for
+// the flush and the saves to proceed independently, and its count is pinned
+// by TestCopySwapMinConnsIsTheWorkersAndTwo. The tests stand the workers
+// still by holding shadow rows themselves: a transaction inserts, and does
+// not commit, a shadow row for one key of each held chunk, and the chunk's
+// insert waits on that transaction's id.
 
 // poolFloorWorkers is how many copy workers the runs here use, so the floor
 // they are held to is this many plus the two the route reserves.
@@ -129,9 +135,9 @@ func (f liveFixture) runPool(t *testing.T, size int32) *pgxpool.Pool {
 // it holds are not cut until a chunk of the first half has landed.
 func (f liveFixture) waitForCopyWriting(t *testing.T) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	pollUntil(t, func(ctx context.Context) (bool, error) {
 		var writing bool
-		err := f.pool.QueryRow(t.Context(), `
+		err := f.pool.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1
 				FROM pg_catalog.pg_locks
@@ -139,9 +145,65 @@ func (f liveFixture) waitForCopyWriting(t *testing.T) {
 				  AND granted
 				  AND mode = 'RowExclusiveLock'
 				  AND relation = to_regclass($1)::oid)`, f.shadowName()).Scan(&writing)
-		require.NoError(t, err)
-		return writing
-	}, poolFloorDeadline, poolFloorPoll, "a transaction of the run holds the shadow for writing")
+		if err != nil {
+			return false, fmt.Errorf("read the shadow's locks: %w", err)
+		}
+		return writing, nil
+	}, "a transaction of the run holds the shadow for writing")
+}
+
+// pollUntil polls cond until it reports true, failing the test at
+// poolFloorDeadline. A query error stops the poll at once and fails the
+// test on the test's goroutine with that error, rather than waiting out
+// the deadline.
+func pollUntil(t *testing.T, cond func(context.Context) (bool, error), msg string) {
+	t.Helper()
+	var err error
+	require.Eventually(t, func() bool {
+		var ok bool
+		ok, err = cond(t.Context())
+		return ok || err != nil
+	}, poolFloorDeadline, poolFloorPoll, msg)
+	require.NoError(t, err, msg)
+}
+
+// pollNever polls cond for window and asserts it never reports true. A
+// query error stops the poll at once and fails the test with that error.
+func pollNever(t *testing.T, cond func(context.Context) (bool, error), window time.Duration, msg string) {
+	t.Helper()
+	var err error
+	held := assert.Never(t, func() bool {
+		var ok bool
+		ok, err = cond(t.Context())
+		return ok || err != nil
+	}, window, poolFloorPoll, msg)
+	if !held {
+		require.NoError(t, err, msg)
+	}
+}
+
+// startRun runs run on a goroutine the test owns and returns the wait for
+// it, which fails the test if the run has not returned by
+// poolFloorDeadline instead of waiting for the package timeout. The
+// goroutine is also waited for at cleanup, after the holds registered
+// later have been released, so it never outlives the test.
+func startRun(t *testing.T, run func()) (wait func()) {
+	t.Helper()
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	wg.Go(func() {
+		defer close(done)
+		run()
+	})
+	t.Cleanup(wg.Wait)
+	return func() {
+		t.Helper()
+		select {
+		case <-done:
+		case <-time.After(poolFloorDeadline):
+			require.FailNow(t, "the run did not return after the holds were released")
+		}
+	}
 }
 
 // holdShadowRows opens a transaction on the fixture's own pool that
@@ -151,11 +213,22 @@ func (f liveFixture) waitForCopyWriting(t *testing.T) {
 // rollback leaves nothing behind: the chunk then inserts the source row
 // with no conflict. The columns are the workload table's; the key is
 // written explicitly, which its identity, generated by default, allows.
+// The hold first requires that no row at or above its lowest key has been
+// copied yet, the premise that each held chunk is still ahead of the copy;
+// a copy that outran the hold fails here by name instead of as a unique
+// violation on the insert.
 func (f liveFixture) holdShadowRows(t *testing.T, keys []int64) pgx.Tx {
 	t.Helper()
 	tx, err := f.pool.Begin(t.Context())
 	require.NoError(t, err)
 	t.Cleanup(func() { releaseLeftover(t, tx) })
+	var copied int64
+	err = tx.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM `+f.shadowName()+`
+		WHERE id >= $1`, slices.Min(keys)).Scan(&copied)
+	require.NoError(t, err)
+	require.Zero(t, copied, "shadow rows copied at or above key %d before the hold opened", slices.Min(keys))
 	_, err = tx.Exec(t.Context(), `
 		INSERT INTO `+f.shadowName()+` (id, uniq, amount, label, blob, updated_at)
 		SELECT id, uniq, amount, label, blob, updated_at
@@ -209,11 +282,10 @@ func (f liveFixture) blockedWorkers(ctx context.Context) (int, error) {
 // waitForBlockedWorkers waits until exactly want copy workers are blocked.
 func (f liveFixture) waitForBlockedWorkers(t *testing.T, want int) {
 	t.Helper()
-	require.Eventuallyf(t, func() bool {
-		n, err := f.blockedWorkers(t.Context())
-		require.NoError(t, err)
-		return n == want
-	}, poolFloorDeadline, poolFloorPoll, "%d copy workers blocked on a held shadow row", want)
+	pollUntil(t, func(ctx context.Context) (bool, error) {
+		n, err := f.blockedWorkers(ctx)
+		return n == want, err
+	}, fmt.Sprintf("%d copy workers blocked on a held shadow row", want))
 }
 
 // assertBlockedWorkers asserts that exactly want copy workers are blocked
@@ -225,19 +297,23 @@ func (f liveFixture) assertBlockedWorkers(t *testing.T, want int) {
 	assert.Equal(t, want, n, "copy workers blocked on a held shadow row")
 }
 
-// shadowHasLabel reports whether the shadow row under id carries label.
-func (f liveFixture) shadowHasLabel(t *testing.T, id int64, label string) bool {
-	t.Helper()
-	var got string
-	err := f.pool.QueryRow(t.Context(), `
-		SELECT label
-		FROM `+f.shadowName()+`
-		WHERE id = $1`, id).Scan(&got)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false
+// shadowHasLabel returns the poll condition that the shadow row under id
+// carries label.
+func (f liveFixture) shadowHasLabel(id int64, label string) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		var got string
+		err := f.pool.QueryRow(ctx, `
+			SELECT label
+			FROM `+f.shadowName()+`
+			WHERE id = $1`, id).Scan(&got)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("read shadow row %d: %w", id, err)
+		}
+		return got == label, nil
 	}
-	require.NoError(t, err)
-	return got == label
 }
 
 // writeSource updates the label of the source row under id, the write
@@ -285,12 +361,11 @@ func (w *landedWatch) waitForLanded(t *testing.T, key int64) {
 // holds one key of each chunk of the second half, so the first half lands
 // and the four workers then stand on the four held chunks, each holding a
 // connection. A source write to key 1, a landed key, is flushed into the
-// shadow on one of the two connections the floor keeps, and the checkpoint
-// save that reported the first half landed went through on the other.
-// Releasing the first held chunk alone lands it and no more — the freed
-// worker finds only the empty chunk above the last key and is done, and
-// three workers still wait — which is the control that the holds are what
-// stands the workers still. Releasing the rest lets the run finish, and
+// shadow on a connection the floor keeps beyond the workers. Releasing the
+// first held chunk alone lands it and no more — the freed worker finds
+// only the empty chunk above the last key and is done, and three workers
+// still wait — which is the control that the holds are what stands the
+// workers still. Releasing the rest lets the run finish, and
 // both oracles hold on the result.
 func TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits(t *testing.T) {
 	shape := testutil.WorkloadShape{IDType: "integer"}
@@ -306,12 +381,11 @@ func TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits(t *testing.T) {
 	opts.CopySwap.OnCheckpoint = watch.onCheckpoint
 
 	var (
-		wg sync.WaitGroup
-		v  verdict.Verdict
-		// runErr is set once wg is done.
+		v verdict.Verdict
+		// runErr is set once waitForRun returns.
 		runErr error
 	)
-	wg.Go(func() {
+	waitForRun := startRun(t, func() {
 		v, runErr = migrate.Run(context.WithoutCancel(t.Context()), pool, parseOne(t, fmt.Sprintf(alter, f.table.Qualified())), opts)
 	})
 
@@ -323,8 +397,8 @@ func TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits(t *testing.T) {
 	watch.waitForLanded(t, chunkKey(firstHeldChunk)-1)
 
 	f.writeSource(t, 1, flushedLabel)
-	require.Eventually(t, func() bool { return f.shadowHasLabel(t, 1, flushedLabel) },
-		poolFloorDeadline, poolFloorPoll, "the write to a landed key is flushed into the shadow while every worker waits")
+	pollUntil(t, f.shadowHasLabel(1, flushedLabel),
+		"the write to a landed key is flushed into the shadow while every worker waits")
 	f.assertBlockedWorkers(t, poolFloorWorkers)
 
 	release(t, holdFirst)
@@ -332,7 +406,7 @@ func TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits(t *testing.T) {
 	f.waitForBlockedWorkers(t, poolFloorWorkers-1)
 
 	release(t, holdRest)
-	wg.Wait()
+	waitForRun()
 	require.NoError(t, runErr)
 	require.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome, "%s: %s", v.Reason, v.Detail)
 	f.assertZeroDiff(t, shape, alter)
@@ -344,12 +418,13 @@ func TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits(t *testing.T) {
 // wrongly would reach it. With the four workers standing on the held
 // chunks, the source write to key 1 stays out of the shadow for the whole
 // watched window: the catch-up's flush and its progress reads are queued
-// on the pool behind the workers. The catch-up reads no keepalive while
-// it waits there, so the server's sender timeout is set to outlast the
-// window; under the live fixture's short one the server would drop the
-// stream instead, which is the other face of the same starvation.
-// Releasing the hold frees the workers, the write lands, and the run
-// finishes.
+// on the pool behind the workers. The catch-up reads, and so answers, no
+// keepalive while it waits there, and the server ends a replication
+// connection that leaves a keepalive unanswered past wal_sender_timeout.
+// The watched window and the waits around it come close to the live
+// fixture's short timeout, so this server allows a minute and the test
+// stays about the pool rather than the stream. Releasing the hold frees
+// the workers, the write lands, and the run finishes.
 func TestRunnerCopySwapFlushWaitsBehindTheCopyWhenThePoolHoldsOnlyTheWorkers(t *testing.T) {
 	shape := testutil.WorkloadShape{IDType: "integer"}
 	f := newLiveFixtureOn(t, shape, "wal_sender_timeout=60s")
@@ -370,12 +445,11 @@ func TestRunnerCopySwapFlushWaitsBehindTheCopyWhenThePoolHoldsOnlyTheWorkers(t *
 	require.NoError(t, err)
 
 	var (
-		wg     sync.WaitGroup
 		result schemachange.Result
-		// runErr is set once wg is done.
+		// runErr is set once waitForRun returns.
 		runErr error
 	)
-	wg.Go(func() {
+	waitForRun := startRun(t, func() {
 		result, runErr = runner.Run(context.WithoutCancel(t.Context()), pool, target, parseOne(t, fmt.Sprintf(alter, f.table.Qualified())))
 	})
 
@@ -387,14 +461,14 @@ func TestRunnerCopySwapFlushWaitsBehindTheCopyWhenThePoolHoldsOnlyTheWorkers(t *
 	f.waitForBlockedWorkers(t, poolFloorWorkers)
 
 	f.writeSource(t, 1, flushedLabel)
-	assert.Never(t, func() bool { return f.shadowHasLabel(t, 1, flushedLabel) },
-		poolStarvedWindow, poolFloorPoll, "the write to a landed key reached the shadow with no connection free for the flush")
+	pollNever(t, f.shadowHasLabel(1, flushedLabel), poolStarvedWindow,
+		"the write to a landed key reached the shadow with no connection free for the flush")
 	f.assertBlockedWorkers(t, poolFloorWorkers)
 
 	release(t, hold)
-	require.Eventually(t, func() bool { return f.shadowHasLabel(t, 1, flushedLabel) },
-		poolFloorDeadline, poolFloorPoll, "the write is flushed once the workers free their connections")
-	wg.Wait()
+	pollUntil(t, f.shadowHasLabel(1, flushedLabel),
+		"the write is flushed once the workers free their connections")
+	waitForRun()
 	require.NoError(t, runErr)
 	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
 	f.assertZeroDiff(t, shape, alter)
