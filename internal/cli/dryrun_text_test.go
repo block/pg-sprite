@@ -398,6 +398,39 @@ func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
 	assert.NotContains(t, text, "knows no safe path")
 }
 
+// A refusal because row-level security policies read the changed column
+// names those policies in the refusal itself, and the help line gives
+// the manual path for the change: for an in-place type change, recreating
+// them in the same transaction, so the table is never left without them.
+func TestDryRunTextDependentPolicyRefusalNamesThePolicies(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "documents", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.documents ALTER COLUMN owner_id TYPE text",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{{
+			Operation:         "ALTER COLUMN owner_id TYPE text",
+			Route:             planner.RouteRefuse,
+			Reason:            planner.ReasonDependentPolicy,
+			DependentPolicies: []string{`"own_rows" ON "app"."documents"`},
+			PolicyFix:         planner.PolicyFixRecreateAroundChange,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, `error[unsupported-statement]: refused — ALTER COLUMN owner_id TYPE text changes a column read by policy "own_rows" ON "app"."documents", and PostgreSQL refuses to retype or drop a column while a policy reads it`)
+	assert.Contains(t, text, "help: this type change runs in place, without rewriting the table, so in one transaction drop those policies, run the change, and recreate them")
+	assert.Contains(t, text, onlineDDLReferenceURL+"#dependent-policy")
+	assert.NotContains(t, text, "knows no safe path")
+	assert.NotContains(t, text, "those views")
+}
+
 // The refusal sentence explains the first refused operation, the same one
 // the run's verdict explains, even when a later operation is refused
 // because views read its column; that operation's views still appear in

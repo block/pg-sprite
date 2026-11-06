@@ -134,6 +134,9 @@ refusal — never a silently wrong or incomplete result:
   `REPLICA IDENTITY` first, then re-plan.
 - **Retyping or dropping a column a view reads is refused** — PostgreSQL would
   refuse it anyway; the plan names the views to drop or redefine first.
+- **Retyping or dropping a column a row-level security policy reads is refused**
+  — PostgreSQL would refuse it anyway; the plan names the policies to drop and
+  recreate around the change.
 - **Destructive statements need a typed acknowledgement** — `migrate --alter`
   refuses a statement that drops a column, a constraint, or a `NOT NULL` with
   `destructive-change` (exit 2) on every route and in `--dry-run`, unless

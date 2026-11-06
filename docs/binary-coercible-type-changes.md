@@ -365,6 +365,10 @@ statement rolls back; the time and lock are spent regardless).
   have been a relabel. The view has to be dropped and recreated around the change. The planner
   reads which views and materialized views read the column and refuses the change as
   `dependent-view`, naming them, before the statement reaches the server.
+- **A row-level security policy reading the column blocks the statement outright** —
+  `cannot alter type of a column used in a policy definition` — for the same reason, wherever
+  the policy is defined. The planner refuses the change as `dependent-policy`, naming the
+  policies, before the statement reaches the server.
 - **A stored generated column whose expression references the altered column blocks the
   statement the same way** — `cannot alter type of a column used by a generated column`
   (`ERRCODE_FEATURE_NOT_SUPPORTED`), again regardless of whether the change would have been a

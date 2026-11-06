@@ -581,6 +581,13 @@ type Verdict struct {
 	// before the change can run. The same list the plan report's
 	// dependent-view decision carries. Empty for every other verdict.
 	DependentViews []string `json:"dependent_views,omitempty"`
+	// DependentPolicies names the row-level security policies that read
+	// the column a refused statement retypes or drops, each rendered
+	// "policy" ON "schema"."table" with every identifier quoted, sorted:
+	// the policies to drop before the change and recreate after it. The
+	// same list the plan report's dependent-policy decision carries. Empty
+	// for every other verdict.
+	DependentPolicies []string `json:"dependent_policies,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what

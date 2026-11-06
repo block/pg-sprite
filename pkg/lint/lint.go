@@ -22,8 +22,10 @@ import (
 // planner reason to the embedded Reasons vocabulary; version 5 added the
 // cascading-drop planner reason to it; version 6 raised the
 // app-breaking-rename finding from warning to error, because the engine
-// now refuses the rename unless the override names the table.
-const FormatVersion = 6
+// now refuses the rename unless the override names the table; version 7
+// added the dependent-policy planner reason to the embedded Reasons
+// vocabulary.
+const FormatVersion = 7
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string

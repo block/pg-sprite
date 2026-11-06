@@ -107,11 +107,12 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, err
 		}
 		if retypesOrDropsColumn(changes) {
-			views, err := preflight.ColumnDependentViews(ctx, pool, req.Schema, ds.Table())
+			deps, err := preflight.ReadColumnDependents(ctx, pool, req.Schema, ds.Table())
 			if err != nil {
 				return plan.Report{}, err
 			}
-			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = views.Tree, views.Drop, views.Own
+			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
+			facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 		}
 	}
 	report.TableExists = &tableExists
@@ -174,7 +175,7 @@ func addColumnProofs(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 }
 
 // retypesOrDropsColumn reports whether any change retypes or drops a
-// column, the two changes a view reading the column blocks.
+// column, the two changes a view or policy reading the column blocks.
 func retypesOrDropsColumn(changes []schemadiff.Change) bool {
 	return slices.ContainsFunc(changes, func(ch schemadiff.Change) bool {
 		return ch.Kind == schemadiff.ChangeAlterType || ch.Kind == schemadiff.ChangeDropColumn

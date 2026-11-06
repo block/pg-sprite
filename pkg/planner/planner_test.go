@@ -222,6 +222,88 @@ func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
 	assert.Equal(t, []string{`"app"."child_tags"`}, plan.Decisions[0].DependentViews)
 }
 
+// PostgreSQL refuses to retype or drop a column a row-level security
+// policy reads, so either change on such a column is refused with the
+// policies named, even a type change that would otherwise relabel in
+// place. The manual path follows what the change would do without the
+// policies: a drop needs them rewritten, an in-place type change can run
+// between dropping and recreating them, and a rewrite needs a new column.
+// A rename, which the policy follows, and changes to columns no policy
+// reads classify as usual.
+func TestClassifyRefusesChangingAColumnAPolicyReads(t *testing.T) {
+	policies := []string{`"own_rows" ON "public"."documents"`, `"team_rows" ON "public"."teams"`}
+	facts := planner.Facts{
+		ColumnTypes:           map[string]string{"owner_id": "character varying(36)", "label": "text"},
+		DependentPolicies:     map[string][]string{"owner_id": policies},
+		DropDependentPolicies: map[string][]string{"owner_id": policies},
+		OwnDependentPolicies:  map[string][]string{"owner_id": policies},
+	}
+	for sql, fix := range map[string]planner.PolicyFix{
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE varchar(64)":               planner.PolicyFixRecreateAroundChange,
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE text":                      planner.PolicyFixRecreateAroundChange,
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE uuid USING owner_id::uuid": planner.PolicyFixExpandContract,
+		"ALTER TABLE documents DROP COLUMN owner_id":                                 planner.PolicyFixRewritePolicies,
+		"ALTER TABLE ONLY documents ALTER COLUMN owner_id TYPE text":                 planner.PolicyFixRecreateAroundChange,
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		d := plan.Decisions[0]
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonDependentPolicy, d.Reason, sql)
+		assert.Equal(t, policies, d.DependentPolicies, sql)
+		assert.Equal(t, fix, d.PolicyFix, sql)
+		assert.Empty(t, d.DependentViews, sql)
+		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+	}
+
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE documents RENAME COLUMN owner_id TO owner": planner.ReasonAppBreakingRename,
+		"ALTER TABLE documents DROP COLUMN label":               planner.ReasonMetadataOnly,
+		"ALTER TABLE documents ALTER COLUMN label TYPE text":    planner.ReasonBinaryCoercible,
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+		assert.Empty(t, plan.Decisions[0].DependentPolicies, sql)
+	}
+}
+
+// A policy on a partition or inheritance child counts against a
+// recursive change and not against one under ONLY, and a recursive drop
+// counts only the copies of the column it drops, the same reach the
+// dependent-view refusal judges by. A column both a view and a policy read
+// is refused for the view first.
+func TestClassifyJudgesDependentPoliciesByWhatTheChangeReaches(t *testing.T) {
+	childPolicy := []string{`"child_rows" ON "app"."documents_child"`}
+	facts := planner.Facts{
+		ColumnTypes:           map[string]string{"owner_id": "character varying(36)", "tag": "text", "email": "text"},
+		DependentPolicies:     map[string][]string{"owner_id": childPolicy, "tag": childPolicy, "email": childPolicy},
+		DropDependentPolicies: map[string][]string{"owner_id": childPolicy, "email": childPolicy},
+		DependentViews:        map[string][]string{"email": {`"app"."emails"`}},
+		DropDependentViews:    map[string][]string{"email": {`"app"."emails"`}},
+	}
+	for sql, want := range map[string]planner.Reason{
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE text":      planner.ReasonDependentPolicy,
+		"ALTER TABLE ONLY documents ALTER COLUMN owner_id TYPE text": planner.ReasonBinaryCoercible,
+		"ALTER TABLE documents DROP COLUMN owner_id":                 planner.ReasonDependentPolicy,
+		"ALTER TABLE documents DROP COLUMN tag":                      planner.ReasonMetadataOnly,
+		"ALTER TABLE documents ALTER COLUMN tag TYPE varchar(10)":    planner.ReasonDependentPolicy,
+		"ALTER TABLE documents DROP COLUMN email":                    planner.ReasonDependentView,
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, want, plan.Decisions[0].Reason, sql)
+		if want == planner.ReasonDependentPolicy {
+			assert.Equal(t, childPolicy, plan.Decisions[0].DependentPolicies, sql)
+		} else {
+			assert.Empty(t, plan.Decisions[0].DependentPolicies, sql)
+		}
+	}
+}
+
 // CASCADE also drops whatever depends on the target, objects the
 // statement does not name, so every drop with it is refused, from the
 // statement alone and whatever the live facts say, while the default
@@ -751,6 +833,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonPartitionParentLock,
 		planner.ReasonReplicaIdentity,
 		planner.ReasonDependentView,
+		planner.ReasonDependentPolicy,
 		planner.ReasonCascadingDrop,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())
