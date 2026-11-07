@@ -359,9 +359,11 @@ The submitted form is already PostgreSQL's safe online idiom (for example
 written and does not block the table while it runs.
 
 `VALIDATE CONSTRAINT` is the idiom only in a statement of its own, or beside other
-`VALIDATE`s. One `ALTER TABLE` holds the strongest lock any of its operations needs
-for the whole statement, so a `VALIDATE` beside any other operation scans under that
-lock. The planner classifies it as [`safer-idiom`](#safer-idiom), and the statement
+operations that take `SHARE UPDATE EXCLUSIVE` alone: another `VALIDATE`, `SET
+STATISTICS`, a column's `SET` / `RESET` options, and every table storage parameter
+except `user_catalog_table`. One `ALTER TABLE` holds the strongest lock any of its
+operations needs for the whole statement, so a `VALIDATE` beside any other operation,
+`SET STORAGE` included, scans under that lock. The planner classifies it as [`safer-idiom`](#safer-idiom), and the statement
 is refused with [`rewrite-required`](#rewrite-required) and the advice to submit each
 operation as its own statement.
 
@@ -667,7 +669,11 @@ which blocks reads and writes, and `SHARE ROW EXCLUSIVE` for a foreign key, whic
 blocks writes. On its own, `VALIDATE` takes only `SHARE UPDATE EXCLUSIVE`, which
 blocks neither. Commit before the `VALIDATE` so it runs in a transaction of its own.
 
-Lint matches tables by the name each statement gives, so it does not see the lock a
+Lint follows the block the way PostgreSQL does. A `BEGIN` inside an open block keeps
+its locks. `ROLLBACK TO SAVEPOINT` releases the locks taken since the savepoint, and
+`RELEASE SAVEPOINT` keeps them. `REINDEX TABLE` holds `SHARE` on the table. An earlier
+statement that takes `SHARE UPDATE EXCLUSIVE` alone, such as `SET STATISTICS`, does
+not count. Lint matches tables by the name each statement gives, so it does not see the lock a
 foreign key takes on the table it references. Only `lint` reports this code: it is a
 property of the script, and `migrate` takes one statement at a time.
 

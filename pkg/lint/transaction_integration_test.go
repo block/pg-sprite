@@ -201,3 +201,86 @@ func TestServerHoldsTheEarlierLockWhileAValidateInTheSameTransactionScans(t *tes
 			locksAfter(t, schema, "ALTER TABLE %[1]s.t VALIDATE CONSTRAINT t_old"))
 	})
 }
+
+// Lint flags a VALIDATE inside a block exactly when the server, at that
+// point, holds a lock on the table that blocks reads or writes. Each case
+// runs the statements before the VALIDATE on one session and reads the
+// locks it holds: a nested BEGIN keeps them, ROLLBACK TO SAVEPOINT
+// releases the ones taken since the savepoint while RELEASE keeps them,
+// REINDEX TABLE holds SHARE, and SET STATISTICS, a column option, and
+// most storage parameters hold only SHARE UPDATE EXCLUSIVE.
+func TestLintFlagsAValidateExactlyWhenTheServerHoldsABlockingLock(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	blocking := map[string]bool{
+		"ShareLock": true, "ShareRowExclusiveLock": true, "ExclusiveLock": true, "AccessExclusiveLock": true,
+	}
+	for _, tc := range []struct {
+		name  string
+		stmts []string
+		held  bool
+	}{
+		{"nested begin", []string{"ALTER TABLE %[1]s.t ADD COLUMN x int", "BEGIN"}, true},
+		{"reindex table", []string{"REINDEX TABLE %[1]s.t"}, true},
+		{"set storage", []string{"ALTER TABLE %[1]s.t ALTER COLUMN n SET STORAGE PLAIN"}, true},
+		{"user_catalog_table", []string{"ALTER TABLE %[1]s.t SET (user_catalog_table = true)"}, true},
+		{"set statistics", []string{"ALTER TABLE %[1]s.t ALTER COLUMN n SET STATISTICS 500"}, false},
+		{"column option", []string{"ALTER TABLE %[1]s.t ALTER COLUMN n SET (n_distinct = 100)"}, false},
+		{"fillfactor", []string{"ALTER TABLE %[1]s.t SET (fillfactor = 70)"}, false},
+		{"autovacuum reset", []string{"ALTER TABLE %[1]s.t RESET (autovacuum_enabled, toast.autovacuum_enabled)"}, false},
+		{"rolled back to a savepoint", []string{"SAVEPOINT s", "ALTER TABLE %[1]s.t ADD COLUMN x int", "ROLLBACK TO s"}, false},
+		{"locked before the savepoint", []string{
+			"ALTER TABLE %[1]s.t ADD COLUMN y int", "SAVEPOINT s", "ALTER TABLE %[1]s.t ADD COLUMN x int", "ROLLBACK TO s",
+		}, true},
+		{"released savepoint", []string{"SAVEPOINT s", "ALTER TABLE %[1]s.t ADD COLUMN x int", "RELEASE s"}, true},
+		{"rolled back to an outer savepoint", []string{
+			"SAVEPOINT a", "SAVEPOINT b", "ALTER TABLE %[1]s.t ADD COLUMN x int", "ROLLBACK TO a",
+		}, false},
+		{"rolled back to an inner savepoint", []string{
+			"SAVEPOINT a", "ALTER TABLE %[1]s.t ADD COLUMN y int", "SAVEPOINT b", "ALTER TABLE %[1]s.t ADD COLUMN x int", "ROLLBACK TO b",
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := testutil.NewSchema(t, pool)
+			for _, ddl := range []string{
+				"CREATE TABLE %[1]s.t (n int)",
+				"CREATE INDEX t_n_idx ON %[1]s.t (n)",
+				"ALTER TABLE %[1]s.t ADD CONSTRAINT t_n_pos CHECK (n > 0) NOT VALID",
+			} {
+				_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
+				require.NoError(t, err)
+			}
+			stmts := make([]string, len(tc.stmts))
+			for i, stmt := range tc.stmts {
+				stmts[i] = strings.ReplaceAll(stmt, "%[1]s", schema)
+			}
+			validate := fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT t_n_pos", schema)
+			report, err := lint.Check("BEGIN; " + strings.Join(stmts, "; ") + "; " + validate + "; COMMIT")
+			require.NoError(t, err)
+			assert.Equal(t, tc.held, hasCode(report, len(stmts)+2, lint.CodeValidateInTransaction),
+				"lint flags the VALIDATE exactly when a blocking lock is held")
+
+			conn, err := pool.Acquire(t.Context())
+			require.NoError(t, err)
+			defer conn.Release()
+			defer func() { _, _ = conn.Exec(context.WithoutCancel(t.Context()), "ROLLBACK") }()
+			for _, stmt := range append([]string{"BEGIN"}, stmts...) {
+				_, err := conn.Exec(t.Context(), stmt)
+				require.NoError(t, err, stmt)
+			}
+			var modes []string
+			require.NoError(t, conn.QueryRow(t.Context(), `SELECT pg_catalog.array_agg(mode)
+				FROM pg_catalog.pg_locks
+				WHERE pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()
+				  AND relation OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)`, schema+".t").Scan(&modes))
+			held := false
+			for _, mode := range modes {
+				held = held || blocking[mode]
+			}
+			assert.Equal(t, tc.held, held, "the server holds %v before the VALIDATE", modes)
+		})
+	}
+}

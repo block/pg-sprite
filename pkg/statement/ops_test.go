@@ -197,6 +197,16 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpSetColumnOptions, Column: "age"},
 		},
 		{
+			name: "set column option",
+			sql:  "ALTER TABLE t ALTER COLUMN age SET (n_distinct = 100)",
+			want: statement.Op{Kind: statement.OpSetColumnOptions, Column: "age"},
+		},
+		{
+			name: "set storage",
+			sql:  "ALTER TABLE t ALTER COLUMN age SET STORAGE PLAIN",
+			want: statement.Op{Kind: statement.OpSetColumnOptions, Column: "age", ColumnStorage: true},
+		},
+		{
 			name: "rename column",
 			sql:  "ALTER TABLE t RENAME COLUMN a TO b",
 			want: statement.Op{Kind: statement.OpRenameColumn, Column: "a", Name: "b"},
@@ -224,7 +234,12 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "set rel options",
 			sql:  "ALTER TABLE t SET (fillfactor = 70)",
-			want: statement.Op{Kind: statement.OpSetRelOptions},
+			want: statement.Op{Kind: statement.OpSetRelOptions, RelOptions: []string{"fillfactor"}},
+		},
+		{
+			name: "reset rel options",
+			sql:  "ALTER TABLE t RESET (fillfactor, toast.autovacuum_enabled)",
+			want: statement.Op{Kind: statement.OpSetRelOptions, RelOptions: []string{"fillfactor", "toast.autovacuum_enabled"}},
 		},
 		{
 			name: "add primary key",

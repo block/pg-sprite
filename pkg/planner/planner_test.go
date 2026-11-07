@@ -820,9 +820,11 @@ func TestRoutesVocabularyPinned(t *testing.T) {
 
 // A VALIDATE CONSTRAINT scans under the strongest lock its ALTER TABLE
 // takes, so it is the online idiom only when every operation in the
-// statement validates. Beside the NOT VALID add it validates, or any other
-// operation, it blocks, and no single safer statement exists.
-func TestClassifyValidateIsOnlineOnlyInAStatementThatOnlyValidates(t *testing.T) {
+// statement takes SHARE UPDATE EXCLUSIVE alone: another validation, SET
+// STATISTICS, a column option, or a storage parameter PostgreSQL changes
+// under that lock. Beside the NOT VALID add it validates, SET STORAGE, or
+// any other operation, it blocks, and no single safer statement exists.
+func TestClassifyValidateIsOnlineOnlyBesideNonBlockingOperations(t *testing.T) {
 	cases := []struct {
 		name   string
 		sql    string
@@ -833,6 +835,13 @@ func TestClassifyValidateIsOnlineOnlyInAStatementThatOnlyValidates(t *testing.T)
 		{"beside the not valid add", "ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID, VALIDATE CONSTRAINT c", planner.ReasonSaferIdiom},
 		{"beside a foreign key add", "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID, VALIDATE CONSTRAINT fk", planner.ReasonSaferIdiom},
 		{"beside an added column", "ALTER TABLE t ADD COLUMN x int, VALIDATE CONSTRAINT c", planner.ReasonSaferIdiom},
+		{"beside a set statistics", "ALTER TABLE t ALTER COLUMN n SET STATISTICS 500, VALIDATE CONSTRAINT c", planner.ReasonOnlineIdiom},
+		{"beside a column option", "ALTER TABLE t ALTER COLUMN n SET (n_distinct = 100), VALIDATE CONSTRAINT c", planner.ReasonOnlineIdiom},
+		{"beside a fillfactor", "ALTER TABLE t SET (fillfactor = 70), VALIDATE CONSTRAINT c", planner.ReasonOnlineIdiom},
+		{"beside a toast autovacuum reset", "ALTER TABLE t RESET (toast.autovacuum_enabled), VALIDATE CONSTRAINT c", planner.ReasonOnlineIdiom},
+		{"beside a set storage", "ALTER TABLE t ALTER COLUMN n SET STORAGE PLAIN, VALIDATE CONSTRAINT c", planner.ReasonSaferIdiom},
+		{"beside user_catalog_table", "ALTER TABLE t SET (user_catalog_table = true), VALIDATE CONSTRAINT c", planner.ReasonSaferIdiom},
+		{"beside an unlisted parameter", "ALTER TABLE t SET (fillfactor = 70, made_up = 1), VALIDATE CONSTRAINT c", planner.ReasonSaferIdiom},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

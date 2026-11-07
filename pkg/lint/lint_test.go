@@ -307,6 +307,21 @@ func TestCheckValidateInTransaction(t *testing.T) {
 		{name: "another table", script: "BEGIN; ALTER TABLE u ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT d; COMMIT"},
 		{name: "another schema", script: "BEGIN; ALTER TABLE a.t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE b.t VALIDATE CONSTRAINT c; COMMIT"},
 		{name: "after only validates", script: "BEGIN; ALTER TABLE t VALIDATE CONSTRAINT c; ALTER TABLE t VALIDATE CONSTRAINT d; COMMIT"},
+		{name: "after a nested begin", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; BEGIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{4}},
+		{name: "after a reindex table", script: "BEGIN; REINDEX TABLE t; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after a set storage", script: "BEGIN; ALTER TABLE t ALTER COLUMN n SET STORAGE PLAIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after user_catalog_table", script: "BEGIN; ALTER TABLE t SET (user_catalog_table = true); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after a set statistics", script: "BEGIN; ALTER TABLE t ALTER COLUMN n SET STATISTICS 500; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after a column option", script: "BEGIN; ALTER TABLE t ALTER COLUMN n SET (n_distinct = 100); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after a fillfactor", script: "BEGIN; ALTER TABLE t SET (fillfactor = 70); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after an autovacuum reset", script: "BEGIN; ALTER TABLE t RESET (autovacuum_enabled, toast.autovacuum_enabled); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "rolled back to a savepoint", script: "BEGIN; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "locked before the savepoint", script: "BEGIN; ALTER TABLE t ADD COLUMN y int; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{6}},
+		{name: "released savepoint", script: "BEGIN; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; RELEASE s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{5}},
+		{name: "rolled back to an outer savepoint", script: "BEGIN; SAVEPOINT a; SAVEPOINT b; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO a; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "rolled back twice to a savepoint", script: "BEGIN; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO s; ALTER TABLE t ADD COLUMN y int; ROLLBACK TO s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "rolled back to an inner savepoint", script: "BEGIN; SAVEPOINT a; ALTER TABLE t ADD COLUMN y int; SAVEPOINT b; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO b; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{7}},
+		{name: "released then rolled back to an outer savepoint", script: "BEGIN; SAVEPOINT a; SAVEPOINT b; ALTER TABLE t ADD COLUMN x int; RELEASE b; ROLLBACK TO a; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

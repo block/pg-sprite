@@ -12,23 +12,25 @@ import (
 func TestTransactionControlOf(t *testing.T) {
 	cases := []struct {
 		sql  string
-		want statement.TransactionControl
+		want statement.Transaction
 	}{
-		{"BEGIN", statement.TransactionBegin},
-		{"BEGIN ISOLATION LEVEL SERIALIZABLE", statement.TransactionBegin},
-		{"START TRANSACTION", statement.TransactionBegin},
-		{"COMMIT", statement.TransactionEnd},
-		{"END", statement.TransactionEnd},
-		{"ROLLBACK", statement.TransactionEnd},
-		{"ABORT", statement.TransactionEnd},
-		{"PREPARE TRANSACTION 'gid'", statement.TransactionEnd},
-		{"COMMIT AND CHAIN", statement.TransactionChain},
-		{"ROLLBACK AND CHAIN", statement.TransactionChain},
-		{"SAVEPOINT s", statement.TransactionNone},
-		{"RELEASE SAVEPOINT s", statement.TransactionNone},
-		{"ROLLBACK TO SAVEPOINT s", statement.TransactionNone},
-		{"COMMIT PREPARED 'gid'", statement.TransactionNone},
-		{"CREATE INDEX CONCURRENTLY i ON t (c)", statement.TransactionNone},
+		{"BEGIN", statement.Transaction{Control: statement.TransactionBegin}},
+		{"BEGIN ISOLATION LEVEL SERIALIZABLE", statement.Transaction{Control: statement.TransactionBegin}},
+		{"START TRANSACTION", statement.Transaction{Control: statement.TransactionBegin}},
+		{"COMMIT", statement.Transaction{Control: statement.TransactionEnd}},
+		{"END", statement.Transaction{Control: statement.TransactionEnd}},
+		{"ROLLBACK", statement.Transaction{Control: statement.TransactionEnd}},
+		{"ABORT", statement.Transaction{Control: statement.TransactionEnd}},
+		{"PREPARE TRANSACTION 'gid'", statement.Transaction{Control: statement.TransactionEnd}},
+		{"COMMIT AND CHAIN", statement.Transaction{Control: statement.TransactionChain}},
+		{"ROLLBACK AND CHAIN", statement.Transaction{Control: statement.TransactionChain}},
+		{"SAVEPOINT s", statement.Transaction{Control: statement.TransactionSavepoint, Savepoint: "s"}},
+		{"RELEASE SAVEPOINT s", statement.Transaction{Control: statement.TransactionRelease, Savepoint: "s"}},
+		{"ROLLBACK TO SAVEPOINT s", statement.Transaction{Control: statement.TransactionRollbackTo, Savepoint: "s"}},
+		{"ROLLBACK TO s", statement.Transaction{Control: statement.TransactionRollbackTo, Savepoint: "s"}},
+		{"RELEASE \"Mixed Case\"", statement.Transaction{Control: statement.TransactionRelease, Savepoint: "Mixed Case"}},
+		{"COMMIT PREPARED 'gid'", statement.Transaction{}},
+		{"CREATE INDEX CONCURRENTLY i ON t (c)", statement.Transaction{}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.sql, func(t *testing.T) {

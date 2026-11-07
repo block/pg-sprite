@@ -180,19 +180,29 @@ func Check(sql string) (Report, error) {
 			}
 			report.Findings = append(report.Findings, validations...)
 		}
-		control, err := statement.TransactionControlOf(stmt.SQL)
+		tx, err := statement.TransactionControlOf(stmt.SQL)
 		if err != nil {
 			return Report{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
-		switch control {
+		switch tx.Control {
 		case statement.TransactionBegin:
+			// A BEGIN inside an open block only warns: the block, and
+			// the locks it holds, carry on.
+			if !inBlock {
+				locked = lockedTables{}
+			}
 			inBlock = true
-			locked = lockedTables{}
 		case statement.TransactionEnd:
 			inBlock = false
 			locked = lockedTables{}
 		case statement.TransactionChain:
 			locked = lockedTables{}
+		case statement.TransactionSavepoint:
+			locked.savepoint(tx.Savepoint)
+		case statement.TransactionRelease:
+			locked.release(tx.Savepoint)
+		case statement.TransactionRollbackTo:
+			locked.rollbackTo(tx.Savepoint)
 		}
 	}
 	for _, f := range report.Findings {
@@ -254,10 +264,53 @@ func checkStatement(classifier *planner.ScriptClassifier, index int, stmt statem
 }
 
 // lockedTables are the tables earlier statements of the open transaction
-// block took a lock on, as each statement spelled the name. The zero value
-// is an empty set.
+// block took a lock that blocks reads or writes on, as each statement
+// spelled the name, with the savepoints set since the block opened. The
+// zero value is an empty set.
 type lockedTables struct {
-	tables []tableName
+	tables     []tableName
+	savepoints []savepoint
+}
+
+// savepoint is a savepoint of the open block and how many tables were
+// locked when it was set.
+type savepoint struct {
+	name   string
+	locked int
+}
+
+// savepoint records a SAVEPOINT. A name may repeat; the latest one wins.
+func (l *lockedTables) savepoint(name string) {
+	l.savepoints = append(l.savepoints, savepoint{name: name, locked: len(l.tables)})
+}
+
+// release records a RELEASE SAVEPOINT: the savepoint and every later one
+// are forgotten, and the locks taken since stay held.
+func (l *lockedTables) release(name string) {
+	if i := l.latest(name); i >= 0 {
+		l.savepoints = l.savepoints[:i]
+	}
+}
+
+// rollbackTo records a ROLLBACK TO SAVEPOINT: the locks taken since the
+// savepoint are released and every later savepoint is forgotten, while
+// the savepoint itself stays.
+func (l *lockedTables) rollbackTo(name string) {
+	if i := l.latest(name); i >= 0 {
+		l.tables = l.tables[:l.savepoints[i].locked]
+		l.savepoints = l.savepoints[:i+1]
+	}
+}
+
+// latest returns the index of the most recent savepoint named name, or -1
+// when the block has none, which PostgreSQL refuses.
+func (l *lockedTables) latest(name string) int {
+	for i := len(l.savepoints) - 1; i >= 0; i-- {
+		if l.savepoints[i].name == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // tableName is a table as a statement spelled it; Schema is empty when the
@@ -279,15 +332,15 @@ func (n tableName) matches(other tableName) bool {
 
 // check returns a validate-in-transaction finding for each VALIDATE
 // CONSTRAINT stmt runs on a table an earlier statement of the block
-// locked, then records the table stmt itself locks. A statement that only
-// validates takes SHARE UPDATE EXCLUSIVE, which blocks neither reads nor
-// writes, so it records nothing.
+// locked, then records the table stmt itself locks. An ALTER TABLE whose
+// every operation takes SHARE UPDATE EXCLUSIVE, which blocks neither
+// reads nor writes, records nothing.
 func (l *lockedTables) check(index int, stmt statement.SourceStatement) ([]Finding, error) {
 	st, err := statement.ParseOne(stmt.SQL)
 	if err != nil {
 		return nil, err
 	}
-	name := tableName{schema: st.Schema(), table: st.Table()}
+	name := lockedName(st)
 	if name.table == "" {
 		return nil, nil
 	}
@@ -313,12 +366,24 @@ func (l *lockedTables) check(index int, stmt statement.SourceStatement) ([]Findi
 		}
 	}
 	for _, op := range ops {
-		if op.Kind != statement.OpValidateConstraint {
+		if !planner.TakesShareUpdateExclusiveOnly(op) {
 			l.tables = append(l.tables, name)
 			break
 		}
 	}
 	return findings, nil
+}
+
+// lockedName names the table stmt locks, as stmt spelled it: the target
+// of an ALTER TABLE, a CREATE TABLE, or a CREATE INDEX, and the table a
+// REINDEX TABLE rebuilds the indexes of, which holds SHARE on it until
+// the block ends. The zero name means stmt locks no table lint can name.
+func lockedName(st statement.Statement) tableName {
+	rel := st.IndexRelation()
+	if st.Kind() == statement.KindReindex && rel.Kind == statement.IndexRelationTable {
+		return tableName{schema: rel.Schema, table: rel.Name}
+	}
+	return tableName{schema: st.Schema(), table: st.Table()}
 }
 
 // holds reports whether an earlier statement of the block locked a table
