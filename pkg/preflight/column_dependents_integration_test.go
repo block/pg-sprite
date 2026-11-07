@@ -437,6 +437,54 @@ func TestReadColumnDependentsTriggersAndGeneratedColumns(t *testing.T) {
 		"a trigger body and a statistics object do not block the change")
 }
 
+// ReadColumnDependents maps each generated column to its own copies: every
+// table's for the tree, the table's alone for ONLY, and for a drop the
+// copies a recursive DROP COLUMN removes, which leaves out a child that
+// declares the column itself. The server is the oracle: a statement that
+// drops the generated column and retypes the column it reads runs once
+// no copy outside the drop is left, and is refused while one is.
+func TestReadColumnDependentsGeneratedColumnCopies(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.ledger (id bigint, amount numeric(10, 2), total numeric GENERATED ALWAYS AS (amount * 2) STORED);
+		CREATE TABLE %[1]s.ledger_archive () INHERITS (%[1]s.ledger);
+		CREATE TABLE %[1]s.ledger_local (id bigint, amount numeric(10, 2), total numeric GENERATED ALWAYS AS (amount * 2) STORED);
+		ALTER TABLE %[1]s.ledger_local INHERIT %[1]s.ledger`, schema))
+	require.NoError(t, err)
+
+	copyOf := func(table string) string { return fmt.Sprintf(`"%s"."%s"."total"`, schema, table) }
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "ledger")
+	require.NoError(t, err)
+	everyCopy := []string{copyOf("ledger"), copyOf("ledger_archive"), copyOf("ledger_local")}
+	assert.Equal(t, map[string][]string{"total": everyCopy}, deps.GeneratedColumnCopies.Tree)
+	assert.Equal(t, map[string][]string{"total": {copyOf("ledger"), copyOf("ledger_archive")}}, deps.GeneratedColumnCopies.Drop,
+		"ledger_local declares total itself and keeps it")
+	assert.Equal(t, map[string][]string{"total": {copyOf("ledger")}}, deps.GeneratedColumnCopies.Own)
+	assert.Equal(t, everyCopy, deps.GeneratedColumns.Tree["amount"])
+
+	run := func(t *testing.T, detachLocal bool) error {
+		t.Helper()
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		if detachLocal {
+			_, err := tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %[1]s.ledger_local NO INHERIT %[1]s.ledger", schema))
+			require.NoError(t, err)
+		}
+		_, err = tx.Exec(t.Context(), fmt.Sprintf(
+			"ALTER TABLE %s.ledger ALTER COLUMN amount TYPE numeric(12, 2), DROP COLUMN total", schema))
+		return err
+	}
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, run(t, false), &pgErr, "the copy the drop leaves still reads amount")
+	require.NoError(t, run(t, true), "the drop removes every remaining copy before the type change")
+}
+
 // ReadColumnDependents maps each partition key column, named directly or
 // used in a key expression, to the partitioned tables whose key includes
 // it: the table's own key for the table alone, and a sub-partition's key

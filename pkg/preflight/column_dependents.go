@@ -37,6 +37,11 @@ type ColumnDependents struct {
 	// "schema"."table". A key on a partition that is itself partitioned
 	// counts on the tables a change reaches.
 	PartitionKeys DependentObjects
+	// GeneratedColumnCopies maps each generated column of the table to
+	// its own copies, rendered as GeneratedColumns renders them, so a
+	// drop of the generated column can be matched against the generated
+	// columns that read another column.
+	GeneratedColumnCopies DependentObjects
 }
 
 // DependentObjects names, per column, the dependent objects of one kind
@@ -84,11 +89,12 @@ func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table
 		return ColumnDependents{}, fmt.Errorf("read the objects that depend on the columns of %s: %w", name, err)
 	}
 	deps := ColumnDependents{
-		Views:            newDependentObjects(),
-		Policies:         newDependentObjects(),
-		Triggers:         newDependentObjects(),
-		GeneratedColumns: newDependentObjects(),
-		PartitionKeys:    newDependentObjects(),
+		Views:                 newDependentObjects(),
+		Policies:              newDependentObjects(),
+		Triggers:              newDependentObjects(),
+		GeneratedColumns:      newDependentObjects(),
+		PartitionKeys:         newDependentObjects(),
+		GeneratedColumnCopies: newDependentObjects(),
 	}
 	rootTable, ok := tables[root]
 	if !ok {
@@ -133,8 +139,32 @@ func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table
 			setDependents(into.Drop, column, drop[kind])
 			setDependents(into.Own, column, own[kind])
 		}
+		if rootTable.columns[column].generated {
+			setGeneratedCopies(deps.GeneratedColumnCopies, column, tables, root, dropped)
+		}
 	}
 	return deps, nil
+}
+
+// setGeneratedCopies records the copies of the generated column column:
+// every table's copy for the tree, the copies a recursive drop removes
+// for a drop, and the table's own copy for ONLY.
+func setGeneratedCopies(into DependentObjects, column string, tables map[uint32]*dependentTable, root uint32, dropped map[uint32]bool) {
+	var tree, drop []dependentName
+	for oid, t := range tables {
+		if _, ok := t.columns[column]; !ok {
+			continue
+		}
+		copied := dependentName{kind: dependentGenerated, schema: t.schema, relation: t.relation, member: column}
+		tree = append(tree, copied)
+		if dropped[oid] {
+			drop = append(drop, copied)
+		}
+	}
+	rootTable := tables[root]
+	setDependents(into.Tree, column, tree)
+	setDependents(into.Drop, column, drop)
+	setDependents(into.Own, column, []dependentName{{kind: dependentGenerated, schema: rootTable.schema, relation: rootTable.relation, member: column}})
 }
 
 func newDependentObjects() DependentObjects {
@@ -144,6 +174,7 @@ func newDependentObjects() DependentObjects {
 // dependentTable is one table at or below the table ReadColumnDependents
 // reads.
 type dependentTable struct {
+	schema, relation string
 	// parents are the tables this one inherits from, inside the tree or
 	// not.
 	parents []uint32
@@ -155,6 +186,7 @@ type dependentTable struct {
 type dependentColumn struct {
 	local      bool
 	inhcount   int32
+	generated  bool
 	dependents []dependentName
 }
 
@@ -173,8 +205,8 @@ const (
 )
 
 // readDependentTree reads schema.table and every table below it, each
-// with its parents, its live columns' inheritance counts, and the objects
-// that read each column, in one statement so the facts come from one
+// with its name, its parents, its live columns' inheritance counts and
+// whether each is generated, and the objects that read each column, in one statement so the facts come from one
 // snapshot. root is the table's oid; a table that does not exist
 // yields no tables.
 func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table string) (map[uint32]*dependentTable, uint32, error) {
@@ -192,12 +224,16 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 			JOIN pg_catalog.pg_inherits i ON i.inhparent OPERATOR(pg_catalog.=) tree.oid
 		)
 		SELECT tree.oid, tree.oid OPERATOR(pg_catalog.=) (SELECT oid FROM root),
+			tn.nspname::pg_catalog.text, tc.relname::pg_catalog.text,
 			ARRAY(SELECT i.inhparent FROM pg_catalog.pg_inherits i
 				WHERE i.inhrelid OPERATOR(pg_catalog.=) tree.oid),
 			a.attname::pg_catalog.text, a.attislocal, a.attinhcount::pg_catalog.int4,
+			a.attgenerated OPERATOR(pg_catalog.<>) '',
 			deps.kind, deps.nspname::pg_catalog.text, deps.relname::pg_catalog.text,
 			deps.member::pg_catalog.text
 		FROM tree
+		JOIN pg_catalog.pg_class tc ON tc.oid OPERATOR(pg_catalog.=) tree.oid
+		JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) tc.relnamespace
 		JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) tree.oid
 			AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped
 		LEFT JOIN LATERAL (
@@ -285,11 +321,13 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 	for rows.Next() {
 		var oid uint32
 		var isRoot bool
+		var tableSchema, relation string
 		var parents []uint32
 		var column string
 		var c dependentColumn
-		var kind, depSchema, relation, member *string
-		if err := rows.Scan(&oid, &isRoot, &parents, &column, &c.local, &c.inhcount, &kind, &depSchema, &relation, &member); err != nil {
+		var kind, depSchema, depRelation, member *string
+		if err := rows.Scan(&oid, &isRoot, &tableSchema, &relation, &parents, &column, &c.local, &c.inhcount, &c.generated,
+			&kind, &depSchema, &depRelation, &member); err != nil {
 			return nil, 0, err
 		}
 		if isRoot {
@@ -297,7 +335,7 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		}
 		t, ok := tables[oid]
 		if !ok {
-			t = &dependentTable{parents: parents, columns: map[string]*dependentColumn{}}
+			t = &dependentTable{schema: tableSchema, relation: relation, parents: parents, columns: map[string]*dependentColumn{}}
 			tables[oid] = t
 		}
 		existing, ok := t.columns[column]
@@ -308,7 +346,7 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		if kind == nil {
 			continue
 		}
-		d := dependentName{kind: *kind, schema: *depSchema, relation: *relation}
+		d := dependentName{kind: *kind, schema: *depSchema, relation: *depRelation}
 		switch *kind {
 		case dependentView, dependentPartitionKey:
 		case dependentPolicy, dependentTrigger, dependentGenerated:

@@ -323,6 +323,87 @@ func TestClassifyRefusesChangingAColumnAGeneratedColumnReads(t *testing.T) {
 	}
 }
 
+// PostgreSQL runs every drop of an ALTER TABLE before its type changes,
+// wherever the drop is written, so a generated column the same statement
+// drops does not block widening the column it reads. A copy the drop does
+// not reach, such as a child's under ONLY or one the child declares
+// itself, still blocks it.
+func TestClassifyDiscountsAGeneratedColumnTheStatementDrops(t *testing.T) {
+	own := `"public"."orders"."total"`
+	child := `"public"."orders_archive"."total"`
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"amount": "numeric(10,2)", "total": "numeric"},
+		DependentGeneratedColumns: planner.ColumnDependents{
+			Tree: map[string][]string{"amount": {child, own}},
+			Drop: map[string][]string{"amount": {child, own}},
+			Own:  map[string][]string{"amount": {own}},
+		},
+		GeneratedColumnCopies: planner.ColumnDependents{
+			Tree: map[string][]string{"total": {child, own}},
+			Drop: map[string][]string{"total": {child, own}},
+			Own:  map[string][]string{"total": {own}},
+		},
+	}
+	for _, sql := range []string{
+		"ALTER TABLE orders DROP COLUMN total, ALTER COLUMN amount TYPE numeric(12,2)",
+		"ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2), DROP COLUMN total",
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		assert.Equal(t, planner.RouteNative, plan.Route, sql)
+		require.Len(t, plan.Decisions, 2, sql)
+		for _, d := range plan.Decisions {
+			assert.Empty(t, d.DependentGeneratedColumns, sql)
+		}
+	}
+
+	plan, err := planner.Classify("ALTER TABLE ONLY orders DROP COLUMN total, ALTER COLUMN amount TYPE numeric(12,2)", facts)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.RouteNative, plan.Decisions[1].Route, "ONLY reaches the table's own generated column alone")
+
+	declared := facts
+	declared.GeneratedColumnCopies.Drop = map[string][]string{"total": {own}}
+	plan, err = planner.Classify("ALTER TABLE orders DROP COLUMN total, ALTER COLUMN amount TYPE numeric(12,2)", declared)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.ReasonDependentGeneratedColumn, plan.Decisions[1].Reason)
+	assert.Equal(t, []string{child}, plan.Decisions[1].DependentGeneratedColumns,
+		"the child declares its own copy, which the drop leaves")
+
+	after, err := planner.FactsAfter("ALTER TABLE orders DROP COLUMN total", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ColumnDependents{Tree: map[string][]string{}, Drop: map[string][]string{}, Own: map[string][]string{}},
+		after.DependentGeneratedColumns)
+	assert.Equal(t, []string{child, own}, facts.DependentGeneratedColumns.Tree["amount"], "the caller's facts are left as they were")
+	d := classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", after)
+	assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason, "a later statement sees the drop")
+}
+
+// The manual path for a type change dependents block follows what the
+// conversion itself costs, so a widening a policy and a trigger both
+// block, or a trigger and a generated column, is still recreated around
+// rather than routed through a new column.
+func TestClassifyJudgesTheDependentFixByTheConversionAlone(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes:               map[string]string{"status": "character varying(16)"},
+		DependentPolicies:         map[string][]string{"status": {`"open_only" ON "public"."orders"`}},
+		DependentTriggers:         dependentsEverywhere("status", []string{`"audit_status" ON "public"."orders"`}),
+		DependentGeneratedColumns: dependentsEverywhere("status", []string{`"public"."orders"."status_upper"`}),
+	}
+	d := classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentPolicy, d.Reason)
+	assert.Equal(t, planner.DependentFixRecreateAroundChange, d.DependentFix)
+
+	facts.DependentPolicies = nil
+	d = classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentTrigger, d.Reason)
+	assert.Equal(t, planner.DependentFixRecreateAroundChange, d.DependentFix)
+
+	d = classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE int USING 0", facts)
+	assert.Equal(t, planner.DependentFixExpandContract, d.DependentFix)
+}
+
 // PostgreSQL never retypes or drops a partition key column, so either
 // change is refused with the partitioned tables named. The partition key
 // is judged before every other dependent, since no object can be moved

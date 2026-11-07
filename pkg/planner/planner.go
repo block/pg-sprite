@@ -343,7 +343,7 @@ const (
 // dependent-generated-column decision, phrased to follow a sentence that
 // names the generated columns.
 const GeneratedColumnHelp = "drop those generated columns first, then re-plan; " +
-	"adding one back afterwards, or changing a stored one's expression instead, rewrites the table"
+	"adding a stored one back afterwards, or changing a stored one's expression instead, rewrites the table"
 
 // PartitionKeyHelp is the operator-facing manual path for a partition-key
 // decision, phrased to follow a sentence that names the partitioned
@@ -466,6 +466,11 @@ type Facts struct {
 	// reads the column is not one: the server records no dependency for
 	// it and lets the change run.
 	DependentTriggers ColumnDependents
+	// GeneratedColumnCopies maps each generated column to its own copies,
+	// named as DependentGeneratedColumns names them, so a statement that
+	// drops a generated column stops it blocking a change to the columns
+	// it reads (preflight.ReadColumnDependents).
+	GeneratedColumnCopies ColumnDependents
 	// DependentGeneratedColumns maps a column to the generated columns
 	// whose expression reads it, each rendered "schema"."table"."column".
 	DependentGeneratedColumns ColumnDependents
@@ -559,14 +564,13 @@ func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []s
 }
 
 // dependentFix picks the manual path for a change that dependents block:
-// a drop needs them rewritten, and a type change is judged by the route it
-// would take with them out of the way. without returns the facts with the
-// blocking dependents removed.
-func dependentFix(op statement.Op, st statement.Statement, without Facts, sql string, single bool) DependentFix {
+// a drop needs them rewritten, and a type change is judged by what the
+// conversion itself costs, whatever else also blocks it.
+func dependentFix(op statement.Op, facts Facts) DependentFix {
 	if op.Kind == statement.OpDropColumn {
 		return DependentFixRewriteDependents
 	}
-	if classifyOp(op, st, without, sql, single).Route == RouteNative {
+	if route, _, _ := classifyTypeChange(op, facts); route == RouteNative {
 		return DependentFixRecreateAroundChange
 	}
 	return DependentFixExpandContract
@@ -601,6 +605,7 @@ func Classify(sql string, facts Facts) (Plan, error) {
 		return Plan{}, err
 	}
 	plan := Plan{Statement: sql, Route: RouteNative}
+	facts = withoutDroppedGeneratedColumns(ops, facts)
 	// Safer rewrites are only constructed for single-operation statements:
 	// a partial rewrite of a multi-operation ALTER would be misleading.
 	single := len(ops) == 1
@@ -616,6 +621,58 @@ func Classify(sql string, facts Facts) (Plan, error) {
 		plan.Decisions = append(plan.Decisions, d)
 	}
 	return plan, nil
+}
+
+// FactsAfter returns facts as they stand once sql has run: the generated
+// columns it drops no longer block a later statement's change to the
+// columns they read.
+func FactsAfter(sql string, facts Facts) (Facts, error) {
+	ops, err := statement.ParseOps(sql)
+	if err != nil {
+		return Facts{}, err
+	}
+	return withoutDroppedGeneratedColumns(ops, facts), nil
+}
+
+// withoutDroppedGeneratedColumns removes, from the generated columns that
+// read each column, the copies the statement's drops remove. PostgreSQL
+// runs every drop of an ALTER TABLE before any type change, wherever the
+// drop is written, so a generated column the same statement drops blocks
+// none of its other operations. A copy the drop does not reach, such as a
+// child's under ONLY or one the child declares itself, stays.
+func withoutDroppedGeneratedColumns(ops []statement.Op, facts Facts) Facts {
+	dropped := map[string]bool{}
+	for _, op := range ops {
+		if op.Kind != statement.OpDropColumn {
+			continue
+		}
+		for _, name := range facts.GeneratedColumnCopies.reached(op) {
+			dropped[name] = true
+		}
+	}
+	if len(dropped) == 0 {
+		return facts
+	}
+	g := facts.DependentGeneratedColumns
+	facts.DependentGeneratedColumns = ColumnDependents{
+		Tree: withoutNames(g.Tree, dropped),
+		Drop: withoutNames(g.Drop, dropped),
+		Own:  withoutNames(g.Own, dropped),
+	}
+	return facts
+}
+
+// withoutNames copies deps without the named dependents, leaving out a
+// column none remain for.
+func withoutNames(deps map[string][]string, names map[string]bool) map[string][]string {
+	out := make(map[string][]string, len(deps))
+	for column, objects := range deps {
+		kept := slices.DeleteFunc(slices.Clone(objects), func(name string) bool { return names[name] })
+		if len(kept) > 0 {
+			out[column] = kept
+		}
+	}
+	return out
 }
 
 // classifyOp routes one operation per the reference table.
@@ -641,16 +698,12 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	}
 	if policies := policiesReadingColumn(op, facts); len(policies) > 0 {
 		d.Route, d.Reason, d.DependentPolicies = RouteRefuse, ReasonDependentPolicy, policies
-		without := facts
-		without.DependentPolicies, without.DropDependentPolicies, without.OwnDependentPolicies = nil, nil, nil
-		d.DependentFix = dependentFix(op, st, without, sql, single)
+		d.DependentFix = dependentFix(op, facts)
 		return d
 	}
 	if triggers := facts.DependentTriggers.reached(op); len(triggers) > 0 {
 		d.Route, d.Reason, d.DependentTriggers = RouteRefuse, ReasonDependentTrigger, triggers
-		without := facts
-		without.DependentTriggers = ColumnDependents{}
-		d.DependentFix = dependentFix(op, st, without, sql, single)
+		d.DependentFix = dependentFix(op, facts)
 		return d
 	}
 	if generated := facts.DependentGeneratedColumns.reached(op); len(generated) > 0 {

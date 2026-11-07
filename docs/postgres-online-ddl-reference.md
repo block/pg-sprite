@@ -625,8 +625,12 @@ what keeps the generated column. The plan names each generated column as
 `"schema"."table"."column"` in `decisions[].dependent_generated_columns`, and a refused
 run's verdict in `dependent_generated_columns`. Drop those generated columns first,
 then re-plan. Adding a `STORED` generated column back afterwards, or changing its
-expression instead, rewrites the table. When a view, a policy, or a trigger also
-depends on the column, the decision names those first.
+expression instead, rewrites the table. A generated column that the same statement,
+or an earlier statement of the same plan, drops does not count: PostgreSQL runs every
+drop of an `ALTER TABLE` before its type changes, wherever the drop is written. A copy
+the drop leaves in place still counts, such as a child's copy under `ONLY` or one the
+child declares itself. When a view, a policy, or a trigger also depends on the column,
+the decision names those first.
 
 ### `partition-key`
 

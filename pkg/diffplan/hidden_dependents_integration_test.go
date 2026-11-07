@@ -84,3 +84,44 @@ func TestPlanRefusesChangingAColumnHiddenDependentsNeed(t *testing.T) {
 		})
 	}
 }
+
+// A desired file that removes a generated column and widens the column it
+// reads plans the widening as the relabel it is: the drop comes first in
+// the plan, so the generated column no longer blocks the type change. A
+// file that keeps the generated column still has the widening refused.
+func TestPlanWidensAColumnOnceItsGeneratedColumnIsDropped(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.ledger (id bigint PRIMARY KEY, amount numeric(10, 2), total numeric GENERATED ALWAYS AS (amount * 2) STORED)`, schema))
+	require.NoError(t, err)
+	widen := fmt.Sprintf("ALTER TABLE %s.ledger ALTER COLUMN amount TYPE numeric(12, 2)", schema)
+
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t,
+		`CREATE TABLE ledger (id bigint PRIMARY KEY, amount numeric(12, 2));`)})
+	require.NoError(t, err)
+	var sqls []string
+	for _, st := range report.Statements {
+		sqls = append(sqls, st.SQL)
+		if st.SQL == widen {
+			require.Len(t, st.Decisions, 1)
+			assert.Equal(t, planner.RouteNative, st.Route)
+			assert.Equal(t, planner.ReasonBinaryCoercible, st.Decisions[0].Reason)
+			assert.Empty(t, st.Decisions[0].DependentGeneratedColumns)
+		}
+	}
+	assert.Equal(t, []string{fmt.Sprintf("ALTER TABLE %s.ledger DROP total", schema), widen}, sqls)
+	assert.NotEqual(t, router.DispositionRefuse, report.Disposition)
+
+	report, err = diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t,
+		`CREATE TABLE ledger (id bigint PRIMARY KEY, amount numeric(12, 2), total numeric GENERATED ALWAYS AS (amount * 2) STORED);`)})
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, widen, report.Statements[0].SQL)
+	require.Len(t, report.Statements[0].Decisions, 1)
+	assert.Equal(t, planner.ReasonDependentGeneratedColumn, report.Statements[0].Decisions[0].Reason)
+}

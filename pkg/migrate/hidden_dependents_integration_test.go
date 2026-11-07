@@ -118,6 +118,18 @@ func TestRunRefusesChangingAColumnHiddenDependentsNeed(t *testing.T) {
 		})
 	}
 
+	t.Run("a statement that drops the generated column widens the column it read", func(t *testing.T) {
+		schema := seed(t)
+		opts := runOptions()
+		opts.AllowDestructive = schema + ".orders"
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.orders ALTER COLUMN amount TYPE numeric(12, 2), DROP COLUMN total", schema)), opts)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, v.Detail)
+		assert.Empty(t, v.DependentGeneratedColumns)
+		assert.Equal(t, "numeric(12,2)", columnType(t, pool, schema, "orders", "amount"))
+	})
+
 	t.Run("a column only a trigger body reads still retypes", func(t *testing.T) {
 		schema := seed(t)
 		v, err := migrate.Run(t.Context(), pool,
