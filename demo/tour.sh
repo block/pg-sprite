@@ -499,7 +499,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" lint --json risky.sql) || status=$?
         assert_eq "lint exit" 1 "$status"
-        assert_eq "lint format_version" 7 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "lint format_version" 8 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "lint errors" 1 "$(jq -r '.errors' <<<"$out")"
     else
         "$PGS" lint risky.sql || echo "(exit $? — error findings gate, by design)"

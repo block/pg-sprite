@@ -15,8 +15,8 @@ and the closed vocabularies below (codes, severities, and the embedded planner r
 adding a value to any of them is a contract change and bumps `format_version`, even if no
 field is added or renamed.
 
-The current version is **7**: version 7 added the `dependent-policy` reason to the embedded
-Reasons vocabulary. Version 6 raised `app-breaking-rename` from `warning` to
+The current version is **8**: version 8 added the `validate-in-transaction` code. Version 7
+added the `dependent-policy` reason to the embedded Reasons vocabulary. Version 6 raised `app-breaking-rename` from `warning` to
 `error`, because the engine now refuses a column or table rename unless `--force` names the
 table. Version 5 added the `cascading-drop` reason to the embedded
 Reasons vocabulary. Version 4 added the `dependent-view` reason. Version 3 added the
@@ -78,7 +78,7 @@ codes make the conservatism visible instead of burying it:
 | `operation` | string | always | Operator-facing label of the flagged operation (`DROP COLUMN legacy_a`). Display only — never branch on it. |
 | `code` | string | always | The typed finding kind (see Codes). Automation branches on this, never on prose. |
 | `severity` | string | always | What the engine would do about it (see Severities). |
-| `reason` | string | classifier findings | The planner's typed cause, drawn from the plan report's Reasons vocabulary. Absent for `destructive` and `concurrent-in-transaction` findings, which are a property of the operation or the script, not a routing decision. |
+| `reason` | string | classifier findings | The planner's typed cause, drawn from the plan report's Reasons vocabulary. Absent for `destructive`, `concurrent-in-transaction`, and `validate-in-transaction` findings, which are a property of the operation or the script, not a routing decision. |
 | `suggestion` | array | when constructible | The ordered safer SQL, present only for `blocking-idiom` findings where the planner constructed the rewrite. A safer form of the submitted statement, not a semantic equivalent — running it by hand forgoes the engine's execution-time guards (invalid-index detection after a concurrent build). Its absence still means the submitted form blocks — the planner does not construct rewrites for multi-operation statements or for operations that need catalog knowledge (ATTACH PARTITION's proving CHECK); the [suggest report](suggest-report.md) emits typed guidance naming the manual path for exactly those cases. |
 | `suggestion_execution` | string | with `suggestion` | The typed execution contract for `suggestion`, drawn from the plan report's Execution contracts vocabulary (`autocommit-each-step`: each step in its own implicit transaction, never inside an enclosing transaction block; a failed step leaves partial state the runner must detect and recover). A consumer that runs the suggestion branches on this. Present exactly when `suggestion` is. |
 
@@ -93,6 +93,7 @@ codes make the conservatism visible instead of burying it:
 | `app-breaking-rename` | error | `ALTER TABLE t RENAME COLUMN email TO email_address` | PostgreSQL runs a column or table rename as a metadata-only catalog flip, but a rename cannot land atomically across running application instances — code still referencing the old name breaks the instant it commits. `migrate` refuses the statement as written (`rewrite-required`) and runs it only when `--force` names the table. For a column, expand/contract instead: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames are not flagged: ordinary SQL names tables and columns, not indexes. Renaming an index that backs a `UNIQUE`, primary-key, or exclusion constraint also renames the constraint, which `ON CONFLICT ON CONSTRAINT` names; offline lint cannot tell that index from a plain one, so it is not flagged, but `migrate` reads the catalog and refuses it (`rewrite-required`, guidance `coordinated-constraint-rename`). |
 | `destructive` | warning | `ALTER TABLE t DROP COLUMN legacy` | The operation discards live structure (a column, constraint, or index drop) and cannot be undone by re-running the schema. |
 | `concurrent-in-transaction` | error | `BEGIN; CREATE INDEX CONCURRENTLY i ON t (c); COMMIT` | A `CONCURRENTLY` operation sits inside a transaction block the script opens with `BEGIN` or `START TRANSACTION`. PostgreSQL refuses every `CONCURRENTLY` form inside a block, so the script fails at that statement and the block rolls back. Run the statement outside the block. A savepoint, or a `COMMIT AND CHAIN` that opens the next block at once, leaves the script inside its block. |
+| `validate-in-transaction` | warning | `BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT` | A `VALIDATE CONSTRAINT` sits inside a transaction block after an earlier statement in the same block locked the same table, such as the `ADD CONSTRAINT ... NOT VALID` it validates. The lock is held until the block ends, so the validation scans every row under it instead of the `SHARE UPDATE EXCLUSIVE` lock it takes on its own. Commit before the `VALIDATE`. |
 
 A lint `code` is what the finding *is*; the finding's `reason` field is the classifier's
 typed cause for it, drawn from the plan report's Reason vocabulary

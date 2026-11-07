@@ -234,6 +234,12 @@ ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES parent (id) NOT
 ALTER TABLE child VALIDATE CONSTRAINT fk;  -- SHARE UPDATE EXCLUSIVE, online
 ```
 
+Each statement must commit on its own. A lock is held until its transaction ends,
+so a `VALIDATE` in the same transaction block as the `ADD`, or in the same `ALTER
+TABLE` statement, scans every row under the `ADD`'s lock instead. `lint` flags the
+block form as [`validate-in-transaction`](#validate-in-transaction), and the planner
+refuses the one-statement form until it is split.
+
 ### Safe pattern: add a primary key / unique constraint online
 
 ```sql
@@ -351,6 +357,13 @@ writes, only competing DDL and vacuum:
 The submitted form is already PostgreSQL's safe online idiom (for example
 `CREATE INDEX CONCURRENTLY` or `ADD CONSTRAINT ... NOT VALID`). It runs as
 written and does not block the table while it runs.
+
+`VALIDATE CONSTRAINT` is the idiom only in a statement of its own, or beside other
+`VALIDATE`s. One `ALTER TABLE` holds the strongest lock any of its operations needs
+for the whole statement, so a `VALIDATE` beside any other operation scans under that
+lock. The planner classifies it as [`safer-idiom`](#safer-idiom), and the statement
+is refused with [`rewrite-required`](#rewrite-required) and the advice to submit each
+operation as its own statement.
 
 The bucket is not uniform: the concurrent builds and `VALIDATE` hold only
 `SHARE UPDATE EXCLUSIVE` while they work, and the `NOT VALID` / `USING INDEX`
@@ -638,6 +651,25 @@ PARTITION`) sits inside a transaction block the script opens with `BEGIN` or
 so the script stops at that statement and the whole block rolls back. Move the
 statement out of the block and run it on its own. Only `lint` reports this code:
 it is a property of the script, and `migrate` takes one statement at a time.
+
+### `validate-in-transaction`
+
+| Verdict | Lock | Scan / rewrite | Lint exit |
+|---|---|---|---|
+| lint warning — runs, but blocks | the lock the earlier statement took, held until `COMMIT` | full validation scan under that lock | 1 |
+
+A `VALIDATE CONSTRAINT` sits inside a transaction block the script opens with
+`BEGIN` or `START TRANSACTION`, after an earlier statement in the same block locked
+the same table. The usual case is the `ADD CONSTRAINT ... NOT VALID` it validates.
+A lock is held until the block ends, so the validation scans every row while the
+table is still under the earlier statement's lock: `ACCESS EXCLUSIVE` for a `CHECK`,
+which blocks reads and writes, and `SHARE ROW EXCLUSIVE` for a foreign key, which
+blocks writes. On its own, `VALIDATE` takes only `SHARE UPDATE EXCLUSIVE`, which
+blocks neither. Commit before the `VALIDATE` so it runs in a transaction of its own.
+
+Lint matches tables by the name each statement gives, so it does not see the lock a
+foreign key takes on the table it references. Only `lint` reports this code: it is a
+property of the script, and `migrate` takes one statement at a time.
 
 ### `rewrite-required`
 

@@ -14,15 +14,17 @@ type TransactionControl int
 // The effects a statement can have on an explicit transaction block.
 const (
 	// TransactionNone: the statement neither opens nor closes a block. A
-	// savepoint statement, and a COMMIT or ROLLBACK AND CHAIN, which
-	// closes one block and opens the next at once, leave a script inside
-	// its block.
+	// savepoint statement leaves a script inside its block.
 	TransactionNone TransactionControl = iota
 	// TransactionBegin: BEGIN or START TRANSACTION opens a block.
 	TransactionBegin
 	// TransactionEnd: COMMIT, END, ROLLBACK, ABORT, or PREPARE
 	// TRANSACTION closes the open block.
 	TransactionEnd
+	// TransactionChain: COMMIT or ROLLBACK AND CHAIN closes one block and
+	// opens the next at once. The script stays inside a block, but the
+	// locks the closed block held are released.
+	TransactionChain
 )
 
 // TransactionControlOf reports what sql, exactly one statement, does to an
@@ -44,7 +46,7 @@ func TransactionControlOf(sql string) (TransactionControl, error) {
 		return TransactionBegin, nil
 	case pganalyze.TransactionStmtKind_TRANS_STMT_COMMIT, pganalyze.TransactionStmtKind_TRANS_STMT_ROLLBACK:
 		if tx.GetChain() {
-			return TransactionNone, nil
+			return TransactionChain, nil
 		}
 		return TransactionEnd, nil
 	case pganalyze.TransactionStmtKind_TRANS_STMT_PREPARE:

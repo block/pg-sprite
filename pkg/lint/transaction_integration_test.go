@@ -1,8 +1,10 @@
 package lint_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -107,4 +109,95 @@ func hasCode(report lint.Report, stmt int, code lint.Code) bool {
 		}
 	}
 	return false
+}
+
+// The validate-in-transaction finding, and the planner's refusal of a
+// VALIDATE beside another operation in one ALTER TABLE, rest on PostgreSQL
+// holding every lock until the transaction ends. Each case runs a script
+// lint flags on one session and reads the locks the session holds on the
+// table once the VALIDATE has run: still the earlier statement's, which
+// blocks writes or reads. The same VALIDATE run in a transaction of its
+// own holds only SHARE UPDATE EXCLUSIVE.
+func TestServerHoldsTheEarlierLockWhileAValidateInTheSameTransactionScans(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	// locksAfter runs stmts in one transaction and returns the lock modes
+	// the session then holds on the table.
+	locksAfter := func(t *testing.T, schema string, stmts ...string) []string {
+		t.Helper()
+		conn, err := pool.Acquire(t.Context())
+		require.NoError(t, err)
+		defer conn.Release()
+		tx, err := conn.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		for _, stmt := range stmts {
+			_, err := tx.Exec(t.Context(), fmt.Sprintf(stmt, schema))
+			require.NoError(t, err, stmt)
+		}
+		var modes []string
+		require.NoError(t, tx.QueryRow(t.Context(), `SELECT pg_catalog.array_agg(mode ORDER BY mode)
+			FROM pg_catalog.pg_locks
+			WHERE pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()
+			  AND relation OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)`, schema+".t").Scan(&modes))
+		return modes
+	}
+	setup := func(t *testing.T) string {
+		t.Helper()
+		schema := testutil.NewSchema(t, pool)
+		for _, ddl := range []string{
+			"CREATE TABLE %[1]s.p (id int PRIMARY KEY)",
+			"CREATE TABLE %[1]s.t (n int, pid int)",
+			"INSERT INTO %[1]s.p VALUES (1)",
+			"INSERT INTO %[1]s.t VALUES (1, 1)",
+			"ALTER TABLE %[1]s.t ADD CONSTRAINT t_old CHECK (n > -1) NOT VALID",
+		} {
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
+			require.NoError(t, err)
+		}
+		return schema
+	}
+
+	for _, tc := range []struct {
+		name  string
+		stmts []string
+		held  string
+	}{
+		{"check then validate", []string{
+			"ALTER TABLE %[1]s.t ADD CONSTRAINT t_n_pos CHECK (n > 0) NOT VALID",
+			"ALTER TABLE %[1]s.t VALIDATE CONSTRAINT t_n_pos",
+		}, "AccessExclusiveLock"},
+		{"foreign key then validate", []string{
+			"ALTER TABLE %[1]s.t ADD CONSTRAINT t_pid_fk FOREIGN KEY (pid) REFERENCES %[1]s.p (id) NOT VALID",
+			"ALTER TABLE %[1]s.t VALIDATE CONSTRAINT t_pid_fk",
+		}, "ShareRowExclusiveLock"},
+		{"added column then validate", []string{
+			"ALTER TABLE %[1]s.t ADD COLUMN x int",
+			"ALTER TABLE %[1]s.t VALIDATE CONSTRAINT t_old",
+		}, "AccessExclusiveLock"},
+		{"one statement", []string{
+			"ALTER TABLE %[1]s.t ADD CONSTRAINT t_n_pos CHECK (n > 0) NOT VALID, VALIDATE CONSTRAINT t_n_pos",
+		}, "AccessExclusiveLock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := setup(t)
+			script := "BEGIN; " + fmt.Sprintf(strings.Join(tc.stmts, "; "), schema) + "; COMMIT"
+			report, err := lint.Check(script)
+			require.NoError(t, err)
+			last := len(tc.stmts) + 1
+			flagged := hasCode(report, last, lint.CodeValidateInTransaction) || hasCode(report, last, lint.CodeBlockingIdiom)
+			require.True(t, flagged, "lint flags the VALIDATE in %s", script)
+			assert.Contains(t, locksAfter(t, schema, tc.stmts...), tc.held,
+				"the earlier lock is still held once the VALIDATE has run")
+		})
+	}
+
+	t.Run("in a transaction of its own", func(t *testing.T) {
+		schema := setup(t)
+		assert.Equal(t, []string{"ShareUpdateExclusiveLock"},
+			locksAfter(t, schema, "ALTER TABLE %[1]s.t VALIDATE CONSTRAINT t_old"))
+	})
 }

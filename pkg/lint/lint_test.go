@@ -197,7 +197,7 @@ func TestReportJSONShape(t *testing.T) {
 	suggestion, err := json.Marshal(report.Findings[0].Suggestion)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 7,
+		"format_version": 8,
 		"postgres_versions": "14-18",
 		"findings": [
 			{
@@ -224,7 +224,7 @@ func TestReportJSONCleanFindingsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 7,
+		"format_version": 8,
 		"postgres_versions": "14-18",
 		"findings": [],
 		"errors": 0,
@@ -277,6 +277,70 @@ func TestCheckFlagsConcurrentInsideTransactionBlock(t *testing.T) {
 			assert.Equal(t, tc.flagged, flagged)
 		})
 	}
+}
+
+// A VALIDATE CONSTRAINT in a transaction block after an earlier statement
+// locked the same table scans under that lock until the block ends. Lint
+// flags it as a warning; outside a block, after the block ends, or on
+// another table, the validation takes only its own lock.
+func TestCheckValidateInTransaction(t *testing.T) {
+	cases := []struct {
+		name   string
+		script string
+		// flagged lists the statement indexes carrying the finding.
+		flagged []int
+	}{
+		{name: "after its not valid add", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after a not valid foreign key", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT fk; COMMIT", flagged: []int{3}},
+		{name: "after an unnamed add", script: "BEGIN; ALTER TABLE t ADD CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT t_n_check; COMMIT", flagged: []int{3}},
+		{name: "after another change to the table", script: "BEGIN; ALTER TABLE t ADD COLUMN x int; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after an index build", script: "BEGIN; CREATE INDEX i ON t (c); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "start transaction", script: "START TRANSACTION; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "qualified then unqualified", script: "BEGIN; ALTER TABLE app.t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "two validates", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c, VALIDATE CONSTRAINT d; COMMIT", flagged: []int{3, 3}},
+		{name: "after a savepoint", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; SAVEPOINT s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{4}},
+		{name: "block never closed", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c", flagged: []int{3}},
+		{name: "no block", script: "ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c"},
+		{name: "after commit", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; COMMIT; ALTER TABLE t VALIDATE CONSTRAINT c"},
+		{name: "after commit in a new block", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; COMMIT; BEGIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after commit and chain", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; COMMIT AND CHAIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "another table", script: "BEGIN; ALTER TABLE u ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT d; COMMIT"},
+		{name: "another schema", script: "BEGIN; ALTER TABLE a.t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE b.t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after only validates", script: "BEGIN; ALTER TABLE t VALIDATE CONSTRAINT c; ALTER TABLE t VALIDATE CONSTRAINT d; COMMIT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := lint.Check(tc.script)
+			require.NoError(t, err)
+			var flagged []int
+			for _, f := range report.Findings {
+				if f.Code != lint.CodeValidateInTransaction {
+					continue
+				}
+				flagged = append(flagged, f.Statement)
+				assert.Equal(t, lint.SeverityWarning, f.Severity)
+				assert.Empty(t, f.Reason)
+				assert.Empty(t, f.Suggestion)
+			}
+			assert.Equal(t, tc.flagged, flagged)
+		})
+	}
+}
+
+func TestCheckValidateInTransactionNamesTheOperation(t *testing.T) {
+	report, err := lint.Check("BEGIN;\nALTER TABLE t ADD CONSTRAINT t_n_pos CHECK (n > 0) NOT VALID;\nALTER TABLE t VALIDATE CONSTRAINT t_n_pos;\nCOMMIT;")
+	require.NoError(t, err)
+	var found *lint.Finding
+	for i := range report.Findings {
+		if report.Findings[i].Code == lint.CodeValidateInTransaction {
+			found = &report.Findings[i]
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, 3, found.Statement)
+	assert.Equal(t, 3, found.Line)
+	assert.Equal(t, "ALTER TABLE t VALIDATE CONSTRAINT t_n_pos", found.SQL)
+	assert.Equal(t, "VALIDATE CONSTRAINT t_n_pos", found.Operation)
 }
 
 func TestCheckConcurrentInTransactionNamesTheOperation(t *testing.T) {
