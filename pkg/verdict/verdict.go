@@ -588,6 +588,24 @@ type Verdict struct {
 	// same list the plan report's dependent-policy decision carries. Empty
 	// for every other verdict.
 	DependentPolicies []string `json:"dependent_policies,omitempty"`
+	// DependentTriggers names the triggers whose UPDATE OF list or WHEN
+	// condition names the column a refused statement retypes or drops,
+	// each rendered "trigger" ON "schema"."table" with every identifier
+	// quoted, sorted. The same list the plan report's dependent-trigger
+	// decision carries. Empty for every other verdict.
+	DependentTriggers []string `json:"dependent_triggers,omitempty"`
+	// DependentGeneratedColumns names the generated columns whose
+	// expression reads the column a refused statement retypes or drops,
+	// each rendered "schema"."table"."column" with every identifier quoted,
+	// sorted. The same list the plan report's dependent-generated-column
+	// decision carries. Empty for every other verdict.
+	DependentGeneratedColumns []string `json:"dependent_generated_columns,omitempty"`
+	// PartitionKeyTables names the partitioned tables whose partition key
+	// includes the column a refused statement retypes or drops, each
+	// schema-qualified with every identifier quoted, sorted. The same list
+	// the plan report's partition-key decision carries. Empty for every
+	// other verdict.
+	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what

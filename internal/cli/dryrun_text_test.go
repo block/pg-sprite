@@ -417,7 +417,7 @@ func TestDryRunTextDependentPolicyRefusalNamesThePolicies(t *testing.T) {
 			Route:             planner.RouteRefuse,
 			Reason:            planner.ReasonDependentPolicy,
 			DependentPolicies: []string{`"own_rows" ON "app"."documents"`},
-			PolicyFix:         planner.PolicyFixRecreateAroundChange,
+			DependentFix:      planner.DependentFixRecreateAroundChange,
 		}},
 	})
 
@@ -429,6 +429,78 @@ func TestDryRunTextDependentPolicyRefusalNamesThePolicies(t *testing.T) {
 	assert.Contains(t, text, onlineDDLReferenceURL+"#dependent-policy")
 	assert.NotContains(t, text, "knows no safe path")
 	assert.NotContains(t, text, "those views")
+}
+
+// A refusal because a trigger, a generated column, or a partition key
+// depends on the changed column names those objects in the refusal
+// itself, and the help line gives the manual path for each.
+func TestDryRunTextHiddenDependentRefusalsNameTheObjects(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision planner.Decision
+		refusal  string
+		help     string
+		anchor   string
+	}{
+		{
+			name: "trigger",
+			decision: planner.Decision{
+				Operation:         "ALTER COLUMN status TYPE varchar(64)",
+				Reason:            planner.ReasonDependentTrigger,
+				DependentTriggers: []string{`"audit_status" ON "app"."orders"`},
+				DependentFix:      planner.DependentFixRecreateAroundChange,
+			},
+			refusal: `ALTER COLUMN status TYPE varchar(64) changes a column named by trigger "audit_status" ON "app"."orders", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it`,
+			help:    "help: this type change runs in place, without rewriting the table, so in one transaction drop those triggers, run the change, and recreate them",
+			anchor:  "#dependent-trigger",
+		},
+		{
+			name: "generated column",
+			decision: planner.Decision{
+				Operation:                 "DROP COLUMN amount",
+				Reason:                    planner.ReasonDependentGeneratedColumn,
+				DependentGeneratedColumns: []string{`"app"."orders"."total_cents"`, `"app"."orders"."total_tax"`},
+			},
+			refusal: `DROP COLUMN amount changes a column read by generated columns "app"."orders"."total_cents", "app"."orders"."total_tax", and PostgreSQL refuses to retype or drop a column while a generated column reads it`,
+			help:    "help: " + planner.GeneratedColumnHelp,
+			anchor:  "#dependent-generated-column",
+		},
+		{
+			name: "partition key",
+			decision: planner.Decision{
+				Operation:          "ALTER COLUMN created_at TYPE timestamptz",
+				Reason:             planner.ReasonPartitionKey,
+				PartitionKeyTables: []string{`"app"."orders"`},
+			},
+			refusal: `ALTER COLUMN created_at TYPE timestamptz changes a column in the partition key of "app"."orders", and PostgreSQL never retypes or drops a partition key column`,
+			help:    "help: " + planner.PartitionKeyHelp,
+			anchor:  "#partition-key",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := plan.NewReport(plan.SourceAlter)
+			report.Schema, report.Table, report.ServerVersion = "app", "orders", "16.10"
+			report.Disposition = router.DispositionRefuse
+			d := tc.decision
+			d.Route = planner.RouteRefuse
+			report.Statements = append(report.Statements, plan.Statement{
+				SQL:         "ALTER TABLE app.orders " + d.Operation,
+				Route:       planner.RouteRefuse,
+				Disposition: router.DispositionRefuse,
+				Reason:      verdict.ReasonUnsupportedStatement,
+				Class:       verdict.ClassCapabilityBoundary,
+				Decisions:   []planner.Decision{d},
+			})
+
+			var out strings.Builder
+			require.NoError(t, writeDryRunText(&out, palette{}, report))
+			text := strings.Join(strings.Fields(out.String()), " ")
+			assert.Contains(t, text, "error[unsupported-statement]: refused — "+tc.refusal)
+			assert.Contains(t, text, tc.help)
+			assert.Contains(t, text, onlineDDLReferenceURL+tc.anchor)
+			assert.NotContains(t, text, "knows no safe path")
+		})
+	}
 }
 
 // The refusal sentence explains the first refused operation, the same one

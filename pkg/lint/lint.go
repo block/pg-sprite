@@ -24,8 +24,9 @@ import (
 // app-breaking-rename finding from warning to error, because the engine
 // now refuses the rename unless the override names the table; version 7
 // added the dependent-policy planner reason to the embedded Reasons
-// vocabulary.
-const FormatVersion = 7
+// vocabulary; version 8 added the dependent-trigger,
+// dependent-generated-column, and partition-key planner reasons to it.
+const FormatVersion = 8
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string

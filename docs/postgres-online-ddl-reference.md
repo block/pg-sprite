@@ -55,8 +55,10 @@ the lock queue below applies to every query on the parent) and `app-breaking-ren
 catalog change is instant; the running application code that still uses the old name is
 what breaks, so `migrate` refuses it as `rewrite-required` unless forced). `replica-identity` is a refusal: the operation would drop what the table's
 replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
-drops a column a view reads, which PostgreSQL refuses, and `dependent-policy` is the same
-refusal for a column a row-level security policy reads. `cascading-drop` is a refusal as well:
+drops a column a view reads, which PostgreSQL refuses, and `dependent-policy`,
+`dependent-trigger`, `dependent-generated-column`, and `partition-key` are the same refusal
+for a column a row-level security policy, a trigger, a generated column, or a partition key
+depends on. `cascading-drop` is a refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
@@ -582,6 +584,65 @@ the decision is `dependent-view`; re-plan after the views are handled. The plann
 reads the policies from live facts, so the linter, which has none, never reports it,
 and the server's own refusal remains the backstop for a policy created after
 planning.
+
+### `dependent-trigger`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a trigger's `UPDATE OF`
+list or `WHEN` condition names. PostgreSQL refuses both while the trigger exists
+(`cannot alter type of a column used in a trigger definition`, and `cannot drop
+column … because other objects depend on it` for a drop), even a type change it would
+otherwise relabel without a rewrite, so the statement could only fail. A trigger whose
+function body reads the column does not count: the server records no dependency on
+it and lets the change run. The change reaches partitions and inheritance children
+the same way as for `dependent-view`. The plan names each trigger as `"trigger" ON
+"schema"."table"` in `decisions[].dependent_triggers`, and a refused run's verdict in
+`dependent_triggers`. The manual path follows the same three cases as
+`dependent-policy`: before a drop, change the triggers so they no longer name the
+column; around a type change PostgreSQL runs in place, drop the triggers, run the
+change, and recreate them in one transaction; for a type change that rewrites the
+table, add a column of the new type, backfill it, and point the triggers at it, since
+copy-and-swap refuses a table with triggers. A rename is not refused, because a
+trigger follows the column. When a view or a policy also depends on the column, the
+decision names those first.
+
+### `dependent-generated-column`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a generated column's
+expression reads. PostgreSQL refuses both while the generated column exists (`cannot
+alter type of a column used by a generated column`, and `cannot drop column … because
+other objects depend on it` for a drop), even a type change it would otherwise relabel,
+so the statement could only fail. The plan names each generated column as
+`"schema"."table"."column"` in `decisions[].dependent_generated_columns`, and a refused
+run's verdict in `dependent_generated_columns`. Drop those generated columns first,
+then re-plan. Adding a `STORED` generated column back afterwards, or changing its
+expression instead, rewrites the table. When a view, a policy, or a trigger also
+depends on the column, the decision names those first.
+
+### `partition-key`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column in the partition key of the
+table or of a partitioned table below it that the change reaches. PostgreSQL never
+does either (`cannot alter column "…" because it is part of the partition key of
+relation "…"`, SQLSTATE `42P16`), whether the key names the column directly or uses
+it in an expression, so the statement could only fail. The plan names each
+partitioned table in `decisions[].partition_key_tables`, and a refused run's verdict
+in `partition_key_tables`. There is no in-place path: create a new partitioned table
+with the new column definition and move the rows into it. A sub-partition's key
+counts against a recursive change and not against one under `ONLY`. The partition key
+is judged before every other dependent, since no object can be moved aside to let the
+change run.
 
 ### `cascading-drop`
 

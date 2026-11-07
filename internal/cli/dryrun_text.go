@@ -82,7 +82,16 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 			w.diag("help", "", "drop or redefine those views first, then re-plan")
 		}
 		if len(d.DependentPolicies) > 0 {
-			w.diag("help", "", d.PolicyFix.Help())
+			w.diag("help", "", d.DependentFix.Help("policies"))
+		}
+		if len(d.DependentTriggers) > 0 {
+			w.diag("help", "", d.DependentFix.Help("triggers"))
+		}
+		if len(d.DependentGeneratedColumns) > 0 {
+			w.diag("help", "", planner.GeneratedColumnHelp)
+		}
+		if len(d.PartitionKeyTables) > 0 {
+			w.diag("help", "", planner.PartitionKeyHelp)
 		}
 	}
 	if ps.Destructive {
@@ -344,6 +353,12 @@ func impactText(r planner.Reason) string {
 		return "changes a column a view reads; PostgreSQL refuses this until the view is dropped or redefined"
 	case planner.ReasonDependentPolicy:
 		return "changes a column a row-level security policy reads; PostgreSQL refuses this until the policy is dropped"
+	case planner.ReasonDependentTrigger:
+		return "changes a column a trigger's UPDATE OF list or WHEN condition names; PostgreSQL refuses this until the trigger is dropped"
+	case planner.ReasonDependentGeneratedColumn:
+		return "changes a column a generated column reads; PostgreSQL refuses this until the generated column is dropped"
+	case planner.ReasonPartitionKey:
+		return "changes a partition key column; PostgreSQL never retypes or drops one"
 	case planner.ReasonCascadingDrop:
 		return "CASCADE also drops the views, row-level security policies, and other tables' foreign keys that depend on it; drop those explicitly and resubmit without CASCADE"
 	case planner.ReasonUnsupportedOperation:
@@ -397,8 +412,21 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			", and PostgreSQL refuses to retype or drop a column while a view reads it"
 	}
 	if d.Reason == planner.ReasonDependentPolicy {
-		return d.Operation + " changes a column read by " + planner.PoliciesPhrase(d.DependentPolicies) +
+		return d.Operation + " changes a column read by " + planner.DependentsPhrase("policy", "policies", d.DependentPolicies) +
 			", and PostgreSQL refuses to retype or drop a column while a policy reads it"
+	}
+	if d.Reason == planner.ReasonDependentTrigger {
+		return d.Operation + " changes a column named by " + planner.DependentsPhrase("trigger", "triggers", d.DependentTriggers) +
+			", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it"
+	}
+	if d.Reason == planner.ReasonDependentGeneratedColumn {
+		return d.Operation + " changes a column read by " +
+			planner.DependentsPhrase("generated column", "generated columns", d.DependentGeneratedColumns) +
+			", and PostgreSQL refuses to retype or drop a column while a generated column reads it"
+	}
+	if d.Reason == planner.ReasonPartitionKey {
+		return d.Operation + " changes a column in the partition key of " + strings.Join(d.PartitionKeyTables, ", ") +
+			", and PostgreSQL never retypes or drops a partition key column"
 	}
 	return "the planner knows no safe path for " + d.Operation
 }

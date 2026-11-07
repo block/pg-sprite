@@ -188,7 +188,24 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 		if d.Reason == planner.ReasonDependentPolicy {
 			v.DependentPolicies = d.DependentPolicies
 			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a policy reads it; %s",
-				d.Operation, planner.PoliciesPhrase(d.DependentPolicies), d.PolicyFix.Help())
+				d.Operation, planner.DependentsPhrase("policy", "policies", d.DependentPolicies), d.DependentFix.Help("policies"))
+		}
+		if d.Reason == planner.ReasonDependentTrigger {
+			v.DependentTriggers = d.DependentTriggers
+			v.Detail = fmt.Sprintf("%s changes a column named by %s, and PostgreSQL refuses to retype or drop a column "+
+				"while a trigger's UPDATE OF list or WHEN condition names it; %s",
+				d.Operation, planner.DependentsPhrase("trigger", "triggers", d.DependentTriggers), d.DependentFix.Help("triggers"))
+		}
+		if d.Reason == planner.ReasonDependentGeneratedColumn {
+			v.DependentGeneratedColumns = d.DependentGeneratedColumns
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column "+
+				"while a generated column reads it; %s",
+				d.Operation, planner.DependentsPhrase("generated column", "generated columns", d.DependentGeneratedColumns), planner.GeneratedColumnHelp)
+		}
+		if d.Reason == planner.ReasonPartitionKey {
+			v.PartitionKeyTables = d.PartitionKeyTables
+			v.Detail = fmt.Sprintf("%s changes a column in the partition key of %s, and PostgreSQL never retypes or drops a partition key column; %s",
+				d.Operation, strings.Join(d.PartitionKeyTables, ", "), planner.PartitionKeyHelp)
 		}
 		if d.Reason == planner.ReasonCascadingDrop {
 			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views, row-level security policies, or other tables' foreign keys, "+

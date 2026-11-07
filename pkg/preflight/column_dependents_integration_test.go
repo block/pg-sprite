@@ -315,3 +315,173 @@ func TestReadColumnDependentsPoliciesForADrop(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, policies("events_1"), partitioned.Policies.Drop["email"], "a partition never declares a column")
 }
+
+// ReadColumnDependents maps each column to the triggers whose UPDATE OF
+// list or WHEN condition names it, on the table or, for the tree, on an
+// inheritance child, and to the generated columns whose expression reads
+// it. A trigger whose function body reads a column, a statistics object
+// over it, and a generated column's own entry do not count. The server is
+// the oracle: each named object blocks the change on its own, with every
+// named object removed the change succeeds, and the column nothing names
+// retypes with every trigger in place.
+func TestReadColumnDependentsTriggersAndGeneratedColumns(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %[1]s.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+		CREATE FUNCTION %[1]s.reads_note() RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN IF NEW.note IS NULL THEN RAISE EXCEPTION 'note'; END IF; RETURN NEW; END $$;
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, status varchar(16), qty int, note text);
+		CREATE TABLE %[1]s.orders_archive () INHERITS (%[1]s.orders);
+		CREATE TRIGGER "Audit Status" BEFORE UPDATE OF status ON %[1]s.orders
+			FOR EACH ROW EXECUTE FUNCTION %[1]s.noop();
+		CREATE TRIGGER qty_positive BEFORE UPDATE ON %[1]s.orders
+			FOR EACH ROW WHEN (NEW.qty > 0) EXECUTE FUNCTION %[1]s.noop();
+		CREATE TRIGGER body_reads_note BEFORE UPDATE ON %[1]s.orders
+			FOR EACH ROW EXECUTE FUNCTION %[1]s.reads_note();
+		CREATE TRIGGER archive_status BEFORE UPDATE OF status ON %[1]s.orders_archive
+			FOR EACH ROW EXECUTE FUNCTION %[1]s.noop();
+		CREATE STATISTICS %[1]s.qty_note ON qty, note FROM %[1]s.orders;
+		CREATE TABLE %[1]s.ledger (
+			id bigint PRIMARY KEY,
+			amount numeric(10, 2),
+			tax numeric(10, 2),
+			total numeric GENERATED ALWAYS AS (amount + tax) STORED,
+			doubled numeric GENERATED ALWAYS AS (amount * 2) STORED
+		)`, schema))
+	require.NoError(t, err)
+
+	on := func(trigger, table string) string { return fmt.Sprintf(`%s ON "%s"."%s"`, trigger, schema, table) }
+	ledger := func(column string) string { return fmt.Sprintf(`"%s"."ledger"."%s"`, schema, column) }
+
+	orders, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]string{
+		"status": {on(`"Audit Status"`, "orders")},
+		"qty":    {on(`"qty_positive"`, "orders")},
+	}, orders.Triggers.Own)
+	tree := map[string][]string{
+		"status": {on(`"Audit Status"`, "orders"), on(`"archive_status"`, "orders_archive")},
+		"qty":    {on(`"qty_positive"`, "orders")},
+	}
+	assert.Equal(t, tree, orders.Triggers.Tree)
+	assert.Equal(t, tree, orders.Triggers.Drop, "the child inherits status without declaring it")
+	assert.Empty(t, orders.GeneratedColumns.Tree)
+	assert.Empty(t, orders.PartitionKeys.Tree)
+
+	ledgerDeps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "ledger")
+	require.NoError(t, err)
+	generated := map[string][]string{
+		"amount": {ledger("doubled"), ledger("total")},
+		"tax":    {ledger("total")},
+	}
+	assert.Equal(t, generated, ledgerDeps.GeneratedColumns.Own)
+	assert.Equal(t, generated, ledgerDeps.GeneratedColumns.Tree)
+	assert.Empty(t, ledgerDeps.Triggers.Tree)
+
+	// retype runs the change in a rolled-back transaction after removing
+	// every named dependent except keep.
+	retype := func(t *testing.T, table, column, newType string, named []string, keep string) error {
+		t.Helper()
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		for _, object := range named {
+			if object == keep {
+				continue
+			}
+			drop := "DROP TRIGGER " + object
+			if table == "ledger" {
+				drop = fmt.Sprintf("ALTER TABLE %s.ledger DROP COLUMN %s", schema, object[strings.LastIndex(object, "."):][1:])
+			}
+			_, err := tx.Exec(t.Context(), drop)
+			require.NoError(t, err, drop)
+		}
+		_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.%s ALTER COLUMN %s TYPE %s", schema, table, column, newType))
+		return err
+	}
+	for _, tc := range []struct {
+		table, column, newType string
+		named                  []string
+	}{
+		{"orders", "status", "varchar(64)", orders.Triggers.Tree["status"]},
+		{"orders", "qty", "bigint", orders.Triggers.Tree["qty"]},
+		{"ledger", "amount", "numeric(12, 2)", ledgerDeps.GeneratedColumns.Tree["amount"]},
+		{"ledger", "tax", "numeric(12, 2)", ledgerDeps.GeneratedColumns.Tree["tax"]},
+	} {
+		require.NoError(t, retype(t, tc.table, tc.column, tc.newType, tc.named, ""),
+			"nothing outside the named dependents blocks retyping %s.%s", tc.table, tc.column)
+		for _, object := range tc.named {
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, retype(t, tc.table, tc.column, tc.newType, tc.named, object), &pgErr, object)
+			assert.Equal(t, "0A000", pgErr.Code, object)
+		}
+	}
+	require.NoError(t, retype(t, "orders", "note", "varchar(200)", nil, ""),
+		"a trigger body and a statistics object do not block the change")
+}
+
+// ReadColumnDependents maps each partition key column, named directly or
+// used in a key expression, to the partitioned tables whose key includes
+// it: the table's own key for the table alone, and a sub-partition's key
+// too for the tree. A partition never declares a column, so a recursive
+// drop reaches the same tables. The server is the oracle: it refuses to
+// retype every column the map names with SQLSTATE 42P16, and retypes a
+// column outside every key.
+func TestReadColumnDependentsPartitionKeys(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (id bigint, region int, created_at timestamp, kind text)
+			PARTITION BY RANGE (created_at);
+		CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY LIST (region);
+		CREATE TABLE %[1]s.events_2026_eu PARTITION OF %[1]s.events_2026 FOR VALUES IN (1);
+		CREATE TABLE %[1]s.tickets (id bigint, code text, note text) PARTITION BY LIST (lower(code));
+		CREATE TABLE %[1]s.tickets_a PARTITION OF %[1]s.tickets FOR VALUES IN ('a')`, schema))
+	require.NoError(t, err)
+	table := func(name string) string { return fmt.Sprintf(`"%s"."%s"`, schema, name) }
+
+	events, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]string{"created_at": {table("events")}}, events.PartitionKeys.Own)
+	tree := map[string][]string{
+		"created_at": {table("events")},
+		"region":     {table("events_2026")},
+	}
+	assert.Equal(t, tree, events.PartitionKeys.Tree)
+	assert.Equal(t, tree, events.PartitionKeys.Drop, "a partition never declares a column")
+
+	tickets, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "tickets")
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]string{"code": {table("tickets")}}, tickets.PartitionKeys.Tree)
+	assert.Equal(t, map[string][]string{"code": {table("tickets")}}, tickets.PartitionKeys.Own)
+
+	retype := func(t *testing.T, table, column, newType string) error {
+		t.Helper()
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.%s ALTER COLUMN %s TYPE %s", schema, table, column, newType))
+		return err
+	}
+	for _, tc := range [][3]string{
+		{"events", "created_at", "timestamptz"},
+		{"events", "region", "bigint"},
+		{"tickets", "code", "varchar(20)"},
+	} {
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, retype(t, tc[0], tc[1], tc[2]), &pgErr, tc[1])
+		assert.Equal(t, "42P16", pgErr.Code, tc[1])
+	}
+	require.NoError(t, retype(t, "events", "kind", "varchar(20)"), "a column outside every key retypes")
+	require.NoError(t, retype(t, "tickets", "note", "varchar(20)"), "a column outside every key retypes")
+}

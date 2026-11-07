@@ -331,6 +331,9 @@ against `sizeGuardApplies`):
 | `replica-identity` | n/a — refused at plan time |
 | `dependent-view` | n/a — refused at plan time |
 | `dependent-policy` | n/a — refused at plan time |
+| `dependent-trigger` | n/a — refused at plan time |
+| `dependent-generated-column` | n/a — refused at plan time |
+| `partition-key` | n/a — refused at plan time |
 | `cascading-drop` | n/a — refused at plan time |
 | `unsupported-operation` | n/a — refused at plan time |
 
