@@ -68,12 +68,19 @@ func addColumnSQL(c column) string {
 }
 
 // columnsSQL lists the live columns of the checkpoint table in order.
+// Every relation and operator is pg_catalog-qualified (CO-9): a lookalike
+// pg_attribute on the session's path would otherwise list columns the
+// table does not have, or none, and Ensure would judge the table's shape
+// by the lookalike.
 const columnsSQL = `
 SELECT a.attname
-FROM pg_attribute a
-JOIN pg_class c ON c.oid = a.attrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+WHERE n.nspname OPERATOR(pg_catalog.=) $1
+  AND c.relname OPERATOR(pg_catalog.=) $2
+  AND a.attnum OPERATOR(pg_catalog.>) 0
+  AND NOT a.attisdropped
 ORDER BY a.attnum`
 
 // tableShape is how an existing checkpoint table compares with the shape
