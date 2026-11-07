@@ -72,8 +72,9 @@ type DependentObjects struct {
 // from the dropped table loses it. Partitions never declare a column of
 // their own, so a drop reaches every partition. The dependency is the one
 // pg_depend records to the column: from the view's rewrite rule, the
-// policy, the trigger, or the generated column's expression, and from the
-// column to its own table for a partition key column. A view that reads
+// policy, the trigger, or the generated column (from its expression on
+// PostgreSQL 15 and later, from the generated column itself before that),
+// and from the column to its own table for a partition key column. A view that reads
 // the table without naming the column does not appear. The read is a planning fact: the server's own refusal
 // at execution stays the backstop for a dependent created after it.
 func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table string) (ColumnDependents, error) {
@@ -245,6 +246,21 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 			  AND d.refobjid OPERATOR(pg_catalog.=) tree.oid
 			  AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
 			  AND ad.adnum OPERATOR(pg_catalog.<>) a.attnum
+			  AND g.attgenerated OPERATOR(pg_catalog.<>) ''
+			UNION
+			SELECT 'generated'::pg_catalog.text, n.nspname, c.relname, g.attname
+			FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_attribute g
+			  ON g.attrelid OPERATOR(pg_catalog.=) d.objid AND g.attnum OPERATOR(pg_catalog.=) d.objsubid
+			JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) d.objid
+			JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+			WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.objid OPERATOR(pg_catalog.=) tree.oid
+			  AND d.objsubid OPERATOR(pg_catalog.<>) a.attnum
+			  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refobjid OPERATOR(pg_catalog.=) tree.oid
+			  AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+			  AND d.deptype OPERATOR(pg_catalog.=) 'a'
 			  AND g.attgenerated OPERATOR(pg_catalog.<>) ''
 			UNION
 			SELECT 'partition-key'::pg_catalog.text, n.nspname, c.relname, NULL::pg_catalog.name

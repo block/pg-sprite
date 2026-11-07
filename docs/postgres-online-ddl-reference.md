@@ -619,7 +619,9 @@ The operation changes the type of, or drops, a column that a generated column's
 expression reads. PostgreSQL refuses both while the generated column exists (`cannot
 alter type of a column used by a generated column`, and `cannot drop column … because
 other objects depend on it` for a drop), even a type change it would otherwise relabel,
-so the statement could only fail. The plan names each generated column as
+so the statement could only fail. PostgreSQL 14 is the exception for a drop: it drops
+the generated column along with the column without saying so, so there the refusal is
+what keeps the generated column. The plan names each generated column as
 `"schema"."table"."column"` in `decisions[].dependent_generated_columns`, and a refused
 run's verdict in `dependent_generated_columns`. Drop those generated columns first,
 then re-plan. Adding a `STORED` generated column back afterwards, or changing its

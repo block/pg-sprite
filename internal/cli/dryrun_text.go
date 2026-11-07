@@ -356,7 +356,7 @@ func impactText(r planner.Reason) string {
 	case planner.ReasonDependentTrigger:
 		return "changes a column a trigger's UPDATE OF list or WHEN condition names; PostgreSQL refuses this until the trigger is dropped"
 	case planner.ReasonDependentGeneratedColumn:
-		return "changes a column a generated column reads; PostgreSQL refuses this until the generated column is dropped"
+		return "changes a column a generated column reads; PostgreSQL refuses this until the generated column is dropped, except that PostgreSQL 14 drops the generated column along with a dropped column"
 	case planner.ReasonPartitionKey:
 		return "changes a partition key column; PostgreSQL never retypes or drops one"
 	case planner.ReasonCascadingDrop:
@@ -422,7 +422,7 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 	if d.Reason == planner.ReasonDependentGeneratedColumn {
 		return d.Operation + " changes a column read by " +
 			planner.DependentsPhrase("generated column", "generated columns", d.DependentGeneratedColumns) +
-			", and PostgreSQL refuses to retype or drop a column while a generated column reads it"
+			", and PostgreSQL refuses to retype or drop a column while a generated column reads it, except that PostgreSQL 14 drops the generated column along with a dropped column"
 	}
 	if d.Reason == planner.ReasonPartitionKey {
 		return d.Operation + " changes a column in the partition key of " + strings.Join(d.PartitionKeyTables, ", ") +

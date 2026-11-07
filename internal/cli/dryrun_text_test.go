@@ -461,7 +461,7 @@ func TestDryRunTextHiddenDependentRefusalsNameTheObjects(t *testing.T) {
 				Reason:                    planner.ReasonDependentGeneratedColumn,
 				DependentGeneratedColumns: []string{`"app"."orders"."total_cents"`, `"app"."orders"."total_tax"`},
 			},
-			refusal: `DROP COLUMN amount changes a column read by generated columns "app"."orders"."total_cents", "app"."orders"."total_tax", and PostgreSQL refuses to retype or drop a column while a generated column reads it`,
+			refusal: `DROP COLUMN amount changes a column read by generated columns "app"."orders"."total_cents", "app"."orders"."total_tax", and PostgreSQL refuses to retype or drop a column while a generated column reads it, except that PostgreSQL 14 drops the generated column along with a dropped column`,
 			help:    "help: " + planner.GeneratedColumnHelp,
 			anchor:  "#dependent-generated-column",
 		},

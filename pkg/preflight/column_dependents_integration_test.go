@@ -404,6 +404,14 @@ func TestReadColumnDependentsTriggersAndGeneratedColumns(t *testing.T) {
 		_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.%s ALTER COLUMN %s TYPE %s", schema, table, column, newType))
 		return err
 	}
+	// PostgreSQL 14 reports a generated column blocking a type change as a
+	// syntax error class; later versions report it as unsupported.
+	var version int
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT pg_catalog.current_setting('server_version_num')::pg_catalog.int4").Scan(&version))
+	generatedCode := "0A000"
+	if version < 150000 {
+		generatedCode = "42601"
+	}
 	for _, tc := range []struct {
 		table, column, newType string
 		named                  []string
@@ -418,7 +426,11 @@ func TestReadColumnDependentsTriggersAndGeneratedColumns(t *testing.T) {
 		for _, object := range tc.named {
 			var pgErr *pgconn.PgError
 			require.ErrorAs(t, retype(t, tc.table, tc.column, tc.newType, tc.named, object), &pgErr, object)
-			assert.Equal(t, "0A000", pgErr.Code, object)
+			code := "0A000"
+			if tc.table == "ledger" {
+				code = generatedCode
+			}
+			assert.Equal(t, code, pgErr.Code, object)
 		}
 	}
 	require.NoError(t, retype(t, "orders", "note", "varchar(200)", nil, ""),

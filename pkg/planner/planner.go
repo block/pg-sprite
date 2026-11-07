@@ -190,7 +190,9 @@ const (
 	// ReasonDependentGeneratedColumn: the operation changes the type of,
 	// or drops, a column that a generated column's expression reads.
 	// PostgreSQL refuses both while the generated column exists, so the
-	// statement could only fail. The decision names the generated columns.
+	// statement could only fail, except that PostgreSQL 14 drops the
+	// generated column along with a dropped column, so there the refusal
+	// is what keeps it. The decision names the generated columns.
 	ReasonDependentGeneratedColumn Reason = "dependent-generated-column"
 	// ReasonPartitionKey: the operation changes the type of, or drops, a
 	// column in the partition key of the table or of a partitioned table
