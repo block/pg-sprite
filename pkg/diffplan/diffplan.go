@@ -106,14 +106,8 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if facts.AddColumnProofs, err = addColumnProofs(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
-		needsRows, err := needsTableRows(changes)
-		if err != nil {
+		if facts.NullFilledColumns, err = nullFilledColumns(ctx, pool, req.Schema, ds.Table(), changes, facts.ColumnTypes); err != nil {
 			return plan.Report{}, err
-		}
-		if needsRows {
-			if facts.TableHasRows, err = preflight.TableHasRows(ctx, pool, req.Schema, ds.Table()); err != nil {
-				return plan.Report{}, err
-			}
 		}
 		if retypesOrDropsColumn(changes) {
 			deps, err := preflight.ReadColumnDependents(ctx, pool, req.Schema, ds.Table())
@@ -183,23 +177,45 @@ func addColumnProofs(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 	return proofs, nil
 }
 
-// needsTableRows reports whether any change adds a NOT NULL column with
-// nothing to fill it, whose classification depends on whether the table
-// holds rows (planner.NeedsTableRows).
-func needsTableRows(changes []schemadiff.Change) (bool, error) {
+// nullFilledColumns reads the columns the changes add NOT NULL that the
+// server would refuse because the table holds a row the column would be
+// NULL in (preflight.AddColumnFillsNull, then preflight.TableHasRows once
+// for all of them). columns are the table's live columns; a column an
+// earlier change drops is a new column again when a later change adds it.
+func nullFilledColumns(ctx context.Context, pool *pgxpool.Pool, schema, table string, changes []schemadiff.Change, columns map[string]string) (map[string]bool, error) {
+	present := maps.Clone(columns)
+	fills := map[string]bool{}
 	for _, ch := range changes {
-		if ch.Kind != schemadiff.ChangeAddColumn {
-			continue
-		}
 		ops, err := statement.ParseOps(ch.SQL)
 		if err != nil {
-			return false, fmt.Errorf("read the operations of %q: %w", ch.SQL, err)
+			return nil, fmt.Errorf("read the operations of %q: %w", ch.SQL, err)
 		}
-		if slices.ContainsFunc(ops, planner.NeedsTableRows) {
-			return true, nil
+		candidates := planner.NullFillCandidates(ops, present)
+		for _, op := range ops {
+			if op.Kind == statement.OpDropColumn {
+				delete(present, op.Column)
+			}
 		}
+		if len(candidates) == 0 {
+			continue
+		}
+		filled, err := preflight.AddColumnFillsNull(ctx, pool, schema, table, ch.SQL, candidates)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(fills, filled)
 	}
-	return false, nil
+	if len(fills) == 0 {
+		return nil, nil
+	}
+	rows, err := preflight.TableHasRows(ctx, pool, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	if !rows {
+		return nil, nil
+	}
+	return fills, nil
 }
 
 // retypesOrDropsColumn reports whether any change retypes or drops a

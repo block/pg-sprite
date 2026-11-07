@@ -54,8 +54,9 @@ type Facts struct {
 // and policies depend on each column (preflight.ReadColumnDependents), and
 // for one that adds columns, has the server prove whether each one
 // rewrites the table (preflight.AddColumnRewrites); when one of those
-// columns is NOT NULL with nothing to fill it, it also reads whether the
-// table holds rows (preflight.TableHasRows). For one that adds an unnamed CHECK or
+// columns is NOT NULL with no DEFAULT of its own, it also has the server
+// prove whether the table holds a row the column would be NULL in
+// (preflight.NullFilledColumns). For one that adds an unnamed CHECK or
 // FOREIGN KEY it also reads the constraint names the schema already uses,
 // so the safer sequence names the constraint as the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
@@ -104,14 +105,12 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 			return Facts{}, err
 		}
 	}
-	needsRows, err := needsTableRows(st)
+	candidates, err := nullFillCandidates(st, classifier.ColumnTypes)
 	if err != nil {
 		return Facts{}, err
 	}
-	if needsRows {
-		if classifier.TableHasRows, err = preflight.TableHasRows(ctx, pool, schema, st.Table()); err != nil {
-			return Facts{}, err
-		}
+	if classifier.NullFilledColumns, err = preflight.NullFilledColumns(ctx, pool, schema, st.Table(), st.SQL(), candidates); err != nil {
+		return Facts{}, err
 	}
 	names, err := addsUnnamedValidatableConstraint(st)
 	if err != nil {
@@ -187,18 +186,18 @@ func addsColumn(st statement.Statement) (bool, error) {
 	return slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn }), nil
 }
 
-// needsTableRows reports whether st is an ALTER TABLE adding a NOT NULL
-// column with nothing to fill it, whose classification depends on whether
-// the table holds rows (planner.NeedsTableRows).
-func needsTableRows(st statement.Statement) (bool, error) {
+// nullFillCandidates names the columns an ALTER TABLE st adds NOT NULL
+// with no DEFAULT of their own, given the table's live columns
+// (planner.NullFillCandidates).
+func nullFillCandidates(st statement.Statement, columns map[string]string) ([]string, error) {
 	if st.Kind() != statement.KindAlterTable {
-		return false, nil
+		return nil, nil
 	}
 	ops, err := statement.ParseOps(st.SQL())
 	if err != nil {
-		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
+		return nil, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
-	return slices.ContainsFunc(ops, planner.NeedsTableRows), nil
+	return planner.NullFillCandidates(ops, columns), nil
 }
 
 // retypesOrDropsColumn reports whether st is an ALTER TABLE that changes a

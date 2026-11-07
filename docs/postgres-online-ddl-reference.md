@@ -591,9 +591,9 @@ planning.
 |---|---|---|---|
 | refused — never executed | — | — | 2 |
 
-The operation adds a `NOT NULL` column with no default, identity, or generation
-expression to a table that holds rows, counting its partitions and inheritance
-children. Every existing row would hold `NULL` in the new column, so PostgreSQL
+The operation adds a `NOT NULL` column that nothing fills (no default, identity, or
+generation expression of its own, and no `DEFAULT` on its domain) to a table that
+holds rows, counting its partitions and inheritance children. Every existing row would hold `NULL` in the new column, so PostgreSQL
 refuses the statement (`column "…" of relation "…" contains null values`, SQLSTATE
 `23502`), and only after it has queued for and taken the table's `ACCESS EXCLUSIVE`
 lock and checked the rows. The statement could only fail. Give the column a constant
@@ -602,9 +602,11 @@ default instead, which PostgreSQL stores in the catalog without rewriting the ta
 NULL` afterwards, which the planner runs as its safer sequence (`safer-idiom`). An
 empty table has no rows to fill, so the same statement is `metadata-only` there, and
 a column the table already has is not refused, since `ADD COLUMN IF NOT EXISTS`
-skips it. The planner reads whether the table holds rows from live facts, reading at
-most one row and never waiting for a lock; a read that another session's lock
-blocks fails the plan rather than guessing. The linter has no live facts and never
+skips it, unless the same statement drops the column first. The planner asks the
+server: it adds the column to a one-row temporary table, where PostgreSQL's own
+refusal says whether anything fills it, and only then reads whether the table holds
+rows, reading at most one row and never waiting for a lock. A read that another
+session's lock blocks fails the plan rather than guessing. The linter has no live facts and never
 reports it. Rows a row-level security policy hides from the role do not count, and
 the server's own refusal remains the backstop for them and for rows inserted after
 planning.

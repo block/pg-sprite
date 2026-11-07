@@ -415,14 +415,15 @@ type Facts struct {
 	DropDependentPolicies map[string][]string
 	// OwnDependentPolicies is DependentPolicies for the table alone.
 	OwnDependentPolicies map[string][]string
-	// TableHasRows is true when the table, or a partition or inheritance
-	// child below it, holds a row (preflight.TableHasRows); false when it
-	// holds none, or when the fact was not read, as in an offline lint.
-	// It is read only for a statement that adds a NOT NULL column with
-	// nothing to fill it (NeedsTableRows), the one classification it
-	// decides; without it the server's own refusal at execution remains
-	// the backstop.
-	TableHasRows bool
+	// NullFilledColumns are the columns the statement adds NOT NULL that
+	// PostgreSQL would refuse to add because the table, or a partition or
+	// inheritance child below it, holds a row the column would be NULL in
+	// (preflight.NullFilledColumns). It is read only for the columns
+	// NullFillCandidates names. A column absent from the map gets a value
+	// in every row, the table holds none, or the fact was not read, as in
+	// an offline lint; without it the server's own refusal at execution
+	// remains the backstop.
+	NullFilledColumns map[string]bool
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -504,22 +505,38 @@ func dependentPolicyFix(op statement.Op, st statement.Statement, facts Facts, sq
 const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
 	"or add it without NOT NULL, backfill it, then set NOT NULL"
 
-// NeedsTableRows reports whether op's classification depends on whether
-// the table holds rows: an ADD COLUMN that declares NOT NULL with nothing
-// to fill the existing rows, which PostgreSQL refuses on a table with
-// rows. A front door reads Facts.TableHasRows only for such a statement.
-func NeedsTableRows(op statement.Op) bool {
-	return op.Kind == statement.OpAddColumn && op.NotNull &&
-		op.Default == statement.DefaultNone && !op.GeneratedStored
+// NullFillCandidates names the columns the operations of one ALTER TABLE
+// add NOT NULL with no DEFAULT of their own, the ones whose existing rows
+// may be left NULL: a front door reads Facts.NullFilledColumns only for
+// these. columns are the table's live columns. A column the table already
+// has is skipped by ADD COLUMN IF NOT EXISTS, and refused as a duplicate
+// otherwise, so neither fills anything, unless an earlier operation of the
+// same statement drops it, which makes the add a new column again.
+func NullFillCandidates(ops []statement.Op, columns map[string]string) []string {
+	dropped := map[string]bool{}
+	var candidates []string
+	for _, op := range ops {
+		if op.Kind == statement.OpDropColumn {
+			dropped[op.Column] = true
+			continue
+		}
+		if op.Kind != statement.OpAddColumn || !op.NotNull ||
+			op.Default != statement.DefaultNone || op.GeneratedStored {
+			continue
+		}
+		if _, exists := columns[op.Column]; exists && !dropped[op.Column] {
+			continue
+		}
+		candidates = append(candidates, op.Column)
+	}
+	return candidates
 }
 
 // fillsNotNullWithNull reports whether op adds a NOT NULL column that
-// nothing fills to a table whose rows would then hold NULL in it. A
-// column the table already has is skipped by ADD COLUMN IF NOT EXISTS,
-// and refused as a duplicate otherwise, so neither fills anything.
+// PostgreSQL would refuse because a row of the table would hold NULL in
+// it.
 func fillsNotNullWithNull(op statement.Op, facts Facts) bool {
-	_, exists := facts.ColumnTypes[op.Column]
-	return NeedsTableRows(op) && facts.TableHasRows && !exists
+	return op.Kind == statement.OpAddColumn && facts.NullFilledColumns[op.Column]
 }
 
 // addColumnProof returns what the server proved about adding op's

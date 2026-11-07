@@ -717,48 +717,51 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 // before the statement's shape: a constant default on a constrained domain
 // still rewrites, and a default the catalog stores runs in place however it
 
-// Adding a NOT NULL column that nothing fills is refused when the table
-// holds rows, since PostgreSQL refuses it then; on an empty table, or
-// without the fact, it classifies as usual. A constant, expression,
-// identity, or serial default and a generated column fill the rows, so
-// none of them is refused, and neither is a column the table already has,
-// which ADD COLUMN IF NOT EXISTS skips.
+// Adding a NOT NULL column is refused when the server proved a row of the
+// table would hold NULL in it (Facts.NullFilledColumns); on an empty
+// table, or without the fact, it classifies as usual.
 func TestClassifyRefusesANotNullColumnNothingFillsOnATableWithRows(t *testing.T) {
 	populated := planner.Facts{
-		TableHasRows: true,
-		ColumnTypes:  map[string]string{"id": "bigint", "email": "text"},
-		AddColumnProofs: map[string]statement.AddColumnProof{
-			"tier": statement.AddColumnInPlace, "created": statement.AddColumnInPlace,
-			"n": statement.AddColumnDefaultRewrites,
-		},
+		NullFilledColumns: map[string]bool{"tier": true},
+		ColumnTypes:       map[string]string{"id": "bigint", "email": "text"},
+		AddColumnProofs:   map[string]statement.AddColumnProof{"tier": statement.AddColumnInPlace},
 	}
-	for sql, want := range map[string]planner.Reason{
-		"ALTER TABLE customers ADD COLUMN tier text NOT NULL":                                planner.ReasonNotNullWithoutDefault,
-		"ALTER TABLE customers ADD COLUMN tier text NOT NULL DEFAULT 'free'":                 planner.ReasonFastDefault,
-		"ALTER TABLE customers ADD COLUMN created timestamptz NOT NULL DEFAULT now()":        planner.ReasonFastDefault,
-		"ALTER TABLE customers ADD COLUMN n bigint NOT NULL GENERATED ALWAYS AS IDENTITY":    planner.ReasonVolatileDefault,
-		"ALTER TABLE customers ADD COLUMN n bigserial NOT NULL":                              planner.ReasonVolatileDefault,
-		"ALTER TABLE customers ADD COLUMN total int NOT NULL GENERATED ALWAYS AS (1) STORED": planner.ReasonGeneratedStored,
-		"ALTER TABLE customers ADD COLUMN tier text":                                         planner.ReasonMetadataOnly,
-		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL":                 planner.ReasonMetadataOnly,
-	} {
-		d := classifyWithFacts(t, sql, populated)
-		assert.Equal(t, want, d.Reason, sql)
-		if want == planner.ReasonNotNullWithoutDefault {
-			assert.Equal(t, planner.RouteRefuse, d.Route, sql)
-		}
-	}
+	d := classifyWithFacts(t, "ALTER TABLE customers ADD COLUMN tier text NOT NULL", populated)
+	assert.Equal(t, planner.ReasonNotNullWithoutDefault, d.Reason)
+	assert.Equal(t, planner.RouteRefuse, d.Route)
 
 	empty := populated
-	empty.TableHasRows = false
-	d := classifyWithFacts(t, "ALTER TABLE customers ADD COLUMN tier text NOT NULL", empty)
+	empty.NullFilledColumns = nil
+	d = classifyWithFacts(t, "ALTER TABLE customers ADD COLUMN tier text NOT NULL", empty)
 	assert.Equal(t, planner.ReasonMetadataOnly, d.Reason)
 	assert.Equal(t, planner.RouteNative, d.Route)
+}
 
-	assert.True(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpAddColumn, NotNull: true}))
-	assert.False(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpAddColumn, NotNull: true, Default: statement.DefaultConstant}))
-	assert.False(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpAddColumn, NotNull: true, GeneratedStored: true}))
-	assert.False(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpSetNotNull, Column: "email"}))
+// The columns whose rows may be left NULL are the ones added NOT NULL
+// with no DEFAULT of their own that the table does not already have. A
+// constant, expression, identity, or serial default and a generated column
+// fill the rows; a column the table has is skipped by ADD COLUMN IF NOT
+// EXISTS, unless the same statement drops it first.
+func TestNullFillCandidates(t *testing.T) {
+	columns := map[string]string{"id": "bigint", "email": "text"}
+	for sql, want := range map[string][]string{
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL":                                   {"tier"},
+		"ALTER TABLE customers ADD COLUMN tier tier_type NOT NULL":                              {"tier"},
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL, ADD COLUMN plan text NOT NULL":    {"tier", "plan"},
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL DEFAULT 'free'":                    nil,
+		"ALTER TABLE customers ADD COLUMN created timestamptz NOT NULL DEFAULT now()":           nil,
+		"ALTER TABLE customers ADD COLUMN n bigint NOT NULL GENERATED ALWAYS AS IDENTITY":       nil,
+		"ALTER TABLE customers ADD COLUMN n bigserial NOT NULL":                                 nil,
+		"ALTER TABLE customers ADD COLUMN total int NOT NULL GENERATED ALWAYS AS (1) STORED":    nil,
+		"ALTER TABLE customers ADD COLUMN tier text":                                            nil,
+		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL":                    nil,
+		"ALTER TABLE customers DROP COLUMN email, ADD COLUMN email text NOT NULL":               {"email"},
+		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL, DROP COLUMN email": nil,
+	} {
+		ops, err := statement.ParseOps(sql)
+		require.NoError(t, err, sql)
+		assert.Equal(t, want, planner.NullFillCandidates(ops, columns), sql)
+	}
 }
 
 // classifyWithFacts classifies a single-operation statement against facts

@@ -50,3 +50,26 @@ func TestPlanRefusesANotNullColumnWithoutDefaultOnATableWithRows(t *testing.T) {
 	assert.Equal(t, planner.RouteRefuse, d.Route)
 	assert.Equal(t, planner.ReasonNotNullWithoutDefault, d.Reason)
 }
+
+// A desired column whose domain DEFAULT fills every row plans as
+// metadata-only on a table with rows, because the server fills it.
+func TestPlanRunsANotNullColumnItsDomainFills(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE DOMAIN %[1]s.tier_type AS text DEFAULT 'free';
+		CREATE TABLE %[1]s.customers (id bigint PRIMARY KEY);
+		INSERT INTO %[1]s.customers VALUES (1)`, schema))
+	require.NoError(t, err)
+	desired := fmt.Sprintf(`CREATE TABLE customers (id bigint PRIMARY KEY, tier %s.tier_type NOT NULL);`, schema)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t, desired)})
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	require.Len(t, report.Statements[0].Decisions, 1)
+	assert.NotEqual(t, router.DispositionRefuse, report.Disposition)
+	assert.Equal(t, planner.ReasonMetadataOnly, report.Statements[0].Decisions[0].Reason)
+}
