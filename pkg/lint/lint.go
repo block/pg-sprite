@@ -9,6 +9,7 @@ package lint
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -305,8 +306,8 @@ func (l *lockedTables) rollbackTo(name string) {
 // latest returns the index of the most recent savepoint named name, or -1
 // when the block has none, which PostgreSQL refuses.
 func (l *lockedTables) latest(name string) int {
-	for i := len(l.savepoints) - 1; i >= 0; i-- {
-		if l.savepoints[i].name == name {
+	for i, sp := range slices.Backward(l.savepoints) {
+		if sp.name == name {
 			return i
 		}
 	}
