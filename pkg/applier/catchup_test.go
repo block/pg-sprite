@@ -22,22 +22,26 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 	assert.Equal(t, DefaultCatchupMaxChanges, opts.MaxChanges)
 	assert.Equal(t, progress.WallClock{}, opts.Clock)
 	assert.Equal(t, decode.DefaultSlotLagCeiling, opts.SlotLagCeiling)
+	assert.Equal(t, DefaultDeadlockAttempts, opts.DeadlockAttempts)
 	require.NoError(t, opts.validate())
 
-	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20}.withDefaults()
+	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20, DeadlockAttempts: 3}.withDefaults()
 	assert.Equal(t, time.Second, given.Interval)
 	assert.Equal(t, 5, given.MaxChanges)
 	assert.Equal(t, int64(1<<20), given.SlotLagCeiling)
+	assert.Equal(t, 3, given.DeadlockAttempts)
 }
 
 // An interval the clock cannot time, a change bound that would never let
-// a cycle end, or a slot lag ceiling that would abort every slot is refused
-// rather than defaulted; the ceiling cannot be switched off.
+// a cycle end, a slot lag ceiling that would abort every slot, or a
+// deadlock bound that would end the catch-up before its first retry is
+// refused rather than defaulted; the ceiling cannot be switched off.
 func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
 	cases := map[string]CatchupOptions{
 		"interval below a millisecond": {Interval: 500 * time.Microsecond},
 		"negative max changes":         {MaxChanges: -1},
 		"negative slot lag ceiling":    {SlotLagCeiling: -1},
+		"negative deadlock attempts":   {DeadlockAttempts: -1},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {

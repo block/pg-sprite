@@ -294,8 +294,13 @@ it. The chunk lands when they are gone. A pass the server rolls back with `deadl
 indexes, so two of them can each wait on a value the other holds, and the server breaks the
 cycle by rolling one back. The rolled-back pass committed nothing and leaves the pending keys
 unchanged, so the chunk takes its next pass, on every path including the `DEFERRABLE` rerun
-below. Only the copier's side is retried: when the server picks the flush as the victim, the
-catch-up fails closed. A chunk whose pending keys outlast
+below. Both sides of the cycle are retried: when the server picks the flush as the victim, the
+flush returns `applier.ErrBatchDeadlocked` with the shadow unchanged, the catch-up requeues the
+batch whole and flushes it on its next cycle, by when the copier's pass has committed or rolled
+back, and `Status.BatchesDeadlocked` counts the requeue; a flush rolled back as the victim
+`applier.CatchupOptions.DeadlockAttempts` cycles in a row ends the catch-up with that error,
+since the flush is losing every round and another cycle would hold the slot's WAL for nothing.
+A chunk whose pending keys outlast
 `copier.Options.CollisionAttempts` passes stops the copy with the latest pass's error and no cause
 of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
 as copied and the resume clear removes the rows committed around them. A shadow with a
