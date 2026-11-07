@@ -9,7 +9,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks"
+    reason_notes: "Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks. A `NOT NULL` column with no default is refused with `not-null-without-default` when the table holds rows, which PostgreSQL would refuse"
   - id: add-column-with-volatile-default-now-gen-random-uuid
     area: "column_changes"
     operation: "`ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …)"

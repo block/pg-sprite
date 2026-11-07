@@ -106,6 +106,15 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if facts.AddColumnProofs, err = addColumnProofs(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
+		needsRows, err := needsTableRows(changes)
+		if err != nil {
+			return plan.Report{}, err
+		}
+		if needsRows {
+			if facts.TableHasRows, err = preflight.TableHasRows(ctx, pool, req.Schema, ds.Table()); err != nil {
+				return plan.Report{}, err
+			}
+		}
 		if retypesOrDropsColumn(changes) {
 			deps, err := preflight.ReadColumnDependents(ctx, pool, req.Schema, ds.Table())
 			if err != nil {
@@ -172,6 +181,25 @@ func addColumnProofs(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 		maps.Copy(proofs, proven)
 	}
 	return proofs, nil
+}
+
+// needsTableRows reports whether any change adds a NOT NULL column with
+// nothing to fill it, whose classification depends on whether the table
+// holds rows (planner.NeedsTableRows).
+func needsTableRows(changes []schemadiff.Change) (bool, error) {
+	for _, ch := range changes {
+		if ch.Kind != schemadiff.ChangeAddColumn {
+			continue
+		}
+		ops, err := statement.ParseOps(ch.SQL)
+		if err != nil {
+			return false, fmt.Errorf("read the operations of %q: %w", ch.SQL, err)
+		}
+		if slices.ContainsFunc(ops, planner.NeedsTableRows) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // retypesOrDropsColumn reports whether any change retypes or drops a

@@ -85,6 +85,7 @@ func Reasons() []Reason {
 		ReasonReplicaIdentity,
 		ReasonDependentView,
 		ReasonDependentPolicy,
+		ReasonNotNullWithoutDefault,
 		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
@@ -176,6 +177,13 @@ const (
 	// statement could only fail. The decision names the policies; drop
 	// them first and recreate them after the change, then re-plan.
 	ReasonDependentPolicy Reason = "dependent-policy"
+	// ReasonNotNullWithoutDefault: the operation adds a NOT NULL column
+	// with no default to a table that holds rows. Every existing row would
+	// hold NULL in the new column, so PostgreSQL refuses the statement
+	// (SQLSTATE 23502) after taking the table's exclusive lock; it could
+	// only fail. A default, identity, or generated column fills the rows,
+	// and an empty table has none to fill, so neither is refused.
+	ReasonNotNullWithoutDefault Reason = "not-null-without-default"
 	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
 	// depends on what it drops: a view or policy that reads a dropped
 	// column, or another table's foreign key on a dropped key. Those
@@ -407,6 +415,14 @@ type Facts struct {
 	DropDependentPolicies map[string][]string
 	// OwnDependentPolicies is DependentPolicies for the table alone.
 	OwnDependentPolicies map[string][]string
+	// TableHasRows is true when the table, or a partition or inheritance
+	// child below it, holds a row (preflight.TableHasRows); false when it
+	// holds none, or when the fact was not read, as in an offline lint.
+	// It is read only for a statement that adds a NOT NULL column with
+	// nothing to fill it (NeedsTableRows), the one classification it
+	// decides; without it the server's own refusal at execution remains
+	// the backstop.
+	TableHasRows bool
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -481,6 +497,29 @@ func dependentPolicyFix(op statement.Op, st statement.Statement, facts Facts, sq
 		return PolicyFixRecreateAroundChange
 	}
 	return PolicyFixExpandContract
+}
+
+// NotNullWithoutDefaultHelp is the operator-facing manual path for a
+// not-null-without-default decision.
+const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
+	"or add it without NOT NULL, backfill it, then set NOT NULL"
+
+// NeedsTableRows reports whether op's classification depends on whether
+// the table holds rows: an ADD COLUMN that declares NOT NULL with nothing
+// to fill the existing rows, which PostgreSQL refuses on a table with
+// rows. A front door reads Facts.TableHasRows only for such a statement.
+func NeedsTableRows(op statement.Op) bool {
+	return op.Kind == statement.OpAddColumn && op.NotNull &&
+		op.Default == statement.DefaultNone && !op.GeneratedStored
+}
+
+// fillsNotNullWithNull reports whether op adds a NOT NULL column that
+// nothing fills to a table whose rows would then hold NULL in it. A
+// column the table already has is skipped by ADD COLUMN IF NOT EXISTS,
+// and refused as a duplicate otherwise, so neither fills anything.
+func fillsNotNullWithNull(op statement.Op, facts Facts) bool {
+	_, exists := facts.ColumnTypes[op.Column]
+	return NeedsTableRows(op) && facts.TableHasRows && !exists
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -566,6 +605,8 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		switch {
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
+		case fillsNotNullWithNull(op, facts):
+			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
 		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:

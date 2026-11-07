@@ -60,6 +60,11 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "n", NewType: "int8", Default: statement.DefaultExpression},
 		},
 		{
+			name: "add column not null",
+			sql:  "ALTER TABLE t ADD COLUMN tier text NOT NULL",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "tier", NewType: "text", NotNull: true},
+		},
+		{
 			name: "add column generated stored",
 			sql:  "ALTER TABLE t ADD COLUMN total numeric GENERATED ALWAYS AS (price * qty) STORED",
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "total", NewType: "numeric", GeneratedStored: true},
@@ -99,7 +104,7 @@ func TestParseOpsShapes(t *testing.T) {
 			name: "add column not null carries no inline constraint",
 			sql:  "ALTER TABLE t ADD COLUMN c int NOT NULL DEFAULT 0",
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
-				Default: statement.DefaultConstant},
+				NotNull: true, Default: statement.DefaultConstant},
 		},
 		{
 			name: "drop column",

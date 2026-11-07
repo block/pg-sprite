@@ -45,8 +45,8 @@ import (
 // report-level advisories field and its closed kind vocabulary for the
 // invalid indexes a diff observes and declines to drop. Version 16 added
 // the dependent-policy planner reason and the dependent_policies decision
-// field.
-const FormatVersion = 16
+// field. Version 17 added the not-null-without-default planner reason.
+const FormatVersion = 17
 
 // Source identifies which front door derived the plan.
 type Source string

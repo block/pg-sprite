@@ -175,6 +175,8 @@ type Op struct {
 	IfNotExists bool
 	// GeneratedStored is true for ADD COLUMN ... GENERATED ... STORED.
 	GeneratedStored bool
+	// NotNull is true for an ADD COLUMN that declares NOT NULL.
+	NotNull bool
 	// InlineConstraints are the table-constraint families an added column
 	// carries inline (UNIQUE, PRIMARY KEY, REFERENCES, CHECK) — each does
 	// the same index build or validation scan as its ADD CONSTRAINT form.
@@ -496,10 +498,12 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 // shape, whether it is a stored generated column, and any inline table
 // constraints it carries. Identity and serial columns are reported as
 // expression defaults — their values come from a sequence, which fast
-// default cannot cover. Nullability clauses and the deferrability
-// attributes that modify a preceding FOREIGN KEY add no work of their own
-// and are not reported; any constraint family the engine does not model
-// is reported as ConstraintUnrecognized so the classifier fails closed.
+// default cannot cover. A NOT NULL clause adds no work of its own but is
+// reported, since it makes the add fail on a table with rows when nothing
+// fills the column. NULL and the deferrability attributes that modify a
+// preceding FOREIGN KEY are not reported; any constraint family the
+// engine does not model is reported as ConstraintUnrecognized so the
+// classifier fails closed.
 func addColumnOp(def *pganalyze.ColumnDef) Op {
 	op := Op{Kind: OpAddColumn, Column: def.GetColname()}
 	op.NewType, op.NewTypeMods = typeRef(def.GetTypeName())
@@ -520,8 +524,9 @@ func addColumnOp(def *pganalyze.ColumnDef) Op {
 			op.Default = DefaultExpression
 		case pganalyze.ConstrType_CONSTR_GENERATED:
 			op.GeneratedStored = true
+		case pganalyze.ConstrType_CONSTR_NOTNULL:
+			op.NotNull = true
 		case pganalyze.ConstrType_CONSTR_NULL,
-			pganalyze.ConstrType_CONSTR_NOTNULL,
 			pganalyze.ConstrType_CONSTR_ATTR_DEFERRABLE,
 			pganalyze.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE,
 			pganalyze.ConstrType_CONSTR_ATTR_DEFERRED,

@@ -716,6 +716,61 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 // An added column classifies by what the server proved about the rewrite
 // before the statement's shape: a constant default on a constrained domain
 // still rewrites, and a default the catalog stores runs in place however it
+
+// Adding a NOT NULL column that nothing fills is refused when the table
+// holds rows, since PostgreSQL refuses it then; on an empty table, or
+// without the fact, it classifies as usual. A constant, expression,
+// identity, or serial default and a generated column fill the rows, so
+// none of them is refused, and neither is a column the table already has,
+// which ADD COLUMN IF NOT EXISTS skips.
+func TestClassifyRefusesANotNullColumnNothingFillsOnATableWithRows(t *testing.T) {
+	populated := planner.Facts{
+		TableHasRows: true,
+		ColumnTypes:  map[string]string{"id": "bigint", "email": "text"},
+		AddColumnProofs: map[string]statement.AddColumnProof{
+			"tier": statement.AddColumnInPlace, "created": statement.AddColumnInPlace,
+			"n": statement.AddColumnDefaultRewrites,
+		},
+	}
+	for sql, want := range map[string]planner.Reason{
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL":                                planner.ReasonNotNullWithoutDefault,
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL DEFAULT 'free'":                 planner.ReasonFastDefault,
+		"ALTER TABLE customers ADD COLUMN created timestamptz NOT NULL DEFAULT now()":        planner.ReasonFastDefault,
+		"ALTER TABLE customers ADD COLUMN n bigint NOT NULL GENERATED ALWAYS AS IDENTITY":    planner.ReasonVolatileDefault,
+		"ALTER TABLE customers ADD COLUMN n bigserial NOT NULL":                              planner.ReasonVolatileDefault,
+		"ALTER TABLE customers ADD COLUMN total int NOT NULL GENERATED ALWAYS AS (1) STORED": planner.ReasonGeneratedStored,
+		"ALTER TABLE customers ADD COLUMN tier text":                                         planner.ReasonMetadataOnly,
+		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL":                 planner.ReasonMetadataOnly,
+	} {
+		d := classifyWithFacts(t, sql, populated)
+		assert.Equal(t, want, d.Reason, sql)
+		if want == planner.ReasonNotNullWithoutDefault {
+			assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		}
+	}
+
+	empty := populated
+	empty.TableHasRows = false
+	d := classifyWithFacts(t, "ALTER TABLE customers ADD COLUMN tier text NOT NULL", empty)
+	assert.Equal(t, planner.ReasonMetadataOnly, d.Reason)
+	assert.Equal(t, planner.RouteNative, d.Route)
+
+	assert.True(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpAddColumn, NotNull: true}))
+	assert.False(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpAddColumn, NotNull: true, Default: statement.DefaultConstant}))
+	assert.False(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpAddColumn, NotNull: true, GeneratedStored: true}))
+	assert.False(t, planner.NeedsTableRows(statement.Op{Kind: statement.OpSetNotNull, Column: "email"}))
+}
+
+// classifyWithFacts classifies a single-operation statement against facts
+// and returns its decision.
+func classifyWithFacts(t *testing.T, sql string, facts planner.Facts) planner.Decision {
+	t.Helper()
+	plan, err := planner.Classify(sql, facts)
+	require.NoError(t, err, sql)
+	require.Len(t, plan.Decisions, 1, sql)
+	return plan.Decisions[0]
+}
+
 // is written. A proven rewrite takes its reason from what the server found
 // rewrites, the type or the default, never from how the default is
 // written. A column the server could not prove, or that no proof was run
@@ -834,6 +889,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonReplicaIdentity,
 		planner.ReasonDependentView,
 		planner.ReasonDependentPolicy,
+		planner.ReasonNotNullWithoutDefault,
 		planner.ReasonCascadingDrop,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())

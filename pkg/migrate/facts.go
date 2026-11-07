@@ -53,7 +53,9 @@ type Facts struct {
 // For an ALTER TABLE that retypes or drops a column it reads which views
 // and policies depend on each column (preflight.ReadColumnDependents), and
 // for one that adds columns, has the server prove whether each one
-// rewrites the table (preflight.AddColumnRewrites). For one that adds an unnamed CHECK or
+// rewrites the table (preflight.AddColumnRewrites); when one of those
+// columns is NOT NULL with nothing to fill it, it also reads whether the
+// table holds rows (preflight.TableHasRows). For one that adds an unnamed CHECK or
 // FOREIGN KEY it also reads the constraint names the schema already uses,
 // so the safer sequence names the constraint as the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
@@ -99,6 +101,15 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	}
 	if adds {
 		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, schema, st.Table(), st.SQL()); err != nil {
+			return Facts{}, err
+		}
+	}
+	needsRows, err := needsTableRows(st)
+	if err != nil {
+		return Facts{}, err
+	}
+	if needsRows {
+		if classifier.TableHasRows, err = preflight.TableHasRows(ctx, pool, schema, st.Table()); err != nil {
 			return Facts{}, err
 		}
 	}
@@ -174,6 +185,20 @@ func addsColumn(st statement.Statement) (bool, error) {
 		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
 	return slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn }), nil
+}
+
+// needsTableRows reports whether st is an ALTER TABLE adding a NOT NULL
+// column with nothing to fill it, whose classification depends on whether
+// the table holds rows (planner.NeedsTableRows).
+func needsTableRows(st statement.Statement) (bool, error) {
+	if st.Kind() != statement.KindAlterTable {
+		return false, nil
+	}
+	ops, err := statement.ParseOps(st.SQL())
+	if err != nil {
+		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
+	}
+	return slices.ContainsFunc(ops, planner.NeedsTableRows), nil
 }
 
 // retypesOrDropsColumn reports whether st is an ALTER TABLE that changes a
