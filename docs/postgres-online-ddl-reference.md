@@ -671,11 +671,16 @@ blocks neither. Commit before the `VALIDATE` so it runs in a transaction of its 
 
 Lint follows the block the way PostgreSQL does. A `BEGIN` inside an open block keeps
 its locks. `ROLLBACK TO SAVEPOINT` releases the locks taken since the savepoint, and
-`RELEASE SAVEPOINT` keeps them. `REINDEX TABLE` holds `SHARE` on the table. An earlier
+`RELEASE SAVEPOINT` keeps them. `REINDEX TABLE` holds `SHARE` on the table, `TRUNCATE`
+holds `ACCESS EXCLUSIVE`, and `LOCK TABLE` holds the mode it names, which counts from
+`SHARE` up. A table renamed in the block keeps its lock under the new name. An earlier
 statement that takes `SHARE UPDATE EXCLUSIVE` alone, such as `SET STATISTICS`, does
-not count. Lint matches tables by the name each statement gives, so it does not see the lock a
-foreign key takes on the table it references. Only `lint` reports this code: it is a
-property of the script, and `migrate` takes one statement at a time.
+not count. Lint matches tables by the name each statement gives, so it does not see a
+lock a statement takes on a table it does not name: the table a foreign key
+references, the table under an index that `DROP INDEX` names, a partition or child
+that a statement reaches without naming it, or a table that `TRUNCATE ... CASCADE`
+or a new trigger locks. Only `lint` reports this code: it is a property of the
+script, and `migrate` takes one statement at a time.
 
 ### `rewrite-required`
 

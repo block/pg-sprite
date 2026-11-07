@@ -541,47 +541,11 @@ func Classify(sql string, facts Facts) (Plan, error) {
 // validation scan among them blocks neither reads nor writes.
 func allTakeShareUpdateExclusiveOnly(ops []statement.Op) bool {
 	for _, op := range ops {
-		if !TakesShareUpdateExclusiveOnly(op) {
+		if !op.TakesShareUpdateExclusiveOnly() {
 			return false
 		}
 	}
 	return true
-}
-
-// TakesShareUpdateExclusiveOnly reports an ALTER TABLE operation whose
-// lock on the table is SHARE UPDATE EXCLUSIVE, which blocks neither reads
-// nor writes: VALIDATE CONSTRAINT, SET STATISTICS and a column's SET /
-// RESET options, and SET / RESET of the storage parameters PostgreSQL
-// changes under that lock. SET STORAGE, user_catalog_table, and a
-// parameter not listed here count as blocking.
-func TakesShareUpdateExclusiveOnly(op statement.Op) bool {
-	switch op.Kind {
-	case statement.OpValidateConstraint:
-		return true
-	case statement.OpSetColumnOptions:
-		return !op.ColumnStorage
-	case statement.OpSetRelOptions:
-		return len(op.RelOptions) > 0 && !slices.ContainsFunc(op.RelOptions, func(name string) bool {
-			return !shareUpdateExclusiveRelOption(name)
-		})
-	default:
-		return false
-	}
-}
-
-// shareUpdateExclusiveRelOption reports a table storage parameter
-// PostgreSQL sets or resets under SHARE UPDATE EXCLUSIVE: every
-// autovacuum_ parameter and the ones listed. A toast. prefix changes none
-// of them.
-func shareUpdateExclusiveRelOption(name string) bool {
-	name = strings.TrimPrefix(strings.ToLower(name), "toast.")
-	switch name {
-	case "fillfactor", "toast_tuple_target", "parallel_workers",
-		"vacuum_index_cleanup", "vacuum_truncate", "log_autovacuum_min_duration":
-		return true
-	default:
-		return strings.HasPrefix(name, "autovacuum_")
-	}
 }
 
 // classifyOp routes one operation per the reference table.

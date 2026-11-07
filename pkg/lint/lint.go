@@ -333,10 +333,18 @@ func (n tableName) matches(other tableName) bool {
 
 // check returns a validate-in-transaction finding for each VALIDATE
 // CONSTRAINT stmt runs on a table an earlier statement of the block
-// locked, then records the table stmt itself locks. An ALTER TABLE whose
+// locked, then records the tables stmt itself locks. An ALTER TABLE whose
 // every operation takes SHARE UPDATE EXCLUSIVE, which blocks neither
-// reads nor writes, records nothing.
+// reads nor writes, records nothing, and neither does a LOCK TABLE in a
+// mode weaker than SHARE.
 func (l *lockedTables) check(index int, stmt statement.SourceStatement) ([]Finding, error) {
+	explicit, err := statement.TablesLockedAgainstWrites(stmt.SQL)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range explicit {
+		l.tables = append(l.tables, tableName{schema: t.Schema, table: t.Name})
+	}
 	st, err := statement.ParseOne(stmt.SQL)
 	if err != nil {
 		return nil, err
@@ -367,9 +375,16 @@ func (l *lockedTables) check(index int, stmt statement.SourceStatement) ([]Findi
 		}
 	}
 	for _, op := range ops {
-		if !planner.TakesShareUpdateExclusiveOnly(op) {
+		if !op.TakesShareUpdateExclusiveOnly() {
 			l.tables = append(l.tables, name)
 			break
+		}
+	}
+	// A renamed table keeps its lock under the new name, which is how a
+	// later statement of the block refers to it.
+	for _, op := range ops {
+		if op.Kind == statement.OpRenameTable {
+			l.tables = append(l.tables, tableName{schema: name.schema, table: op.Name})
 		}
 	}
 	return findings, nil
@@ -378,7 +393,9 @@ func (l *lockedTables) check(index int, stmt statement.SourceStatement) ([]Findi
 // lockedName names the table stmt locks, as stmt spelled it: the target
 // of an ALTER TABLE, a CREATE TABLE, or a CREATE INDEX, and the table a
 // REINDEX TABLE rebuilds the indexes of, which holds SHARE on it until
-// the block ends. The zero name means stmt locks no table lint can name.
+// the block ends. A LOCK TABLE or a TRUNCATE names its tables through
+// statement.TablesLockedAgainstWrites instead. The zero name means stmt
+// locks no table lint can name.
 func lockedName(st statement.Statement) tableName {
 	rel := st.IndexRelation()
 	if st.Kind() == statement.KindReindex && rel.Kind == statement.IndexRelationTable {

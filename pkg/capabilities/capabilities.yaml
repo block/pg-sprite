@@ -182,7 +182,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Already the online idiom; executed as-is. `VALIDATE CONSTRAINT` is the idiom only beside operations that take `SHARE UPDATE EXCLUSIVE` alone, such as another `VALIDATE` or `SET STATISTICS`: beside any other operation in one `ALTER TABLE`, it scans under that statement's strongest lock, so the statement is refused with `rewrite-required` until it is split. `lint` flags a `VALIDATE` in the same transaction block as an earlier statement that locked the table against reads or writes (`validate-in-transaction`)"
+    reason_notes: "Already the online idiom; executed as-is. `VALIDATE CONSTRAINT` is the idiom only beside operations that take `SHARE UPDATE EXCLUSIVE` alone, such as another `VALIDATE` or `SET STATISTICS`, and such a statement runs under the same validate budget as a lone `VALIDATE`: beside any other operation in one `ALTER TABLE`, it scans under that statement's strongest lock, so the statement is refused with `rewrite-required` until it is split. `lint` flags a `VALIDATE` in the same transaction block as an earlier statement that locked the table against reads or writes (`validate-in-transaction`)"
   - id: add-foreign-key-not-valid-on-a-partitioned-parent
     area: "constraints"
     operation: "`ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent**"
