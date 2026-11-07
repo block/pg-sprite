@@ -190,33 +190,24 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // the operational error. An error with a zero result means the pipeline
 // stopped before planning or executing anything.
 //
-// Options.Force, Options.AllowDestructive, Options.CopySwap.BlockWrites
-// and Options.CopySwap.Restart are rejected: the declarative front door
-// never runs a submitted form blind, refuses a destructive plan whole,
-// never takes a table offline for writes, and never starts a stopped run
-// over. A destructive, force-worthy, offline or started-over change
-// belongs on the imperative front door where the operator states it
-// explicitly.
+// Every typed acknowledgement — Options.Force, AcceptBlocking,
+// AllowDestructive, CopySwap.Restart and CopySwap.BlockWrites — is rejected
+// with its own sentinel, the first set in that order when several are, before
+// the policy is validated: each accepts a loss for one statement the operator
+// wrote, and the declarative front door runs statements the plan derived. A
+// destructive, blocking, force-worthy, restarted or offline change belongs
+// on the imperative front door where the operator states it explicitly.
 //
 // Every planned statement runs back through [Run], so Run's note on the
 // pool's search_path applies to the pool passed here.
 //
 // RunDesired does not close the pool; one pool serves any number of calls.
 func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
-	// The acknowledgements this door rejects are named before Options is
-	// validated, so a value that also breaks a mutual-exclusion rule still
-	// returns the sentinel an embedder branches on.
-	if opts.Force != "" {
-		return DesiredResult{}, ErrForceNotSupported
-	}
-	if opts.AllowDestructive != "" {
-		return DesiredResult{}, ErrAllowDestructiveNotSupported
-	}
-	if opts.CopySwap.BlockWrites != "" {
-		return DesiredResult{}, ErrBlockWritesNotSupported
-	}
-	if opts.CopySwap.Restart != "" {
-		return DesiredResult{}, ErrRestartNotSupported
+	// The acknowledgements are rejected before the policy is validated, so
+	// a caller that left two set gets the first one's sentinel rather than
+	// the validation error for the pair.
+	if err := rejectDesiredAcks(opts); err != nil {
+		return DesiredResult{}, err
 	}
 	if err := opts.validate(); err != nil {
 		return DesiredResult{}, err

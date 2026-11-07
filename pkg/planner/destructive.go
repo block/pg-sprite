@@ -21,6 +21,20 @@ func destructiveOp(kind statement.OpKind) bool {
 	return destructive
 }
 
+// DestructiveOpKinds returns every operation shape the planner marks
+// destructive, in statement.OpKinds() order. The front door's
+// irreversible-operations registry derives its operation entries from it,
+// so this classification stays the only list of destructive shapes.
+func DestructiveOpKinds() []statement.OpKind {
+	var kinds []statement.OpKind
+	for _, k := range statement.OpKinds() {
+		if destructiveOp(k) {
+			kinds = append(kinds, k)
+		}
+	}
+	return kinds
+}
+
 // classifyDestructive is the explicit decision for every shape in
 // statement.OpKinds(). classified is false only for a shape this switch
 // does not name, which TestEveryOpKindIsClassifiedForDestructiveness
