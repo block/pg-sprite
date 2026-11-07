@@ -433,19 +433,23 @@ func TestDryRunTextDependentPolicyRefusalNamesThePolicies(t *testing.T) {
 
 // A refusal because a NOT NULL column with no default would leave the
 // table's rows holding NULL says so, and the help line gives the two ways
-// to add the column.
+// to add the column, once for a statement that adds two such columns.
 func TestDryRunTextNotNullWithoutDefaultRefusalGivesTheManualPath(t *testing.T) {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema, report.Table, report.ServerVersion = "app", "customers", "16.10"
 	report.Disposition = router.DispositionRefuse
 	report.Statements = append(report.Statements, plan.Statement{
-		SQL:         "ALTER TABLE app.customers ADD COLUMN tier text NOT NULL",
+		SQL:         "ALTER TABLE app.customers ADD COLUMN tier text NOT NULL, ADD COLUMN plan text NOT NULL",
 		Route:       planner.RouteRefuse,
 		Disposition: router.DispositionRefuse,
 		Reason:      verdict.ReasonUnsupportedStatement,
 		Class:       verdict.ClassCapabilityBoundary,
 		Decisions: []planner.Decision{{
 			Operation: "ADD COLUMN tier",
+			Route:     planner.RouteRefuse,
+			Reason:    planner.ReasonNotNullWithoutDefault,
+		}, {
+			Operation: "ADD COLUMN plan",
 			Route:     planner.RouteRefuse,
 			Reason:    planner.ReasonNotNullWithoutDefault,
 		}},
@@ -455,7 +459,8 @@ func TestDryRunTextNotNullWithoutDefaultRefusalGivesTheManualPath(t *testing.T) 
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := strings.Join(strings.Fields(out.String()), " ")
 	assert.Contains(t, text, "error[unsupported-statement]: refused — ADD COLUMN tier adds a NOT NULL column with no default to a table that holds rows, and PostgreSQL refuses it because every existing row would hold NULL")
-	assert.Contains(t, text, "help: "+planner.NotNullWithoutDefaultHelp)
+	assert.Contains(t, text, "note[not-null-without-default]: ADD COLUMN plan — adds a NOT NULL column with no default")
+	assert.Equal(t, 1, strings.Count(text, "help: "+planner.NotNullWithoutDefaultHelp))
 	assert.Contains(t, text, onlineDDLReferenceURL+"#not-null-without-default")
 	assert.NotContains(t, text, "knows no safe path")
 }

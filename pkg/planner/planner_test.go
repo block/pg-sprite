@@ -713,10 +713,6 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 		"without live column facts every type change is a rewrite")
 }
 
-// An added column classifies by what the server proved about the rewrite
-// before the statement's shape: a constant default on a constrained domain
-// still rewrites, and a default the catalog stores runs in place however it
-
 // Adding a NOT NULL column is refused when the server proved a row of the
 // table would hold NULL in it (Facts.NullFilledColumns); on an empty
 // table, or without the fact, it classifies as usual.
@@ -737,11 +733,13 @@ func TestClassifyRefusesANotNullColumnNothingFillsOnATableWithRows(t *testing.T)
 	assert.Equal(t, planner.RouteNative, d.Route)
 }
 
-// The columns whose rows may be left NULL are the ones added NOT NULL
-// with no DEFAULT of their own that the table does not already have. A
-// constant, expression, identity, or serial default and a generated column
-// fill the rows; a column the table has is skipped by ADD COLUMN IF NOT
-// EXISTS, unless the same statement drops it first.
+// The columns whose rows may be left NULL are the ones added with no
+// DEFAULT of their own that the table does not already have, NOT NULL or
+// not, since a domain or an inline PRIMARY KEY can make a column NOT NULL
+// the statement never spells. A constant, expression, identity, or serial
+// default and a generated column fill the rows; a column the table has is
+// skipped by ADD COLUMN IF NOT EXISTS, unless the same statement drops it
+// first.
 func TestNullFillCandidates(t *testing.T) {
 	columns := map[string]string{"id": "bigint", "email": "text"}
 	for sql, want := range map[string][]string{
@@ -753,7 +751,10 @@ func TestNullFillCandidates(t *testing.T) {
 		"ALTER TABLE customers ADD COLUMN n bigint NOT NULL GENERATED ALWAYS AS IDENTITY":       nil,
 		"ALTER TABLE customers ADD COLUMN n bigserial NOT NULL":                                 nil,
 		"ALTER TABLE customers ADD COLUMN total int NOT NULL GENERATED ALWAYS AS (1) STORED":    nil,
-		"ALTER TABLE customers ADD COLUMN tier text":                                            nil,
+		"ALTER TABLE customers ADD COLUMN tier text":                                            {"tier"},
+		"ALTER TABLE customers ADD COLUMN tier required_text":                                   {"tier"},
+		"ALTER TABLE customers ADD COLUMN n bigint PRIMARY KEY":                                 {"n"},
+		"ALTER TABLE customers ADD COLUMN n bigint PRIMARY KEY DEFAULT 0":                       nil,
 		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL":                    nil,
 		"ALTER TABLE customers DROP COLUMN email, ADD COLUMN email text NOT NULL":               {"email"},
 		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL, DROP COLUMN email": nil,
@@ -774,6 +775,9 @@ func classifyWithFacts(t *testing.T, sql string, facts planner.Facts) planner.De
 	return plan.Decisions[0]
 }
 
+// An added column classifies by what the server proved about the rewrite
+// before the statement's shape: a constant default on a constrained domain
+// still rewrites, and a default the catalog stores runs in place however it
 // is written. A proven rewrite takes its reason from what the server found
 // rewrites, the type or the default, never from how the default is
 // written. A column the server could not prove, or that no proof was run

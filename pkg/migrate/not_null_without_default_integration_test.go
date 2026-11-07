@@ -68,7 +68,10 @@ func TestRunRefusesANotNullColumnWithoutDefaultOnATableWithRows(t *testing.T) {
 
 // A NOT NULL column with no DEFAULT of its own is refused only when the
 // server proves a row would hold NULL in it. A domain DEFAULT fills every
-// row, so the column runs. Dropping a column and adding it back NOT NULL
+// row, so the column runs. A NOT NULL that comes from the column's domain
+// or an inline PRIMARY KEY leaves the rows NULL just as a spelled one does,
+// so those columns are refused, and a column that may hold NULL runs.
+// Dropping a column and adding it back NOT NULL
 // in one statement leaves every row NULL in the new column, so it is
 // refused even though the table has a column of that name. ADD COLUMN IF
 // NOT EXISTS for a column the table has adds nothing, so it plans without
@@ -82,6 +85,7 @@ func TestRunJudgesANotNullColumnByWhatTheServerFillsItWith(t *testing.T) {
 	schema := testutil.NewSchema(t, pool)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE DOMAIN %[1]s.tier_type AS text DEFAULT 'free';
+		CREATE DOMAIN %[1]s.tier_required AS text NOT NULL;
 		CREATE TABLE %[1]s.customers (id bigint PRIMARY KEY, email text NOT NULL);
 		INSERT INTO %[1]s.customers VALUES (1, 'a@example.com'), (2, 'b@example.com')`, schema))
 	require.NoError(t, err)
@@ -94,6 +98,22 @@ func TestRunJudgesANotNullColumnByWhatTheServerFillsItWith(t *testing.T) {
 	require.NoError(t, pool.QueryRow(t.Context(), fmt.Sprintf(
 		"SELECT pg_catalog.array_agg(DISTINCT tier::text) FROM %s.customers", schema)).Scan(&tiers))
 	assert.Equal(t, []string{"free"}, tiers)
+
+	for column, add := range map[string]string{
+		"plan":   "ADD COLUMN plan %[1]s.tier_required",
+		"seq_id": "ADD COLUMN seq_id bigint PRIMARY KEY",
+	} {
+		v, err = migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %[1]s.customers "+add, schema)), runOptions())
+		require.NoError(t, err, add)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome, v.Detail)
+		assert.Contains(t, v.Detail, "ADD COLUMN "+column+" adds a NOT NULL column with no default to a table that holds rows")
+		assert.Empty(t, v.ExecutedSQL, add)
+	}
+	v, err = migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("ALTER TABLE %s.customers ADD COLUMN note text", schema)), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, v.Detail)
 
 	opts := runOptions()
 	opts.AllowDestructive = schema + ".customers"

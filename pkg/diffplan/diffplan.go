@@ -177,8 +177,9 @@ func addColumnProofs(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 	return proofs, nil
 }
 
-// nullFilledColumns reads the columns the changes add NOT NULL that the
-// server would refuse because the table holds a row the column would be
+// nullFilledColumns reads the columns the changes add NOT NULL, as spelled
+// or through a domain or an inline PRIMARY KEY, that the server would
+// refuse because the table holds a row the column would be
 // NULL in (preflight.AddColumnFillsNull, then preflight.TableHasRows once
 // for all of them). columns are the table's live columns; a column an
 // earlier change drops is a new column again when a later change adds it.

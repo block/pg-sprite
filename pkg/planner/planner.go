@@ -415,9 +415,11 @@ type Facts struct {
 	DropDependentPolicies map[string][]string
 	// OwnDependentPolicies is DependentPolicies for the table alone.
 	OwnDependentPolicies map[string][]string
-	// NullFilledColumns are the columns the statement adds NOT NULL that
-	// PostgreSQL would refuse to add because the table, or a partition or
-	// inheritance child below it, holds a row the column would be NULL in
+	// NullFilledColumns are the columns the statement adds NOT NULL, as
+	// spelled or through the column's domain or an inline PRIMARY KEY,
+	// that PostgreSQL would refuse to add because the table, or a
+	// partition or inheritance child below it with storage of its own,
+	// holds a row the column would be NULL in
 	// (preflight.NullFilledColumns). It is read only for the columns
 	// NullFillCandidates names. A column absent from the map gets a value
 	// in every row, the table holds none, or the fact was not read, as in
@@ -506,12 +508,15 @@ const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which Pos
 	"or add it without NOT NULL, backfill it, then set NOT NULL"
 
 // NullFillCandidates names the columns the operations of one ALTER TABLE
-// add NOT NULL with no DEFAULT of their own, the ones whose existing rows
-// may be left NULL: a front door reads Facts.NullFilledColumns only for
-// these. columns are the table's live columns. A column the table already
-// has is skipped by ADD COLUMN IF NOT EXISTS, and refused as a duplicate
-// otherwise, so neither fills anything, unless an earlier operation of the
-// same statement drops it, which makes the add a new column again.
+// add with no DEFAULT of their own, the ones whose existing rows may be
+// left NULL: a front door reads Facts.NullFilledColumns only for these.
+// The statement need not spell NOT NULL, since the column's domain or an
+// inline PRIMARY KEY can make it NOT NULL, so the server's probe decides
+// which candidates PostgreSQL would refuse. columns are the table's live
+// columns. A column the table already has is skipped by ADD COLUMN IF NOT
+// EXISTS, and refused as a duplicate otherwise, so neither fills anything,
+// unless an earlier operation of the same statement drops it, which makes
+// the add a new column again.
 func NullFillCandidates(ops []statement.Op, columns map[string]string) []string {
 	dropped := map[string]bool{}
 	var candidates []string
@@ -520,8 +525,7 @@ func NullFillCandidates(ops []statement.Op, columns map[string]string) []string 
 			dropped[op.Column] = true
 			continue
 		}
-		if op.Kind != statement.OpAddColumn || !op.NotNull ||
-			op.Default != statement.DefaultNone || op.GeneratedStored {
+		if op.Kind != statement.OpAddColumn || op.Default != statement.DefaultNone || op.GeneratedStored {
 			continue
 		}
 		if _, exists := columns[op.Column]; exists && !dropped[op.Column] {

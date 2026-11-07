@@ -30,12 +30,14 @@ const sqlstateNotNullViolation = "23502"
 // constraint the probe row can fail, a domain CHECK among them.
 const sqlstateClassIntegrityConstraintViolation = "23"
 
-// NullFilledColumns reports which of columns, each added NOT NULL by the
-// ALTER TABLE sql with no DEFAULT of its own, PostgreSQL would refuse to
-// add to schema.table because the table holds a row it would leave NULL
-// in. It is empty when none would: when every column gets a value from
-// somewhere else, such as its domain's DEFAULT, or when the table holds no
-// row. The columns come from planner.NullFillCandidates.
+// NullFilledColumns reports which of columns, each added by the ALTER
+// TABLE sql with no DEFAULT of its own, PostgreSQL would refuse to add to
+// schema.table because the column is NOT NULL, as spelled or through its
+// domain or an inline PRIMARY KEY, and the table holds a row it would
+// leave NULL in. It is empty when none would: when no column is NOT NULL,
+// when every column gets a value from somewhere else, such as its domain's
+// DEFAULT, or when the table holds no row. The columns come from
+// planner.NullFillCandidates.
 //
 // Each column is first added to a temporary table holding one row
 // (AddColumnFillsNull), which needs no privilege on the table and no lock
@@ -147,7 +149,12 @@ func probeFillsNull(ctx context.Context, tx pgx.Tx, probeTable, probe string) (b
 	case errors.As(probeErr, &pgErr) && pgErr.Code == sqlstateNotNullViolation:
 		return true, nil
 	case errors.As(probeErr, &pgErr) && pgErr.Code == sqlstateLockNotAvailable:
-		return false, fmt.Errorf("%w: %w", ErrTableRowsLocked, probeErr)
+		// The probe never opens the live table, so the lock is one its
+		// domain's CHECK or a function that CHECK calls needed. Unlike the
+		// add-column proof, which can call the column unproven and route it
+		// the conservative way, a NULL fill has no safe default answer, so
+		// the plan fails.
+		return false, fmt.Errorf("%w: %w", errProbeLockNotAvailable, probeErr)
 	case errors.As(probeErr, &pgErr) && strings.HasPrefix(pgErr.Code, sqlstateClassIntegrityConstraintViolation):
 		return false, nil
 	default:
@@ -156,7 +163,8 @@ func probeFillsNull(ctx context.Context, tx pgx.Tx, probeTable, probe string) (b
 }
 
 // ErrTableRowsLocked means another session holds or awaits a lock that
-// blocks reading schema.table, so whether it holds rows is unknown. The
+// blocks reading schema.table or a table below it, so whether it holds
+// rows is unknown. The
 // plan cannot say whether adding a NOT NULL column without a default
 // would fail, so it fails rather than guess; a later attempt reads the
 // table once the lock is released.
@@ -165,15 +173,18 @@ var ErrTableRowsLocked = errors.New("the table cannot be read without waiting fo
 // TableHasRows reports whether schema.table, or any partition or
 // inheritance child below it, holds a row the session can see. Adding a
 // NOT NULL column with no default fills every existing row with NULL, so
-// PostgreSQL refuses it exactly when this is true.
+// PostgreSQL refuses it exactly when this is true. Only the tables with
+// storage of their own are read, each with ONLY: PostgreSQL checks the new
+// column on those alone, so a foreign table's rows neither count nor get
+// fetched from the remote server.
 //
 // The read runs in a read-only transaction that never waits for a lock: a
 // lock_timeout of one millisecond, as for the add-column proof, keeps it
 // from queueing behind another session's ACCESS EXCLUSIVE lock, and a read
 // the lock blocks returns ErrTableRowsLocked. It stops at the first row
-// it finds, under a statement_timeout of its own. Rows a row-level security policy hides from the session's
-// role do not count, so for such a role the server's own refusal at
-// execution remains the backstop.
+// it finds, under a statement_timeout of its own. Rows a row-level
+// security policy hides from the session's role do not count, so for such
+// a role the server's own refusal at execution remains the backstop.
 func TableHasRows(ctx context.Context, pool *pgxpool.Pool, schema, table string) (bool, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -191,7 +202,18 @@ func TableHasRows(ctx context.Context, pool *pgxpool.Pool, schema, table string)
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return false, fmt.Errorf("set up the row read of %s: %w", qualifiedName(schema, table), err)
 	}
-	q := "SELECT EXISTS (SELECT FROM " + pgx.Identifier{schema, table}.Sanitize() + ")"
+	stored, err := tablesWithStorage(ctx, tx, schema, table)
+	if err != nil {
+		return false, err
+	}
+	if len(stored) == 0 {
+		return false, nil
+	}
+	reads := make([]string, 0, len(stored))
+	for _, name := range stored {
+		reads = append(reads, "EXISTS (SELECT FROM ONLY "+name.Sanitize()+")")
+	}
+	q := "SELECT " + strings.Join(reads, " OR ")
 	var rows bool
 	err = tx.QueryRow(ctx, q).Scan(&rows)
 	var pgErr *pgconn.PgError
@@ -202,4 +224,39 @@ func TableHasRows(ctx context.Context, pool *pgxpool.Pool, schema, table string)
 		return false, fmt.Errorf("read whether %s holds rows: %w", qualifiedName(schema, table), err)
 	}
 	return rows, nil
+}
+
+// tablesWithStorage names schema.table and every partition and inheritance
+// child below it that stores rows of its own, as ordinary tables do: a
+// partitioned table stores none, and a foreign table's rows live on
+// another server. It reads the catalog alone and takes no lock.
+func tablesWithStorage(ctx context.Context, tx pgx.Tx, schema, table string) ([]pgx.Identifier, error) {
+	// INV: CO-9 — pg_catalog-qualified, operators included.
+	rows, err := tx.Query(ctx, `WITH RECURSIVE tree(oid) AS (
+			SELECT c.oid FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+			WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2
+			UNION
+			SELECT i.inhrelid FROM pg_catalog.pg_inherits i
+			JOIN tree ON tree.oid OPERATOR(pg_catalog.=) i.inhparent
+		)
+		SELECT n.nspname, c.relname FROM tree
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.oid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE c.relkind OPERATOR(pg_catalog.=) 'r'
+		ORDER BY n.nspname, c.relname`, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("read the tables below %s: %w", qualifiedName(schema, table), err)
+	}
+	names, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (pgx.Identifier, error) {
+		var nspname, relname string
+		if err := row.Scan(&nspname, &relname); err != nil {
+			return nil, err
+		}
+		return pgx.Identifier{nspname, relname}, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read the tables below %s: %w", qualifiedName(schema, table), err)
+	}
+	return names, nil
 }

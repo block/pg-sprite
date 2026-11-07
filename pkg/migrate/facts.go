@@ -53,10 +53,10 @@ type Facts struct {
 // For an ALTER TABLE that retypes or drops a column it reads which views
 // and policies depend on each column (preflight.ReadColumnDependents), and
 // for one that adds columns, has the server prove whether each one
-// rewrites the table (preflight.AddColumnRewrites); when one of those
-// columns is NOT NULL with no DEFAULT of its own, it also has the server
-// prove whether the table holds a row the column would be NULL in
-// (preflight.NullFilledColumns). For one that adds an unnamed CHECK or
+// rewrites the table (preflight.AddColumnRewrites), and for each of those
+// with no DEFAULT of its own whether it is NOT NULL, as spelled or through
+// its domain or an inline PRIMARY KEY, and the table holds a row it would
+// be NULL in (preflight.NullFilledColumns). For one that adds an unnamed CHECK or
 // FOREIGN KEY it also reads the constraint names the schema already uses,
 // so the safer sequence names the constraint as the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
@@ -186,8 +186,8 @@ func addsColumn(st statement.Statement) (bool, error) {
 	return slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn }), nil
 }
 
-// nullFillCandidates names the columns an ALTER TABLE st adds NOT NULL
-// with no DEFAULT of their own, given the table's live columns
+// nullFillCandidates names the columns an ALTER TABLE st adds with no
+// DEFAULT of their own, given the table's live columns
 // (planner.NullFillCandidates).
 func nullFillCandidates(st statement.Statement, columns map[string]string) ([]string, error) {
 	if st.Kind() != statement.KindAlterTable {

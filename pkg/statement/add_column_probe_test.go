@@ -8,8 +8,9 @@ import (
 )
 
 // Each added column becomes its own probe on the probe table, keeping what
-// decides a rewrite and dropping the constraints that only scan or build an
-// index, and an identity's SEQUENCE NAME. Commands other than ADD COLUMN,
+// decides a rewrite or a NULL fill and dropping the constraints that only
+// scan or build an index, and an identity's SEQUENCE NAME. A PRIMARY KEY
+// keeps only the NOT NULL it implies. Commands other than ADD COLUMN,
 // and generated columns, are left out, and an IF NOT EXISTS is recorded on
 // its probe.
 func TestAddColumnProbes(t *testing.T) {
@@ -18,6 +19,7 @@ func TestAddColumnProbes(t *testing.T) {
 			"ADD COLUMN b int CONSTRAINT b_pos CHECK (b > 0) UNIQUE REFERENCES app.u (id), "+
 			"ADD COLUMN c bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME app.c_seq START WITH 10), "+
 			"ADD COLUMN IF NOT EXISTS f text DEFAULT 'x', "+
+			"ADD COLUMN g bigint PRIMARY KEY, "+
 			"ADD COLUMN e int GENERATED ALWAYS AS (b * 2) STORED, "+
 			"ALTER COLUMN d TYPE text",
 		"pg_temp", "probe")
@@ -27,6 +29,7 @@ func TestAddColumnProbes(t *testing.T) {
 		"b": {SQL: "ALTER TABLE pg_temp.probe ADD COLUMN b int"},
 		"c": {SQL: "ALTER TABLE pg_temp.probe ADD COLUMN c bigint GENERATED ALWAYS AS IDENTITY (START 10 )"},
 		"f": {SQL: "ALTER TABLE pg_temp.probe ADD COLUMN IF NOT EXISTS f text DEFAULT 'x'", IfNotExists: true},
+		"g": {SQL: "ALTER TABLE pg_temp.probe ADD COLUMN g bigint NOT NULL"},
 	}, probes)
 }
 

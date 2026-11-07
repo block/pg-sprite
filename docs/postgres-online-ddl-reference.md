@@ -593,7 +593,10 @@ planning.
 
 The operation adds a `NOT NULL` column that nothing fills (no default, identity, or
 generation expression of its own, and no `DEFAULT` on its domain) to a table that
-holds rows, counting its partitions and inheritance children. Every existing row would hold `NULL` in the new column, so PostgreSQL
+holds rows. The column is `NOT NULL` whether the statement spells it or it comes from
+the column's domain or an inline `PRIMARY KEY`. The rows counted are the table's and
+those of its partitions and inheritance children that store rows locally; a foreign
+table's rows are not read, since PostgreSQL does not check them. Every existing row would hold `NULL` in the new column, so PostgreSQL
 refuses the statement (`column "…" of relation "…" contains null values`, SQLSTATE
 `23502`), and only after it has queued for and taken the table's `ACCESS EXCLUSIVE`
 lock and checked the rows. The statement could only fail. Give the column a constant
@@ -604,7 +607,7 @@ empty table has no rows to fill, so the same statement is `metadata-only` there,
 a column the table already has is not refused, since `ADD COLUMN IF NOT EXISTS`
 skips it, unless the same statement drops the column first. The planner asks the
 server: it adds the column to a one-row temporary table, where PostgreSQL's own
-refusal says whether anything fills it, and only then reads whether the table holds
+refusal says whether the column is `NOT NULL` and nothing fills it, and only then reads whether the table holds
 rows, reading at most one row and never waiting for a lock. A read that another
 session's lock blocks fails the plan rather than guessing. The linter has no live facts and never
 reports it. Rows a row-level security policy hides from the role do not count, and
