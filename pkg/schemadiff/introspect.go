@@ -573,7 +573,9 @@ func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]strin
 
 // introspectIndexes reads the non-constraint indexes as server-decompiled
 // CREATE INDEX statements. Constraint-backed indexes (primary key, unique
-// constraint, exclusion) are represented by their constraint instead.
+// constraint, exclusion) are represented by their constraint instead. A
+// foreign key's conindid names the index it references, which the key does
+// not own, so only those three constraint types hide an index.
 // pg_get_indexdef always schema-qualifies the ON clause, so the
 // qualification is stripped to keep the model schema-relative and
 // comparable between the live and scratch sides. indisvalid rides along so
@@ -589,7 +591,8 @@ func introspectIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]Index, err
 		WHERE i.indrelid OPERATOR(pg_catalog.=) $1
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pg_catalog.pg_constraint con
-		      WHERE con.conindid OPERATOR(pg_catalog.=) i.indexrelid)
+		      WHERE con.conindid OPERATOR(pg_catalog.=) i.indexrelid
+		        AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[]))
 		ORDER BY c.relname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("query indexes: %w", err)
