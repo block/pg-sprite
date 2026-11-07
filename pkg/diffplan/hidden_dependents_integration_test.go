@@ -1,6 +1,7 @@
 package diffplan_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -124,4 +125,41 @@ func TestPlanWidensAColumnOnceItsGeneratedColumnIsDropped(t *testing.T) {
 	assert.Equal(t, widen, report.Statements[0].SQL)
 	require.Len(t, report.Statements[0].Decisions, 1)
 	assert.Equal(t, planner.ReasonDependentGeneratedColumn, report.Statements[0].Decisions[0].Reason)
+}
+
+// A desired file that removes a column and the generated column reading it
+// plans the generated column's drop first, so neither drop is refused. The
+// server is the oracle: the plan's statements run in order.
+func TestPlanDropsAGeneratedColumnBeforeTheColumnItReads(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.ledger (id bigint PRIMARY KEY, amount numeric(10, 2), total numeric GENERATED ALWAYS AS (amount * 2) STORED)`, schema))
+	require.NoError(t, err)
+
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t,
+		`CREATE TABLE ledger (id bigint PRIMARY KEY);`)})
+	require.NoError(t, err)
+	var sqls []string
+	for _, st := range report.Statements {
+		sqls = append(sqls, st.SQL)
+		assert.NotEqual(t, planner.RouteRefuse, st.Route, st.SQL)
+	}
+	require.Equal(t, []string{
+		fmt.Sprintf("ALTER TABLE %s.ledger DROP total", schema),
+		fmt.Sprintf("ALTER TABLE %s.ledger DROP amount", schema),
+	}, sqls)
+	assert.NotEqual(t, router.DispositionRefuse, report.Disposition)
+
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+	for _, sql := range sqls {
+		_, err := tx.Exec(t.Context(), sql)
+		require.NoError(t, err, sql)
+	}
 }

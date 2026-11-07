@@ -60,6 +60,25 @@ func writeDryRunText(out io.Writer, pal palette, report plan.Report) error {
 	return w.err
 }
 
+// writeDependentHelp writes the manual path for each kind of dependent
+// that blocks d. The diagnostic above names only the kind d's reason
+// names, so each other kind is introduced by name.
+func writeDependentHelp(w *stickyWriter, d planner.Decision) {
+	help := func(reason planner.Reason, singular, plural string, names []string, text string) {
+		if len(names) == 0 {
+			return
+		}
+		if d.Reason != reason {
+			text = "the change is also blocked by " + planner.DependentsPhrase(singular, plural, names) + ": " + text
+		}
+		w.diag("help", "", text)
+	}
+	help(planner.ReasonDependentView, "view", "views", d.DependentViews, "drop or redefine those views first, then re-plan")
+	help(planner.ReasonDependentPolicy, "policy", "policies", d.DependentPolicies, d.DependentFix.Help("policies"))
+	help(planner.ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers, d.DependentFix.Help("triggers"))
+	help(planner.ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns, planner.GeneratedColumnHelp)
+}
+
 // writeStatementDiagnostics renders one plan statement's labeled entries —
 // the statement itself, its refusal, its classifications, guidance, the
 // substitution notes, and the docs anchors — and returns the execution
@@ -78,18 +97,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
 		codes = appendCode(codes, string(d.Reason))
-		if len(d.DependentViews) > 0 {
-			w.diag("help", "", "drop or redefine those views first, then re-plan")
-		}
-		if len(d.DependentPolicies) > 0 {
-			w.diag("help", "", d.DependentFix.Help("policies"))
-		}
-		if len(d.DependentTriggers) > 0 {
-			w.diag("help", "", d.DependentFix.Help("triggers"))
-		}
-		if len(d.DependentGeneratedColumns) > 0 {
-			w.diag("help", "", planner.GeneratedColumnHelp)
-		}
+		writeDependentHelp(w, d)
 		if len(d.PartitionKeyTables) > 0 {
 			w.diag("help", "", planner.PartitionKeyHelp)
 		}

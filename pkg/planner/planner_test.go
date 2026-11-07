@@ -380,6 +380,91 @@ func TestClassifyDiscountsAGeneratedColumnTheStatementDrops(t *testing.T) {
 	assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason, "a later statement sees the drop")
 }
 
+// The drops of one ALTER TABLE run in the order written, so a drop of a
+// column a generated column reads is refused unless the same statement
+// drops the generated column first. Every other operation runs after all
+// the drops, so a type change sees the generated column gone wherever its
+// drop is written.
+func TestClassifyJudgesADropByTheDropsWrittenBeforeIt(t *testing.T) {
+	total := `"public"."ledger"."total"`
+	facts := planner.Facts{
+		ColumnTypes:               map[string]string{"amount": "integer", "total": "integer"},
+		DependentGeneratedColumns: dependentsEverywhere("amount", []string{total}),
+		GeneratedColumnCopies:     dependentsEverywhere("total", []string{total}),
+	}
+
+	plan, err := planner.Classify("ALTER TABLE ledger DROP COLUMN amount, DROP COLUMN total", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.RouteRefuse, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.ReasonDependentGeneratedColumn, plan.Decisions[0].Reason)
+	assert.Equal(t, []string{total}, plan.Decisions[0].DependentGeneratedColumns)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[1].Reason)
+
+	plan, err = planner.Classify("ALTER TABLE ledger DROP COLUMN total, DROP COLUMN amount", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.RouteNative, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+	for _, d := range plan.Decisions {
+		assert.Equal(t, planner.ReasonMetadataOnly, d.Reason)
+		assert.Empty(t, d.DependentGeneratedColumns)
+	}
+}
+
+// A partition's copy of a generated column goes when the parent's copy is
+// dropped, and PostgreSQL refuses to drop it on its own, so a refusal
+// names only the parent's copy. A copy a child declares itself survives
+// the parent's drop and is named too.
+func TestClassifyNamesOnlyTheGeneratedColumnCopiesToDrop(t *testing.T) {
+	own := `"public"."events"."total"`
+	partition := `"public"."events_2026"."total"`
+	declared := `"public"."events_legacy"."total"`
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"amount": "integer"},
+		DependentGeneratedColumns: planner.ColumnDependents{
+			Tree: map[string][]string{"amount": {partition, declared, own}},
+			Drop: map[string][]string{"amount": {partition, own}},
+			Own:  map[string][]string{"amount": {own}},
+		},
+		GeneratedColumnCopies: planner.ColumnDependents{
+			Tree: map[string][]string{"total": {partition, declared, own}},
+			Drop: map[string][]string{"total": {partition, own}},
+			Own:  map[string][]string{"total": {own}},
+		},
+	}
+	d := classifyWithFacts(t, "ALTER TABLE events ALTER COLUMN amount TYPE bigint", facts)
+	assert.Equal(t, planner.ReasonDependentGeneratedColumn, d.Reason)
+	assert.Equal(t, []string{declared, own}, d.DependentGeneratedColumns)
+
+	d = classifyWithFacts(t, "ALTER TABLE events DROP COLUMN amount", facts)
+	assert.Equal(t, []string{own}, d.DependentGeneratedColumns)
+}
+
+// A change several kinds of dependent block names every one of them, so
+// the manual path clears them all; the reason is the first kind.
+func TestClassifyNamesEveryKindOfDependentThatBlocks(t *testing.T) {
+	policy := []string{`"open_only" ON "public"."orders"`}
+	trigger := []string{`"audit_status" ON "public"."orders"`}
+	generated := []string{`"public"."orders"."status_upper"`}
+	facts := planner.Facts{
+		ColumnTypes:               map[string]string{"status": "character varying(16)"},
+		DependentPolicies:         map[string][]string{"status": policy},
+		DependentTriggers:         dependentsEverywhere("status", trigger),
+		DependentGeneratedColumns: dependentsEverywhere("status", generated),
+	}
+	d := classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentPolicy, d.Reason)
+	assert.Equal(t, policy, d.DependentPolicies)
+	assert.Equal(t, trigger, d.DependentTriggers)
+	assert.Equal(t, generated, d.DependentGeneratedColumns)
+	assert.Equal(t, `trigger "audit_status" ON "public"."orders" and generated column "public"."orders"."status_upper"`, d.OtherDependents())
+
+	facts.DependentPolicies, facts.DependentGeneratedColumns = nil, planner.ColumnDependents{}
+	d = classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentTrigger, d.Reason)
+	assert.Empty(t, d.OtherDependents())
+}
+
 // The manual path for a type change dependents block follows what the
 // conversion itself costs, so a widening a policy and a trigger both
 // block, or a trigger and a generated column, is still recreated around
@@ -462,7 +547,7 @@ func classifyWithFacts(t *testing.T, sql string, facts planner.Facts) planner.De
 // recursive change and not against one under ONLY, and a recursive drop
 // counts only the copies of the column it drops, the same reach the
 // dependent-view refusal judges by. A column both a view and a policy read
-// is refused for the view first.
+// is refused for the view first, with the policy named as well.
 func TestClassifyJudgesDependentPoliciesByWhatTheChangeReaches(t *testing.T) {
 	childPolicy := []string{`"child_rows" ON "app"."documents_child"`}
 	facts := planner.Facts{
@@ -484,7 +569,7 @@ func TestClassifyJudgesDependentPoliciesByWhatTheChangeReaches(t *testing.T) {
 		require.NoError(t, err, sql)
 		require.Len(t, plan.Decisions, 1, sql)
 		assert.Equal(t, want, plan.Decisions[0].Reason, sql)
-		if want == planner.ReasonDependentPolicy {
+		if want == planner.ReasonDependentPolicy || want == planner.ReasonDependentView {
 			assert.Equal(t, childPolicy, plan.Decisions[0].DependentPolicies, sql)
 		} else {
 			assert.Empty(t, plan.Decisions[0].DependentPolicies, sql)

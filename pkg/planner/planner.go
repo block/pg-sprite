@@ -287,29 +287,32 @@ type Decision struct {
 	SaferSQLExecution Execution `json:"safer_sql_execution,omitempty"`
 	// DependentViews names the views and materialized views that read the
 	// column, each schema-qualified with every identifier quoted, present
-	// exactly for dependent-view decisions.
+	// whenever one blocks the change, whatever the decision's reason.
 	DependentViews []string `json:"dependent_views,omitempty"`
 	// DependentPolicies names the row-level security policies that read
 	// the column, each rendered "policy" ON "schema"."table" with every
-	// identifier quoted, present exactly for dependent-policy decisions.
+	// identifier quoted, present whenever one blocks the change, whatever
+	// the decision's reason.
 	DependentPolicies []string `json:"dependent_policies,omitempty"`
 	// DependentTriggers names the triggers whose UPDATE OF list or WHEN
 	// condition names the column, each rendered "trigger" ON
-	// "schema"."table" with every identifier quoted, present exactly for
-	// dependent-trigger decisions.
+	// "schema"."table" with every identifier quoted, present whenever one
+	// blocks the change, whatever the decision's reason.
 	DependentTriggers []string `json:"dependent_triggers,omitempty"`
 	// DependentGeneratedColumns names the generated columns whose
 	// expression reads the column, each rendered "schema"."table"."column"
-	// with every identifier quoted, present exactly for
-	// dependent-generated-column decisions.
+	// with every identifier quoted, present whenever one blocks the change,
+	// whatever the decision's reason. A copy that dropping the table's own
+	// generated column removes is left out, since PostgreSQL refuses to
+	// drop it on its own.
 	DependentGeneratedColumns []string `json:"dependent_generated_columns,omitempty"`
 	// PartitionKeyTables names the partitioned tables whose partition key
 	// includes the column, each schema-qualified with every identifier
 	// quoted, present exactly for partition-key decisions.
 	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
-	// DependentFix is the manual path for a dependent-policy or
-	// dependent-trigger decision, which depends on what the change would
-	// do with those dependents out of the way. Like Kind, it is not part
+	// DependentFix is the manual path for the policies and triggers that
+	// block the change, which depends on what the change would do with
+	// those dependents out of the way. Like Kind, it is not part
 	// of the plan-report contract: it selects the help the engine's own
 	// text renders.
 	DependentFix DependentFix `json:"-"`
@@ -373,6 +376,24 @@ func (f DependentFix) Help(plural string) string {
 			"add a column of the new type instead, backfill it, point those " + plural + " at it, then drop the old column"
 	}
 	return string(f)
+}
+
+// OtherDependents phrases the dependents that block the change besides
+// the kind its reason names, such as the triggers on a dependent-policy
+// decision, or returns "" when there are none. PostgreSQL refuses the
+// change until every one of them is out of the way.
+func (d Decision) OtherDependents() string {
+	var others []string
+	add := func(reason Reason, singular, plural string, names []string) {
+		if d.Reason != reason && len(names) > 0 {
+			others = append(others, DependentsPhrase(singular, plural, names))
+		}
+	}
+	add(ReasonDependentView, "view", "views", d.DependentViews)
+	add(ReasonDependentPolicy, "policy", "policies", d.DependentPolicies)
+	add(ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers)
+	add(ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns)
+	return strings.Join(others, " and ")
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -605,12 +626,21 @@ func Classify(sql string, facts Facts) (Plan, error) {
 		return Plan{}, err
 	}
 	plan := Plan{Statement: sql, Route: RouteNative}
-	facts = withoutDroppedGeneratedColumns(ops, facts)
+	// PostgreSQL runs every drop of an ALTER TABLE before its other
+	// operations, wherever the drop is written, and runs the drops
+	// themselves in the order written. So a drop sees only the generated
+	// columns the drops written before it remove, and every other
+	// operation sees all of them removed.
+	afterDrops := withoutDroppedGeneratedColumns(ops, facts)
 	// Safer rewrites are only constructed for single-operation statements:
 	// a partial rewrite of a multi-operation ALTER would be misleading.
 	single := len(ops) == 1
-	for _, op := range ops {
-		d := classifyOp(op, st, facts, sql, single)
+	for i, op := range ops {
+		opFacts := afterDrops
+		if op.Kind == statement.OpDropColumn {
+			opFacts = withoutDroppedGeneratedColumns(ops[:i], facts)
+		}
+		d := classifyOp(op, st, opFacts, sql, single)
 		if len(d.SaferSQL) > 0 {
 			// Stamped here, in the one place every decision passes
 			// through, so a constructed sequence can never ship without
@@ -635,11 +665,9 @@ func FactsAfter(sql string, facts Facts) (Facts, error) {
 }
 
 // withoutDroppedGeneratedColumns removes, from the generated columns that
-// read each column, the copies the statement's drops remove. PostgreSQL
-// runs every drop of an ALTER TABLE before any type change, wherever the
-// drop is written, so a generated column the same statement drops blocks
-// none of its other operations. A copy the drop does not reach, such as a
-// child's under ONLY or one the child declares itself, stays.
+// read each column, the copies the drops among ops remove. A copy the drop
+// does not reach, such as a child's under ONLY or one the child declares
+// itself, stays.
 func withoutDroppedGeneratedColumns(ops []statement.Op, facts Facts) Facts {
 	dropped := map[string]bool{}
 	for _, op := range ops {
@@ -675,6 +703,49 @@ func withoutNames(deps map[string][]string, names map[string]bool) map[string][]
 	return out
 }
 
+// withoutInheritedCopies leaves out of generated the copies that dropping
+// the table's own copy of the same generated column removes. PostgreSQL
+// refuses to drop an inherited copy on its own, so naming one would point
+// the operator at a drop that fails.
+func withoutInheritedCopies(generated []string, copies ColumnDependents) []string {
+	named := map[string]bool{}
+	for _, name := range generated {
+		named[name] = true
+	}
+	removed := map[string]bool{}
+	for column, own := range copies.Own {
+		if len(own) != 1 || !named[own[0]] {
+			continue
+		}
+		for _, name := range copies.Drop[column] {
+			if name != own[0] {
+				removed[name] = true
+			}
+		}
+	}
+	if len(removed) == 0 {
+		return generated
+	}
+	return slices.DeleteFunc(slices.Clone(generated), func(name string) bool { return removed[name] })
+}
+
+// dependentReason is the refusal reason for the first kind of dependent
+// that blocks d, in the order views, policies, triggers, generated
+// columns.
+func dependentReason(d Decision) (Reason, bool) {
+	switch {
+	case len(d.DependentViews) > 0:
+		return ReasonDependentView, true
+	case len(d.DependentPolicies) > 0:
+		return ReasonDependentPolicy, true
+	case len(d.DependentTriggers) > 0:
+		return ReasonDependentTrigger, true
+	case len(d.DependentGeneratedColumns) > 0:
+		return ReasonDependentGeneratedColumn, true
+	}
+	return "", false
+}
+
 // classifyOp routes one operation per the reference table.
 func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
 	d := Decision{Operation: op.Describe(), Kind: op.Kind, Destructive: destructiveOp(op.Kind)}
@@ -692,22 +763,17 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason, d.PartitionKeyTables = RouteRefuse, ReasonPartitionKey, tables
 		return d
 	}
-	if views := viewsReadingColumn(op, facts); len(views) > 0 {
-		d.Route, d.Reason, d.DependentViews = RouteRefuse, ReasonDependentView, views
-		return d
-	}
-	if policies := policiesReadingColumn(op, facts); len(policies) > 0 {
-		d.Route, d.Reason, d.DependentPolicies = RouteRefuse, ReasonDependentPolicy, policies
+	// Every kind of dependent that blocks the change is named, so the
+	// manual path clears all of them; the reason is the first kind.
+	d.DependentViews = viewsReadingColumn(op, facts)
+	d.DependentPolicies = policiesReadingColumn(op, facts)
+	d.DependentTriggers = facts.DependentTriggers.reached(op)
+	d.DependentGeneratedColumns = withoutInheritedCopies(facts.DependentGeneratedColumns.reached(op), facts.GeneratedColumnCopies)
+	if len(d.DependentPolicies) > 0 || len(d.DependentTriggers) > 0 {
 		d.DependentFix = dependentFix(op, facts)
-		return d
 	}
-	if triggers := facts.DependentTriggers.reached(op); len(triggers) > 0 {
-		d.Route, d.Reason, d.DependentTriggers = RouteRefuse, ReasonDependentTrigger, triggers
-		d.DependentFix = dependentFix(op, facts)
-		return d
-	}
-	if generated := facts.DependentGeneratedColumns.reached(op); len(generated) > 0 {
-		d.Route, d.Reason, d.DependentGeneratedColumns = RouteRefuse, ReasonDependentGeneratedColumn, generated
+	if reason, blocked := dependentReason(d); blocked {
+		d.Route, d.Reason = RouteRefuse, reason
 		return d
 	}
 	switch op.Kind {

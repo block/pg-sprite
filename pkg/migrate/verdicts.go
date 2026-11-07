@@ -180,27 +180,30 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 				"which makes UPDATE and DELETE fail while a publication publishes them; "+
 				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
 		}
+		v.DependentViews = d.DependentViews
+		v.DependentPolicies = d.DependentPolicies
+		v.DependentTriggers = d.DependentTriggers
+		v.DependentGeneratedColumns = d.DependentGeneratedColumns
 		if d.Reason == planner.ReasonDependentView {
-			v.DependentViews = d.DependentViews
 			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
 				"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", "))
 		}
 		if d.Reason == planner.ReasonDependentPolicy {
-			v.DependentPolicies = d.DependentPolicies
 			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a policy reads it; %s",
 				d.Operation, planner.DependentsPhrase("policy", "policies", d.DependentPolicies), d.DependentFix.Help("policies"))
 		}
 		if d.Reason == planner.ReasonDependentTrigger {
-			v.DependentTriggers = d.DependentTriggers
 			v.Detail = fmt.Sprintf("%s changes a column named by %s, and PostgreSQL refuses to retype or drop a column "+
 				"while a trigger's UPDATE OF list or WHEN condition names it; %s",
 				d.Operation, planner.DependentsPhrase("trigger", "triggers", d.DependentTriggers), d.DependentFix.Help("triggers"))
 		}
 		if d.Reason == planner.ReasonDependentGeneratedColumn {
-			v.DependentGeneratedColumns = d.DependentGeneratedColumns
 			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column "+
-				"while a generated column reads it; %s",
+				"while a generated column reads it, except that PostgreSQL 14 drops the generated column along with a dropped column; %s",
 				d.Operation, planner.DependentsPhrase("generated column", "generated columns", d.DependentGeneratedColumns), planner.GeneratedColumnHelp)
+		}
+		if others := d.OtherDependents(); others != "" {
+			v.Detail += "; the change is also blocked by " + others + ", so re-plan after dealing with every blocker"
 		}
 		if d.Reason == planner.ReasonPartitionKey {
 			v.PartitionKeyTables = d.PartitionKeyTables

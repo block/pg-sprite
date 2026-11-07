@@ -79,7 +79,10 @@ type DependentObjects struct {
 // pg_depend records to the column: from the view's rewrite rule, the
 // policy, the trigger, or the generated column (from its expression on
 // PostgreSQL 15 and later, from the generated column itself before that),
-// and from the column to its own table for a partition key column. A view that reads
+// and from the column to its own table for a partition key column. A
+// trigger a partition clones from a parent's trigger in the tree is named
+// once, as the parent's: PostgreSQL drops the clones with it and refuses
+// to drop one alone. A view that reads
 // the table without naming the column does not appear. The read is a planning fact: the server's own refusal
 // at execution stays the backstop for a dependent created after it.
 func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table string) (ColumnDependents, error) {
@@ -269,6 +272,11 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 			  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
 			  AND d.refobjid OPERATOR(pg_catalog.=) tree.oid
 			  AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+			  AND NOT EXISTS (
+				SELECT FROM pg_catalog.pg_trigger pt
+				JOIN tree parent ON parent.oid OPERATOR(pg_catalog.=) pt.tgrelid
+				WHERE pt.oid OPERATOR(pg_catalog.=) tg.tgparentid
+			  )
 			UNION
 			SELECT 'generated'::pg_catalog.text, n.nspname, c.relname, g.attname
 			FROM pg_catalog.pg_depend d

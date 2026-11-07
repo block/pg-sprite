@@ -118,6 +118,27 @@ func TestRunRefusesChangingAColumnHiddenDependentsNeed(t *testing.T) {
 		})
 	}
 
+	// Every kind of dependent that blocks the change is named, so the
+	// manual path clears all of them, not just the first.
+	t.Run("a trigger and a generated column both block a widening", func(t *testing.T) {
+		schema := seed(t)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TRIGGER audit_amount BEFORE UPDATE OF amount ON %[1]s.orders
+			FOR EACH ROW EXECUTE FUNCTION %[1]s.touch()`, schema))
+		require.NoError(t, err)
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.orders ALTER COLUMN amount TYPE numeric(12, 2)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome, v.Detail)
+		trigger := fmt.Sprintf(`"audit_amount" ON "%s"."orders"`, schema)
+		generated := fmt.Sprintf(`"%s"."orders"."total"`, schema)
+		assert.Equal(t, []string{trigger}, v.DependentTriggers)
+		assert.Equal(t, []string{generated}, v.DependentGeneratedColumns)
+		assert.Contains(t, v.Detail, "a column named by trigger "+trigger+",")
+		assert.True(t, strings.HasSuffix(v.Detail, "; the change is also blocked by generated column "+generated+
+			", so re-plan after dealing with every blocker"), v.Detail)
+		assert.Equal(t, "numeric(10,2)", columnType(t, pool, schema, "orders", "amount"))
+	})
+
 	t.Run("a statement that drops the generated column widens the column it read", func(t *testing.T) {
 		schema := seed(t)
 		opts := runOptions()

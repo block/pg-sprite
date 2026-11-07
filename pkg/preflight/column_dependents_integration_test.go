@@ -545,3 +545,50 @@ func TestReadColumnDependentsPartitionKeys(t *testing.T) {
 	require.NoError(t, retype(t, "events", "kind", "varchar(20)"), "a column outside every key retypes")
 	require.NoError(t, retype(t, "tickets", "note", "varchar(20)"), "a column outside every key retypes")
 }
+
+// A row trigger on a partitioned table is cloned onto every partition, and
+// PostgreSQL drops the clones with it and refuses to drop one alone, so
+// ReadColumnDependents names the parent's trigger once. A trigger created
+// on a partition itself is that partition's own and is named too. The
+// server is the oracle: a clone cannot be dropped, and dropping the named
+// triggers lets the type change run.
+func TestReadColumnDependentsNamesAClonedTriggerOnce(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %[1]s.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+		CREATE TABLE %[1]s.events (id bigint, status varchar(16)) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100);
+		CREATE TRIGGER audit BEFORE UPDATE OF status ON %[1]s.events
+			FOR EACH ROW EXECUTE FUNCTION %[1]s.noop();
+		CREATE TRIGGER local_audit BEFORE UPDATE OF status ON %[1]s.events_1
+			FOR EACH ROW EXECUTE FUNCTION %[1]s.noop()`, schema))
+	require.NoError(t, err)
+
+	on := func(trigger, table string) string { return fmt.Sprintf(`"%s" ON "%s"."%s"`, trigger, schema, table) }
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	named := map[string][]string{"status": {on("audit", "events"), on("local_audit", "events_1")}}
+	assert.Equal(t, named, deps.Triggers.Tree)
+	assert.Equal(t, named, deps.Triggers.Drop)
+	assert.Equal(t, map[string][]string{"status": {on("audit", "events")}}, deps.Triggers.Own)
+
+	_, err = pool.Exec(t.Context(), "DROP TRIGGER "+on("audit", "events_1"))
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "a partition's clone cannot be dropped on its own")
+	assert.Equal(t, "2BP01", pgErr.Code)
+
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+	for _, trigger := range named["status"] {
+		_, err := tx.Exec(t.Context(), "DROP TRIGGER "+trigger)
+		require.NoError(t, err, trigger)
+	}
+	_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN status TYPE varchar(64)", schema))
+	require.NoError(t, err, "with the named triggers gone the type change runs")
+}

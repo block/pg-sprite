@@ -606,8 +606,11 @@ column; around a type change PostgreSQL runs in place, drop the triggers, run th
 change, and recreate them in one transaction; for a type change that rewrites the
 table, add a column of the new type, backfill it, and point the triggers at it, since
 copy-and-swap refuses a table with triggers. A rename is not refused, because a
-trigger follows the column. When a view or a policy also depends on the column, the
-decision names those first.
+trigger follows the column. A partition's clone of a trigger on its partitioned
+parent is not named on its own: PostgreSQL drops the clones with the parent's trigger
+and refuses to drop one alone. When a view or a policy also depends on the column,
+the decision's reason names those first, and `dependent_triggers` still names the
+triggers.
 
 ### `dependent-generated-column`
 
@@ -625,12 +628,19 @@ what keeps the generated column. The plan names each generated column as
 `"schema"."table"."column"` in `decisions[].dependent_generated_columns`, and a refused
 run's verdict in `dependent_generated_columns`. Drop those generated columns first,
 then re-plan. Adding a `STORED` generated column back afterwards, or changing its
-expression instead, rewrites the table. A generated column that the same statement,
-or an earlier statement of the same plan, drops does not count: PostgreSQL runs every
-drop of an `ALTER TABLE` before its type changes, wherever the drop is written. A copy
+expression instead, rewrites the table. A partition's copy of the table's own
+generated column is not named on its own, since dropping the table's copy drops it
+and PostgreSQL refuses to drop it alone. A generated column that an earlier statement
+of the same plan drops does not count. Within one `ALTER TABLE`, PostgreSQL runs every
+drop before its other operations, wherever the drop is written, and runs the drops
+themselves in the order written. So a type change ignores a generated column the
+statement drops anywhere, while a drop ignores only one dropped before it: `DROP
+COLUMN total, DROP COLUMN amount` runs, and `DROP COLUMN amount, DROP COLUMN total` is
+refused. A `diff` plan drops generated columns before the columns they read. A copy
 the drop leaves in place still counts, such as a child's copy under `ONLY` or one the
 child declares itself. When a view, a policy, or a trigger also depends on the column,
-the decision names those first.
+the decision's reason names those first, and `dependent_generated_columns` still names
+the generated columns.
 
 ### `partition-key`
 

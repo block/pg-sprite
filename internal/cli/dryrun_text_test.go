@@ -433,7 +433,8 @@ func TestDryRunTextDependentPolicyRefusalNamesThePolicies(t *testing.T) {
 
 // A refusal because a trigger, a generated column, or a partition key
 // depends on the changed column names those objects in the refusal
-// itself, and the help line gives the manual path for each.
+// itself, and the help line gives the manual path for each. A second kind
+// of dependent that also blocks the change is named in its own help line.
 func TestDryRunTextHiddenDependentRefusalsNameTheObjects(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -452,6 +453,19 @@ func TestDryRunTextHiddenDependentRefusalsNameTheObjects(t *testing.T) {
 			},
 			refusal: `ALTER COLUMN status TYPE varchar(64) changes a column named by trigger "audit_status" ON "app"."orders", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it`,
 			help:    "help: this type change runs in place, without rewriting the table, so in one transaction drop those triggers, run the change, and recreate them",
+			anchor:  "#dependent-trigger",
+		},
+		{
+			name: "trigger and generated column",
+			decision: planner.Decision{
+				Operation:                 "ALTER COLUMN status TYPE varchar(64)",
+				Reason:                    planner.ReasonDependentTrigger,
+				DependentTriggers:         []string{`"audit_status" ON "app"."orders"`},
+				DependentGeneratedColumns: []string{`"app"."orders"."status_upper"`},
+				DependentFix:              planner.DependentFixRecreateAroundChange,
+			},
+			refusal: `ALTER COLUMN status TYPE varchar(64) changes a column named by trigger "audit_status" ON "app"."orders", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it`,
+			help:    `help: the change is also blocked by generated column "app"."orders"."status_upper": ` + planner.GeneratedColumnHelp,
 			anchor:  "#dependent-trigger",
 		},
 		{
