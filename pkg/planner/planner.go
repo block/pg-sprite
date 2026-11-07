@@ -154,13 +154,15 @@ const (
 	// EXCLUSIVE on the partitioned parent — no scan, but it queues behind
 	// and then blocks every query on the parent while held.
 	ReasonPartitionParentLock Reason = "partition-parent-lock"
-	// ReasonReplicaIdentity: the operation drops what the table's
-	// REPLICA IDENTITY USING INDEX keys on — the index itself, the
-	// constraint that owns it, or one of its columns. The setting outlives
-	// the index, so the table is left with no usable identity, and every
-	// UPDATE and DELETE on it fails while a publication publishes them.
-	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
-	// re-plan.
+	// ReasonReplicaIdentity: the operation drops what the table's replica
+	// identity index keys on — the index itself, the constraint that owns
+	// it, or one of its columns. The index is the one REPLICA IDENTITY
+	// USING INDEX selects, or the primary key under REPLICA IDENTITY
+	// DEFAULT while a publication publishes the table's updates or
+	// deletes. The setting outlives the index, so the table is left with
+	// no usable identity, and every UPDATE and DELETE on it fails while a
+	// publication publishes them. Move the identity first (ALTER TABLE ...
+	// REPLICA IDENTITY), then re-plan.
 	ReasonReplicaIdentity Reason = "replica-identity"
 	// ReasonDependentView: the operation changes the type of, or drops, a
 	// column that a view or materialized view reads. PostgreSQL refuses
@@ -371,7 +373,8 @@ type Facts struct {
 	// rebuilt: never a relabel.
 	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
-	// its partitions key on; the zero value when none selects an index.
+	// the tables below it key on; the zero value when none has one to
+	// protect.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
 	// AddColumnProofs maps a column the change adds to what the server
 	// proved about adding it (preflight.AddColumnRewrites). A column absent

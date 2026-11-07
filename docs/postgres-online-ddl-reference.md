@@ -516,12 +516,18 @@ blocking access to every partition. Flagged so it is scheduled deliberately.
 |---|---|---|---|
 | refused — never executed | — | — | 2 |
 
-The operation drops what the table's `REPLICA IDENTITY USING INDEX` keys on: the
-index itself, the constraint that owns it, or one of its key columns, which takes
-the index with it. PostgreSQL keeps the setting and leaves the table with no usable
-identity, so every `UPDATE` and `DELETE` on it fails while a publication publishes
-them. Move the identity first (`ALTER TABLE … REPLICA IDENTITY USING INDEX` another
-unique index, or `REPLICA IDENTITY DEFAULT` when a primary key remains), then re-plan.
+The operation drops what the table's replica identity index keys on: the index
+itself, the constraint that owns it, or one of its key columns, which takes the
+index with it. The index is the one `REPLICA IDENTITY USING INDEX` selects, or the
+primary key under `REPLICA IDENTITY DEFAULT`. PostgreSQL keeps the setting and
+leaves the table with no usable identity, so every `UPDATE` and `DELETE` on it
+fails while a publication publishes them. A `DEFAULT` table counts its primary key
+only while a publication publishes its updates or deletes, by listing the table, a
+partitioned table above it, or its schema, or by publishing all tables; on any
+other table the primary key stays free to drop. Move the identity first
+(`ALTER TABLE … REPLICA IDENTITY USING INDEX` a unique index the drop leaves in
+place, `REPLICA IDENTITY DEFAULT` when a primary key remains, or
+`REPLICA IDENTITY FULL`, which logs every column of the old row), then re-plan.
 The planner judges this from live facts, so the linter, which has none, never
 reports it.
 

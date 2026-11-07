@@ -1,9 +1,12 @@
 package migrate_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,5 +139,78 @@ func TestRunRefusesDroppingTheReplicaIdentity(t *testing.T) {
 		assert.Contains(t, v.Detail, "events_1_id_ref_idx")
 		assert.True(t, indexExists(t, pool, schema, "events_ref_key"))
 		assert.True(t, indexExists(t, pool, schema, "events_1_id_ref_idx"))
+	})
+}
+
+// Under REPLICA IDENTITY DEFAULT the primary key is the table's identity,
+// and PostgreSQL drops it without complaint, so a published table is left
+// with no identity and its next UPDATE fails with SQLSTATE 55000. The
+// planner refuses dropping the primary key, or a column it covers, while a
+// publication publishes the table's updates or deletes. The same drop on a
+// table no publication publishes runs.
+func TestRunRefusesDroppingThePrimaryKeyOfAPublishedDefaultIdentity(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	seed := func(t *testing.T, published bool) string {
+		t.Helper()
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, note text);
+			INSERT INTO %[1]s.orders VALUES (1, 'first')`, schema))
+		require.NoError(t, err)
+		if published {
+			publication := pgx.Identifier{schema + "_pub"}.Sanitize()
+			t.Cleanup(func() {
+				// t.Context is cancelled by cleanup time; strip the cancellation.
+				if _, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP PUBLICATION IF EXISTS "+publication); err != nil {
+					t.Logf("drop publication %s: %v", publication, err)
+				}
+			})
+			_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s.orders", publication, schema))
+			require.NoError(t, err)
+		}
+		return schema
+	}
+
+	t.Run("the server breaks updates once the primary key is gone", func(t *testing.T) {
+		schema := seed(t, true)
+		tx, err := pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_pkey", schema))
+		require.NoError(t, err, "PostgreSQL drops the primary key of a published table without complaint")
+		_, err = tx.Exec(t.Context(), fmt.Sprintf("UPDATE %s.orders SET note = 'second' WHERE id = 1", schema))
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr)
+		assert.Equal(t, "55000", pgErr.Code, pgErr.Message)
+	})
+
+	for _, tc := range []struct{ name, ddl string }{
+		{"dropping the primary key", "ALTER TABLE %s.orders DROP CONSTRAINT orders_pkey"},
+		{"dropping a column the primary key covers", "ALTER TABLE %s.orders DROP COLUMN id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := seed(t, true)
+			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(tc.ddl, schema)), destructiveOptions(schema+".orders"))
+			require.NoError(t, err)
+			assert.Equal(t, verdict.OutcomeRefused, v.Outcome, v.Detail)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+			assert.Contains(t, v.Detail, "replica identity")
+			assert.True(t, indexExists(t, pool, schema, "orders_pkey"), "the primary key must still exist")
+			_, err = pool.Exec(t.Context(), fmt.Sprintf("UPDATE %s.orders SET note = 'second' WHERE id = 1", schema))
+			assert.NoError(t, err, "the table must still take updates")
+		})
+	}
+
+	t.Run("dropping the primary key of a table no publication publishes runs", func(t *testing.T) {
+		schema := seed(t, false)
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_pkey", schema)), destructiveOptions(schema+".orders"))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, v.Detail)
+		assert.False(t, indexExists(t, pool, schema, "orders_pkey"))
 	})
 }

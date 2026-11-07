@@ -196,13 +196,16 @@ type Index struct {
 	Invalid bool
 }
 
-// ReplicaIdentityKeys is what a table's REPLICA IDENTITY USING INDEX
-// is built on, across the table and every table below it, partitions and
-// inheritance children alike. Logical decoding
-// keys UPDATE and DELETE on that index, and PostgreSQL keeps the setting
-// when the index is dropped, so the table is left with no usable identity
-// and every UPDATE and DELETE on it fails while a publication publishes
-// them. The zero value means no table in the tree selects an index.
+// ReplicaIdentityKeys is what the replica identity indexes of a table are
+// built on, across the table and every table below it, partitions and
+// inheritance children alike: the index REPLICA IDENTITY USING INDEX
+// selects, or the primary key under REPLICA IDENTITY DEFAULT on a table a
+// publication publishes updates or deletes for. Logical decoding keys
+// UPDATE and DELETE on that index, and PostgreSQL keeps the setting when
+// the index is dropped, so the table is left with no usable identity and
+// every UPDATE and DELETE on it fails while a publication publishes them.
+// The zero value means no table in the tree has an identity index to
+// protect.
 type ReplicaIdentityKeys struct {
 	// Indexes are the indexes on this table whose drop removes a replica
 	// identity index: the table's own, or a partitioned index that a
@@ -214,7 +217,8 @@ type ReplicaIdentityKeys struct {
 	// Columns are the columns every replica identity index in the tree
 	// covers, INCLUDE columns too. Dropping one drops each index built on
 	// it, those of the tables below included. Name-sorted.
-	Columns []string // OwnColumns are the columns this table's own replica identity index
+	Columns []string
+	// OwnColumns are the columns this table's own replica identity index
 	// covers, INCLUDE columns too: what a DROP COLUMN under ALTER TABLE
 	// ONLY can take, since it leaves the column in the tables below.
 	// Name-sorted.
