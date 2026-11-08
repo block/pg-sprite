@@ -191,12 +191,13 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 
 // desiredShapeSentinels is the closed set of desired-file shapes the
 // planner refuses before it builds anything: a CREATE TABLE that names a
-// live parent. RunDesired maps them to a refusal, since nothing was
-// planned or executed.
+// live parent, or an expression whose printed text never settles. RunDesired
+// maps them to a refusal, since nothing was planned or executed.
 func desiredShapeSentinels() []error {
 	return []error{
 		schemadiff.ErrDesiredPartitionOf,
 		schemadiff.ErrDesiredInherits,
+		schemadiff.ErrExpressionUnsettled,
 	}
 }
 

@@ -86,9 +86,9 @@ type Column struct {
 	// why the checkpoint format moved with it.
 	Sequence *SequenceOptions `json:",omitempty"`
 	// DefaultReplays are the texts Default prints as after each further
-	// replay through the server, when replaying changes it; see
-	// settleDesired. Only a desired model carries them, and they never
-	// reach a digest.
+	// replay through the server, when replaying changes it, and a live
+	// text that prints as Default or one of those; see settleDesired.
+	// Only a desired model carries them, and they never reach a digest.
 	DefaultReplays []string `json:"-"`
 	// MultipleOwnedSequences reports that the column's default calls more
 	// than one sequence the column owns. The model carries one sequence
@@ -181,8 +181,9 @@ type Constraint struct {
 	// VALID, so a desired constraint is always validated.
 	NotValid bool `json:"-"`
 	// DefReplays are the texts a check constraint's Def prints as after
-	// each further replay through the server, when replaying changes it;
-	// see settleDesired. Only a desired model carries them.
+	// each further replay through the server, when replaying changes it,
+	// and a live text that prints as Def or one of those; see
+	// settleDesired. Only a desired model carries them.
 	DefReplays []string `json:"-"`
 }
 
@@ -204,8 +205,9 @@ type Index struct {
 	// invalid, so the zero value is the delivered state.
 	Invalid bool
 	// DefReplays are the texts Def prints as after each further replay
-	// through the server, when replaying changes it; see settleDesired.
-	// Only a desired model carries them.
+	// through the server, when replaying changes it, and a live text that
+	// prints as Def or one of those; see settleDesired. Only a desired
+	// model carries them.
 	DefReplays []string `json:"-"`
 }
 

@@ -99,6 +99,67 @@ func TestDiffTakesEveryReplayOfADesiredExpressionAsTheSame(t *testing.T) {
 	})
 }
 
+// A desired file pulled from the live table holds the live text, and
+// building it prints the next text on the chain, one replay ahead of the
+// live table. The diff still finds them the same, and a real change made
+// to the pulled file is still planned.
+func TestDiffTakesAPulledDesiredFileAsTheSame(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	createFromDesired(t, pool, schema, nestedRowDesired)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	pulled, err := schemadiff.Render(live)
+	require.NoError(t, err)
+	require.Contains(t, pulled, "ROW(a, b) IS DISTINCT FROM ROW(1, 2)", "the pulled file must hold the unexpanded inner rows, or this case tests nothing")
+
+	ds, err := statement.ParseDesired(pulled)
+	require.NoError(t, err)
+	built, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	require.NotEqual(t, liveDefinitions(t, pool, schema)[0], constraintDef(built, "ck"),
+		"building the pulled file must print the next text on the chain, or this case tests nothing")
+	assert.Empty(t, diffDesired(t, pool, schema, ds))
+
+	changed, err := statement.ParseDesired(strings.Replace(pulled, "(e IS DISTINCT FROM 5)", "(e IS DISTINCT FROM 7)", 1))
+	require.NoError(t, err)
+	var kinds []schemadiff.ChangeKind
+	for _, c := range diffDesired(t, pool, schema, changed) {
+		kinds = append(kinds, c.Kind)
+	}
+	assert.Equal(t, []schemadiff.ChangeKind{schemadiff.ChangeDropConstraint, schemadiff.ChangeAddConstraint}, kinds,
+		"a real change to the pulled check is planned")
+}
+
+// An expression whose printed text is still changing after every replay
+// the build allows is refused by name, instead of planning against a text
+// the live table may never hold.
+func TestIntrospectDesiredRefusesAnExpressionThatNeverSettles(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	ds, err := statement.ParseDesired(`CREATE TABLE t (
+		a int, b int, c int, d int, e int, f int, g int,
+		CONSTRAINT deep CHECK ((((((a, b), c), d), e), f, g) IS DISTINCT FROM (((((1, 2), 3), 4), 5), 6, 7))
+	);`)
+	require.NoError(t, err)
+	_, err = schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.ErrorIs(t, err, schemadiff.ErrExpressionUnsettled)
+	assert.ErrorContains(t, err, `constraint "deep" of table t still changed after 4 replays`)
+}
+
+func constraintDef(m schemadiff.Model, name string) string {
+	for _, c := range m.Constraints {
+		if c.Name == name {
+			return c.Def
+		}
+	}
+	return ""
+}
+
 // A generation expression settles the same way on a server that can
 // replace one in place.
 func TestDiffTakesEveryReplayOfAGenerationExpressionAsTheSame(t *testing.T) {
