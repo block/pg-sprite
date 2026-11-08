@@ -641,6 +641,13 @@ func Classify(sql string, facts Facts) (Plan, error) {
 			opFacts = withoutDroppedGeneratedColumns(ops[:i], facts)
 		}
 		d := classifyOp(op, st, opFacts, sql, single)
+		if op.Kind == statement.OpValidateConstraint && !allTakeShareUpdateExclusiveOnly(ops) {
+			// One ALTER TABLE holds the strongest lock any of its
+			// operations needs for the whole statement, so the
+			// validation scan runs under it: blocking, and only online
+			// beside operations that block neither reads nor writes.
+			d.Reason = ReasonSaferIdiom
+		}
 		if len(d.SaferSQL) > 0 {
 			// Stamped here, in the one place every decision passes
 			// through, so a constructed sequence can never ship without
@@ -744,6 +751,18 @@ func dependentReason(d Decision) (Reason, bool) {
 		return ReasonDependentGeneratedColumn, true
 	}
 	return "", false
+}
+
+// allTakeShareUpdateExclusiveOnly reports a statement whose every
+// operation takes SHARE UPDATE EXCLUSIVE and nothing stronger, so a
+// validation scan among them blocks neither reads nor writes.
+func allTakeShareUpdateExclusiveOnly(ops []statement.Op) bool {
+	for _, op := range ops {
+		if !op.TakesShareUpdateExclusiveOnly() {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyOp routes one operation per the reference table.
