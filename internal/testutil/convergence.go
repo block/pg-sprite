@@ -19,7 +19,15 @@ type RelationRef struct {
 }
 
 // ConvergeOptions controls convergence comparison.
-type ConvergeOptions struct{ IgnoreColumns []string }
+type ConvergeOptions struct {
+	// IgnoreColumns are shadow columns left out of the comparison.
+	IgnoreColumns []string
+	// ExcludeKeys are primary keys left out of both sides, counts
+	// included: a caller that knows which rows were written after the
+	// instant the two relations should agree about takes them out of the
+	// comparison rather than asking the oracle to judge them.
+	ExcludeKeys []int64
+}
 
 // DirectionDiff reports differing primary keys in one EXCEPT direction.
 type DirectionDiff struct {
@@ -92,8 +100,10 @@ func diffInSnapshot(ctx context.Context, tx pgx.Tx, source, shadow RelationRef, 
 	if !containsColumn(columns, key) {
 		return Report{}, fmt.Errorf("shadow %s.%s primary key %s cannot be ignored", shadow.Schema, shadow.Table, key)
 	}
+	exclusion := newKeyExclusion(key, opts.ExcludeKeys)
 	var report Report
-	if err = tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM `+qualified(source)+`), (SELECT count(*) FROM `+qualified(shadow)+`)`).Scan(&report.SourceCount, &report.ShadowCount); err != nil {
+	countQuery := `SELECT (SELECT count(*) FROM ` + qualified(source) + exclusion.where + `), (SELECT count(*) FROM ` + qualified(shadow) + exclusion.where + `)`
+	if err = tx.QueryRow(ctx, countQuery, exclusion.args...).Scan(&report.SourceCount, &report.ShadowCount); err != nil {
 		return Report{}, fmt.Errorf("count convergence relations: %w", err)
 	}
 	// The source side casts every column to the shadow's type: a widened or
@@ -116,7 +126,7 @@ func diffInSnapshot(ctx context.Context, tx pgx.Tx, source, shadow RelationRef, 
 		{"shadow-minus-source", shadowSide, sourceSide},
 	}
 	for _, d := range directions {
-		keys, err := missingKeys(ctx, tx, d.left, d.right, key)
+		keys, err := missingKeys(ctx, tx, d.left, d.right, key, exclusion)
 		if err != nil {
 			return Report{}, fmt.Errorf("%s difference: %w", d.name, err)
 		}
@@ -134,16 +144,34 @@ type relationSide struct {
 	columns string
 }
 
+// keyExclusion is the WHERE clause that takes ConvergeOptions.ExcludeKeys
+// out of a relation, with the keys as its one bound argument; both are
+// empty when no key is excluded.
+type keyExclusion struct {
+	where string
+	args  []any
+}
+
+func newKeyExclusion(key string, exclude []int64) keyExclusion {
+	if len(exclude) == 0 {
+		return keyExclusion{}
+	}
+	return keyExclusion{
+		where: ` WHERE NOT (` + pgx.Identifier{key}.Sanitize() + ` = ANY($1))`,
+		args:  []any{exclude},
+	}
+}
+
 // missingKeys returns the lowest DifferenceLimit primary keys of rows
 // present in left but absent from right. The primary key is always in the
 // projection, so every projected row is already distinct and EXCEPT loses
 // no multiplicity.
-func missingKeys(ctx context.Context, tx pgx.Tx, left, right relationSide, key string) ([]int64, error) {
+func missingKeys(ctx context.Context, tx pgx.Tx, left, right relationSide, key string, exclusion keyExclusion) ([]int64, error) {
 	keyID := pgx.Identifier{key}.Sanitize()
-	q := `SELECT ` + keyID + ` FROM (SELECT ` + left.columns + ` FROM ` + qualified(left.rel) +
-		` EXCEPT SELECT ` + right.columns + ` FROM ` + qualified(right.rel) +
+	q := `SELECT ` + keyID + ` FROM (SELECT ` + left.columns + ` FROM ` + qualified(left.rel) + exclusion.where +
+		` EXCEPT SELECT ` + right.columns + ` FROM ` + qualified(right.rel) + exclusion.where +
 		`) d ORDER BY ` + keyID + ` LIMIT ` + fmt.Sprint(DifferenceLimit)
-	rows, err := tx.Query(ctx, q)
+	rows, err := tx.Query(ctx, q, exclusion.args...)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}

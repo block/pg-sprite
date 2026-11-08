@@ -3,3 +3,4 @@ coverage.out
 *.test
 .idea/
 .vscode/
+integration/loadproof/results.json

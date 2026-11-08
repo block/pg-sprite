@@ -14,7 +14,7 @@ PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DA
 # Which corpus replay project to run (replay/<project>/project.conf).
 REPLAY_PROJECT ?= buzz
 
-.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -85,6 +85,17 @@ test-supported-postgres:
 # tokenless. PG_VERSION selects the major of the provisioned database.
 test-aws-boundary:
 	$(GO) test -tags ministack -race -count=1 -run 'AuroraControlPlane' -v ./internal/testutil/
+
+# Operator-run load proof of the copy-and-swap route (integration/loadproof):
+# the built binary retypes a large table's identity key while a concurrent
+# workload writes it, judged by timing-free oracles. Runs against the compose
+# database by default; point LOAD_PROOF_DSN at any server with
+# wal_level=logical. LOAD_PROOF_ROWS, LOAD_PROOF_WORKERS, LOAD_PROOF_RATE,
+# LOAD_PROOF_HOT, LOAD_PROOF_FREE_DISK and LOAD_PROOF_RESULTS pass through;
+# results.json lands in the package directory.
+LOAD_PROOF_DSN ?= $(PG_DSN_LOCAL)
+load-proof: build db-up
+	LOAD_PROOF=1 LOAD_PROOF_BIN=$(CURDIR)/bin/pg-sprite LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProof$$' -v ./integration/loadproof
 
 lint:
 	golangci-lint run
