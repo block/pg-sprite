@@ -304,9 +304,11 @@ $ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blockin
 Exit 1 means execution started and PostgreSQL refused a step, or the command
 stopped before anything ran. Here the safer sequence for a `CHECK` constraint
 adds it `NOT VALID`, which commits, and then fails to validate it because a
-row has an upper-case email. The verdict on stdout names the failed step and
-the committed prefix that remains (`executed_sql`); the PostgreSQL error,
-with its SQLSTATE, goes to stderr. The constraint now exists `NOT VALID`, so
+row has an upper-case email. The verdict on stdout names the failed step, the
+committed prefix that remains (`executed_sql`), and the PostgreSQL error that
+stopped it (`sqlstate` and `server_error`, the error's primary message; never
+its DETAIL line, which can quote row values). stderr carries the same error
+with the step it failed. The constraint now exists `NOT VALID`, so
 fix the rows and then run the failed step (`failed_step_sql`) to finish. Do
 not rerun the original `ADD CONSTRAINT`: the constraint already exists, so it
 fails with `duplicate_object` (see the
@@ -317,6 +319,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_lower 
 {
   "outcome": "failed",
   "code": "execution-failed",
+  "sqlstate": "23514",
+  "server_error": "check constraint \"users_email_lower\" of relation \"users\" is violated by some row",
   "failed_step": 2,
   "failed_step_sql": "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_lower\"",
   "statement": "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))",

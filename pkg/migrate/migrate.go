@@ -246,6 +246,13 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 // execution checks the planned definition again under the table's lock
 // before acting on it.
 func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
+	v, err := runStatement(ctx, pool, st, opts, adopts, validates)
+	return withServerError(v, err), err
+}
+
+// runStatement is run before a failed verdict records the server error
+// that failed it.
+func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
 	if err := opts.validate(); err != nil {
 		return verdict.Verdict{}, err
 	}

@@ -184,6 +184,8 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		DependentGeneratedColumns: []string{`"public"."t"."g"`},
 		PartitionKeyTables:        []string{`"public"."t"`},
 		ExecutedSQL:               []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
+		SQLState:                  "23514",
+		ServerError:               `check constraint "c" of relation "t" is violated by some row`,
 		Forced:                    true,
 		AllowedDestructive:        true,
 		BlockingPassthrough:       true,

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
@@ -354,6 +356,24 @@ func failureVerdict(st statement.Statement, err error,
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; no earlier steps had committed — Code names the outcome and any state the failed step itself left",
 			stepErr.Step, stepErr.Total)
 	}
+	return v
+}
+
+// withServerError records on a failed verdict the server error that
+// failed it: the SQLSTATE and primary message of the first
+// *pgconn.PgError in err's chain, the same text the returned error
+// prints. A verdict that did not fail, or a failure that was not a
+// server error, is returned unchanged.
+func withServerError(v verdict.Verdict, err error) verdict.Verdict {
+	if v.Outcome != verdict.OutcomeFailed {
+		return v
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return v
+	}
+	v.SQLState = pgErr.Code
+	v.ServerError = pgErr.Message
 	return v
 }
 
