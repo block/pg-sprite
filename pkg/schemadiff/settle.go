@@ -298,7 +298,8 @@ func (r replayer) recordLivePrecursors(ctx context.Context, target string, settl
 	}
 	for i, c := range settled.Columns {
 		l, ok := liveCols[c.Name]
-		if !ok || l.Generated != c.Generated || !hasReplayableExpression(c) || onChain(l.Default, c.Default, c.DefaultReplays) {
+		if !ok || l.Default == "" || l.Generated != c.Generated || !hasReplayableExpression(c) ||
+			onChain(l.Default, c.Default, c.DefaultReplays) {
 			continue
 		}
 		candidate := c
@@ -356,24 +357,31 @@ func (r replayer) recordLivePrecursors(ctx context.Context, target string, settl
 
 // replayInSavepoint replays m's expressions on the scratch table in a
 // savepoint, introspects the result, and rolls the savepoint back. It
-// reports false when the server refuses the replay with a class 42 error,
-// such as a column or function the desired table does not have: the live
-// text does not apply to the desired table, which the diff plans as the
-// change it is.
+// reports false when m has nothing the replayer can run, such as a
+// generation expression on a server that cannot replace one, because the
+// scratch table would still print the desired text and so prove nothing
+// about the live one. It also reports false when the server refuses the
+// replay with a class 42 error, such as a column or function the desired
+// table does not have: the live text does not apply to the desired table,
+// which the diff plans as the change it is.
 func (r replayer) replayInSavepoint(ctx context.Context, m Model) (Model, bool, error) {
+	stmts := r.statements(m)
+	if len(stmts) == 0 {
+		return Model{}, false, nil
+	}
 	sp, err := r.tx.Begin(ctx)
 	if err != nil {
 		return Model{}, false, fmt.Errorf("begin live expression replay: %w", err)
 	}
-	after, replayed, err := r.replayAndIntrospect(ctx, sp, m)
+	after, replayed, err := r.replayAndIntrospect(ctx, sp, stmts)
 	if rbErr := sp.Rollback(ctx); rbErr != nil && err == nil {
 		return Model{}, false, fmt.Errorf("roll back live expression replay: %w", rbErr)
 	}
 	return after, replayed, err
 }
 
-func (r replayer) replayAndIntrospect(ctx context.Context, sp pgx.Tx, m Model) (Model, bool, error) {
-	if err := r.run(ctx, sp, r.statements(m)); err != nil {
+func (r replayer) replayAndIntrospect(ctx context.Context, sp pgx.Tx, stmts []string) (Model, bool, error) {
+	if err := r.run(ctx, sp, stmts); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "42") {
 			return Model{}, false, nil

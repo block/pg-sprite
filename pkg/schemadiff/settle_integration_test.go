@@ -133,6 +133,58 @@ func TestDiffTakesAPulledDesiredFileAsTheSame(t *testing.T) {
 		"a real change to the pulled check is planned")
 }
 
+// Matching a live text to the desired chain never hides a real change. A
+// column with no live default still plans the default the file adds, and a
+// changed generation expression is still planned on a server that cannot
+// replay one, where the scratch table would only ever print the desired
+// text. The check gives the build something to replay, so the live texts
+// are matched at all.
+func TestDiffStillPlansExpressionsTheLiveTableLacks(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	t.Run("a default the live column does not have", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t (
+			a int,
+			f boolean
+		)`, schema))
+		require.NoError(t, err)
+		ds, err := statement.ParseDesired(`CREATE TABLE t (
+			a int,
+			f boolean DEFAULT (((1, 2), 3) IS DISTINCT FROM ((1, 2), 4))
+		);`)
+		require.NoError(t, err)
+		changes := diffDesired(t, pool, schema, ds)
+		require.Len(t, changes, 1)
+		assert.Equal(t, schemadiff.ChangeSetDefault, changes[0].Kind)
+	})
+
+	t.Run("a changed generation expression", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t (
+			a int,
+			b int,
+			c int,
+			g boolean GENERATED ALWAYS AS (a IS NULL) STORED,
+			CONSTRAINT ck CHECK (a > 0)
+		)`, schema))
+		require.NoError(t, err)
+		ds, err := statement.ParseDesired(`CREATE TABLE t (
+			a int,
+			b int,
+			c int,
+			g boolean GENERATED ALWAYS AS (((a, b), c) IS DISTINCT FROM ((1, 2), 3)) STORED,
+			CONSTRAINT ck CHECK (a > 0)
+		);`)
+		require.NoError(t, err)
+		changes := diffDesired(t, pool, schema, ds)
+		require.Len(t, changes, 1)
+		assert.Equal(t, schemadiff.ChangeSetGeneratedExpression, changes[0].Kind)
+	})
+}
+
 // An expression whose printed text is still changing after every replay
 // the build allows is refused by name, instead of planning against a text
 // the live table may never hold.
