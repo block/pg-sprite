@@ -211,18 +211,46 @@ run commits, anyone with your project's anon key can read, insert, update, and
 delete the table's rows. A row inserted then keeps the `owner_id` its writer
 chose, so once RLS is on, your policies show it to that user as their own.
 
-Close the gap before you create the table:
+Close the gap before you create the table, so that new tables start with no
+Data API access:
 
-1. Turn off the project setting **Default privileges for new entities**
-   (`auto_expose_new_tables = false` under `[api]` in a local `config.toml`).
-   New tables then start with no Data API access.
-2. Create the table, then apply its RLS declaration.
-3. Grant the table to `anon` or `authenticated` yourself, now that its
+1. Turn off default privileges for new tables.
+   - On a hosted project, turn off the project setting **Default privileges
+     for new entities**.
+   - On a local stack, set `auto_expose_new_tables = false` under `[api]` in
+     `config.toml`. The CLI applies it only when it initializes the database.
+     On a database that already exists, run the revoke yourself:
+
+     ```sql
+     ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+       REVOKE SELECT, INSERT, UPDATE, DELETE ON TABLES FROM anon, authenticated, service_role;
+     ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+       REVOKE USAGE, SELECT ON SEQUENCES FROM anon, authenticated, service_role;
+     ```
+
+2. Check that new tables are no longer granted to `anon` or `authenticated`.
+   This query must return no rows:
+
+   ```sql
+   SELECT a.grantee::regrole AS grantee, a.privilege_type
+   FROM pg_default_acl d
+   JOIN pg_namespace n ON n.oid = d.defaclnamespace
+   CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+   WHERE d.defaclrole = 'postgres'::regrole
+     AND n.nspname = 'public'
+     AND d.defaclobjtype = 'r'
+     AND a.grantee IN ('anon'::regrole, 'authenticated'::regrole)
+     AND a.privilege_type IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE');
+   ```
+
+3. Create the table, then apply its RLS declaration.
+4. Grant the table to `anon` or `authenticated` yourself, now that its
    policies are in place.
 
-If you keep the setting on, apply the RLS declaration straight after the
-create, before any app code or user can reach the table, and check that the
-table is still empty before you rely on it.
+Do not create a table that needs RLS while new tables are still granted to
+`anon`. Applying the RLS straight after the create still leaves a window in
+which the Data API serves the table, and nothing you check afterwards shows
+what a client did during it.
 
 ## What works today
 
