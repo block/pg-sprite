@@ -345,7 +345,12 @@ the slot under the row (decoding target):
 A refusal from either read leaves the row and the slot as they were. A `Reconcile` that fails
 after its marker leaves the row in `reconciling`, and `InspectResume` answers that row as
 reconcile whatever the catalog shows under the slot name, so the adapter repeats `Start`
-rather than deciding anything itself.
+rather than deciding anything itself. A `Reconcile` whose clear of the shadow above the
+watermark cannot take its fence within the caller's `lock_timeout` — an earlier run's
+transaction still writing into the shadow — returns the server's `55P03` as a
+`*pgconn.PgError`, not a refusal. It fails before the marker and before any slot command, so
+the row, its watermark, and the shadow are as they were, and repeating `Start` once the
+writer has ended is safe.
 
 #### What a live `Run` holds open
 
@@ -365,12 +370,18 @@ the pool besides; an importer running many tables from one process sizes for bot
 - **From the pool:** `Copier.Workers` connections (default `copier.DefaultWorkers`) while the
   copy runs, one at a time for the capture's flushes and the checkpoint saves, one for the
   verification pass, and one for the swap transaction. A pool smaller than the copy's workers
-  slows the copy; it does not stall the run. `Runner.Run` admits any pool, but a pool of only
-  the workers leaves the catch-up's flushes waiting behind the copy while the slot's lag
-  grows, so the front doors (`migrate.Run` and `migrate.RunDesired`) refuse a pool below
-  `migrate.CopySwapMinConns(Copier)` — the workers plus one connection for the catch-up's
-  flushes and one for the checkpoint saves and progress reads, six with the default
-  workers — before the preflight, so nothing is created. The check also runs when a stopped
+  slows the copy; it does not stall the run. `Runner.Run` admits any pool and reports nothing
+  about its size: a pool of only the workers does not fail the run, it leaves the catch-up's
+  flushes waiting behind the copy while the slot's lag grows, and a source write reaches the
+  shadow only once a worker frees its connection
+  (`TestRunnerCopySwapFlushWaitsBehindTheCopyWhenThePoolHoldsOnlyTheWorkers`). A host that
+  calls `Runner.Run` directly sizes its pool with `migrate.CopySwapMinConns(Copier)` itself;
+  the front doors (`migrate.Run` and `migrate.RunDesired`) refuse a pool below it before the
+  preflight, so nothing is created. The floor is the workers plus two, six with the default
+  workers: one connection beyond the workers keeps the flushes landing while every worker
+  holds its connection (`TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits`), and the
+  second is headroom so the flushes and the checkpoint saves and progress reads do not queue
+  behind one another. The check also runs when a stopped
   run resumes or is restarted, so a run stopped before the pool was shrunk is refused, and
   keeps its slot or fence and its checkpoint row, until the pool is raised again. The floor
   is per run: a host running several copy-and-swap runs at once from one pool sizes it for
@@ -469,17 +480,23 @@ logs the typed fields and shows a fixed line. The comparison cannot tell a clust
 physical copy of it — a standby, or a server restored from a base backup or a snapshot keeps
 the source's system identifier — and a run wired across such a pair stops later instead, as
 the environmental `shadow-lock-unconfirmed` refusal, when its first working transaction
-finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQL grants to
-`PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
+finds no lock to confirm. A host that calls `schemachange.Runner` directly skips this
+comparison, so a lock connection and a pool on different databases end the same way:
+`shadow-lock-unconfirmed` on the first working transaction, before anything is written.
+Although the class is `environmental`, re-acquiring the lock does not help there — every
+attempt confirms from the wrong database — so escalate it as a wiring error. The check reads
+`pg_control_system()`, which PostgreSQL grants to `PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the run blocks the table's writes — offline mode, the fenced path
 (a quiesced target, in the engine's terms) that needs no logical decoding but refuses every
 write to the table with `55006` until the swap — or is live. `BlockWrites` is a typed acknowledgement, not a switch: it must name the resolved target
 as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before anything
 executes, and an acknowledged run records a warn-level audit naming the table before the
-fence goes on. `RunDesired` rejects it, as it rejects every acknowledgement
-([below](#rundesired-takes-no-acknowledgement)). An adapter that builds one `Options` for both
-front doors passes `RunDesired` a copy with `CopySwap.BlockWrites` cleared. Three further
+fence goes on. `RunDesired` rejects both `BlockWrites` and `Restart`, as it rejects every
+acknowledgement ([below](#rundesired-takes-no-acknowledgement)). A stopped desired-plan copy is
+resumed by running the plan again, or started over by running the stopped statement through
+`Run` with `CopySwap.Restart`. An adapter that builds one `Options` for both front doors passes
+`RunDesired` a copy with `CopySwap.BlockWrites` and `CopySwap.Restart` cleared. Three further
 fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
@@ -751,7 +768,11 @@ both.
 
 Through the library, the verbs are `migrate.Run` with `CopySwapOptions.Restart` set to the
 acknowledgement, and `schemachange.RunOptions.Restart` on the `Runner` directly; the
-`Runner` refuses the committed-swap case as `CauseRestartSwapCommitted`.
+`Runner` refuses the committed-swap case as `CauseRestartSwapCommitted`. `migrate.RunDesired`
+rejects the field with `ErrRestartNotSupported` before planning anything: a desired plan
+resumes a stopped copy-and-swap on its own, and a run that must start over is the stopped
+statement run through `Run` — `migrate --alter … --restart SCHEMA.TABLE` on the CLI — before
+the plan is run again.
 
 ## Design constraints the integration imposes
 

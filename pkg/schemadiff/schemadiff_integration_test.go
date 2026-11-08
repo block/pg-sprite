@@ -193,6 +193,58 @@ func TestDiffSerialTableConverges(t *testing.T) {
 	assert.Empty(t, changes)
 }
 
+// A plain unique index stays in the model when a foreign key references
+// it, whether the key is on another table or on the table itself: the
+// server records the referenced index as the foreign key's conindid, but
+// the index belongs to no key constraint of the table, so it is introspected
+// as an index. A desired file that declares the table as it stands plans no
+// change. The self-referencing key needs the index before it, which a
+// desired CREATE TABLE cannot declare, so that case checks the live model.
+func TestDiffKeepsAUniqueIndexAForeignKeyReferences(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	const accounts = `CREATE TABLE accounts (id bigint PRIMARY KEY, code text NOT NULL, parent_code text);
+CREATE UNIQUE INDEX accounts_code_key ON accounts (code);`
+	for name, tc := range map[string]struct{ setup, desired string }{
+		"referenced from another table": {
+			setup: accounts + `
+CREATE TABLE invoices (id bigint PRIMARY KEY, account_code text REFERENCES accounts (code));`,
+			desired: accounts,
+		},
+		"referenced from the table itself": {
+			setup: accounts + `
+ALTER TABLE accounts ADD CONSTRAINT accounts_parent_fk FOREIGN KEY (parent_code) REFERENCES accounts (code);`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema := testutil.NewSchema(t, pool)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf("SET search_path = %s; %s", pgx.Identifier{schema}.Sanitize(), tc.setup))
+			require.NoError(t, err)
+
+			live, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
+			require.NoError(t, err)
+			var indexes []string
+			for _, ix := range live.Indexes {
+				indexes = append(indexes, ix.Name)
+			}
+			assert.Equal(t, []string{"accounts_code_key"}, indexes)
+			if tc.desired == "" {
+				return
+			}
+
+			ds, err := statement.ParseDesired(tc.desired)
+			require.NoError(t, err)
+			desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+			require.NoError(t, err)
+			changes, err := schemadiff.Diff(schema, live, desired)
+			require.NoError(t, err)
+			assert.Empty(t, changes)
+		})
+	}
+}
+
 // A serial's sequence declaration is not compared: the serial shorthand
 // cannot state one, so a file that writes it plans no change against a live
 // serial whose sequence was tuned, and the tuning is left as it is.

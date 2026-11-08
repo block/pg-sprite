@@ -164,6 +164,27 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "--block-writes cannot be combined with --desired")
 	})
 
+	// Under --desired the derived plan, not the operator, decides which
+	// stopped run --restart would discard, so the flag is a usage error
+	// there that points at the imperative door, decided at parse like the
+	// --block-writes case above.
+	t.Run("rejects --restart with --desired", func(t *testing.T) {
+		desired := filepath.Join(t.TempDir(), "orders.sql")
+		require.NoError(t, os.WriteFile(desired, []byte("this is not SQL"), 0o600))
+		c := New("test")
+		k, err := kong.New(c, kong.Vars{"version": "test"})
+		require.NoError(t, err)
+		_, err = k.Parse([]string{
+			"migrate",
+			"--url", "postgres://user@127.0.0.1:1/app",
+			"--desired", desired,
+			"--restart", "public.orders",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--restart cannot be combined with --desired")
+		assert.Contains(t, err.Error(), "migrate --alter --copy-and-swap --restart")
+	})
+
 	for _, flag := range []string{"--copy-and-swap", "--free-disk=1GiB", "--keep-old", "--block-writes=public.t"} {
 		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
 			c := New("test")

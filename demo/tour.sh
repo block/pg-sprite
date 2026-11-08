@@ -78,7 +78,7 @@ dry_run() {
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -307,7 +307,7 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
@@ -334,7 +334,7 @@ diff_advisory() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         assert_eq "advisory count of [$desired]" 1 "$(jq -r '.advisories | length' <<<"$out")"
@@ -362,7 +362,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -403,7 +403,7 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
             case "$(basename "$desired")" in
             contacts.sql)
@@ -499,7 +499,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" lint --json risky.sql) || status=$?
         assert_eq "lint exit" 1 "$status"
-        assert_eq "lint format_version" 6 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "lint format_version" 10 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "lint errors" 1 "$(jq -r '.errors' <<<"$out")"
     else
         "$PGS" lint risky.sql || echo "(exit $? — error findings gate, by design)"

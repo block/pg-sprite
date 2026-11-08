@@ -578,9 +578,38 @@ type Verdict struct {
 	// DependentViews names the views and materialized views that read the
 	// column a refused statement retypes or drops, each schema-qualified
 	// with every identifier quoted, sorted: the objects to drop or redefine
-	// before the change can run. The same list the plan report's
-	// dependent-view decision carries. Empty for every other verdict.
+	// before the change can run. The same list the plan report's refused
+	// decision carries, present whenever one blocks the change, whatever
+	// the refusal's reason, and empty otherwise.
 	DependentViews []string `json:"dependent_views,omitempty"`
+	// DependentPolicies names the row-level security policies that read
+	// the column a refused statement retypes or drops, each rendered
+	// "policy" ON "schema"."table" with every identifier quoted, sorted:
+	// the policies to drop before the change and recreate after it. The
+	// same list the plan report's refused decision carries, present
+	// whenever one blocks the change, whatever the refusal's reason, and
+	// empty otherwise.
+	DependentPolicies []string `json:"dependent_policies,omitempty"`
+	// DependentTriggers names the triggers whose UPDATE OF list or WHEN
+	// condition names the column a refused statement retypes or drops,
+	// each rendered "trigger" ON "schema"."table" with every identifier
+	// quoted, sorted. The same list the plan report's refused decision
+	// carries, present whenever one blocks the change, whatever the
+	// refusal's reason, and empty otherwise.
+	DependentTriggers []string `json:"dependent_triggers,omitempty"`
+	// DependentGeneratedColumns names the generated columns whose
+	// expression reads the column a refused statement retypes or drops,
+	// each rendered "schema"."table"."column" with every identifier quoted,
+	// sorted. The same list the plan report's refused decision carries,
+	// present whenever one blocks the change, whatever the refusal's
+	// reason, and empty otherwise.
+	DependentGeneratedColumns []string `json:"dependent_generated_columns,omitempty"`
+	// PartitionKeyTables names the partitioned tables whose partition key
+	// includes the column a refused statement retypes or drops, each
+	// schema-qualified with every identifier quoted, sorted. The same list
+	// the plan report's partition-key decision carries. Empty for every
+	// other verdict.
+	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what

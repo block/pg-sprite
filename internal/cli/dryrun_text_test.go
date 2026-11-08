@@ -398,6 +398,159 @@ func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
 	assert.NotContains(t, text, "knows no safe path")
 }
 
+// A refusal because row-level security policies read the changed column
+// names those policies in the refusal itself, and the help line gives
+// the manual path for the change: for an in-place type change, recreating
+// them in the same transaction, so the table is never left without them.
+func TestDryRunTextDependentPolicyRefusalNamesThePolicies(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "documents", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.documents ALTER COLUMN owner_id TYPE text",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{{
+			Operation:         "ALTER COLUMN owner_id TYPE text",
+			Route:             planner.RouteRefuse,
+			Reason:            planner.ReasonDependentPolicy,
+			DependentPolicies: []string{`"own_rows" ON "app"."documents"`},
+			DependentFix:      planner.DependentFixRecreateAroundChange,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, `error[unsupported-statement]: refused — ALTER COLUMN owner_id TYPE text changes a column read by policy "own_rows" ON "app"."documents", and PostgreSQL refuses to retype or drop a column while a policy reads it`)
+	assert.Contains(t, text, "help: this type change runs in place, without rewriting the table, so in one transaction drop those policies, run the change, and recreate them")
+	assert.Contains(t, text, onlineDDLReferenceURL+"#dependent-policy")
+	assert.NotContains(t, text, "knows no safe path")
+	assert.NotContains(t, text, "those views")
+}
+
+// A refusal because a trigger, a generated column, or a partition key
+// depends on the changed column names those objects in the refusal
+// itself, and the help line gives the manual path for each. A second kind
+// of dependent that also blocks the change is named in its own help line.
+func TestDryRunTextHiddenDependentRefusalsNameTheObjects(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision planner.Decision
+		refusal  string
+		help     string
+		anchor   string
+	}{
+		{
+			name: "trigger",
+			decision: planner.Decision{
+				Operation:         "ALTER COLUMN status TYPE varchar(64)",
+				Reason:            planner.ReasonDependentTrigger,
+				DependentTriggers: []string{`"audit_status" ON "app"."orders"`},
+				DependentFix:      planner.DependentFixRecreateAroundChange,
+			},
+			refusal: `ALTER COLUMN status TYPE varchar(64) changes a column named by trigger "audit_status" ON "app"."orders", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it`,
+			help:    "help: this type change runs in place, without rewriting the table, so in one transaction drop those triggers, run the change, and recreate them",
+			anchor:  "#dependent-trigger",
+		},
+		{
+			name: "trigger and generated column",
+			decision: planner.Decision{
+				Operation:                 "ALTER COLUMN status TYPE varchar(64)",
+				Reason:                    planner.ReasonDependentTrigger,
+				DependentTriggers:         []string{`"audit_status" ON "app"."orders"`},
+				DependentGeneratedColumns: []string{`"app"."orders"."status_upper"`},
+				DependentFix:              planner.DependentFixRecreateAroundChange,
+			},
+			refusal: `ALTER COLUMN status TYPE varchar(64) changes a column named by trigger "audit_status" ON "app"."orders", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it`,
+			help:    `help: the change is also blocked by generated column "app"."orders"."status_upper": ` + planner.GeneratedColumnHelp,
+			anchor:  "#dependent-trigger",
+		},
+		{
+			name: "generated column",
+			decision: planner.Decision{
+				Operation:                 "DROP COLUMN amount",
+				Reason:                    planner.ReasonDependentGeneratedColumn,
+				DependentGeneratedColumns: []string{`"app"."orders"."total_cents"`, `"app"."orders"."total_tax"`},
+			},
+			refusal: `DROP COLUMN amount changes a column read by generated columns "app"."orders"."total_cents", "app"."orders"."total_tax", and PostgreSQL refuses to retype or drop a column while a generated column reads it, except that PostgreSQL 14 drops the generated column along with a dropped column`,
+			help:    "help: " + planner.GeneratedColumnHelp,
+			anchor:  "#dependent-generated-column",
+		},
+		{
+			name: "partition key",
+			decision: planner.Decision{
+				Operation:          "ALTER COLUMN created_at TYPE timestamptz",
+				Reason:             planner.ReasonPartitionKey,
+				PartitionKeyTables: []string{`"app"."orders"`},
+			},
+			refusal: `ALTER COLUMN created_at TYPE timestamptz changes a column in the partition key of "app"."orders", and PostgreSQL never retypes or drops a partition key column`,
+			help:    "help: " + planner.PartitionKeyHelp,
+			anchor:  "#partition-key",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := plan.NewReport(plan.SourceAlter)
+			report.Schema, report.Table, report.ServerVersion = "app", "orders", "16.10"
+			report.Disposition = router.DispositionRefuse
+			d := tc.decision
+			d.Route = planner.RouteRefuse
+			report.Statements = append(report.Statements, plan.Statement{
+				SQL:         "ALTER TABLE app.orders " + d.Operation,
+				Route:       planner.RouteRefuse,
+				Disposition: router.DispositionRefuse,
+				Reason:      verdict.ReasonUnsupportedStatement,
+				Class:       verdict.ClassCapabilityBoundary,
+				Decisions:   []planner.Decision{d},
+			})
+
+			var out strings.Builder
+			require.NoError(t, writeDryRunText(&out, palette{}, report))
+			text := strings.Join(strings.Fields(out.String()), " ")
+			assert.Contains(t, text, "error[unsupported-statement]: refused — "+tc.refusal)
+			assert.Contains(t, text, tc.help)
+			assert.Contains(t, text, onlineDDLReferenceURL+tc.anchor)
+			assert.NotContains(t, text, "knows no safe path")
+		})
+	}
+}
+
+// A refusal because a NOT NULL column with no default would leave the
+// table's rows holding NULL says so, and the help line gives the two ways
+// to add the column, once for a statement that adds two such columns.
+func TestDryRunTextNotNullWithoutDefaultRefusalGivesTheManualPath(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "customers", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.customers ADD COLUMN tier text NOT NULL, ADD COLUMN plan text NOT NULL",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{{
+			Operation: "ADD COLUMN tier",
+			Route:     planner.RouteRefuse,
+			Reason:    planner.ReasonNotNullWithoutDefault,
+		}, {
+			Operation: "ADD COLUMN plan",
+			Route:     planner.RouteRefuse,
+			Reason:    planner.ReasonNotNullWithoutDefault,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, "error[unsupported-statement]: refused — ADD COLUMN tier adds a NOT NULL column with no default to a table that holds rows, and PostgreSQL refuses it because every existing row would hold NULL")
+	assert.Contains(t, text, "note[not-null-without-default]: ADD COLUMN plan — adds a NOT NULL column with no default")
+	assert.Equal(t, 1, strings.Count(text, "help: "+planner.NotNullWithoutDefaultHelp))
+	assert.Contains(t, text, onlineDDLReferenceURL+"#not-null-without-default")
+	assert.NotContains(t, text, "knows no safe path")
+}
+
 // The refusal sentence explains the first refused operation, the same one
 // the run's verdict explains, even when a later operation is refused
 // because views read its column; that operation's views still appear in

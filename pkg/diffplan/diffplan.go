@@ -106,12 +106,20 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if facts.AddColumnProofs, err = addColumnProofs(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
+		if facts.NullFilledColumns, err = nullFilledColumns(ctx, pool, req.Schema, ds.Table(), changes, facts.ColumnTypes); err != nil {
+			return plan.Report{}, err
+		}
 		if retypesOrDropsColumn(changes) {
-			views, err := preflight.ColumnDependentViews(ctx, pool, req.Schema, ds.Table())
+			deps, err := preflight.ReadColumnDependents(ctx, pool, req.Schema, ds.Table())
 			if err != nil {
 				return plan.Report{}, err
 			}
-			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = views.Tree, views.Drop, views.Own
+			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
+			facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
+			facts.DependentTriggers = planner.ColumnDependents(deps.Triggers)
+			facts.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
+			facts.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
+			facts.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)
 		}
 	}
 	report.TableExists = &tableExists
@@ -173,8 +181,50 @@ func addColumnProofs(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 	return proofs, nil
 }
 
+// nullFilledColumns reads the columns the changes add NOT NULL, as spelled
+// or through a domain or an inline PRIMARY KEY, that the server would
+// refuse because the table holds a row the column would be
+// NULL in (preflight.AddColumnFillsNull, then preflight.TableHasRows once
+// for all of them). columns are the table's live columns; a column an
+// earlier change drops is a new column again when a later change adds it.
+func nullFilledColumns(ctx context.Context, pool *pgxpool.Pool, schema, table string, changes []schemadiff.Change, columns map[string]string) (map[string]bool, error) {
+	present := maps.Clone(columns)
+	fills := map[string]bool{}
+	for _, ch := range changes {
+		ops, err := statement.ParseOps(ch.SQL)
+		if err != nil {
+			return nil, fmt.Errorf("read the operations of %q: %w", ch.SQL, err)
+		}
+		candidates := planner.NullFillCandidates(ops, present)
+		for _, op := range ops {
+			if op.Kind == statement.OpDropColumn {
+				delete(present, op.Column)
+			}
+		}
+		if len(candidates) == 0 {
+			continue
+		}
+		filled, err := preflight.AddColumnFillsNull(ctx, pool, schema, table, ch.SQL, candidates)
+		if err != nil {
+			return nil, err
+		}
+		maps.Copy(fills, filled)
+	}
+	if len(fills) == 0 {
+		return nil, nil
+	}
+	rows, err := preflight.TableHasRows(ctx, pool, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	if !rows {
+		return nil, nil
+	}
+	return fills, nil
+}
+
 // retypesOrDropsColumn reports whether any change retypes or drops a
-// column, the two changes a view reading the column blocks.
+// column, the two changes a view or policy reading the column blocks.
 func retypesOrDropsColumn(changes []schemadiff.Change) bool {
 	return slices.ContainsFunc(changes, func(ch schemadiff.Change) bool {
 		return ch.Kind == schemadiff.ChangeAlterType || ch.Kind == schemadiff.ChangeDropColumn
@@ -199,6 +249,11 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 			return nil, "", fmt.Errorf("classify derived statement %q: %w", canonical, err)
 		}
 		plans = append(plans, classified)
+		// A generated column an earlier statement drops no longer blocks
+		// a later statement's change to the columns it reads.
+		if facts, err = planner.FactsAfter(canonical, facts); err != nil {
+			return nil, "", fmt.Errorf("apply derived statement %q to the planning facts: %w", canonical, err)
+		}
 	}
 	routed := router.Route(plans)
 	planned := make([]plan.Statement, 0, len(changes))

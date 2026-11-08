@@ -235,7 +235,18 @@ func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (b
 // against cannot change before the drop runs. The tree follows
 // pg_inherits, so it holds partitions and classic inheritance children
 // alike: a DROP COLUMN here recurses into both. An identity index is one
-// pg_index marks indisreplident on a table whose relreplident is 'i'. Each
+// pg_index marks indisreplident on a table whose relreplident is 'i', or
+// the primary key of a table whose relreplident is 'd' (DEFAULT) while a
+// publication publishes its updates or deletes. A publication publishes a
+// permanent table when it publishes all tables, lists the table, or lists
+// its schema, and the server applies a partition's ancestors' publications
+// to it as well. The catalogs are read directly rather than through
+// pg_publication_tables, which looks each publication up again by name and
+// fails if one is dropped while the query runs. A partitioned table holds no
+// rows, so only its partitions' primary keys count, each traced up to the
+// parent's as any other identity index is. A DEFAULT table no publication
+// publishes keeps no identity worth protecting, so its primary key stays
+// free to drop. Each
 // is traced up its attachment chain to the index on this table that a DROP
 // INDEX or DROP CONSTRAINT here would cascade from; an identity index on a
 // child that is attached under nothing on this table contributes only its
@@ -247,8 +258,12 @@ func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (b
 // counted on its own as well.
 func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIdentityKeys, error) {
 	var keys ReplicaIdentityKeys
+	schemaPublications, err := schemaPublicationsClause(ctx, tx)
+	if err != nil {
+		return ReplicaIdentityKeys{}, err
+	}
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		WITH RECURSIVE tree AS (
 		    SELECT $1::pg_catalog.oid AS relid
 		    UNION
@@ -257,9 +272,23 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 		), identity AS (
 		    SELECT i.indexrelid, i.indrelid, i.indkey
 		    FROM tree
-		    JOIN pg_catalog.pg_class c
-		      ON c.oid OPERATOR(pg_catalog.=) tree.relid AND c.relreplident OPERATOR(pg_catalog.=) 'i'
-		    JOIN pg_catalog.pg_index i ON i.indrelid OPERATOR(pg_catalog.=) c.oid AND i.indisreplident
+		    JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.relid
+		    JOIN pg_catalog.pg_index i ON i.indrelid OPERATOR(pg_catalog.=) c.oid
+		    CROSS JOIN LATERAL (SELECT ARRAY(
+		        SELECT c.oid
+		        UNION
+		        SELECT ancestor.relid FROM pg_catalog.pg_partition_ancestors(c.oid) ancestor) AS rels) self
+		    WHERE (c.relreplident OPERATOR(pg_catalog.=) 'i' AND i.indisreplident)
+		       OR (c.relreplident OPERATOR(pg_catalog.=) 'd' AND i.indisprimary
+		           AND c.relkind OPERATOR(pg_catalog.=) 'r' AND c.relpersistence OPERATOR(pg_catalog.=) 'p'
+		           AND EXISTS (
+		               SELECT FROM pg_catalog.pg_publication p
+		               WHERE (p.pubupdate OR p.pubdelete)
+		                 AND (p.puballtables
+		                      OR EXISTS (
+		                          SELECT FROM pg_catalog.pg_publication_rel pr
+		                          WHERE pr.prpubid OPERATOR(pg_catalog.=) p.oid
+		                            AND pr.prrelid OPERATOR(pg_catalog.=) ANY (self.rels))`+schemaPublications+`)))
 		), chain AS (
 		    SELECT indexrelid AS relid FROM identity
 		    UNION
@@ -305,6 +334,27 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 		keys.OwnColumns = nil
 	}
 	return keys, nil
+}
+
+// schemaPublicationsClause returns the condition, inside ReadReplicaIdentity,
+// that a publication lists the schema of the table or of a table above it,
+// or "" on a server that predates schema publications (PostgreSQL 15).
+func schemaPublicationsClause(ctx context.Context, tx pgx.Tx) (string, error) {
+	var supported bool
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_catalog.to_regclass('pg_catalog.pg_publication_namespace') IS NOT NULL`).Scan(&supported); err != nil {
+		return "", fmt.Errorf("query whether the server has schema publications: %w", err)
+	}
+	if !supported {
+		return "", nil
+	}
+	return `
+		                      OR EXISTS (
+		                          SELECT FROM pg_catalog.pg_publication_namespace pn
+		                          JOIN pg_catalog.pg_class sc ON sc.relnamespace OPERATOR(pg_catalog.=) pn.pnnspid
+		                          WHERE pn.pnpubid OPERATOR(pg_catalog.=) p.oid
+		                            AND sc.oid OPERATOR(pg_catalog.=) ANY (self.rels))`, nil
 }
 
 // introspectInheritance reads classic PostgreSQL inheritance in both
@@ -573,7 +623,9 @@ func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]strin
 
 // introspectIndexes reads the non-constraint indexes as server-decompiled
 // CREATE INDEX statements. Constraint-backed indexes (primary key, unique
-// constraint, exclusion) are represented by their constraint instead.
+// constraint, exclusion) are represented by their constraint instead. A
+// foreign key's conindid names the index it references, which the key does
+// not own, so only those three constraint types hide an index.
 // pg_get_indexdef always schema-qualifies the ON clause, so the
 // qualification is stripped to keep the model schema-relative and
 // comparable between the live and scratch sides. indisvalid rides along so
@@ -589,7 +641,8 @@ func introspectIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]Index, err
 		WHERE i.indrelid OPERATOR(pg_catalog.=) $1
 		  AND NOT EXISTS (
 		      SELECT 1 FROM pg_catalog.pg_constraint con
-		      WHERE con.conindid OPERATOR(pg_catalog.=) i.indexrelid)
+		      WHERE con.conindid OPERATOR(pg_catalog.=) i.indexrelid
+		        AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[]))
 		ORDER BY c.relname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("query indexes: %w", err)
