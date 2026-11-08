@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,6 +107,75 @@ func TestCheckLiveSettlesAChunkWhoseShadowReachedTheSweepsSource(t *testing.T) {
 	assert.True(t, outcome.Clean())
 	assert.Equal(t, 1, outcome.Report.Settled, "the shadow reached the sweep's source while the source moved on")
 	assert.Empty(t, outcome.Report.Mismatches)
+}
+
+// A chunk written between every read settles when each of its keys does,
+// though the chunk as a whole never holds still: the shadow does not
+// reach the state the sweep saw on the source, because rows the sweep
+// read equal have moved on both sides since, and the source does not
+// match the shadow, because another row changed after the catch-up
+// confirmed. Judged key by key, every row is accounted for. Three rows of
+// the first chunk stand for the three ways a key under load settles: the
+// first is changed before the sweep and lands on the shadow before the
+// reread, so the reread finds it equal; the second is changed after the
+// sweep and lands too, so it is equal as well; the third is changed after
+// the catch-up confirmed and is held off the shadow, so the reread finds
+// it on the shadow as the sweep saw it on the source while the source
+// holds the newer value the stream still carries. Nothing was divergent,
+// so the chunk settles on the first reread, the pass is clean, and the
+// proofs are minted; once the hold is released the stream delivers the
+// third change and the tables converge.
+func TestCheckLiveSettlesAChunkWrittenBetweenEveryRead(t *testing.T) {
+	f := newLiveFixture(t)
+	release := f.holdShadow(t)
+	touch := func(id int) string {
+		return "UPDATE " + f.table.Qualified() + " SET amount = amount + 1 WHERE id = " + strconv.Itoa(id)
+	}
+	f.exec(t, touch(1))
+
+	var rehold func()
+	var waits atomic.Int32
+	v := f.verifier(t, checksum.Options{})
+	outcome, err := f.checkLive(t, v, checksum.DivergenceAbort, checksum.LiveOptions{
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			if waits.Add(1) > 1 {
+				return pollSleep(ctx, d)
+			}
+			release()
+			f.exec(t, touch(2))
+			require.Eventually(t, func() bool {
+				var same bool
+				require.NoError(t, f.pool.QueryRow(ctx, "SELECT bool_and(s.amount = t.amount) FROM "+f.table.Qualified()+" s JOIN "+f.shadowName()+" t ON t.id = s.id WHERE s.id IN (1, 2)").Scan(&same))
+				return same
+			}, 10*time.Second, 20*time.Millisecond, "the first two changes landed on the shadow")
+			marked := f.currentWALLSN(t)
+			require.Eventually(t, func() bool { return f.catchup.Confirmed() >= marked },
+				10*time.Second, 20*time.Millisecond, "the catch-up confirmed past the sweep's read")
+			rehold = f.holdShadow(t)
+			f.exec(t, touch(3))
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, outcome.Clean())
+	assert.Equal(t, 3, outcome.Report.Chunks)
+	assert.Equal(t, 1, outcome.Report.Settled, "every key of the chunk settled on the first reread")
+	assert.Equal(t, 0, outcome.Report.Unsettled)
+	assert.Empty(t, outcome.Report.Mismatches)
+	_, minted := outcome.VerifiedShadow()
+	assert.True(t, minted, "a pass whose every differing chunk settled verifies the shadow")
+	work, err := v.Work(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), work.ChunksReread, "a chunk whose keys all settled is not read again")
+
+	require.NotNil(t, rehold, "the pass waited on the catch-up")
+	rehold()
+	require.Eventually(t, func() bool {
+		var same bool
+		require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT s.amount = t.amount FROM "+f.table.Qualified()+" s JOIN "+f.shadowName()+" t ON t.id = s.id WHERE s.id = 3").Scan(&same))
+		return same
+	}, 10*time.Second, 20*time.Millisecond, "the stream delivered the change the reread saw still in flight")
+	f.assertConverged(t)
 }
 
 // A chunk whose source changes between every read cannot be judged: no

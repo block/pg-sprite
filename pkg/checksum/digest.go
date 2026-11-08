@@ -110,6 +110,31 @@ func shadowColumnTypes(ctx context.Context, tx pgx.Tx, shadow copier.Shadow) ([]
 // search_path plays no part (CO-9); COALESCE is syntax, not a function, and
 // takes no qualifier.
 func digestSQL(target preflight.CopySwapTarget, schema, table string, types []columnType, conversions map[string]string) string {
+	key := pgx.Identifier{target.PKColumn()}.Sanitize()
+	return "SELECT pg_catalog.count(*)," +
+		" pg_catalog.encode(pg_catalog.sha256(COALESCE(pg_catalog.string_agg(" + rowHashSQL(types, conversions) + ", ''::bytea ORDER BY " + key + "), ''::bytea)), 'hex')" +
+		" FROM " + pgx.Identifier{schema, table}.Sanitize() +
+		" WHERE " + key + " BETWEEN $1::bigint AND $2::bigint"
+}
+
+// rowsSQL is the digest statement's companion: the same per-row SHA-256
+// over the same closed key range, returned one row at a time with its key
+// in key order instead of aggregated. A live pass reads a differing chunk
+// this way so it can judge each key on its own; the chunk's digest is the
+// SHA-256 of these hashes concatenated in this order, which is how the two
+// statements are checked against each other.
+func rowsSQL(target preflight.CopySwapTarget, schema, table string, types []columnType, conversions map[string]string) string {
+	key := pgx.Identifier{target.PKColumn()}.Sanitize()
+	return "SELECT " + key + ", " + rowHashSQL(types, conversions) +
+		" FROM " + pgx.Identifier{schema, table}.Sanitize() +
+		" WHERE " + key + " BETWEEN $1::bigint AND $2::bigint" +
+		" ORDER BY " + key
+}
+
+// rowHashSQL is the expression both statements hash a row with: the copy
+// columns cast to the shadow's types, rendered as a record, hashed as the
+// bytes the server stores.
+func rowHashSQL(types []columnType, conversions map[string]string) string {
 	cast := make([]string, 0, len(types))
 	for _, c := range types {
 		if expr, ok := conversions[c.name]; ok {
@@ -118,12 +143,7 @@ func digestSQL(target preflight.CopySwapTarget, schema, table string, types []co
 		}
 		cast = append(cast, pgx.Identifier{c.name}.Sanitize()+"::"+c.typeName)
 	}
-	key := pgx.Identifier{target.PKColumn()}.Sanitize()
-	rowHash := "pg_catalog.sha256(pg_catalog.convert_to(ROW(" + strings.Join(cast, ", ") + ")::text, pg_catalog.getdatabaseencoding()))"
-	return "SELECT pg_catalog.count(*)," +
-		" pg_catalog.encode(pg_catalog.sha256(COALESCE(pg_catalog.string_agg(" + rowHash + ", ''::bytea ORDER BY " + key + "), ''::bytea)), 'hex')" +
-		" FROM " + pgx.Identifier{schema, table}.Sanitize() +
-		" WHERE " + key + " BETWEEN $1::bigint AND $2::bigint"
+	return "pg_catalog.sha256(pg_catalog.convert_to(ROW(" + strings.Join(cast, ", ") + ")::text, pg_catalog.getdatabaseencoding()))"
 }
 
 // digest runs one side's statement for the closed range [lower, upper].

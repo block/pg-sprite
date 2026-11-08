@@ -53,8 +53,9 @@ const (
 	// CauseLagging is a catch-up that did not confirm past the position the
 	// chunk's digests were read at within LiveOptions.SettleWait.
 	CauseLagging UnresolvedCause = "lagging"
-	// CauseHot is a chunk whose source or shadow changed on every one of
-	// LiveOptions.Attempts rereads, so no two reads could be compared.
+	// CauseHot is a chunk some key of which changed between every two of
+	// LiveOptions.Attempts rereads, so the key was never read the same
+	// way twice and the chunk could not be judged.
 	CauseHot UnresolvedCause = "hot"
 )
 
@@ -71,6 +72,10 @@ type UnresolvedError struct {
 	// Rereads is the number of fresh-snapshot rereads the pass made of the
 	// chunk before it gave up.
 	Rereads int
+	// Keys is how many of the chunk's keys were still changing at the
+	// last reread. It is zero under CauseLagging: a pass that never got
+	// to reread the chunk judged no key.
+	Keys int
 	// Source and Shadow are the two digests of the pass's last read.
 	Source Digest
 	Shadow Digest
@@ -91,8 +96,8 @@ func (e *UnresolvedError) Error() string {
 		return fmt.Sprintf("chunk [%d, %d] read at %s is unsettled: the catch-up has confirmed only %s after %s; run the pass again once the catch-up has confirmed past the read",
 			e.Chunk.Lower(), e.Chunk.Upper(), e.Captured, e.Confirmed, rereadsPhrase(e.Rereads))
 	case CauseHot:
-		return fmt.Sprintf("chunk [%d, %d] changed on every one of %s: source %d rows, shadow %d rows at %s; the source is changing faster than the pass can compare it, so run the pass again when it is quieter",
-			e.Chunk.Lower(), e.Chunk.Upper(), rereadsPhrase(e.Rereads), e.Source.Rows, e.Shadow.Rows, e.Captured)
+		return fmt.Sprintf("chunk [%d, %d] kept changing through %s: %s still changing, source %d rows, shadow %d rows at %s; the source is changing faster than the pass can compare it, so run the pass again when it is quieter",
+			e.Chunk.Lower(), e.Chunk.Upper(), rereadsPhrase(e.Rereads), keysPhrase(e.Keys), e.Source.Rows, e.Shadow.Rows, e.Captured)
 	default:
 		return fmt.Sprintf("chunk [%d, %d] is unsettled after %s", e.Chunk.Lower(), e.Chunk.Upper(), rereadsPhrase(e.Rereads))
 	}
@@ -104,6 +109,14 @@ func rereadsPhrase(n int) string {
 		return "1 reread"
 	}
 	return fmt.Sprintf("%d rereads", n)
+}
+
+// keysPhrase counts keys in words that agree with the number.
+func keysPhrase(n int) string {
+	if n == 1 {
+		return "1 key"
+	}
+	return fmt.Sprintf("%d keys", n)
 }
 
 // Unwrap makes every UnresolvedError match ErrVerificationUnresolved.
@@ -218,16 +231,20 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // sweep is the same as Check's: every chunk cut and digested on both sides
 // in one snapshot. A chunk that differs in the sweep is not yet a finding,
 // since the shadow may simply not have received the source's latest
-// writes: the pass writes a marker to the WAL in the chunk's transaction,
-// waits for the catch-up to confirm past it, reads the chunk again in a
-// fresh snapshot, and judges the two reads together (settle). A chunk whose
-// two sides then agree, or whose shadow has reached exactly what the sweep
-// saw on the source, is settled and counts as clean; a chunk that kept
-// changing is reread up to LiveOptions.Attempts times and then left
-// unsettled; a chunk that held still on both sides across a confirmed
-// position and still differs is a divergence. The sweep's premise is that
-// the stream is the shadow's only writer, so the shadow either lags the
-// source or has caught up to it, and nothing else moves it.
+// writes: the pass reads every row of the chunk on both sides in the
+// chunk's transaction, hashed and keyed, writes a marker to the WAL in
+// the same transaction, waits for the catch-up to confirm past it, reads
+// the rows again in a fresh snapshot, and judges the two reads key by key
+// (settle). A key whose two sides then agree, or whose shadow has reached
+// exactly what the earlier read saw on the source, is settled; a key that
+// held still on both sides across a confirmed position and still differs
+// is a divergence, which concludes the chunk; a key that kept changing is
+// reread, with only the keys still hot, up to LiveOptions.Attempts times
+// in all, and a chunk with hot keys left after that is unsettled. A chunk
+// every key of which settled counts as clean, however many writes hit it
+// while the pass ran. The sweep's premise is that the stream is the
+// shadow's only writer, so the shadow either lags the source or has
+// caught up to it, and nothing else moves it.
 //
 // Every differing chunk is settled before the pass decides anything, so
 // one chunk that will not settle does not hide a divergence in another;
@@ -314,17 +331,17 @@ func (v *Verifier) CheckLive(ctx context.Context, pool *pgxpool.Pool, through co
 // says nothing about the data — the context ending, the lock lost, a read
 // refused — stops the settling.
 func (v *Verifier) sweepAndSettle(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, live LiveOptions) (Report, *UnresolvedError, error) {
-	sourceSQL, shadowSQL, err := v.digestStatements(ctx, pool)
+	stmts, err := v.digestStatements(ctx, pool)
 	if err != nil {
 		return Report{}, nil, err
 	}
-	report, differing, err := v.sweep(ctx, pool, sourceSQL, shadowSQL, through, true)
+	report, differing, err := v.sweep(ctx, pool, stmts, through, true)
 	if err != nil {
 		return Report{}, nil, err
 	}
 	var first *UnresolvedError
 	for _, prior := range differing {
-		verdict, now, err := v.settle(ctx, pool, sourceSQL, shadowSQL, prior, 0, live)
+		settled, err := v.settle(ctx, pool, stmts, prior, 0, live)
 		var unresolved *UnresolvedError
 		if errors.As(err, &unresolved) {
 			report.Unsettled++
@@ -336,14 +353,11 @@ func (v *Verifier) sweepAndSettle(ctx context.Context, pool *pgxpool.Pool, throu
 		if err != nil {
 			return Report{}, nil, err
 		}
-		switch verdict {
-		case verdictEqual, verdictSettled:
-			report.Settled++
-		case verdictDiverged:
-			report.Mismatches = append(report.Mismatches, Mismatch{Chunk: now.chunk, Source: now.source, Shadow: now.shadow})
-		default:
-			return Report{}, nil, fmt.Errorf("%w (CO-1): settle returned verdict %d", ErrInvariantViolation, verdict)
+		if settled.diverged > 0 {
+			report.Mismatches = append(report.Mismatches, settled.last.mismatch())
+			continue
 		}
+		report.Settled++
 	}
 	if lost := v.lockLost(); lost != nil {
 		return Report{}, nil, lost
