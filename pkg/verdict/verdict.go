@@ -524,8 +524,10 @@ type Verdict struct {
 	// does not exist (42883). Empty unless Outcome is OutcomeFailed.
 	SQLState string `json:"sqlstate,omitempty"`
 	// ServerError is that server error's primary message, for display.
-	// It never carries the server's DETAIL line, which can quote row
-	// values. Empty exactly when SQLState is.
+	// It leaves out the server's DETAIL line, but the primary message of
+	// a data fault (SQLSTATE class 22) can still name a row's value, as
+	// in `invalid input syntax for type integer: "abc"`. Empty exactly
+	// when SQLState is.
 	ServerError string `json:"server_error,omitempty"`
 	// FailedStep is the 1-based position of the sequence step that failed,
 	// matching the numbering the planner's partial-failure contracts use;

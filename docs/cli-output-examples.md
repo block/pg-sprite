@@ -306,8 +306,9 @@ stopped before anything ran. Here the safer sequence for a `CHECK` constraint
 adds it `NOT VALID`, which commits, and then fails to validate it because a
 row has an upper-case email. The verdict on stdout names the failed step, the
 committed prefix that remains (`executed_sql`), and the PostgreSQL error that
-stopped it (`sqlstate` and `server_error`, the error's primary message; never
-its DETAIL line, which can quote row values). stderr carries the same error
+stopped it (`sqlstate` and `server_error`, the error's primary message). The
+DETAIL line is left out, but the primary message of a data fault (SQLSTATE
+class 22) can still name a row's value. stderr carries the same error
 with the step it failed. The constraint now exists `NOT VALID`, so
 fix the rows and then run the failed step (`failed_step_sql`) to finish. Do
 not rerun the original `ADD CONSTRAINT`: the constraint already exists, so it
