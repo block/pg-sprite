@@ -133,6 +133,47 @@ func TestDiffTakesAPulledDesiredFileAsTheSame(t *testing.T) {
 		"a real change to the pulled check is planned")
 }
 
+// A live text that does not apply to the desired table is not on the
+// chain. Here the live check reads column x, which the desired table drops,
+// so replaying it on the scratch table fails with an undefined column. That
+// failure is rolled back with its savepoint: the check and the dropped
+// column are still planned, and the partial index after it, which the file
+// holds in its pulled form, is still matched to the live one.
+func TestDiffPlansALiveExpressionTheDesiredTableCannotHold(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (
+		  a int,
+		  b int,
+		  c int,
+		  x int,
+		  CONSTRAINT ck CHECK (((a, b), x) IS DISTINCT FROM ((1, 2), 3))
+		);
+		CREATE INDEX t_p_idx ON %[1]s.t (a) WHERE ((a, b), c) IS DISTINCT FROM ((1, 2), 3);`, schema))
+	require.NoError(t, err)
+	ds, err := statement.ParseDesired(`
+		CREATE TABLE t (
+		  a integer,
+		  b integer,
+		  c integer,
+		  CONSTRAINT ck CHECK (((ROW(a, b) IS DISTINCT FROM ROW(1, 2)) OR (c IS DISTINCT FROM 3)))
+		);
+		CREATE INDEX t_p_idx ON t USING btree (a) WHERE ROW(a, b) IS DISTINCT FROM ROW(1, 2) OR c IS DISTINCT FROM 3;`)
+	require.NoError(t, err)
+	var sqls []string
+	for _, c := range diffDesired(t, pool, schema, ds) {
+		sqls = append(sqls, c.SQL)
+	}
+	assert.Equal(t, []string{
+		fmt.Sprintf(`ALTER TABLE "%s"."t" DROP CONSTRAINT "ck"`, schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."t" DROP COLUMN "x"`, schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."t" ADD CONSTRAINT "ck" CHECK ((((a IS DISTINCT FROM 1) OR (b IS DISTINCT FROM 2)) OR (c IS DISTINCT FROM 3)))`, schema),
+	}, sqls, "the check and the dropped column are planned; the index is not")
+}
+
 // Matching a live text to the desired chain never hides a real change. A
 // column with no live default still plans the default the file adds, and a
 // changed generation expression is still planned on a server that cannot
