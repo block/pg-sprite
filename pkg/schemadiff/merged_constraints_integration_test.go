@@ -150,12 +150,14 @@ func TestSimilarConstraintsTheServerKeepsApartRoundTrip(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pool, schema := mergedConstraintsFixture(t, tt.live)
+			pool, schema := mergedConstraintsFixture(t, "")
 			var num int
 			require.NoError(t, pool.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::int").Scan(&num))
 			if num < tt.minVersion {
 				t.Skipf("needs server_version_num %d; server reports %d", tt.minVersion, num)
 			}
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(tt.live, schema))
+			require.NoError(t, err)
 			_, _, changes := roundTrip(t, pool, schema, "t")
 			assert.Empty(t, changes, "the server keeps both constraints, so the rendered file must rebuild them")
 		})
