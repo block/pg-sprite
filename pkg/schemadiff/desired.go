@@ -123,6 +123,9 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
+	if m, err = settleDesired(ctx, tx, scratch, table, path, m); err != nil {
+		return Model{}, err
+	}
 	if err := tx.Rollback(ctx); err != nil {
 		return Model{}, fmt.Errorf("roll back scratch schema: %w", err)
 	}
