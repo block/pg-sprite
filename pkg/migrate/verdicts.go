@@ -210,6 +210,10 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 			v.Detail = fmt.Sprintf("%s changes a column in the partition key of %s, and PostgreSQL never retypes or drops a partition key column; %s",
 				d.Operation, strings.Join(d.PartitionKeyTables, ", "), planner.PartitionKeyHelp)
 		}
+		if d.Reason == planner.ReasonNotNullWithoutDefault {
+			v.Detail = fmt.Sprintf("%s adds a NOT NULL column with no default to a table that holds rows, "+
+				"and PostgreSQL refuses it because every existing row would hold NULL; %s", d.Operation, planner.NotNullWithoutDefaultHelp)
+		}
 		if d.Reason == planner.ReasonCascadingDrop {
 			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views, row-level security policies, or other tables' foreign keys, "+
 				"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+

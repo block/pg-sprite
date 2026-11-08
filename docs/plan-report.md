@@ -25,7 +25,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **17**: version 17 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **18**: version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -151,6 +151,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `dependent-trigger` | The operation retypes or drops a column that a trigger's `UPDATE OF` list or `WHEN` condition names, on a table the change reaches (judged as for `dependent-view`). PostgreSQL refuses this while the trigger exists, even for a type change it would relabel; a trigger whose function reads the column does not count. Refused; `dependent_triggers` names the triggers. The text output's help gives the manual path, chosen as for `dependent-policy`. A column that a view or a policy also reads is refused for those first, with `dependent_triggers` still set. |
 | `dependent-generated-column` | The operation retypes or drops a column that a generated column's expression reads, on a table the change reaches. PostgreSQL refuses this while the generated column exists, even for a type change it would relabel, except that PostgreSQL 14 drops the generated column along with a dropped column. Refused; `dependent_generated_columns` names the generated columns. A column that a view, a policy, or a trigger also depends on is refused for those first, with `dependent_generated_columns` still set. |
 | `partition-key` | The operation retypes or drops a column in the partition key of the table or of a partitioned table below it that the change reaches (judged as for `dependent-view`). PostgreSQL never does either. Refused; `partition_key_tables` names the partitioned tables. Judged before every other dependent, since no object can be moved aside to let the change run. |
+| `not-null-without-default` | The operation adds a `NOT NULL` column that nothing fills (no default, identity, or generation expression of its own, and no `DEFAULT` on its domain) to a table that holds rows. The column is `NOT NULL` whether the statement spells it or it comes from the column's domain or an inline `PRIMARY KEY`. The rows counted are the table's and those of its partitions and inheritance children that store rows locally; a foreign table's rows are not read, since PostgreSQL does not check them. Every existing row would hold `NULL` in the new column, so PostgreSQL refuses the statement (SQLSTATE `23502`) after taking the table's exclusive lock. Refused. The text output's help gives the manual path: a constant default, which PostgreSQL stores without a rewrite, or adding the column without `NOT NULL`, backfilling it, and then setting `NOT NULL`. An empty table, or a column the table already has and the statement does not drop first, is not refused. |
 | `cascading-drop` | A `DROP COLUMN`, `DROP CONSTRAINT`, or `DROP INDEX` with `CASCADE`, which also drops whatever depends on the target, such as a view that reads the column or another table's foreign key on the constraint. Those objects are outside the statement, so the plan cannot show them. Refused; drop each dependent object as its own change, then resubmit without `CASCADE`. |
 | `unsupported-operation` | The planner does not recognize the operation or knows no safe path for it. |
 
@@ -348,7 +349,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 17,
+  "format_version": 18,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -391,7 +392,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 17,
+  "format_version": 18,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -458,7 +459,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 17,
+  "format_version": 18,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

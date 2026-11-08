@@ -58,7 +58,9 @@ replica identity index keys on. `dependent-view` is a refusal too: the operation
 drops a column a view reads, which PostgreSQL refuses, and `dependent-policy`,
 `dependent-trigger`, `dependent-generated-column`, and `partition-key` are the same refusal
 for a column a row-level security policy, a trigger, a generated column, or a partition key
-depends on. `cascading-drop` is a refusal as well:
+depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
+that nothing fills to a table with rows, which PostgreSQL refuses. `cascading-drop` is a
+refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
@@ -674,6 +676,36 @@ with the new column definition and move the rows into it. A sub-partition's key
 counts against a recursive change and not against one under `ONLY`. The partition key
 is judged before every other dependent, since no object can be moved aside to let the
 change run.
+
+### `not-null-without-default`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+
+The operation adds a `NOT NULL` column that nothing fills (no default, identity, or
+generation expression of its own, and no `DEFAULT` on its domain) to a table that
+holds rows. The column is `NOT NULL` whether the statement spells it or it comes from
+the column's domain or an inline `PRIMARY KEY`. The rows counted are the table's and
+those of its partitions and inheritance children that store rows locally; a foreign
+table's rows are not read, since PostgreSQL does not check them. Every existing row would hold `NULL` in the new column, so PostgreSQL
+refuses the statement (`column "…" of relation "…" contains null values`, SQLSTATE
+`23502`), and only after it has queued for and taken the table's `ACCESS EXCLUSIVE`
+lock and checked the rows. The statement could only fail. Give the column a constant
+default instead, which PostgreSQL stores in the catalog without rewriting the table
+(`fast-default`), or add the column without `NOT NULL`, backfill it, and set `NOT
+NULL` afterwards, which the planner runs as its safer sequence (`safer-idiom`). An
+empty table has no rows to fill, so the same statement is `metadata-only` there, and
+a column the table already has is not refused, since `ADD COLUMN IF NOT EXISTS`
+skips it, unless the same statement drops the column first. The planner asks the
+server: it adds the column to a one-row temporary table, where PostgreSQL's own
+refusal says whether the column is `NOT NULL` and nothing fills it, and only then reads whether the table holds
+rows, reading at most one row and never waiting for a lock. A read that another
+session's lock blocks fails the plan rather than guessing. The linter has no live facts and never
+reports it. Rows a row-level security policy hides from the role do not count, and
+the server's own refusal remains the backstop for them and for rows inserted after
+planning.
 
 ### `cascading-drop`
 

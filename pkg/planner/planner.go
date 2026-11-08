@@ -88,6 +88,7 @@ func Reasons() []Reason {
 		ReasonDependentTrigger,
 		ReasonDependentGeneratedColumn,
 		ReasonPartitionKey,
+		ReasonNotNullWithoutDefault,
 		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
@@ -201,6 +202,13 @@ const (
 	// path is a new partitioned table with the new key, the rows moved
 	// into it. The decision names the partitioned tables.
 	ReasonPartitionKey Reason = "partition-key"
+	// ReasonNotNullWithoutDefault: the operation adds a NOT NULL column
+	// with no default to a table that holds rows. Every existing row would
+	// hold NULL in the new column, so PostgreSQL refuses the statement
+	// (SQLSTATE 23502) after taking the table's exclusive lock; it could
+	// only fail. A default, identity, or generated column fills the rows,
+	// and an empty table has none to fill, so neither is refused.
+	ReasonNotNullWithoutDefault Reason = "not-null-without-default"
 	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
 	// depends on what it drops: a view or policy that reads a dropped
 	// column, or another table's foreign key on a dropped key. Those
@@ -498,6 +506,17 @@ type Facts struct {
 	// PartitionKeys maps a column to the partitioned tables whose
 	// partition key includes it, each schema-qualified.
 	PartitionKeys ColumnDependents
+	// NullFilledColumns are the columns the statement adds NOT NULL, as
+	// spelled or through the column's domain or an inline PRIMARY KEY,
+	// that PostgreSQL would refuse to add because the table, or a
+	// partition or inheritance child below it with storage of its own,
+	// holds a row the column would be NULL in
+	// (preflight.NullFilledColumns). It is read only for the columns
+	// NullFillCandidates names. A column absent from the map gets a value
+	// in every row, the table holds none, or the fact was not read, as in
+	// an offline lint; without it the server's own refusal at execution
+	// remains the backstop.
+	NullFilledColumns map[string]bool
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -595,6 +614,47 @@ func dependentFix(op statement.Op, facts Facts) DependentFix {
 		return DependentFixRecreateAroundChange
 	}
 	return DependentFixExpandContract
+}
+
+// NotNullWithoutDefaultHelp is the operator-facing manual path for a
+// not-null-without-default decision.
+const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
+	"or add it without NOT NULL, backfill it, then set NOT NULL"
+
+// NullFillCandidates names the columns the operations of one ALTER TABLE
+// add with no DEFAULT of their own, the ones whose existing rows may be
+// left NULL: a front door reads Facts.NullFilledColumns only for these.
+// The statement need not spell NOT NULL, since the column's domain or an
+// inline PRIMARY KEY can make it NOT NULL, so the server's probe decides
+// which candidates PostgreSQL would refuse. columns are the table's live
+// columns. A column the table already has is skipped by ADD COLUMN IF NOT
+// EXISTS, and refused as a duplicate otherwise, so neither fills anything,
+// unless an earlier operation of the same statement drops it, which makes
+// the add a new column again.
+func NullFillCandidates(ops []statement.Op, columns map[string]string) []string {
+	dropped := map[string]bool{}
+	var candidates []string
+	for _, op := range ops {
+		if op.Kind == statement.OpDropColumn {
+			dropped[op.Column] = true
+			continue
+		}
+		if op.Kind != statement.OpAddColumn || op.Default != statement.DefaultNone || op.GeneratedStored {
+			continue
+		}
+		if _, exists := columns[op.Column]; exists && !dropped[op.Column] {
+			continue
+		}
+		candidates = append(candidates, op.Column)
+	}
+	return candidates
+}
+
+// fillsNotNullWithNull reports whether op adds a NOT NULL column that
+// PostgreSQL would refuse because a row of the table would hold NULL in
+// it.
+func fillsNotNullWithNull(op statement.Op, facts Facts) bool {
+	return op.Kind == statement.OpAddColumn && facts.NullFilledColumns[op.Column]
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -812,6 +872,8 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		switch {
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
+		case fillsNotNullWithNull(op, facts):
+			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
 		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:

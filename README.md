@@ -140,6 +140,9 @@ refusal — never a silently wrong or incomplete result:
 - **Retyping or dropping a column a trigger, a generated column, or a partition
   key depends on is refused** — PostgreSQL would refuse it anyway; the plan names
   the triggers, generated columns, or partitioned tables in the way.
+- **Adding a `NOT NULL` column with no default to a table with rows is refused**
+  — PostgreSQL would refuse it anyway, after taking the table's exclusive lock;
+  the plan suggests a constant default or a backfill first.
 - **Destructive statements need a typed acknowledgement** — `migrate --alter`
   refuses a statement that drops a column, a constraint, or a `NOT NULL` with
   `destructive-change` (exit 2) on every route and in `--dry-run`, unless
