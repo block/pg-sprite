@@ -18,6 +18,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -225,6 +226,35 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements, "the created table plans no statements")
 		assert.Empty(t, res.Verdicts)
+	})
+
+	t.Run("refuses a desired file that declares one constraint twice", func(t *testing.T) {
+		// One CREATE TABLE keeps only one of two identical UNIQUE
+		// constraints, so the desired build would lack t_v_b. The run
+		// refuses before planning anything rather than dropping the live
+		// copy of the constraint the server left out.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.t (id int PRIMARY KEY, v text);
+			ALTER TABLE %[1]s.t ADD CONSTRAINT t_v_a UNIQUE (v);
+			ALTER TABLE %[1]s.t ADD CONSTRAINT t_v_b UNIQUE (v);`, schema))
+		require.NoError(t, err)
+		before, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+		require.NoError(t, err)
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t,
+			`CREATE TABLE t (id int PRIMARY KEY, v text, CONSTRAINT t_v_a UNIQUE (v), CONSTRAINT t_v_b UNIQUE (v));`)}, runOptions())
+		require.NoError(t, err, "a constraint declared twice is a refusal, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+		assert.Equal(t, verdict.ClassByDesign, res.Class)
+		assert.Contains(t, res.Detail, `table "t", constraint "t_v_b"`)
+		assert.Empty(t, res.Plan.Statements, "nothing was planned")
+		assert.Empty(t, res.Verdicts, "nothing was attempted")
+
+		after, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+		require.NoError(t, err)
+		assert.Equal(t, before, after, "the live table, both constraints included, is unchanged")
 	})
 
 	t.Run("refuses a create when a standalone type occupies the name", func(t *testing.T) {

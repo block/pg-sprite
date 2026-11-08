@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/stretchr/testify/assert"
@@ -402,4 +403,33 @@ func TestRowSecurityRefusalRegistry(t *testing.T) {
 	}
 	_, ok := RowSecurityRefusal(errors.New("operational failure"))
 	assert.False(t, ok)
+}
+
+// A desired file that declares one index constraint twice is a mistake in
+// the file, so it is refused by design; a CREATE TABLE that names a live
+// parent is a capability boundary. Both front doors that build a desired
+// file, RunDesired and the row-security executor, classify them the same
+// way, however deeply the error is wrapped.
+func TestDesiredShapeRefusalClasses(t *testing.T) {
+	merged := fmt.Errorf("inspect desired row security for public.t: %w",
+		fmt.Errorf("%w: table %q, constraint %q", schemadiff.ErrDesiredConstraintMerged, "t", "c2"))
+	tests := []struct {
+		name string
+		err  error
+		want verdict.Refusal
+	}{
+		{"a constraint declared twice", merged, verdict.ByDesign(verdict.ReasonUnsupportedStatement)},
+		{"a partition of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredPartitionOf), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
+		{"an inheritance child of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredInherits), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := desiredShapeRefusal(tt.err)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got)
+			got, ok = RowSecurityRefusal(tt.err)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }

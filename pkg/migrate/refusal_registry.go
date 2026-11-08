@@ -276,10 +276,15 @@ func rowSecurityUnsupportedRefusal() verdict.Refusal {
 
 // RowSecurityRefusal classifies typed admission failures from the atomic RLS
 // executor. Operational errors are not refusals. Privilege causes take priority
-// over the general admission sentinel they also wrap.
+// over the general admission sentinel they also wrap. The executor builds the
+// declaration on the same scratch schema as RunDesired, so a desired-file
+// shape refusal is classified the same way on both paths.
 func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
 	if errors.Is(err, executor.ErrRowSecurityPrivileges) {
 		return insufficientPrivilegesRefusal(), true
+	}
+	if refusal, ok := desiredShapeRefusal(err); ok {
+		return refusal, true
 	}
 	if errors.Is(err, executor.ErrRowSecurityRefused) {
 		return rowSecurityUnsupportedRefusal(), true
