@@ -46,7 +46,7 @@ func TestRowSecurityErrorClassification(t *testing.T) {
 }
 
 func TestRowSecurityAdmissionErrorsArePermanent(t *testing.T) {
-	for _, cause := range []error{statement.ErrPolicyRelationDependency, statement.ErrRowSecurityDeclaration, &pgconn.PgError{Code: "42501"}} {
+	for _, cause := range []error{statement.ErrPolicyRelationDependency, statement.ErrPolicyReadsOwnTable, statement.ErrRowSecurityDeclaration, &pgconn.PgError{Code: "42501"}} {
 		err := rowSecurityError(t.Context(), t.Context(), cause, Budget{})
 		assert.ErrorIs(t, err, cause)
 		assert.Equal(t, CodeRowSecurityRefused, OutcomeCode(err))

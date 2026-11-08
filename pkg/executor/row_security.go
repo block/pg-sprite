@@ -118,7 +118,7 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	if budgetErr := asBudgetError(err, b); budgetErr != nil {
 		return budgetErr
 	}
-	if errors.Is(err, statement.ErrPolicyRelationDependency) || errors.Is(err, statement.ErrRowSecurityDeclaration) {
+	if errors.Is(err, statement.ErrPolicyRelationDependency) || errors.Is(err, statement.ErrPolicyReadsOwnTable) || errors.Is(err, statement.ErrRowSecurityDeclaration) {
 		return fmt.Errorf("%w: %w", ErrRowSecurityRefused, err)
 	}
 	var pgErr *pgconn.PgError

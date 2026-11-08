@@ -147,9 +147,19 @@ Qualify every external helper and type in policy expressions, including objects
 in `public`: use `public.doc_status`, not `doc_status`. Policy inspection searches
 only its scratch schema and PostgreSQL built-ins, preventing accidental bindings.
 Qualified helpers such as `auth.uid()` work, including `(SELECT auth.uid())`.
-Policy expressions that directly query a table are refused until dependency
-handling can preserve their identities. Other [table export limits](pull.md#refused-table-shapes)
-still apply.
+A policy may read another table, such as a membership check written as
+`EXISTS (SELECT 1 FROM public.team_members m WHERE m.user_id = auth.uid())`, when
+it names that table schema-qualified. Scratch builds the policy against the live
+table it names, which is the table the applied policy will read; `CREATE POLICY`
+takes only an `ACCESS SHARE` lock on it, so writes to that table continue. An
+unqualified table name, a CTE name, or a database-qualified name is refused, and
+so is any table with the policy's own table name: scratch would bind that name to
+the live table rather than to itself, and PostgreSQL rejects a policy that reads
+its own table as infinite recursion when it is queried. The comparison does not
+cover the referenced table's own policies, which apply to the subquery under the
+caller's role, or recursion between two tables whose policies read each other;
+a `SECURITY DEFINER` helper function avoids both. Other
+[table export limits](pull.md#refused-table-shapes) still apply.
 
 An unchanged definition produces an empty plan. Any table or RLS difference in
 this mode is refused, including a missing live table. No partial plan is emitted. Admission errors exit 1 with a diagnostic; unsupported
@@ -280,8 +290,8 @@ this table-scoped work.
    diff. Implemented through automatic export and SQL declarations; greenfield
    creation remains refused.
 3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
-   and verifies one table's RLS state in one bounded transaction. Mixed changes and
-   policy relation dependencies remain unsupported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
+   and verifies one table's RLS state in one bounded transaction. Mixed changes remain
+   unsupported; a policy that reads another schema-qualified table is supported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
 4. **Prove application behavior.** The local Supabase harness now checks real
    PostgREST requests from two authenticated users and anonymous callers, allowed
    and denied writes, changed visibility, and rollback after a cancelled apply.

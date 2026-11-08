@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -148,7 +149,69 @@ func TestRowSecurityTableChangeIsRefusedEvenWithUnchangedPolicies(t *testing.T) 
 	assert.Empty(t, changes)
 }
 
-func TestRowSecurityExportRefusesRelationDependencies(t *testing.T) {
+// teamMembers creates the table a membership policy reads, in schema.
+func teamMembers(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.team_members (
+     team_id bigint NOT NULL,
+     user_id bigint NOT NULL
+ )`, schema))
+	require.NoError(t, err)
+}
+
+// A policy that reads another table exports with that table named
+// schema-qualified, and the exported file materializes to the same model:
+// the scratch policy binds the live table the applied policy reads.
+func TestRowSecurityRoundTripPolicyReadingAnotherTable(t *testing.T) {
+	pool, schema := rowSecurityTable(t)
+	teamMembers(t, pool, schema)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY members ON %[1]s.documents FOR SELECT
+     USING (EXISTS (SELECT 1 FROM %[1]s.team_members m WHERE m.user_id = documents.owner_id));
+ CREATE POLICY writers ON %[1]s.documents FOR INSERT
+     WITH CHECK (owner_id IN (SELECT user_id FROM %[1]s.team_members))`, schema))
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	sql, err := schemadiff.RenderWithRowSecurity(live)
+	require.NoError(t, err)
+	assert.Contains(t, sql, "FROM "+schema+".team_members m\n")
+	roundTripRowSecurity(t, pool, schema)
+}
+
+// Materializing a policy that reads a live table takes only the ACCESS SHARE
+// lock a plain SELECT takes on it: a session holding EXCLUSIVE, which every
+// stronger lock and every write conflicts with, does not hold the build up.
+func TestRowSecurityPolicyRelationTakesOnlyAccessShare(t *testing.T) {
+	pool, schema := rowSecurityTable(t)
+	teamMembers(t, pool, schema)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) }()
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.team_members IN EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	desired, err := statement.ParseDesiredWithRowSecurity(fmt.Sprintf(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner_id bigint NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY members ON documents FOR SELECT
+     USING (EXISTS (SELECT 1 FROM %s.team_members m WHERE m.user_id = documents.owner_id));`, schema))
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(ctx, pool, schema, desired)
+	require.NoError(t, err)
+	require.Len(t, model.RowSecurity.Policies, 1)
+	require.NotNil(t, model.RowSecurity.Policies[0].Using)
+	assert.Equal(t, fmt.Sprintf("(EXISTS ( SELECT 1\n   FROM %s.team_members m\n  WHERE (m.user_id = documents.owner_id)))", schema),
+		*model.RowSecurity.Policies[0].Using)
+}
+
+// A live policy that reads its own table cannot be exported: a desired file
+// would bind the name to the live table rather than the desired one.
+func TestRowSecurityExportRefusesAPolicyReadingItsOwnTable(t *testing.T) {
 	pool, schema := rowSecurityTable(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE POLICY readers
      ON %s.documents FOR SELECT
@@ -157,7 +220,7 @@ func TestRowSecurityExportRefusesRelationDependencies(t *testing.T) {
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	_, err = schemadiff.RenderWithRowSecurity(live)
-	require.ErrorIs(t, err, statement.ErrPolicyRelationDependency)
+	require.ErrorIs(t, err, statement.ErrPolicyReadsOwnTable)
 }
 
 func TestRowSecurityForceChangeIsRefused(t *testing.T) {

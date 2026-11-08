@@ -17,9 +17,19 @@ var ErrRowSecurityDeclaration = errors.New("desired row security requires one ex
 // ErrRowSecurityTableDefinitionRequired identifies a missing table definition in an RLS file.
 var ErrRowSecurityTableDefinitionRequired = errors.New("desired row security requires a CREATE TABLE definition")
 
-// ErrPolicyRelationDependency refuses policy subqueries that read relations until
-// desired-state materialization can preserve their dependency identities.
-var ErrPolicyRelationDependency = errors.New("policy relation dependencies are not supported in desired row security")
+// ErrPolicyRelationDependency refuses a policy expression that reads a table it
+// does not name schema-qualified. Policy expressions resolve against nothing but
+// the scratch schema and PostgreSQL's built-ins, so an unqualified name either
+// fails to resolve or binds an object nobody meant. A CTE name is refused the
+// same way, because the grammar cannot tell it from a table name.
+var ErrPolicyRelationDependency = errors.New("a policy must name every table it reads schema-qualified, such as public.team_members")
+
+// ErrPolicyReadsOwnTable refuses a policy expression that reads a relation with
+// its own table's name. The scratch build would bind the name to the live table
+// rather than to the desired one, and PostgreSQL reports infinite recursion for
+// a policy that reads the table it protects. The file does not say which schema
+// the table lives in, so the name is refused in every schema.
+var ErrPolicyReadsOwnTable = errors.New("a policy cannot read the table it is defined on")
 
 // ErrRowSecurityForeignKey refuses a foreign key in a row-security desired
 // file. The row-security scratch build creates no stand-in for a referenced
@@ -45,7 +55,8 @@ func (d DesiredWithRowSecurity) Statements() []Statement { return slices.Clone(d
 // ParseDesiredWithRowSecurity admits table/index definitions followed by RLS
 // settings, policies, and policy comments. It requires explicit ENABLE/DISABLE;
 // FORCE/NO FORCE is optional and cannot be declared twice. Other ALTER commands,
-// qualified targets, and policy queries reading relations are refused.
+// qualified targets, and policy queries reading a table unqualified or reading
+// their own table are refused.
 func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
@@ -134,10 +145,14 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, error
 		return rowSecurityTarget(alter.GetRelation())
 	case node.GetCreatePolicyStmt() != nil:
 		policy := node.GetCreatePolicyStmt()
-		if policyReadsRelation(policy.GetQual()) || policyReadsRelation(policy.GetWithCheck()) {
-			return "", ErrPolicyRelationDependency
+		target, err := rowSecurityTarget(policy.GetTable())
+		if err != nil {
+			return "", err
 		}
-		return rowSecurityTarget(policy.GetTable())
+		if err := admitPolicyRelations(policy, target); err != nil {
+			return "", err
+		}
+		return target, nil
 	case node.GetCommentStmt() != nil:
 		comment := node.GetCommentStmt()
 		if comment.GetObjtype() != pganalyze.ObjectType_OBJECT_POLICY {
@@ -160,21 +175,42 @@ func rowSecurityTarget(rel *pganalyze.RangeVar) (string, error) {
 	return rel.GetRelname(), nil
 }
 
-// This is grammar admission only: reject RangeVar nodes in expressions. A
-// scalar SELECT auth.uid() has none and remains admissible; SELECT FROM does
-// not. SQL meaning still comes exclusively from execute-and-introspect.
-func policyReadsRelation(node *pganalyze.Node) bool {
-	if node == nil {
-		return false
+// admitPolicyRelations admits the tables a policy's USING and WITH CHECK
+// expressions read: each must be named schema-qualified, and none may carry the
+// name of the table the policy is defined on (see ErrPolicyRelationDependency and
+// ErrPolicyReadsOwnTable). This is grammar admission only: a scalar SELECT
+// auth.uid() reads no table and is admitted unchanged. SQL meaning still comes
+// exclusively from execute-and-introspect, where a qualified name binds the live
+// table the applied policy will read.
+func admitPolicyRelations(policy *pganalyze.CreatePolicyStmt, table string) error {
+	var read []*pganalyze.RangeVar
+	for _, expr := range []*pganalyze.Node{policy.GetQual(), policy.GetWithCheck()} {
+		if expr != nil {
+			read = appendRelations(read, expr.ProtoReflect())
+		}
 	}
-	return messageReadsRelation(node.ProtoReflect())
+	for _, rel := range read {
+		if rel.GetSchemaname() == "" || rel.GetCatalogname() != "" {
+			return fmt.Errorf("%w: policy %q reads %q", ErrPolicyRelationDependency, policy.GetPolicyName(), relationName(rel))
+		}
+		if rel.GetRelname() == table {
+			return fmt.Errorf("%w: policy %q reads %q", ErrPolicyReadsOwnTable, policy.GetPolicyName(), relationName(rel))
+		}
+	}
+	return nil
 }
 
-func messageReadsRelation(msg protoreflect.Message) bool {
-	if _, ok := msg.Interface().(*pganalyze.RangeVar); ok {
-		return true
+// relationName prints a RangeVar the way the file wrote it, for an error.
+func relationName(rel *pganalyze.RangeVar) string {
+	parts := []string{rel.GetCatalogname(), rel.GetSchemaname(), rel.GetRelname()}
+	return strings.Join(slices.DeleteFunc(parts, func(part string) bool { return part == "" }), ".")
+}
+
+// appendRelations appends every RangeVar in msg, in tree order.
+func appendRelations(read []*pganalyze.RangeVar, msg protoreflect.Message) []*pganalyze.RangeVar {
+	if rel, ok := msg.Interface().(*pganalyze.RangeVar); ok {
+		return append(read, rel)
 	}
-	found := false
 	msg.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
 		if field.Kind() != protoreflect.MessageKind {
 			return true
@@ -183,24 +219,21 @@ func messageReadsRelation(msg protoreflect.Message) bool {
 		case field.IsMap():
 			if field.MapValue().Kind() == protoreflect.MessageKind {
 				value.Map().Range(func(_ protoreflect.MapKey, item protoreflect.Value) bool {
-					found = messageReadsRelation(item.Message())
-					return !found
+					read = appendRelations(read, item.Message())
+					return true
 				})
 			}
 		case field.IsList():
 			list := value.List()
 			for i := 0; i < list.Len(); i++ {
-				if messageReadsRelation(list.Get(i).Message()) {
-					found = true
-					break
-				}
+				read = appendRelations(read, list.Get(i).Message())
 			}
 		default:
-			found = messageReadsRelation(value.Message())
+			read = appendRelations(read, value.Message())
 		}
-		return !found
+		return true
 	})
-	return found
+	return read
 }
 
 // HasRowSecurityDeclaration reports whether sql declares row security without
