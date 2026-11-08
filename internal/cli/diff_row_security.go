@@ -88,8 +88,7 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 // security, all in one transaction. The preview runs that transaction,
 // including its readback, and rolls it back.
 func (c *DiffCmd) previewCreateWithRowSecurity(ctx context.Context, out io.Writer, pool *pgxpool.Pool, desired statement.DesiredWithRowSecurity, b executor.Budget) error {
-	opts := migrate.Options{Budget: executor.SequenceBudget{Brief: b}, Logger: c.diag()}
-	preview, err := migrate.PreviewCreateWithRowSecurity(ctx, pool, c.Schema, desired, opts)
+	preview, err := executor.PreviewDesiredCreateWithRowSecurity(ctx, pool, c.Schema, "", desired, b)
 	if err != nil {
 		refusal, ok := migrate.RowSecurityRefusal(err)
 		if !ok {
@@ -109,13 +108,17 @@ func (c *DiffCmd) previewCreateWithRowSecurity(ctx context.Context, out io.Write
 			return fmt.Errorf("write create with row security preview: %w", err)
 		}
 	case c.SQL:
+		// The script runs in one transaction, as migrate --desired does, so
+		// running it never leaves the table visible without its row security.
 		header := sqlDiagnosticComment(fmt.Sprintf("%s.%s does not exist; pg-sprite migrate --desired creates it with its row security in one transaction",
 			preview.Schema, preview.Table))
-		if _, err := fmt.Fprintln(out, header); err != nil {
-			return fmt.Errorf("write create with row security preview: %w", err)
+		lines := append([]string{header, "BEGIN;"}, preview.Statements...)
+		for i := 2; i < len(lines); i++ {
+			lines[i] += ";"
 		}
-		for _, sql := range preview.Statements {
-			if _, err := fmt.Fprintln(out, sql+";"); err != nil {
+		lines = append(lines, "COMMIT;")
+		for _, line := range lines {
+			if _, err := fmt.Fprintln(out, line); err != nil {
 				return fmt.Errorf("write create with row security preview: %w", err)
 			}
 		}

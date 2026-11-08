@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -56,10 +57,104 @@ func PreviewCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	return report.plan(), nil
 }
 
+// ExecuteDesiredRowSecurity converges a desired file that declares row
+// security, whether or not its table exists. It mints the absence and
+// creation-access proofs itself, inside the attempt, so b.StatementTimeout
+// bounds the probes as well as the change. An existing table converges as
+// ExecuteRowSecurity converges it. An absent table is created as
+// ExecuteCreateWithRowSecurity creates it, owned by createOwner when that is
+// non-empty. A standalone type at the table's name is a create collision.
+func ExecuteDesiredRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
+	if err := b.validate(); err != nil {
+		return RowSecurityReport{}, err
+	}
+	if desired.Table() == "" || schema == "" {
+		return RowSecurityReport{}, fmt.Errorf("%w: %w", ErrRowSecurityRefused, statement.ErrRowSecurityDeclaration)
+	}
+	// INV: RS-3 — the routing probes share the attempt's one deadline.
+	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
+	defer cancel()
+	report, err := executeDesiredRowSecurity(attempt, pool, schema, createOwner, desired, b)
+	return report, rowSecurityError(ctx, attempt, err, b)
+}
+
+func executeDesiredRowSecurity(attempt context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
+	at, cr, err := createWithRowSecurityProofs(attempt, pool, schema, createOwner, desired)
+	if errors.Is(err, preflight.ErrRelationExists) {
+		return executeRowSecurity(attempt, pool, schema, desired, b, rowSecurityExecute, nil)
+	}
+	if err != nil {
+		return RowSecurityReport{}, err
+	}
+	return createWithRowSecurity(attempt, pool, at, cr, desired, b, false)
+}
+
+// PreviewDesiredCreateWithRowSecurity mints the same proofs as
+// ExecuteDesiredRowSecurity for an absent table and previews its create,
+// under one deadline. A table at the name returns an error wrapping
+// preflight.ErrRelationExists, and the caller previews the existing table
+// instead.
+func PreviewDesiredCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityPlan, error) {
+	if err := b.validate(); err != nil {
+		return RowSecurityPlan{}, err
+	}
+	if desired.Table() == "" || schema == "" {
+		return RowSecurityPlan{}, fmt.Errorf("%w: %w", ErrRowSecurityRefused, statement.ErrRowSecurityDeclaration)
+	}
+	// INV: RS-3 — the routing probes share the attempt's one deadline.
+	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
+	defer cancel()
+	report, err := previewDesiredCreate(attempt, pool, schema, createOwner, desired, b)
+	if err := rowSecurityError(ctx, attempt, err, b); err != nil {
+		return RowSecurityPlan{}, err
+	}
+	return report.plan(), nil
+}
+
+func previewDesiredCreate(attempt context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
+	at, cr, err := createWithRowSecurityProofs(attempt, pool, schema, createOwner, desired)
+	if err != nil {
+		return RowSecurityReport{}, err
+	}
+	return createWithRowSecurity(attempt, pool, at, cr, desired, b, true)
+}
+
+// createWithRowSecurityProofs mints the absence and creation-access proofs
+// for the desired table. A table at the name returns an error wrapping
+// preflight.ErrRelationExists; a standalone type there is a create
+// collision.
+func createWithRowSecurityProofs(ctx context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity) (preflight.AbsentTarget, preflight.CreationRole, error) {
+	at, err := preflight.CheckTableAbsent(ctx, pool, schema, desired.Table())
+	if errors.Is(err, preflight.ErrRelationExists) {
+		return preflight.AbsentTarget{}, preflight.CreationRole{}, err
+	}
+	if errors.Is(err, preflight.ErrTypeExists) {
+		return preflight.AbsentTarget{}, preflight.CreationRole{}, fmt.Errorf("%w: %w", ErrCreateCollision, err)
+	}
+	if err != nil {
+		return preflight.AbsentTarget{}, preflight.CreationRole{}, fmt.Errorf("check whether %s.%s exists: %w", schema, desired.Table(), err)
+	}
+	cr, err := preflight.CheckCreatePrivilegesAs(ctx, pool, at.Schema(), createOwner)
+	if err != nil {
+		return preflight.AbsentTarget{}, preflight.CreationRole{}, fmt.Errorf("verify creation access in schema %s: %w", at.Schema(), err)
+	}
+	return at, cr, nil
+}
+
 func runCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget, preview bool) (RowSecurityReport, error) {
 	if err := b.validate(); err != nil {
 		return RowSecurityReport{}, err
 	}
+	// INV: RS-3 — the whole attempt has one deadline, the name probe included.
+	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
+	defer cancel()
+	report, err := createWithRowSecurity(attempt, pool, at, cr, desired, b, preview)
+	return report, rowSecurityError(ctx, attempt, err, b)
+}
+
+// createWithRowSecurity checks the proofs, admits the create, probes its
+// names, and runs the transaction, all under the caller's attempt deadline.
+func createWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget, preview bool) (RowSecurityReport, error) {
 	// INV: ST-7 — the proofs are re-verified at the point of use, as in
 	// ExecuteCreate.
 	if at.Schema() == "" || at.Table() == "" {
@@ -97,11 +192,7 @@ func runCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at prefli
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("verify claimed names are absent in %s: %w", at.Schema(), err)
 	}
-	// INV: RS-3 — the whole attempt has one deadline.
-	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
-	defer cancel()
-	report, err := executeCreateWithRowSecurity(attempt, pool, at, cr, desired, admitted, ownedClaims, b, preview)
-	return report, rowSecurityError(ctx, attempt, err, b)
+	return executeCreateWithRowSecurity(ctx, pool, at, cr, desired, admitted, ownedClaims, b, preview)
 }
 
 func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, admitted []createStep, ownedClaims []string, b Budget, preview bool) (RowSecurityReport, error) {
@@ -129,6 +220,11 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, classifyRowSecurityDesiredError(err))
 	}
+	// A table shape the row security path does not support is refused
+	// before any target DDL, as it is for an existing table.
+	if _, err := rowSecurityTableShape(wanted); err != nil {
+		return RowSecurityReport{}, fmt.Errorf("admit the desired table %s: %w: %w", target, ErrRowSecurityRefused, err)
+	}
 	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("set create search path for %s: %w", target, err)
 	}
@@ -147,18 +243,6 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	if err := verifyUncommittedNames(ctx, tx, at, ownedClaims); err != nil {
 		return RowSecurityReport{}, err
 	}
-	// INV: ST-9 — a table created under the configured owner must be born
-	// under it. The executor never repairs ownership.
-	if cr.SetsRole() {
-		owner, err := readTableOwner(ctx, tx, at)
-		if err != nil {
-			return RowSecurityReport{}, fmt.Errorf("read the owner of %s before commit: %w", target, err)
-		}
-		if owner != cr.Owner() {
-			return RowSecurityReport{}, fmt.Errorf("%w: ST-9: %s would be owned by %s, not %s; nothing was committed",
-				ErrInvariantViolation, target, owner, cr.Owner())
-		}
-	}
 	security, err := schemadiff.RenderRowSecurity(schema, wanted)
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("render row security for %s: %w: %w", target, ErrRowSecurityRefused, err)
@@ -173,6 +257,17 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 			return RowSecurityReport{}, fmt.Errorf("apply row security on %s: %w", target, err)
 		}
 		report.Statements = append(report.Statements, sql)
+	}
+	// INV: ST-9 — the table commits owned by the creation role. The owner is
+	// read after every statement has run, so a change made by an event
+	// trigger on any of them is caught. The executor never repairs ownership.
+	owner, err := readTableOwner(ctx, tx, at)
+	if err != nil {
+		return RowSecurityReport{}, fmt.Errorf("read the owner of %s before commit: %w", target, err)
+	}
+	if owner != cr.Owner() {
+		return RowSecurityReport{}, fmt.Errorf("%w: ST-9: %s would be owned by %s, not %s; nothing was committed",
+			ErrInvariantViolation, target, owner, cr.Owner())
 	}
 	// INV: RS-6 — the table and its row security are verified together and
 	// commit together.

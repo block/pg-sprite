@@ -296,3 +296,92 @@ func sqlstate(err error) string {
 	}
 	return ""
 }
+
+// A table shape the row security path does not support is refused before
+// any target DDL, by the run and the preview alike, and nothing is created.
+func TestCreateWithRowSecurityRefusesAnUnsupportedShapeBeforeCreating(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	d := desiredRowSecurity(t, `CREATE UNLOGGED TABLE notes (id bigint PRIMARY KEY);
+ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;`)
+
+	_, err := executor.PreviewCreateWithRowSecurity(t.Context(), f.pool, f.at, f.cr, d, createWithRowSecurityBudget)
+	require.ErrorIs(t, err, executor.ErrRowSecurityRefused)
+	assert.ErrorContains(t, err, "admit the desired table")
+	assert.NotErrorIs(t, err, executor.ErrInvariantViolation)
+	report, err := executor.ExecuteCreateWithRowSecurity(t.Context(), f.pool, f.at, f.cr, d, createWithRowSecurityBudget)
+	require.ErrorIs(t, err, executor.ErrRowSecurityRefused)
+	assert.NotErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.Empty(t, report.Statements)
+	assert.False(t, relationExists(t, f.pool, f.schema, "notes"))
+}
+
+// An event trigger that hands the table to another role while its policy is
+// created cannot make the run commit a table the creation role does not
+// own: the owner is read after every statement, and the run rolls back.
+func TestExecuteCreateWithRowSecurityRollsBackAnOwnerChangedByAPolicyTrigger(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	other := testutil.NewRole(t, f.pool, "NOLOGIN")
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()),
+			"DROP SCHEMA IF EXISTS "+pgx.Identifier{f.schema}.Sanitize()+" CASCADE")
+		assert.NoError(t, err)
+	})
+	testutil.InstallEventTrigger(t, f.pool, testutil.DDLCommandEnd, f.schema, "give_away", fmt.Sprintf(`
+     IF EXISTS (
+         SELECT 1 FROM pg_event_trigger_ddl_commands() d
+         JOIN pg_policy p ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid
+         JOIN pg_class c ON c.oid = p.polrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = '%s' AND d.command_tag = 'CREATE POLICY'
+     ) THEN
+         EXECUTE format('ALTER TABLE %%I.notes OWNER TO %%I', '%s', '%s');
+     END IF;`, f.schema, f.schema, other))
+
+	report, err := executor.ExecuteCreateWithRowSecurity(t.Context(), f.pool, f.at, f.cr,
+		desiredRowSecurity(t, notesWithRowSecurity), createWithRowSecurityBudget)
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.ErrorContains(t, err, "ST-9")
+	assert.Empty(t, report.Statements)
+	assert.False(t, relationExists(t, f.pool, f.schema, "notes"))
+}
+
+// The probes before the transaction share the attempt's deadline. With
+// every pool connection held elsewhere, a run that cannot even probe its
+// names stops at the statement budget instead of waiting for the caller.
+func TestCreateWithRowSecurityProbesShareTheAttemptDeadline(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	cfg := f.pool.Config().Copy()
+	cfg.MaxConns = 1
+	small, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(small.Close)
+	held, err := small.Acquire(t.Context())
+	require.NoError(t, err)
+	defer held.Release()
+	budget := executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 300 * time.Millisecond}
+	d := desiredRowSecurity(t, notesWithRowSecurity)
+
+	runs := map[string]func() error{
+		"execute-create": func() error {
+			_, err := executor.ExecuteCreateWithRowSecurity(t.Context(), small, f.at, f.cr, d, budget)
+			return err
+		},
+		"execute-desired": func() error {
+			_, err := executor.ExecuteDesiredRowSecurity(t.Context(), small, f.schema, "", d, budget)
+			return err
+		},
+		"preview-desired": func() error {
+			_, err := executor.PreviewDesiredCreateWithRowSecurity(t.Context(), small, f.schema, "", d, budget)
+			return err
+		},
+	}
+	for name, run := range runs {
+		t.Run(name, func(t *testing.T) {
+			err := run()
+			var budgetErr *executor.BudgetError
+			require.ErrorAs(t, err, &budgetErr)
+			assert.Equal(t, executor.CauseStatement, budgetErr.Cause)
+		})
+	}
+	assert.False(t, relationExists(t, f.pool, f.schema, "notes"))
+}

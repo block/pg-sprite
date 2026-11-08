@@ -22,9 +22,8 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 		return err
 	}
 	defer pool.Close()
-	report, runErr := migrate.RunDesiredRowSecurity(ctx, pool, c.Schema, desired, migrate.Options{
-		Budget: executor.SequenceBudget{Brief: executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}},
-		Logger: c.diag(),
+	report, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, executor.Budget{
+		LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout,
 	})
 	v := rowSecurityVerdict(c.Schema+"."+desired.Table(), report, runErr)
 	emitErr := c.emit(out, v)

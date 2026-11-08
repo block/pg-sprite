@@ -230,11 +230,9 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 }
 
 func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
-	// Render refuses unsupported shapes even when two models happen to match.
-	table := withoutExportOnlyRefusals(live)
-	table.RowSecurity = schemadiff.RowSecurity{}
-	if _, err := schemadiff.Render(table); err != nil {
-		return fmt.Errorf("row security target: %w", err)
+	table, err := rowSecurityTableShape(live)
+	if err != nil {
+		return err
 	}
 	wanted.RowSecurity = schemadiff.RowSecurity{}
 	changes, err := schemadiff.Diff(schema, table, wanted)
@@ -245,6 +243,19 @@ func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 		return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
 	}
 	return nil
+}
+
+// rowSecurityTableShape returns m without its row security or the facts
+// only an export refuses, and refuses a table shape the row security path
+// does not support. Render refuses unsupported shapes even when two models
+// happen to match.
+func rowSecurityTableShape(m schemadiff.Model) (schemadiff.Model, error) {
+	table := withoutExportOnlyRefusals(m)
+	table.RowSecurity = schemadiff.RowSecurity{}
+	if _, err := schemadiff.Render(table); err != nil {
+		return schemadiff.Model{}, fmt.Errorf("row security target: %w", err)
+	}
+	return table, nil
 }
 
 // withoutExportOnlyRefusals returns live without the facts that only an

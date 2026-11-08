@@ -17,7 +17,7 @@ import (
 // Only an unchanged existing table produces a report, with no executable steps.
 // Deltas return RowSecurityReviewRequired, wrapping ErrUnsupportedChange. A
 // missing table returns schemadiff.ErrTableNotFound; preview its creation with
-// migrate.PreviewCreateWithRowSecurity. The distinct parsed
+// executor.PreviewDesiredCreateWithRowSecurity. The distinct parsed
 // type cannot be passed to RunDesired or ExecuteCreate. Inspection still needs
 // CREATE privilege for its rolled-back scratch schema, just like Plan.
 func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) (plan.Report, error) {

@@ -92,6 +92,9 @@ func TestDiffRowSecurityPreviewsCreateOfMissingTable(t *testing.T) {
 	cmd = &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, SQL: true}
 	require.NoError(t, cmd.run(t.Context(), &out))
 	assert.Contains(t, out.String(), "-- "+schema+".documents does not exist; pg-sprite migrate --desired creates it with its row security in one transaction")
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	assert.Equal(t, "BEGIN;", lines[1], "the script must create the table and its RLS in one transaction")
+	assert.Equal(t, "COMMIT;", lines[len(lines)-1])
 	assert.Contains(t, out.String(), preview.Statements[1]+";")
 
 	out.Reset()
