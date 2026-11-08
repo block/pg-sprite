@@ -713,6 +713,68 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 		"without live column facts every type change is a rewrite")
 }
 
+// Adding a NOT NULL column is refused when the server proved a row of the
+// table would hold NULL in it (Facts.NullFilledColumns); on an empty
+// table, or without the fact, it classifies as usual.
+func TestClassifyRefusesANotNullColumnNothingFillsOnATableWithRows(t *testing.T) {
+	populated := planner.Facts{
+		NullFilledColumns: map[string]bool{"tier": true},
+		ColumnTypes:       map[string]string{"id": "bigint", "email": "text"},
+		AddColumnProofs:   map[string]statement.AddColumnProof{"tier": statement.AddColumnInPlace},
+	}
+	d := classifyWithFacts(t, "ALTER TABLE customers ADD COLUMN tier text NOT NULL", populated)
+	assert.Equal(t, planner.ReasonNotNullWithoutDefault, d.Reason)
+	assert.Equal(t, planner.RouteRefuse, d.Route)
+
+	empty := populated
+	empty.NullFilledColumns = nil
+	d = classifyWithFacts(t, "ALTER TABLE customers ADD COLUMN tier text NOT NULL", empty)
+	assert.Equal(t, planner.ReasonMetadataOnly, d.Reason)
+	assert.Equal(t, planner.RouteNative, d.Route)
+}
+
+// The columns whose rows may be left NULL are the ones added with no
+// DEFAULT of their own that the table does not already have, NOT NULL or
+// not, since a domain or an inline PRIMARY KEY can make a column NOT NULL
+// the statement never spells. A constant, expression, identity, or serial
+// default and a generated column fill the rows; a column the table has is
+// skipped by ADD COLUMN IF NOT EXISTS, unless the same statement drops it
+// first.
+func TestNullFillCandidates(t *testing.T) {
+	columns := map[string]string{"id": "bigint", "email": "text"}
+	for sql, want := range map[string][]string{
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL":                                   {"tier"},
+		"ALTER TABLE customers ADD COLUMN tier tier_type NOT NULL":                              {"tier"},
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL, ADD COLUMN plan text NOT NULL":    {"tier", "plan"},
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL DEFAULT 'free'":                    nil,
+		"ALTER TABLE customers ADD COLUMN created timestamptz NOT NULL DEFAULT now()":           nil,
+		"ALTER TABLE customers ADD COLUMN n bigint NOT NULL GENERATED ALWAYS AS IDENTITY":       nil,
+		"ALTER TABLE customers ADD COLUMN n bigserial NOT NULL":                                 nil,
+		"ALTER TABLE customers ADD COLUMN total int NOT NULL GENERATED ALWAYS AS (1) STORED":    nil,
+		"ALTER TABLE customers ADD COLUMN tier text":                                            {"tier"},
+		"ALTER TABLE customers ADD COLUMN tier required_text":                                   {"tier"},
+		"ALTER TABLE customers ADD COLUMN n bigint PRIMARY KEY":                                 {"n"},
+		"ALTER TABLE customers ADD COLUMN n bigint PRIMARY KEY DEFAULT 0":                       nil,
+		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL":                    nil,
+		"ALTER TABLE customers DROP COLUMN email, ADD COLUMN email text NOT NULL":               {"email"},
+		"ALTER TABLE customers ADD COLUMN IF NOT EXISTS email text NOT NULL, DROP COLUMN email": nil,
+	} {
+		ops, err := statement.ParseOps(sql)
+		require.NoError(t, err, sql)
+		assert.Equal(t, want, planner.NullFillCandidates(ops, columns), sql)
+	}
+}
+
+// classifyWithFacts classifies a single-operation statement against facts
+// and returns its decision.
+func classifyWithFacts(t *testing.T, sql string, facts planner.Facts) planner.Decision {
+	t.Helper()
+	plan, err := planner.Classify(sql, facts)
+	require.NoError(t, err, sql)
+	require.Len(t, plan.Decisions, 1, sql)
+	return plan.Decisions[0]
+}
+
 // An added column classifies by what the server proved about the rewrite
 // before the statement's shape: a constant default on a constrained domain
 // still rewrites, and a default the catalog stores runs in place however it
@@ -875,6 +937,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonReplicaIdentity,
 		planner.ReasonDependentView,
 		planner.ReasonDependentPolicy,
+		planner.ReasonNotNullWithoutDefault,
 		planner.ReasonCascadingDrop,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())

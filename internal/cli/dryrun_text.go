@@ -74,6 +74,9 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 	w.printf("  %s;\n", ps.SQL)
 	codes := writeRefusal(w, ps)
 	refused = len(codes) // at most one refusal code per statement
+	// Every not-null-without-default column of a statement shares one
+	// manual path, printed once after the first of them.
+	notNullHelped := false
 	for _, d := range ps.Decisions {
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
@@ -83,6 +86,10 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		}
 		if len(d.DependentPolicies) > 0 {
 			w.diag("help", "", d.PolicyFix.Help())
+		}
+		if d.Reason == planner.ReasonNotNullWithoutDefault && !notNullHelped {
+			notNullHelped = true
+			w.diag("help", "", planner.NotNullWithoutDefaultHelp)
 		}
 	}
 	if ps.Destructive {
@@ -344,6 +351,8 @@ func impactText(r planner.Reason) string {
 		return "changes a column a view reads; PostgreSQL refuses this until the view is dropped or redefined"
 	case planner.ReasonDependentPolicy:
 		return "changes a column a row-level security policy reads; PostgreSQL refuses this until the policy is dropped"
+	case planner.ReasonNotNullWithoutDefault:
+		return "adds a NOT NULL column with no default to a table that holds rows; PostgreSQL refuses this because every existing row would hold NULL"
 	case planner.ReasonCascadingDrop:
 		return "CASCADE also drops the views, row-level security policies, and other tables' foreign keys that depend on it; drop those explicitly and resubmit without CASCADE"
 	case planner.ReasonUnsupportedOperation:
@@ -399,6 +408,10 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 	if d.Reason == planner.ReasonDependentPolicy {
 		return d.Operation + " changes a column read by " + planner.PoliciesPhrase(d.DependentPolicies) +
 			", and PostgreSQL refuses to retype or drop a column while a policy reads it"
+	}
+	if d.Reason == planner.ReasonNotNullWithoutDefault {
+		return d.Operation + " adds a NOT NULL column with no default to a table that holds rows, " +
+			"and PostgreSQL refuses it because every existing row would hold NULL"
 	}
 	return "the planner knows no safe path for " + d.Operation
 }

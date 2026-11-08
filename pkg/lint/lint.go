@@ -25,8 +25,10 @@ import (
 // app-breaking-rename finding from warning to error, because the engine
 // now refuses the rename unless the override names the table; version 7
 // added the dependent-policy planner reason to the embedded Reasons
-// vocabulary; version 8 added the validate-in-transaction code.
-const FormatVersion = 8
+// vocabulary; version 8 added the validate-in-transaction code; version 9
+// added the not-null-without-default planner reason to the embedded
+// Reasons vocabulary.
+const FormatVersion = 9
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string

@@ -331,6 +331,7 @@ against `sizeGuardApplies`):
 | `replica-identity` | n/a — refused at plan time |
 | `dependent-view` | n/a — refused at plan time |
 | `dependent-policy` | n/a — refused at plan time |
+| `not-null-without-default` | n/a — refused at plan time |
 | `cascading-drop` | n/a — refused at plan time |
 | `unsupported-operation` | n/a — refused at plan time |
 
