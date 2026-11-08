@@ -45,14 +45,23 @@ type Options struct {
 	StatementTimeout time.Duration
 	// Chunker sizes the chunks.
 	Chunker ChunkerOptions
-	// CollisionAttempts is the number of times a chunk whose insert the
-	// server refused on a unique index or an exclusion constraint is run
-	// before the copy stops with that refusal. Each attempt reads the source
-	// afresh, so a value a source change moved between keys lands once the
-	// applier has flushed the move's other half into the shadow.
+	// CollisionAttempts is the number of passes a chunk whose insert the
+	// server refused on a unique index or an exclusion constraint is given
+	// before the copy stops with that refusal: the refused insert, then one
+	// pass that commits every row of the chunk but those whose values other
+	// shadow rows hold, then passes over only the rows held off. Each pass
+	// reads the source afresh, so a value a source change moved between
+	// keys lands once the applier has flushed the move's other half into
+	// the shadow. On a shadow with a DEFERRABLE unique or exclusion
+	// constraint, which cannot be copied around, the passes after the first
+	// rerun the refused insert over the whole chunk. A pass the server
+	// rolls back to break a deadlock with another shadow writer spends one
+	// attempt from the same budget, after waiting up to the server's
+	// deadlock_timeout to be chosen.
 	CollisionAttempts int
-	// CollisionBackoff is the wait before a collided chunk's second attempt;
-	// each later wait is one backoff longer.
+	// CollisionBackoff is the wait before a collided chunk's first pass over
+	// the rows it held off; each later wait is one backoff longer. The pass
+	// that commits the rest of the chunk waits for nothing.
 	CollisionBackoff time.Duration
 	// Clock times each chunk for the chunker's chunk-time throttling
 	// feedback (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
@@ -135,7 +144,12 @@ type Copier struct {
 	// sql is the one insert statement every chunk runs, frozen at
 	// construction so no worker builds SQL, and searchPath the SET LOCAL
 	// its transaction runs first so the statement resolves as it should.
+	// skipSQL and keysSQL are the statements a chunk whose insert collided
+	// runs instead: over its range, committing around the rows held off,
+	// then over the held-off keys alone.
 	sql        string
+	skipSQL    string
+	keysSQL    string
 	searchPath string
 	// clearSQL removes one batch of shadow rows above the resume watermark.
 	clearSQL string
@@ -189,6 +203,8 @@ func NewCopier(target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.Tabl
 		chunker:    chunker,
 		opts:       opts,
 		sql:        copySQL(target, shadow),
+		skipSQL:    copySkipSQL(target, shadow),
+		keysSQL:    copyKeysSQL(target, shadow),
 		searchPath: copySearchPath(shadow),
 		clearSQL:   clearAboveSQL(target, shadow),
 		ledger:     newLedger(from),
@@ -245,18 +261,28 @@ func (c *Copier) Position() Position {
 // and continues, so a caller can back off and resume behind a busy table.
 //
 // A chunk whose insert the server refuses on a unique index or an
-// exclusion constraint (SQLSTATE 23505 or 23P01) is run again after a wait,
-// up to Options.CollisionAttempts times: the value it collided on was moved
-// between keys by a source change the applier has yet to flush, and a later
-// attempt's snapshot sees the shadow after that flush. A collision no
-// attempt outlasts returns the server's error wrapped, the chunk in flight,
-// and Collisions counts every refused attempt.
+// exclusion constraint (SQLSTATE 23505 or 23P01) is given up to
+// Options.CollisionAttempts passes: the value it collided on was moved
+// between keys by a source change the applier has yet to flush. The next
+// pass commits every row of the chunk but those whose values other shadow
+// rows hold, and the chunk's Position entry then names those keys as
+// Pending, so the applier writes the rest of the chunk while later passes,
+// each after a wait, copy only the held-off rows once the flush has
+// rewritten the rows holding their values. A collision no pass outlasts
+// returns the server's error wrapped, the chunk in flight with its pending
+// keys, and Collisions counts every pass that left a row held off. A pass
+// the server rolls back to break a deadlock (SQLSTATE 40P01) — two shadow
+// writers each waiting on a value the other holds — is treated as a
+// collision: it committed nothing, so the chunk takes its next pass.
 //
 // Cancellation reaches the server as a closed connection, so a statement
 // that was running keeps running until it finishes or hits the transaction's
 // statement_timeout, and only then is its transaction rolled back; the
 // server-side end of a cancelled chunk is bounded by that timeout, not by
-// Run's return.
+// Run's return. A Run stopped by ctx returns an error that answers
+// errors.Is for ctx.Err() (context.Canceled or context.DeadlineExceeded),
+// and also for the cause when ctx was cancelled with one
+// (context.WithCancelCause).
 func (c *Copier) Run(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := c.start(); err != nil {
 		return err
@@ -271,20 +297,54 @@ func (c *Copier) Run(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := c.clearAbove(ctx, pool, c.Position().Watermark); err != nil {
 		return c.finish(err)
 	}
-	ctx, stop := context.WithCancelCause(ctx)
+	workers, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 
 	var wg sync.WaitGroup
 	for range c.opts.Workers {
 		wg.Go(func() {
-			if err := c.work(ctx, pool); err != nil {
+			if err := c.work(workers, pool); err != nil {
 				stop(err)
 			}
 		})
 	}
 	wg.Wait()
 	// INV: LK-3
-	return c.finish(context.Cause(ctx))
+	return c.finish(stopReason(ctx, workers))
+}
+
+// stopReason is why the workers stopped: the first worker's error, or the
+// caller's ending of ctx. A worker's error stands as it is, even when the
+// caller cancelled after it, since that error is what stopped the copy.
+func stopReason(ctx, workers context.Context) error {
+	cause := context.Cause(workers)
+	if ctx.Err() == nil {
+		return cause
+	}
+	if !errors.Is(cause, context.Cause(ctx)) {
+		return cause
+	}
+	return endedWith(ctx)
+}
+
+// endedWith is why an ended ctx ended. A caller that cancelled with a cause
+// of its own (context.WithCancelCause) gets that cause wrapped together
+// with ctx.Err(), so the error reads as the cause and as a cancellation
+// (errors.Is(err, context.Canceled)) alike; a caller that cancelled
+// plainly, or whose deadline passed, gets ctx.Err() as it stands, and so
+// does a cause that already wraps it.
+//
+// It reads only that ctx ended, whoever ended it: a cancellation with a
+// cause always reads as a stop. An owner that cancels a context it derived
+// for this package because something failed must report that failure
+// itself, as the table lock session's loss and the runner's capture and
+// save failures are; otherwise the failure reads as the caller's stop.
+func endedWith(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, ctx.Err()) {
+		return cause
+	}
+	return fmt.Errorf("%w (%w)", cause, ctx.Err())
 }
 
 func (c *Copier) start() error {
@@ -321,13 +381,13 @@ func (c *Copier) finish(cause error) error {
 }
 
 // work is one worker's loop: claim a chunk, copy it in its own transaction
-// (again, after a wait, when the insert collided with a shadow row the
-// applier has yet to clear), land it, and tell the chunker how long the
-// committed attempt took. It returns nil when the chunker has no chunk left
-// and the first error otherwise; a cancelled context ends the loop with the
-// context's error, which Run resolves to the cancellation's cause. A chunk
-// whose copy failed is left in flight: it did not land, so its keys must
-// not read as landed.
+// (in further passes, around and then after a wait for the rows whose
+// values collided with shadow rows the applier has yet to clear), land it,
+// and tell the chunker how long the pass that committed the range took. It
+// returns nil when the chunker has no chunk left and the first error
+// otherwise; a cancelled context ends the loop with the context's error,
+// which Run resolves to the cancellation's cause. A chunk whose copy failed
+// is left in flight: it did not land, so its keys must not read as landed.
 func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 	for ctx.Err() == nil {
 		chunk, ok, err := c.claim(ctx, pool)
@@ -379,6 +439,19 @@ func (c *Copier) land(chunk Chunk, inserted int64) error {
 	// INV: LK-3
 	if !c.ledger.land(chunk, inserted) {
 		return refuse(CauseChunksInFlight, nil, "landed chunk [%d, %d] was not in flight", chunk.Lower(), chunk.Upper())
+	}
+	return nil
+}
+
+// settle records that a chunk has committed inserted rows in all and still
+// owes the rows under pending, so Position classifies its other keys as
+// landed while the chunk stays in flight (CO-4).
+func (c *Copier) settle(chunk Chunk, inserted int64, pending []int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// INV: CO-4
+	if !c.ledger.settle(chunk, inserted, pending) {
+		return refuse(CauseChunksInFlight, nil, "chunk [%d, %d] settled with %d rows pending was not in flight", chunk.Lower(), chunk.Upper(), len(pending))
 	}
 	return nil
 }

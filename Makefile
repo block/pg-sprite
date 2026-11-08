@@ -14,7 +14,7 @@ PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DA
 # Which corpus replay project to run (replay/<project>/project.conf).
 REPLAY_PROJECT ?= buzz
 
-.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -31,10 +31,46 @@ test:
 test-unit:
 	SKIP_INTEGRATION=1 $(GO) test -race ./...
 
+# Race detector flag for test-db and test-own-server. CI clears it (RACE=)
+# on every PostgreSQL major but the newest: the code that runs goroutines
+# does not branch on the server version, and the detector slows the suite
+# down. `make test-db RACE=` is the faster local loop.
+RACE ?= -race
+
+# Packages test-db runs. The two shard targets below set it; set it yourself
+# to run a few packages against the compose database.
+TEST_PKGS ?= ./...
+
+# The slowest package. CI's race job runs it on a runner of its own, through
+# the two shard targets below, so it does not set the length of the job.
+SLOW_TEST_PKG := ./pkg/schemachange
+
 # Integration suite against the long-lived compose database (no per-test
 # containers). Start it first: make db-up [PG_VERSION=14]
 test-db:
-	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test -race -count=1 ./...
+	PG_DSN="$(PG_DSN_LOCAL)" $(GO) test $(RACE) -count=1 $(TEST_PKGS)
+
+# The two halves of test-db that CI's race job runs on separate runners:
+# the slowest package alone, and every other package. Together they run
+# exactly what test-db runs.
+test-db-slow:
+	$(MAKE) test-db TEST_PKGS=$(SLOW_TEST_PKG)
+
+test-db-rest:
+	@all=$$($(GO) list ./...) || exit 1; \
+	slow=$$($(GO) list $(SLOW_TEST_PKG)) || exit 1; \
+	rest=$$(printf '%s\n' "$$all" | grep -vx "$$slow" | tr '\n' ' '); \
+	if [ -z "$$rest" ]; then echo "test-db-rest: no packages left after excluding $$slow" >&2; exit 1; fi; \
+	$(MAKE) test-db TEST_PKGS="$$rest"
+
+# The tests that need a server of their own (testutil.SkipOnSharedServer):
+# they create a cluster-level role or a tablespace, or check which image the
+# harness chose, so test-db skips them. This runs exactly those the container
+# way, with PG_DSN cleared; CI's matrix and the release job run it beside
+# test-db, and internal/testutil's own-server completeness test holds the
+# list here to the helper's callers.
+test-own-server:
+	PG_DSN= $(GO) test $(RACE) -count=1 -run '^(TestServerMajorMatchesRequestedVersion|TestCheckPrivilegesReplicationAccess|TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC|TestBuildShadowKeepsTheSourceTablespace|TestIntrospectReplicaIdentityUnderAPublicationForAllTables)$$' ./internal/testutil ./pkg/preflight ./pkg/schemachange ./pkg/schemadiff
 
 # Full suite against every supported PostgreSQL major (14 -> 18) via
 # testcontainers — the local mirror of the CI matrix.

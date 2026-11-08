@@ -54,7 +54,7 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 	}
 	steps, refused := 0, 0
 	for i, ps := range report.Statements {
-		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite migrate")
+		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite migrate", report.Schema+"."+report.Table)
 		steps += s
 		refused += r
 		if ps.Cause != "" {

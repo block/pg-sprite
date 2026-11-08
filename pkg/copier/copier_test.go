@@ -1,7 +1,9 @@
 package copier
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -92,4 +94,58 @@ func TestCopierOptionsValidateAsTheCopyWould(t *testing.T) {
 	err = Options{Chunker: ChunkerOptions{MinRows: 50, MaxRows: 10}}.Validate()
 	assert.ErrorIs(t, err, ErrInvalidChunkerOptions)
 	assert.NotErrorIs(t, err, ErrInvalidOptions)
+}
+
+// Run reports why its workers stopped. A worker's own error is reported as
+// it stands, whether or not the caller cancels afterwards; the caller's
+// cancellation is reported as ctx.Err() when it was plain, and as the
+// caller's own cause wrapped with ctx.Err() when it was cancelled with
+// one, so a cause-cancelled copy still reads as a cancellation.
+func TestStopReasonKeepsACancellationReadableAsOne(t *testing.T) {
+	t.Run("a worker's error is its own, even once the caller cancels", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		workers, stop := context.WithCancelCause(ctx)
+		failed := errors.New("copy chunk: connection reset")
+		stop(failed)
+		assert.Same(t, failed, stopReason(ctx, workers))
+		cancel(errors.New("owner is ready to cut over"))
+		assert.Same(t, failed, stopReason(ctx, workers), "the first failure stopped the copy, not the cancel after it")
+	})
+
+	t.Run("a plain cancel is ctx.Err() as it stands", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		workers, stop := context.WithCancelCause(ctx)
+		defer stop(nil)
+		cancel()
+		assert.Equal(t, context.Canceled, stopReason(ctx, workers))
+	})
+
+	t.Run("a cancel with a cause is the cause and a cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		workers, stop := context.WithCancelCause(ctx)
+		defer stop(nil)
+		cause := errors.New("owner is ready to cut over")
+		cancel(cause)
+		err := stopReason(ctx, workers)
+		assert.ErrorIs(t, err, cause)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.EqualError(t, err, "owner is ready to cut over (context canceled)")
+	})
+}
+
+// A passed deadline is reported as context.DeadlineExceeded as it stands,
+// and a cause that already wraps the cancellation — the CLI's signal cause
+// is one — is returned as it stands rather than wrapped a second time.
+func TestEndedWithReportsADeadlineAndAWrappedCancellationAsTheyStand(t *testing.T) {
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Unix(0, 0))
+	defer cancelExpired()
+	<-expired.Done()
+	assert.Equal(t, context.DeadlineExceeded, endedWith(expired))
+
+	interrupted := fmt.Errorf("interrupted by signal: %w", context.Canceled)
+	caused, cancel := context.WithCancelCause(t.Context())
+	cancel(interrupted)
+	err := endedWith(caused)
+	assert.Same(t, interrupted, err, "a cause that is already a cancellation is reported as it stands")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded))
 }

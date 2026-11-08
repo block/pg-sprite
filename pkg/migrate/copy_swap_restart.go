@@ -1,12 +1,26 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 )
+
+// ErrRestartNotSupported is returned by [RunDesired] when
+// Options.CopySwap.Restart is set. The acknowledgement names one run to
+// discard, but on the declarative front door the derived plan, not the
+// operator, decides which statements take copy-and-swap and so which run
+// the acknowledgement would discard; a value left on an embedder's
+// configuration would throw away a stopped run's checkpoint, shadow, and
+// fence or slot on every later plan, and a plan whose statements route
+// elsewhere would fail on the acknowledgement after an earlier statement
+// committed. Starting a run over belongs on the imperative front door,
+// where the operator names the statement and the table together.
+var ErrRestartNotSupported = errors.New(
+	"the restart acknowledgement applies to the imperative front door only; desired-state execution resumes a stopped run and never starts one over")
 
 // checkRestartAck confirms that the restart acknowledgement names the
 // resolved target table, exactly as the force acknowledgement must: a

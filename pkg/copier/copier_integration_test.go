@@ -2,6 +2,7 @@ package copier_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -333,8 +334,12 @@ func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 		Clock:       pin.clock,
 	})
 	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	// The owner cancels with a cause of its own, as an embedder does; the
+	// copy must still read as the cancellation it is.
+	ctx, cancelWith := context.WithCancelCause(t.Context())
+	defer cancelWith(nil)
+	ownerStop := errors.New("owner is ready to cut over")
+	cancel := func() { cancelWith(ownerStop) }
 	results := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() { results <- c.Run(ctx, f.pool) })
@@ -355,7 +360,8 @@ func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 	const stopDeadline = 15 * time.Second
 	select {
 	case err := <-results:
-		assert.ErrorIs(t, err, context.Canceled)
+		assert.ErrorIs(t, err, context.Canceled, "a cancel with the owner's own cause is still a cancellation")
+		assert.ErrorIs(t, err, ownerStop, "and carries the owner's cause")
 	case <-time.After(stopDeadline):
 		t.Fatalf("copy did not stop within %s of cancellation", stopDeadline)
 	}
@@ -648,20 +654,16 @@ func (p *shadowPin) commit(t *testing.T) {
 
 // goneLock acquires the table lock and then terminates the session's
 // backend, so the server no longer grants the lock while the session still
-// believes it holds it: the default keepalive is long enough that only an
-// in-transaction confirmation can catch the loss.
+// believes it holds it. The keepalive is an hour away, so only an
+// in-transaction confirmation can catch the loss during the test. The
+// cleanup releases without waiting for the keepalive to notice;
+// TestTableLockKeepaliveLoss in pkg/dbconn covers that detection.
 func (f copierFixture) goneLock(t *testing.T, table string) *dbconn.TableLockSession {
 	t.Helper()
-	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table)
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table, dbconn.WithTableLockKeepalive(time.Hour))
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		const lockLossDeadline = 30 * time.Second
-		select {
-		case <-lock.Done():
-		case <-time.After(lockLossDeadline):
-			t.Errorf("lock session did not report loss within %s", lockLossDeadline)
-		}
-		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())))
+		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())), "releasing a session whose backend is gone fails")
 	})
 	f.terminateBackend(t, lock.BackendPID())
 	require.NoError(t, lock.Err(), "the keepalive has not yet noticed the loss; the in-transaction check must")
