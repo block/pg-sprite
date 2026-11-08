@@ -252,11 +252,16 @@ codes — are in [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
 ## Install
 
+Install with [Homebrew](https://brew.sh/) on macOS or Linux:
+
+```sh
+brew install block/tap/pg-sprite
+```
+
 Release archives for linux/darwin on amd64/arm64, with `checksums.txt`, are
-published on the [releases page](https://github.com/block/pg-sprite/releases)
-once tags exist. The binary is pure Go (the SQL parser is Wasm), so on any
-other platform — or without waiting for a release — `go install` works with
-no C toolchain:
+published on the [releases page](https://github.com/block/pg-sprite/releases).
+The binary is pure Go (the SQL parser is Wasm), so on any other platform, or
+to build an unreleased commit, `go install` works with no C toolchain:
 
 ```sh
 go install github.com/block/pg-sprite/cmd/pg-sprite@latest
