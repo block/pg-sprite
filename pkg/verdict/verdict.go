@@ -540,14 +540,15 @@ type Verdict struct {
 	Table string `json:"table,omitempty"`
 	// Detail is the human explanation: why refused, or what committed.
 	Detail string `json:"detail,omitempty"`
-	// WritesBlocked is true on an executed or failed copy-and-swap verdict
-	// whose run blocked the table's writes (offline mode, --block-writes):
-	// the write fence went on, and every write that reached it was refused
-	// with SQLSTATE 55006. On a failed verdict it is set only when the fence
-	// went on, and Detail says whether it still stands; a blocked-writes run
-	// that stopped before its fence went on reports false, since the table
-	// kept taking writes. False for every other verdict, including a live
-	// run's.
+	// WritesBlocked is true on an executed, failed, or refused copy-and-swap
+	// verdict whose run blocked the table's writes (offline mode,
+	// --block-writes): the write fence went on, and every write that reached
+	// it was refused with SQLSTATE 55006. On a failed verdict it is set only
+	// when the fence went on, and Detail says whether it still stands; on a
+	// refused verdict it is set only when the stopped run's fence still
+	// stands. A blocked-writes run that stopped before its fence went on
+	// reports false, since the table kept taking writes. False for every
+	// other verdict, including a live run's.
 	WritesBlocked bool `json:"writes_blocked,omitempty"`
 	// Abandoned is true on a failed copy-and-swap verdict whose run the
 	// engine abandoned on a data fault: the shadow is dropped, the hold on
