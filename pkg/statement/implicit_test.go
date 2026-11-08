@@ -205,11 +205,20 @@ func TestIndexConstraints(t *testing.T) {
 
 	declared, err = statement.IndexConstraints(`CREATE TABLE t (
 		LIKE other INCLUDING ALL,
+		LIKE s.indexed INCLUDING INDEXES,
+		LIKE plain,
+		LIKE excluded EXCLUDING INDEXES,
+		LIKE everything_but INCLUDING ALL EXCLUDING INDEXES,
 		CONSTRAINT t_pk PRIMARY KEY (a)
 	)`)
 	require.NoError(t, err)
-	assert.Equal(t, statement.DeclaredIndexConstraints{Names: []string{"t_pk"}, Like: true}, declared,
-		"a LIKE clause is reported, since it can copy constraints the statement does not declare")
+	assert.Equal(t, statement.DeclaredIndexConstraints{
+		Names: []string{"t_pk"},
+		IndexesCopiedFrom: []statement.QualifiedName{
+			{Name: "other"},
+			{Schema: "s", Name: "indexed"},
+		},
+	}, declared, "only the LIKE clauses that include indexes copy constraints the statement does not declare")
 
 	_, err = statement.IndexConstraints("CREATE INDEX i ON t (a)")
 	require.ErrorIs(t, err, statement.ErrNotCreateTable)

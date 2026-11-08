@@ -118,6 +118,64 @@ func TestUnnamedPrimaryKeyMergedWithANamedUniqueConstraintIsRefused(t *testing.T
 		);`, `table "t" declares 2 primary key, unique, and exclusion constraints, and building it kept 1`)
 }
 
+// A LIKE clause that does not include indexes copies no constraints, so the
+// merge of an unnamed constraint into a named one is still counted. The
+// live table holds both constraints, and a plan from the merged build
+// would drop t_a_key.
+func TestUnnamedConstraintMergedBesideALikeClauseIsRefused(t *testing.T) {
+	live := `
+		CREATE TABLE %[1]s.template (b int UNIQUE);
+		CREATE TABLE %[1]s.t (a int UNIQUE, b int);
+		ALTER TABLE %[1]s.t ADD CONSTRAINT c2 UNIQUE (a);`
+	for name, like := range map[string]string{
+		"plain":             "LIKE template",
+		"excluding indexes": "LIKE template EXCLUDING INDEXES",
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool, schema := mergedConstraintsFixture(t, live)
+			requireBuildRefuses(t, pool, schema, `
+				CREATE TABLE t (
+				  `+like+`,
+				  a int UNIQUE,
+				  CONSTRAINT c2 UNIQUE (a)
+				);`, `table "t" declares 2 primary key, unique, and exclusion constraints, and building it kept 1`)
+		})
+	}
+}
+
+// A LIKE clause that includes indexes copies its source's constraints after
+// the table is created, so they add to the count, and the declared
+// constraints still merge among themselves.
+func TestUnnamedConstraintMergedBesideCopiedIndexesIsRefused(t *testing.T) {
+	pool, schema := mergedConstraintsFixture(t, `CREATE TABLE %[1]s.template (b int UNIQUE);`)
+	requireBuildRefuses(t, pool, schema, `
+		CREATE TABLE t (
+		  LIKE template INCLUDING INDEXES,
+		  a int UNIQUE,
+		  CONSTRAINT c2 UNIQUE (a)
+		);`, `table "t" declares 2 primary key, unique, and exclusion constraints and copies 1 through LIKE, and building it kept 2`)
+}
+
+// A copied constraint is never merged with a declared one, even when the
+// two repeat each other exactly, so both are built and the file is not
+// refused.
+func TestCopiedConstraintIsKeptBesideARepeatedDeclaredOne(t *testing.T) {
+	pool, schema := mergedConstraintsFixture(t, `CREATE TABLE %[1]s.template (a int UNIQUE);`)
+	ds, err := statement.ParseDesired(`
+		CREATE TABLE t (
+		  LIKE template INCLUDING INDEXES,
+		  CONSTRAINT c1 UNIQUE (a)
+		);`)
+	require.NoError(t, err)
+	m, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	defs := make(map[string]string)
+	for _, con := range m.Constraints {
+		defs[con.Name] = con.Def
+	}
+	assert.Equal(t, map[string]string{"c1": "UNIQUE (a)", "t_a_key": "UNIQUE (a)"}, defs)
+}
+
 // Two constraints that differ in any way the server compares are both kept
 // by one CREATE TABLE, so their table renders and round-trips to an empty
 // plan.

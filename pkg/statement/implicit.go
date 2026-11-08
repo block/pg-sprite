@@ -97,10 +97,20 @@ type DeclaredIndexConstraints struct {
 	// in definition order: the name the statement states, or "" when the
 	// server chooses one.
 	Names []string
-	// Like reports a LIKE clause, which can copy further index constraints
-	// from another table, so the table built can hold more than Names.
-	Like bool
+	// IndexesCopiedFrom names, in definition order, the table each LIKE
+	// clause that includes indexes copies from. The server creates the
+	// copies after the table, so they are kept beside the declared
+	// constraints rather than merged with them, and the table built holds
+	// the declared constraints plus every PRIMARY KEY, UNIQUE, and EXCLUDE
+	// constraint these tables hold. A LIKE clause that excludes indexes
+	// copies none and is not listed.
+	IndexesCopiedFrom []QualifiedName
 }
+
+// likeIncludingIndexes is the bit a LIKE clause's options set when the
+// clause includes indexes, CREATE_TABLE_LIKE_INDEXES in PostgreSQL's
+// parsenodes.h. INCLUDING ALL sets it, and EXCLUDING INDEXES clears it.
+const likeIncludingIndexes = 1 << 6
 
 // IndexConstraints returns the PRIMARY KEY, UNIQUE, and EXCLUDE constraints
 // a CREATE TABLE declares.
@@ -123,8 +133,11 @@ func IndexConstraints(sql string) (DeclaredIndexConstraints, error) {
 		}
 	}
 	for _, elt := range create.GetTableElts() {
-		if elt.GetTableLikeClause() != nil {
-			declared.Like = true
+		if like := elt.GetTableLikeClause(); like != nil {
+			if like.GetOptions()&likeIncludingIndexes != 0 {
+				rel := like.GetRelation()
+				declared.IndexesCopiedFrom = append(declared.IndexesCopiedFrom, QualifiedName{Schema: rel.GetSchemaname(), Name: rel.GetRelname()})
+			}
 			continue
 		}
 		if con := elt.GetConstraint(); con != nil {
