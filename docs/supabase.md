@@ -201,6 +201,29 @@ coverage uses the same executor. The [hosted suite](../integration/supabase/host
 also exercised preview, apply, convergence, and atomic rollback as the owning
 `postgres` role. Hosted non-owner privilege validation remains a follow-up.
 
+### Creating a new table that needs RLS
+
+pg-sprite creates a new table and applies its RLS in two separate runs, because
+the RLS declaration needs the table to exist. On a default Supabase project,
+every table `postgres` creates in `public` is granted to `anon` and
+`authenticated`, and the Data API serves it as soon as it exists. Until the RLS
+run commits, anyone with your project's anon key can read, insert, update, and
+delete the table's rows. A row inserted then keeps the `owner_id` its writer
+chose, so once RLS is on, your policies show it to that user as their own.
+
+Close the gap before you create the table:
+
+1. Turn off the project setting **Default privileges for new entities**
+   (`auto_expose_new_tables = false` under `[api]` in a local `config.toml`).
+   New tables then start with no Data API access.
+2. Create the table, then apply its RLS declaration.
+3. Grant the table to `anon` or `authenticated` yourself, now that its
+   policies are in place.
+
+If you keep the setting on, apply the RLS declaration straight after the
+create, before any app code or user can reach the table, and check that the
+table is still empty before you rely on it.
+
 ## What works today
 
 A disposable local `supabase/postgres:17.6.1.136` database (PostgreSQL 17.6)
@@ -270,6 +293,9 @@ outcome; they do not assume every unsuccessful change rolls back completely.
   change, and recreate them in one transaction, so no request sees the table
   without them. A change that rewrites the table, such as `uuid` to `text`, needs a
   new column of the new type that the policies move to
+- A new `public` table is open to the Data API until its RLS declaration is
+  applied, unless the project's default privileges for new entities are off;
+  see [creating a new table that needs RLS](#creating-a-new-table-that-needs-rls)
 - Work on tables your app owns. Leave Supabase-managed schemas such as
   `auth` and `storage` to Supabase
 - Realtime coverage is limited to INSERT/UPDATE subscriptions during the tested
