@@ -54,8 +54,9 @@ the sequencing across transaction boundaries *is* the safety mechanism.
 "Implicit or bounded" above is the mechanical detail behind the contract —
 autocommit-each-step has two shapes in the executor:
 
-- **Brief catalog steps (step kind `brief`) and `VALIDATE CONSTRAINT` (step
-  kind `validate-constraint`)** each run as one short *explicit* transaction:
+- **Brief catalog steps (step kind `brief`) and `VALIDATE CONSTRAINT`, alone or
+  beside operations that take only `SHARE UPDATE EXCLUSIVE` (step kind
+  `validate-constraint`)** each run as one short *explicit* transaction:
   `BEGIN` → `SET LOCAL lock_timeout` / `statement_timeout` → the statement →
   `COMMIT` (`pkg/executor`'s bounded runner). When the preflight proof
   carries a schema, the same `SET LOCAL` pins `search_path` to that schema

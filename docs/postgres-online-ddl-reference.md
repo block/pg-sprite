@@ -236,6 +236,12 @@ ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES parent (id) NOT
 ALTER TABLE child VALIDATE CONSTRAINT fk;  -- SHARE UPDATE EXCLUSIVE, online
 ```
 
+Each statement must commit on its own. A lock is held until its transaction ends,
+so a `VALIDATE` in the same transaction block as the `ADD`, or in the same `ALTER
+TABLE` statement, scans every row under the `ADD`'s lock instead. `lint` flags the
+block form as [`validate-in-transaction`](#validate-in-transaction), and the planner
+refuses the one-statement form until it is split.
+
 ### Safe pattern: add a primary key / unique constraint online
 
 ```sql
@@ -353,6 +359,15 @@ writes, only competing DDL and vacuum:
 The submitted form is already PostgreSQL's safe online idiom (for example
 `CREATE INDEX CONCURRENTLY` or `ADD CONSTRAINT ... NOT VALID`). It runs as
 written and does not block the table while it runs.
+
+`VALIDATE CONSTRAINT` is the idiom only in a statement of its own, or beside other
+operations that take `SHARE UPDATE EXCLUSIVE` alone: another `VALIDATE`, `SET
+STATISTICS`, a column's `SET` / `RESET` options, and every table storage parameter
+except `user_catalog_table`. One `ALTER TABLE` holds the strongest lock any of its
+operations needs for the whole statement, so a `VALIDATE` beside any other operation,
+`SET STORAGE` included, scans under that lock. The planner classifies it as [`safer-idiom`](#safer-idiom), and the statement
+is refused with [`rewrite-required`](#rewrite-required) and the advice to submit each
+operation as its own statement.
 
 The bucket is not uniform: the concurrent builds and `VALIDATE` hold only
 `SHARE UPDATE EXCLUSIVE` while they work, and the `NOT VALID` / `USING INDEX`
@@ -669,6 +684,34 @@ PARTITION`) sits inside a transaction block the script opens with `BEGIN` or
 so the script stops at that statement and the whole block rolls back. Move the
 statement out of the block and run it on its own. Only `lint` reports this code:
 it is a property of the script, and `migrate` takes one statement at a time.
+
+### `validate-in-transaction`
+
+| Verdict | Lock | Scan / rewrite | Lint exit |
+|---|---|---|---|
+| lint warning — runs, but blocks | the lock the earlier statement took, held until `COMMIT` | full validation scan under that lock | 1 |
+
+A `VALIDATE CONSTRAINT` sits inside a transaction block the script opens with
+`BEGIN` or `START TRANSACTION`, after an earlier statement in the same block locked
+the same table. The usual case is the `ADD CONSTRAINT ... NOT VALID` it validates.
+A lock is held until the block ends, so the validation scans every row while the
+table is still under the earlier statement's lock: `ACCESS EXCLUSIVE` for a `CHECK`,
+which blocks reads and writes, and `SHARE ROW EXCLUSIVE` for a foreign key, which
+blocks writes. On its own, `VALIDATE` takes only `SHARE UPDATE EXCLUSIVE`, which
+blocks neither. Commit before the `VALIDATE` so it runs in a transaction of its own.
+
+Lint follows the block the way PostgreSQL does. A `BEGIN` inside an open block keeps
+its locks. `ROLLBACK TO SAVEPOINT` releases the locks taken since the savepoint, and
+`RELEASE SAVEPOINT` keeps them. `REINDEX TABLE` holds `SHARE` on the table, `TRUNCATE`
+holds `ACCESS EXCLUSIVE`, and `LOCK TABLE` holds the mode it names, which counts from
+`SHARE` up. A table renamed in the block keeps its lock under the new name. An earlier
+statement that takes `SHARE UPDATE EXCLUSIVE` alone, such as `SET STATISTICS`, does
+not count. Lint matches tables by the name each statement gives, so it does not see a
+lock a statement takes on a table it does not name: the table a foreign key
+references, the table under an index that `DROP INDEX` names, a partition or child
+that a statement reaches without naming it, or a table that `TRUNCATE ... CASCADE`
+or a new trigger locks. Only `lint` reports this code: it is a property of the
+script, and `migrate` takes one statement at a time.
 
 ### `rewrite-required`
 

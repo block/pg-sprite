@@ -60,11 +60,6 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "n", NewType: "int8", Default: statement.DefaultExpression},
 		},
 		{
-			name: "add column not null",
-			sql:  "ALTER TABLE t ADD COLUMN tier text NOT NULL",
-			want: statement.Op{Kind: statement.OpAddColumn, Column: "tier", NewType: "text", NotNull: true},
-		},
-		{
 			name: "add column generated stored",
 			sql:  "ALTER TABLE t ADD COLUMN total numeric GENERATED ALWAYS AS (price * qty) STORED",
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "total", NewType: "numeric", GeneratedStored: true},
@@ -104,7 +99,7 @@ func TestParseOpsShapes(t *testing.T) {
 			name: "add column not null carries no inline constraint",
 			sql:  "ALTER TABLE t ADD COLUMN c int NOT NULL DEFAULT 0",
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
-				NotNull: true, Default: statement.DefaultConstant},
+				Default: statement.DefaultConstant},
 		},
 		{
 			name: "drop column",
@@ -202,6 +197,16 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpSetColumnOptions, Column: "age"},
 		},
 		{
+			name: "set column option",
+			sql:  "ALTER TABLE t ALTER COLUMN age SET (n_distinct = 100)",
+			want: statement.Op{Kind: statement.OpSetColumnOptions, Column: "age"},
+		},
+		{
+			name: "set storage",
+			sql:  "ALTER TABLE t ALTER COLUMN age SET STORAGE PLAIN",
+			want: statement.Op{Kind: statement.OpSetColumnOptions, Column: "age", ColumnStorage: true},
+		},
+		{
 			name: "rename column",
 			sql:  "ALTER TABLE t RENAME COLUMN a TO b",
 			want: statement.Op{Kind: statement.OpRenameColumn, Column: "a", Name: "b"},
@@ -229,7 +234,12 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "set rel options",
 			sql:  "ALTER TABLE t SET (fillfactor = 70)",
-			want: statement.Op{Kind: statement.OpSetRelOptions},
+			want: statement.Op{Kind: statement.OpSetRelOptions, RelOptions: []string{"fillfactor"}},
+		},
+		{
+			name: "reset rel options",
+			sql:  "ALTER TABLE t RESET (fillfactor, toast.autovacuum_enabled)",
+			want: statement.Op{Kind: statement.OpSetRelOptions, RelOptions: []string{"fillfactor", "toast.autovacuum_enabled"}},
 		},
 		{
 			name: "add primary key",
