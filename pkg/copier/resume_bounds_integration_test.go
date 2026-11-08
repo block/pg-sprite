@@ -44,6 +44,33 @@ func TestClearAboveRemovesTheTailInChunkerSizedBatches(t *testing.T) {
 	assert.Equal(t, int64(100), f.count(t, shadow.ShadowTable(), "id <= 100"), "every key through the watermark stays")
 }
 
+// A tail that is not a multiple of the batch ends on the short batch, not
+// on an extra empty one, and only the first batch is the fence. With the
+// shadow holding keys 1..275 and the watermark at 100, a batch of 50 takes
+// the 175 keys above in three full batches and a short one of 25, which
+// ends the clear: four deletes. The first batch's guard takes the shadow
+// in SHARE ROW EXCLUSIVE to wait out the earlier run's stragglers; the
+// three after it hold ROW EXCLUSIVE, what their delete holds, so none
+// queues behind a writer the fence already waited out.
+func TestClearAboveEndsAtTheFirstShortBatchAndFencesOnlyTheFirst(t *testing.T) {
+	f := newCopierFixture(t)
+	target, lock, shadow := f.prepareClearedShadow(t, 275)
+	shadowName := pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()
+	sent := newStatementLog()
+	pool := f.tracedPool(t, sent)
+
+	err := copier.ClearAbove(t.Context(), pool, target, shadow, lock, copier.NewWatermark(100), copier.Options{
+		Chunker: copier.ChunkerOptions{InitialRows: 50, MaxRows: 50},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, 4, sent.count(clearStatementPrefix(f, shadow)), "three full batches of 50, then the short batch of 25 that ends the clear")
+	assert.Equal(t, 1, sent.count("LOCK TABLE "+shadowName+" IN SHARE ROW EXCLUSIVE MODE"), "only the first batch is the fence")
+	assert.Equal(t, 3, sent.count("LOCK TABLE "+shadowName+" IN ROW EXCLUSIVE MODE"), "every later batch holds what its delete holds")
+	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id > 100"), "every key above the watermark is gone")
+	assert.Equal(t, int64(100), f.count(t, shadow.ShadowTable(), "id <= 100"), "every key through the watermark stays")
+}
+
 // Every clear batch runs under the caller's lock_timeout and
 // statement_timeout, not the pool's session defaults and not the copier's
 // own (LK-2): the fence waits behind a straggling writer for exactly as

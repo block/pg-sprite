@@ -23,9 +23,9 @@ import (
 // only rows the shadow has, and the copier that resumes from the same
 // watermark lands the rest. ClearAbove refuses what NewCopier refuses and
 // bounds each batch as a chunk transaction is bounded. Of opts it honors
-// LockTimeout, StatementTimeout, Chunker (the batch size) and Clock; the
-// clear runs one batch at a time and reports no progress, so Workers and
-// Tracker have no effect. It runs under the
+// LockTimeout, StatementTimeout and Chunker (the batch size, read once);
+// the clear runs one batch at a time, times nothing, and reports no
+// progress, so Workers, Clock and Tracker have no effect. It runs under the
 // lock session's Bind context, so a lost lock cancels the batch in flight
 // (LK-1). A complete watermark has nothing above it and clears nothing.
 func ClearAbove(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.TableLockSession, from Watermark, opts Options) error {

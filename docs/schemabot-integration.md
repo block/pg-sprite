@@ -345,7 +345,12 @@ the slot under the row (decoding target):
 A refusal from either read leaves the row and the slot as they were. A `Reconcile` that fails
 after its marker leaves the row in `reconciling`, and `InspectResume` answers that row as
 reconcile whatever the catalog shows under the slot name, so the adapter repeats `Start`
-rather than deciding anything itself.
+rather than deciding anything itself. A `Reconcile` whose clear of the shadow above the
+watermark cannot take its fence within the caller's `lock_timeout` — an earlier run's
+transaction still writing into the shadow — returns the server's `55P03` as a
+`*pgconn.PgError`, not a refusal. It fails before the marker and before any slot command, so
+the row, its watermark, and the shadow are as they were, and repeating `Start` once the
+writer has ended is safe.
 
 #### What a live `Run` holds open
 

@@ -80,14 +80,14 @@ func NewReconciler(cfg dbconn.Config, lock *dbconn.TableLockSession, store *chec
 }
 
 // clearOptions bounds the reconcile's clear of the shadow as its pass is
-// bounded. The copier's worker count has no bearing on a clear, which
-// runs one batch at a time, and is left to its default.
+// bounded. The copier's worker count and clock have no bearing on a clear,
+// which runs one batch at a time and times nothing, and are left to their
+// defaults.
 func clearOptions(opts checksum.Options) copier.Options {
 	return copier.Options{
 		LockTimeout:      opts.LockTimeout,
 		StatementTimeout: opts.StatementTimeout,
 		Chunker:          opts.Chunker,
-		Clock:            opts.Clock,
 	}
 }
 

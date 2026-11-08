@@ -3,11 +3,15 @@ package schemachange_test
 import (
 	"context"
 	"math"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -129,6 +133,89 @@ func TestReconcileRetriesAfterTheClearFenceTimesOut(t *testing.T) {
 	})
 	assert.Equal(t, 0, reconciled.Outcome.Collisions)
 	assert.Equal(t, 0, f.shadowRowsAbove(t, shadow, 300))
+}
+
+// The reconcile's clear runs under the budgets the caller set for the
+// pass, not the copier's defaults (LK-2). Each clear batch sets its
+// lock_timeout and statement_timeout just before its delete, so the budget
+// line the pool sent last before every delete of the shadow above the
+// watermark is the clear's own. The copy left nothing differing, so the
+// pass recopies nothing and every such delete is the clear's.
+func TestReconcileClearRunsUnderTheCallersBudgets(t *testing.T) {
+	f := newReconcileFixture(t, 500)
+	shadow := f.buildShadow(t)
+	copyAll(t, f, newCopier(t, f, shadow))
+	cp := f.row(shadow, checkpoint.PhaseCopying, copier.NewWatermark(300), "", 0)
+	require.NoError(t, f.store.Save(t.Context(), f.lock, cp))
+
+	sent := &budgetLog{
+		deletePrefix: "DELETE FROM " + pgx.Identifier{f.table.Schema, shadow.ShadowTable()}.Sanitize() + " WHERE",
+	}
+	poolConfig, err := pgxpool.ParseConfig(f.cfg.URL)
+	require.NoError(t, err)
+	poolConfig.ConnConfig.Tracer = sent
+	pool, err := pgxpool.NewWithConfig(t.Context(), poolConfig)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	reconciler, err := schemachange.NewReconciler(f.cfg, f.lock, f.store, f.target, shadow, checksum.Options{
+		LockTimeout:      1500 * time.Millisecond,
+		StatementTimeout: 7 * time.Second,
+		Chunker:          copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
+	})
+	require.NoError(t, err)
+	reconciled, err := reconciler.Reconcile(t.Context(), pool, cp)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		assert.NoError(t, reconciled.Slot.Close(ctx))
+		assert.NoError(t, decode.DropSlot(ctx, f.cfg, f.pool, reconciled.Slot.Name()))
+	})
+
+	// Keys 301..500 in batches of 100: two full batches and the empty one
+	// that ends the clear.
+	assert.Equal(t, []string{
+		"SET LOCAL lock_timeout = 1500; SET LOCAL statement_timeout = 7000",
+		"SET LOCAL lock_timeout = 1500; SET LOCAL statement_timeout = 7000",
+		"SET LOCAL lock_timeout = 1500; SET LOCAL statement_timeout = 7000",
+	}, sent.budgetsBeforeDeletes(), "every clear batch set the caller's budgets")
+	assert.Equal(t, 0, f.shadowRowsAbove(t, shadow, 300))
+}
+
+// budgetLog is a pgx query tracer that records, for every statement
+// starting with deletePrefix, the budget line its connection sent last
+// before it.
+type budgetLog struct {
+	deletePrefix string
+
+	mu      sync.Mutex
+	last    map[*pgx.Conn]string
+	budgets []string
+}
+
+func (l *budgetLog) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last == nil {
+		l.last = map[*pgx.Conn]string{}
+	}
+	switch {
+	case strings.HasPrefix(data.SQL, "SET LOCAL lock_timeout"):
+		l.last[conn] = data.SQL
+	case strings.HasPrefix(data.SQL, l.deletePrefix):
+		l.budgets = append(l.budgets, l.last[conn])
+	}
+	return ctx
+}
+
+func (l *budgetLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// budgetsBeforeDeletes is the budget line in force for each recorded
+// delete, in the order the deletes were sent.
+func (l *budgetLog) budgetsBeforeDeletes() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.budgets)
 }
 
 // With nothing landed there is no pass, so the reconcile leaves the shadow
