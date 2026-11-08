@@ -99,6 +99,10 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 		}
 		classifier.DependentViews, classifier.DropDependentViews, classifier.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
 		classifier.DependentPolicies, classifier.DropDependentPolicies, classifier.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
+		classifier.DependentTriggers = planner.ColumnDependents(deps.Triggers)
+		classifier.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
+		classifier.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
+		classifier.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)
 	}
 	if adds {
 		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, schema, st.Table(), st.SQL()); err != nil {

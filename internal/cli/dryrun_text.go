@@ -60,6 +60,25 @@ func writeDryRunText(out io.Writer, pal palette, report plan.Report) error {
 	return w.err
 }
 
+// writeDependentHelp writes the manual path for each kind of dependent
+// that blocks d. The diagnostic above names only the kind d's reason
+// names, so each other kind is introduced by name.
+func writeDependentHelp(w *stickyWriter, d planner.Decision) {
+	help := func(reason planner.Reason, singular, plural string, names []string, text string) {
+		if len(names) == 0 {
+			return
+		}
+		if d.Reason != reason {
+			text = "the change is also blocked by " + planner.DependentsPhrase(singular, plural, names) + ": " + text
+		}
+		w.diag("help", "", text)
+	}
+	help(planner.ReasonDependentView, "view", "views", d.DependentViews, "drop or redefine those views first, then re-plan")
+	help(planner.ReasonDependentPolicy, "policy", "policies", d.DependentPolicies, d.DependentFix.Help("policies"))
+	help(planner.ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers, d.DependentFix.Help("triggers"))
+	help(planner.ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns, planner.GeneratedColumnHelp)
+}
+
 // writeStatementDiagnostics renders one plan statement's labeled entries —
 // the statement itself, its refusal, its classifications, guidance, the
 // substitution notes, and the docs anchors — and returns the execution
@@ -81,11 +100,9 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
 		codes = appendCode(codes, string(d.Reason))
-		if len(d.DependentViews) > 0 {
-			w.diag("help", "", "drop or redefine those views first, then re-plan")
-		}
-		if len(d.DependentPolicies) > 0 {
-			w.diag("help", "", d.PolicyFix.Help())
+		writeDependentHelp(w, d)
+		if len(d.PartitionKeyTables) > 0 {
+			w.diag("help", "", planner.PartitionKeyHelp)
 		}
 		if d.Reason == planner.ReasonNotNullWithoutDefault && !notNullHelped {
 			notNullHelped = true
@@ -351,6 +368,12 @@ func impactText(r planner.Reason) string {
 		return "changes a column a view reads; PostgreSQL refuses this until the view is dropped or redefined"
 	case planner.ReasonDependentPolicy:
 		return "changes a column a row-level security policy reads; PostgreSQL refuses this until the policy is dropped"
+	case planner.ReasonDependentTrigger:
+		return "changes a column a trigger's UPDATE OF list or WHEN condition names; PostgreSQL refuses this until the trigger is dropped"
+	case planner.ReasonDependentGeneratedColumn:
+		return "changes a column a generated column reads; PostgreSQL refuses this until the generated column is dropped, except that PostgreSQL 14 drops the generated column along with a dropped column"
+	case planner.ReasonPartitionKey:
+		return "changes a partition key column; PostgreSQL never retypes or drops one"
 	case planner.ReasonNotNullWithoutDefault:
 		return "adds a NOT NULL column with no default to a table that holds rows; PostgreSQL refuses this because every existing row would hold NULL"
 	case planner.ReasonCascadingDrop:
@@ -406,8 +429,21 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			", and PostgreSQL refuses to retype or drop a column while a view reads it"
 	}
 	if d.Reason == planner.ReasonDependentPolicy {
-		return d.Operation + " changes a column read by " + planner.PoliciesPhrase(d.DependentPolicies) +
+		return d.Operation + " changes a column read by " + planner.DependentsPhrase("policy", "policies", d.DependentPolicies) +
 			", and PostgreSQL refuses to retype or drop a column while a policy reads it"
+	}
+	if d.Reason == planner.ReasonDependentTrigger {
+		return d.Operation + " changes a column named by " + planner.DependentsPhrase("trigger", "triggers", d.DependentTriggers) +
+			", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it"
+	}
+	if d.Reason == planner.ReasonDependentGeneratedColumn {
+		return d.Operation + " changes a column read by " +
+			planner.DependentsPhrase("generated column", "generated columns", d.DependentGeneratedColumns) +
+			", and PostgreSQL refuses to retype or drop a column while a generated column reads it, except that PostgreSQL 14 drops the generated column along with a dropped column"
+	}
+	if d.Reason == planner.ReasonPartitionKey {
+		return d.Operation + " changes a column in the partition key of " + strings.Join(d.PartitionKeyTables, ", ") +
+			", and PostgreSQL never retypes or drops a partition key column"
 	}
 	if d.Reason == planner.ReasonNotNullWithoutDefault {
 		return d.Operation + " adds a NOT NULL column with no default to a table that holds rows, " +

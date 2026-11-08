@@ -116,6 +116,10 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			}
 			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
 			facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
+			facts.DependentTriggers = planner.ColumnDependents(deps.Triggers)
+			facts.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
+			facts.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
+			facts.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)
 		}
 	}
 	report.TableExists = &tableExists
@@ -245,6 +249,11 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 			return nil, "", fmt.Errorf("classify derived statement %q: %w", canonical, err)
 		}
 		plans = append(plans, classified)
+		// A generated column an earlier statement drops no longer blocks
+		// a later statement's change to the columns it reads.
+		if facts, err = planner.FactsAfter(canonical, facts); err != nil {
+			return nil, "", fmt.Errorf("apply derived statement %q to the planning facts: %w", canonical, err)
+		}
 	}
 	routed := router.Route(plans)
 	planned := make([]plan.Statement, 0, len(changes))

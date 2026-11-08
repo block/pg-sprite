@@ -137,6 +137,9 @@ refusal — never a silently wrong or incomplete result:
 - **Retyping or dropping a column a row-level security policy reads is refused**
   — PostgreSQL would refuse it anyway; the plan names the policies to drop and
   recreate around the change.
+- **Retyping or dropping a column a trigger, a generated column, or a partition
+  key depends on is refused** — PostgreSQL would refuse it anyway; the plan names
+  the triggers, generated columns, or partitioned tables in the way.
 - **Adding a `NOT NULL` column with no default to a table with rows is refused**
   — PostgreSQL would refuse it anyway, after taking the table's exclusive lock;
   the plan suggests a constant default or a backfill first.

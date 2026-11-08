@@ -238,12 +238,12 @@ func TestClassifyRefusesChangingAColumnAPolicyReads(t *testing.T) {
 		DropDependentPolicies: map[string][]string{"owner_id": policies},
 		OwnDependentPolicies:  map[string][]string{"owner_id": policies},
 	}
-	for sql, fix := range map[string]planner.PolicyFix{
-		"ALTER TABLE documents ALTER COLUMN owner_id TYPE varchar(64)":               planner.PolicyFixRecreateAroundChange,
-		"ALTER TABLE documents ALTER COLUMN owner_id TYPE text":                      planner.PolicyFixRecreateAroundChange,
-		"ALTER TABLE documents ALTER COLUMN owner_id TYPE uuid USING owner_id::uuid": planner.PolicyFixExpandContract,
-		"ALTER TABLE documents DROP COLUMN owner_id":                                 planner.PolicyFixRewritePolicies,
-		"ALTER TABLE ONLY documents ALTER COLUMN owner_id TYPE text":                 planner.PolicyFixRecreateAroundChange,
+	for sql, fix := range map[string]planner.DependentFix{
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE varchar(64)":               planner.DependentFixRecreateAroundChange,
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE text":                      planner.DependentFixRecreateAroundChange,
+		"ALTER TABLE documents ALTER COLUMN owner_id TYPE uuid USING owner_id::uuid": planner.DependentFixExpandContract,
+		"ALTER TABLE documents DROP COLUMN owner_id":                                 planner.DependentFixRewriteDependents,
+		"ALTER TABLE ONLY documents ALTER COLUMN owner_id TYPE text":                 planner.DependentFixRecreateAroundChange,
 	} {
 		plan, err := planner.Classify(sql, facts)
 		require.NoError(t, err, sql)
@@ -252,7 +252,7 @@ func TestClassifyRefusesChangingAColumnAPolicyReads(t *testing.T) {
 		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
 		assert.Equal(t, planner.ReasonDependentPolicy, d.Reason, sql)
 		assert.Equal(t, policies, d.DependentPolicies, sql)
-		assert.Equal(t, fix, d.PolicyFix, sql)
+		assert.Equal(t, fix, d.DependentFix, sql)
 		assert.Empty(t, d.DependentViews, sql)
 		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
 	}
@@ -270,11 +270,284 @@ func TestClassifyRefusesChangingAColumnAPolicyReads(t *testing.T) {
 	}
 }
 
+// PostgreSQL refuses to retype or drop a column a trigger's UPDATE OF list
+// or WHEN condition names, even a type change that would otherwise relabel
+// in place, so either change is refused with the triggers named. The
+// manual path follows what the change would do without the triggers, as
+// for a policy. A rename, which the trigger follows, classifies as usual.
+func TestClassifyRefusesChangingAColumnATriggerNames(t *testing.T) {
+	triggers := []string{`"audit_status" ON "public"."orders"`}
+	facts := planner.Facts{
+		ColumnTypes:       map[string]string{"status": "character varying(16)", "note": "text"},
+		DependentTriggers: dependentsEverywhere("status", triggers),
+	}
+	for sql, fix := range map[string]planner.DependentFix{
+		"ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)":      planner.DependentFixRecreateAroundChange,
+		"ALTER TABLE orders ALTER COLUMN status TYPE int USING 0":      planner.DependentFixExpandContract,
+		"ALTER TABLE orders DROP COLUMN status":                        planner.DependentFixRewriteDependents,
+		"ALTER TABLE ONLY orders ALTER COLUMN status TYPE varchar(64)": planner.DependentFixRecreateAroundChange,
+	} {
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonDependentTrigger, d.Reason, sql)
+		assert.Equal(t, triggers, d.DependentTriggers, sql)
+		assert.Equal(t, fix, d.DependentFix, sql)
+	}
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE orders RENAME COLUMN status TO state":    planner.ReasonAppBreakingRename,
+		"ALTER TABLE orders ALTER COLUMN note TYPE text":      planner.ReasonBinaryCoercible,
+		"ALTER TABLE orders ALTER COLUMN status SET NOT NULL": planner.ReasonSaferIdiom,
+	} {
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, reason, d.Reason, sql)
+		assert.Empty(t, d.DependentTriggers, sql)
+	}
+}
+
+// PostgreSQL refuses to retype or drop a column a generated column reads,
+// so either change is refused with the generated columns named.
+func TestClassifyRefusesChangingAColumnAGeneratedColumnReads(t *testing.T) {
+	generated := []string{`"public"."orders"."total_cents"`}
+	facts := planner.Facts{
+		ColumnTypes:               map[string]string{"amount": "numeric(10,2)"},
+		DependentGeneratedColumns: dependentsEverywhere("amount", generated),
+	}
+	for _, sql := range []string{
+		"ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)",
+		"ALTER TABLE orders DROP COLUMN amount",
+	} {
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonDependentGeneratedColumn, d.Reason, sql)
+		assert.Equal(t, generated, d.DependentGeneratedColumns, sql)
+	}
+}
+
+// PostgreSQL runs every drop of an ALTER TABLE before its type changes,
+// wherever the drop is written, so a generated column the same statement
+// drops does not block widening the column it reads. A copy the drop does
+// not reach, such as a child's under ONLY or one the child declares
+// itself, still blocks it.
+func TestClassifyDiscountsAGeneratedColumnTheStatementDrops(t *testing.T) {
+	own := `"public"."orders"."total"`
+	child := `"public"."orders_archive"."total"`
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"amount": "numeric(10,2)", "total": "numeric"},
+		DependentGeneratedColumns: planner.ColumnDependents{
+			Tree: map[string][]string{"amount": {child, own}},
+			Drop: map[string][]string{"amount": {child, own}},
+			Own:  map[string][]string{"amount": {own}},
+		},
+		GeneratedColumnCopies: planner.ColumnDependents{
+			Tree: map[string][]string{"total": {child, own}},
+			Drop: map[string][]string{"total": {child, own}},
+			Own:  map[string][]string{"total": {own}},
+		},
+	}
+	for _, sql := range []string{
+		"ALTER TABLE orders DROP COLUMN total, ALTER COLUMN amount TYPE numeric(12,2)",
+		"ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2), DROP COLUMN total",
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		assert.Equal(t, planner.RouteNative, plan.Route, sql)
+		require.Len(t, plan.Decisions, 2, sql)
+		for _, d := range plan.Decisions {
+			assert.Empty(t, d.DependentGeneratedColumns, sql)
+		}
+	}
+
+	plan, err := planner.Classify("ALTER TABLE ONLY orders DROP COLUMN total, ALTER COLUMN amount TYPE numeric(12,2)", facts)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.RouteNative, plan.Decisions[1].Route, "ONLY reaches the table's own generated column alone")
+
+	declared := facts
+	declared.GeneratedColumnCopies.Drop = map[string][]string{"total": {own}}
+	plan, err = planner.Classify("ALTER TABLE orders DROP COLUMN total, ALTER COLUMN amount TYPE numeric(12,2)", declared)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.ReasonDependentGeneratedColumn, plan.Decisions[1].Reason)
+	assert.Equal(t, []string{child}, plan.Decisions[1].DependentGeneratedColumns,
+		"the child declares its own copy, which the drop leaves")
+
+	after, err := planner.FactsAfter("ALTER TABLE orders DROP COLUMN total", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ColumnDependents{Tree: map[string][]string{}, Drop: map[string][]string{}, Own: map[string][]string{}},
+		after.DependentGeneratedColumns)
+	assert.Equal(t, []string{child, own}, facts.DependentGeneratedColumns.Tree["amount"], "the caller's facts are left as they were")
+	d := classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", after)
+	assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason, "a later statement sees the drop")
+}
+
+// The drops of one ALTER TABLE run in the order written, so a drop of a
+// column a generated column reads is refused unless the same statement
+// drops the generated column first. Every other operation runs after all
+// the drops, so a type change sees the generated column gone wherever its
+// drop is written.
+func TestClassifyJudgesADropByTheDropsWrittenBeforeIt(t *testing.T) {
+	total := `"public"."ledger"."total"`
+	facts := planner.Facts{
+		ColumnTypes:               map[string]string{"amount": "integer", "total": "integer"},
+		DependentGeneratedColumns: dependentsEverywhere("amount", []string{total}),
+		GeneratedColumnCopies:     dependentsEverywhere("total", []string{total}),
+	}
+
+	plan, err := planner.Classify("ALTER TABLE ledger DROP COLUMN amount, DROP COLUMN total", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.RouteRefuse, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.ReasonDependentGeneratedColumn, plan.Decisions[0].Reason)
+	assert.Equal(t, []string{total}, plan.Decisions[0].DependentGeneratedColumns)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[1].Reason)
+
+	plan, err = planner.Classify("ALTER TABLE ledger DROP COLUMN total, DROP COLUMN amount", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.RouteNative, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+	for _, d := range plan.Decisions {
+		assert.Equal(t, planner.ReasonMetadataOnly, d.Reason)
+		assert.Empty(t, d.DependentGeneratedColumns)
+	}
+}
+
+// A partition's copy of a generated column goes when the parent's copy is
+// dropped, and PostgreSQL refuses to drop it on its own, so a refusal
+// names only the parent's copy. A copy a child declares itself survives
+// the parent's drop and is named too.
+func TestClassifyNamesOnlyTheGeneratedColumnCopiesToDrop(t *testing.T) {
+	own := `"public"."events"."total"`
+	partition := `"public"."events_2026"."total"`
+	declared := `"public"."events_legacy"."total"`
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"amount": "integer"},
+		DependentGeneratedColumns: planner.ColumnDependents{
+			Tree: map[string][]string{"amount": {partition, declared, own}},
+			Drop: map[string][]string{"amount": {partition, own}},
+			Own:  map[string][]string{"amount": {own}},
+		},
+		GeneratedColumnCopies: planner.ColumnDependents{
+			Tree: map[string][]string{"total": {partition, declared, own}},
+			Drop: map[string][]string{"total": {partition, own}},
+			Own:  map[string][]string{"total": {own}},
+		},
+	}
+	d := classifyWithFacts(t, "ALTER TABLE events ALTER COLUMN amount TYPE bigint", facts)
+	assert.Equal(t, planner.ReasonDependentGeneratedColumn, d.Reason)
+	assert.Equal(t, []string{declared, own}, d.DependentGeneratedColumns)
+
+	d = classifyWithFacts(t, "ALTER TABLE events DROP COLUMN amount", facts)
+	assert.Equal(t, []string{own}, d.DependentGeneratedColumns)
+}
+
+// A change several kinds of dependent block names every one of them, so
+// the manual path clears them all; the reason is the first kind.
+func TestClassifyNamesEveryKindOfDependentThatBlocks(t *testing.T) {
+	policy := []string{`"open_only" ON "public"."orders"`}
+	trigger := []string{`"audit_status" ON "public"."orders"`}
+	generated := []string{`"public"."orders"."status_upper"`}
+	facts := planner.Facts{
+		ColumnTypes:               map[string]string{"status": "character varying(16)"},
+		DependentPolicies:         map[string][]string{"status": policy},
+		DependentTriggers:         dependentsEverywhere("status", trigger),
+		DependentGeneratedColumns: dependentsEverywhere("status", generated),
+	}
+	d := classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentPolicy, d.Reason)
+	assert.Equal(t, policy, d.DependentPolicies)
+	assert.Equal(t, trigger, d.DependentTriggers)
+	assert.Equal(t, generated, d.DependentGeneratedColumns)
+	assert.Equal(t, `trigger "audit_status" ON "public"."orders" and generated column "public"."orders"."status_upper"`, d.OtherDependents())
+
+	facts.DependentPolicies, facts.DependentGeneratedColumns = nil, planner.ColumnDependents{}
+	d = classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentTrigger, d.Reason)
+	assert.Empty(t, d.OtherDependents())
+}
+
+// The manual path for a type change dependents block follows what the
+// conversion itself costs, so a widening a policy and a trigger both
+// block, or a trigger and a generated column, is still recreated around
+// rather than routed through a new column.
+func TestClassifyJudgesTheDependentFixByTheConversionAlone(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes:               map[string]string{"status": "character varying(16)"},
+		DependentPolicies:         map[string][]string{"status": {`"open_only" ON "public"."orders"`}},
+		DependentTriggers:         dependentsEverywhere("status", []string{`"audit_status" ON "public"."orders"`}),
+		DependentGeneratedColumns: dependentsEverywhere("status", []string{`"public"."orders"."status_upper"`}),
+	}
+	d := classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentPolicy, d.Reason)
+	assert.Equal(t, planner.DependentFixRecreateAroundChange, d.DependentFix)
+
+	facts.DependentPolicies = nil
+	d = classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)", facts)
+	assert.Equal(t, planner.ReasonDependentTrigger, d.Reason)
+	assert.Equal(t, planner.DependentFixRecreateAroundChange, d.DependentFix)
+
+	d = classifyWithFacts(t, "ALTER TABLE orders ALTER COLUMN status TYPE int USING 0", facts)
+	assert.Equal(t, planner.DependentFixExpandContract, d.DependentFix)
+}
+
+// PostgreSQL never retypes or drops a partition key column, so either
+// change is refused with the partitioned tables named. The partition key
+// is judged before every other dependent, since no object can be moved
+// aside to let the change run, and by what the change reaches: a
+// sub-partition's key counts against a recursive change and not against
+// one under ONLY.
+func TestClassifyRefusesChangingAPartitionKeyColumn(t *testing.T) {
+	parent := []string{`"public"."events"`}
+	sub := []string{`"public"."events_2026"`}
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"created_at": "timestamp without time zone", "region": "character varying(8)"},
+		PartitionKeys: planner.ColumnDependents{
+			Tree: map[string][]string{"created_at": parent, "region": sub},
+			Drop: map[string][]string{"created_at": parent, "region": sub},
+			Own:  map[string][]string{"created_at": parent},
+		},
+		DependentViews:    map[string][]string{"created_at": {`"public"."recent_events"`}},
+		DependentTriggers: dependentsEverywhere("created_at", []string{`"stamp" ON "public"."events"`}),
+	}
+	for sql, want := range map[string][]string{
+		"ALTER TABLE events ALTER COLUMN created_at TYPE timestamptz": parent,
+		"ALTER TABLE events DROP COLUMN created_at":                   parent,
+		"ALTER TABLE events ALTER COLUMN region TYPE varchar(16)":     sub,
+		"ALTER TABLE events DROP COLUMN region":                       sub,
+	} {
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonPartitionKey, d.Reason, sql)
+		assert.Equal(t, want, d.PartitionKeyTables, sql)
+		assert.Empty(t, d.DependentViews, sql)
+		assert.Empty(t, d.DependentTriggers, sql)
+	}
+	d := classifyWithFacts(t, "ALTER TABLE ONLY events ALTER COLUMN region TYPE varchar(16)", facts)
+	assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason)
+	assert.Empty(t, d.PartitionKeyTables)
+}
+
+// dependentsEverywhere is a column's dependents as every change to it
+// reaches them: recursive, recursive drop, and ONLY alike.
+func dependentsEverywhere(column string, names []string) planner.ColumnDependents {
+	m := map[string][]string{column: names}
+	return planner.ColumnDependents{Tree: m, Drop: m, Own: m}
+}
+
+// classifyWithFacts classifies a single-operation statement against facts
+// and returns its decision.
+func classifyWithFacts(t *testing.T, sql string, facts planner.Facts) planner.Decision {
+	t.Helper()
+	plan, err := planner.Classify(sql, facts)
+	require.NoError(t, err, sql)
+	require.Len(t, plan.Decisions, 1, sql)
+	return plan.Decisions[0]
+}
+
 // A policy on a partition or inheritance child counts against a
 // recursive change and not against one under ONLY, and a recursive drop
 // counts only the copies of the column it drops, the same reach the
 // dependent-view refusal judges by. A column both a view and a policy read
-// is refused for the view first.
+// is refused for the view first, with the policy named as well.
 func TestClassifyJudgesDependentPoliciesByWhatTheChangeReaches(t *testing.T) {
 	childPolicy := []string{`"child_rows" ON "app"."documents_child"`}
 	facts := planner.Facts{
@@ -296,7 +569,7 @@ func TestClassifyJudgesDependentPoliciesByWhatTheChangeReaches(t *testing.T) {
 		require.NoError(t, err, sql)
 		require.Len(t, plan.Decisions, 1, sql)
 		assert.Equal(t, want, plan.Decisions[0].Reason, sql)
-		if want == planner.ReasonDependentPolicy {
+		if want == planner.ReasonDependentPolicy || want == planner.ReasonDependentView {
 			assert.Equal(t, childPolicy, plan.Decisions[0].DependentPolicies, sql)
 		} else {
 			assert.Empty(t, plan.Decisions[0].DependentPolicies, sql)
@@ -765,16 +1038,6 @@ func TestNullFillCandidates(t *testing.T) {
 	}
 }
 
-// classifyWithFacts classifies a single-operation statement against facts
-// and returns its decision.
-func classifyWithFacts(t *testing.T, sql string, facts planner.Facts) planner.Decision {
-	t.Helper()
-	plan, err := planner.Classify(sql, facts)
-	require.NoError(t, err, sql)
-	require.Len(t, plan.Decisions, 1, sql)
-	return plan.Decisions[0]
-}
-
 // An added column classifies by what the server proved about the rewrite
 // before the statement's shape: a constant default on a constrained domain
 // still rewrites, and a default the catalog stores runs in place however it
@@ -937,6 +1200,9 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonReplicaIdentity,
 		planner.ReasonDependentView,
 		planner.ReasonDependentPolicy,
+		planner.ReasonDependentTrigger,
+		planner.ReasonDependentGeneratedColumn,
+		planner.ReasonPartitionKey,
 		planner.ReasonNotNullWithoutDefault,
 		planner.ReasonCascadingDrop,
 		planner.ReasonUnsupportedOperation,

@@ -56,12 +56,12 @@ func TestRunRefusesChangingAColumnAPolicyReads(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		statement string
-		fix       planner.PolicyFix
+		fix       planner.DependentFix
 	}{
-		{name: "a widening the server would relabel", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE varchar(64)", fix: planner.PolicyFixRecreateAroundChange},
-		{name: "a type change to text", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE text", fix: planner.PolicyFixRecreateAroundChange},
-		{name: "a type change that rewrites", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE bigint USING owner_id::bigint", fix: planner.PolicyFixExpandContract},
-		{name: "a column drop", statement: "ALTER TABLE %s.documents DROP COLUMN owner_id", fix: planner.PolicyFixRewritePolicies},
+		{name: "a widening the server would relabel", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE varchar(64)", fix: planner.DependentFixRecreateAroundChange},
+		{name: "a type change to text", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE text", fix: planner.DependentFixRecreateAroundChange},
+		{name: "a type change that rewrites", statement: "ALTER TABLE %s.documents ALTER COLUMN owner_id TYPE bigint USING owner_id::bigint", fix: planner.DependentFixExpandContract},
+		{name: "a column drop", statement: "ALTER TABLE %s.documents DROP COLUMN owner_id", fix: planner.DependentFixRewriteDependents},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			schema := seed(t)
@@ -77,7 +77,7 @@ func TestRunRefusesChangingAColumnAPolicyReads(t *testing.T) {
 			assert.Equal(t, policies, v.DependentPolicies)
 			assert.Empty(t, v.DependentViews)
 			assert.Contains(t, v.Detail, "a column read by policies "+policies[0]+", "+policies[1]+",")
-			assert.True(t, strings.HasSuffix(v.Detail, "; "+tc.fix.Help()), v.Detail)
+			assert.True(t, strings.HasSuffix(v.Detail, "; "+tc.fix.Help("policies")), v.Detail)
 			assert.Equal(t, "character varying(36)", columnType(t, pool, schema, "documents", "owner_id"))
 		})
 	}
