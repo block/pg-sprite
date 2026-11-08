@@ -267,14 +267,24 @@ func rowSecurityUnsupportedRefusal() verdict.Refusal {
 }
 
 // RowSecurityRefusal classifies typed admission failures from the atomic RLS
-// executor. Operational errors are not refusals. Privilege causes take priority
-// over the general admission sentinel they also wrap.
+// executors, including the creation proofs and create-path admission of a
+// table created with its row security. Operational errors are not refusals.
+// Privilege causes take priority over the general admission sentinel they
+// also wrap.
 func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
-	if errors.Is(err, executor.ErrRowSecurityPrivileges) {
+	var privErr *preflight.PrivilegeError
+	if errors.Is(err, executor.ErrRowSecurityPrivileges) || errors.As(err, &privErr) ||
+		errors.Is(err, preflight.ErrCreateOwnerNotFound) {
 		return insufficientPrivilegesRefusal(), true
 	}
 	if errors.Is(err, executor.ErrRowSecurityRefused) {
 		return rowSecurityUnsupportedRefusal(), true
+	}
+	if errors.Is(err, executor.ErrCreateCollision) {
+		return createCollisionRefusal(), true
+	}
+	if r, ok := createAdmissionRefusal(err); ok {
+		return r, true
 	}
 	if errors.Is(err, executor.ErrTableNotFound) {
 		return plan.RowSecurityMissingTableRefusal(), true

@@ -3,7 +3,6 @@ package diffplan
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -16,8 +15,9 @@ import (
 
 // PlanWithRowSecurity verifies an explicitly RLS-scoped desired definition.
 // Only an unchanged existing table produces a report, with no executable steps.
-// Deltas return RowSecurityReviewRequired, wrapping ErrUnsupportedChange. Missing
-// tables remain unsupported without a review. The distinct parsed
+// Deltas return RowSecurityReviewRequired, wrapping ErrUnsupportedChange. A
+// missing table returns schemadiff.ErrTableNotFound; preview its creation with
+// migrate.PreviewCreateWithRowSecurity. The distinct parsed
 // type cannot be passed to RunDesired or ExecuteCreate. Inspection still needs
 // CREATE privilege for its rolled-back scratch schema, just like Plan.
 func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) (plan.Report, error) {
@@ -28,9 +28,6 @@ func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string,
 		return plan.Report{}, statement.ErrRowSecurityDeclaration
 	}
 	live, err := schemadiff.Introspect(ctx, pool, schema, desired.Table())
-	if errors.Is(err, schemadiff.ErrTableNotFound) {
-		return plan.Report{}, fmt.Errorf("creating tables with managed row security is not supported: %w: %w", schemadiff.ErrUnsupportedChange, err)
-	}
 	if err != nil {
 		return plan.Report{}, err
 	}

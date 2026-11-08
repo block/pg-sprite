@@ -15,15 +15,16 @@ import (
 func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, desired statement.DesiredWithRowSecurity) error {
 	if c.DryRun {
 		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
-		return diff.runRowSecurityDiff(ctx, out, desired)
+		return diff.runRowSecurityDiff(ctx, out, desired, executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout})
 	}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	report, runErr := executor.ExecuteRowSecurity(ctx, pool, c.Schema, desired, executor.Budget{
-		LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout,
+	report, runErr := migrate.RunDesiredRowSecurity(ctx, pool, c.Schema, desired, migrate.Options{
+		Budget: executor.SequenceBudget{Brief: executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}},
+		Logger: c.diag(),
 	})
 	v := rowSecurityVerdict(c.Schema+"."+desired.Table(), report, runErr)
 	emitErr := c.emit(out, v)
@@ -36,6 +37,9 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 	v := verdict.Verdict{Table: table, Outcome: verdict.OutcomeExecuted, ExecutedSQL: report.Statements,
 		Detail: "row security converged: all changes committed in one transaction"}
 	if err == nil {
+		if report.TableCreated {
+			v.Detail = "table created with its row security: all changes committed in one transaction"
+		}
 		if len(report.Statements) == 0 {
 			v.Detail = "already converged: row security matches; nothing to run"
 		}

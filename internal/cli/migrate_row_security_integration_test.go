@@ -44,13 +44,62 @@ func TestMigrateDesiredRLSLockTimeoutPreservesState(t *testing.T) {
 	assert.Equal(t, before, after)
 }
 
-func TestMigrateDesiredRLSMissingTableIsRefused(t *testing.T) {
+// An absent table is created together with its row security. The dry run
+// lists the statements without creating anything, the run commits exactly
+// those statements, and a rerun finds nothing to do.
+func TestMigrateDesiredRLSCreatesMissingTable(t *testing.T) {
 	url, schema, pool := desiredFixture(t)
 	_, err := pool.Exec(t.Context(), "DROP TABLE "+schema+".documents")
 	require.NoError(t, err)
 	cmd := desiredCommand(t, url, schema, `CREATE TABLE documents (
  id int PRIMARY KEY,
  owner_id int NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 7);`)
+
+	cmd.DryRun = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var preview executor.RowSecurityPlan
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &preview))
+	require.Len(t, preview.Statements, 4)
+	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.ErrorIs(t, err, schemadiff.ErrTableNotFound, "the dry run must not create the table")
+
+	cmd.DryRun = false
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Equal(t, "table created with its row security: all changes committed in one transaction", v.Detail)
+	assert.Equal(t, preview.Statements, v.ExecutedSQL)
+	assert.Contains(t, v.ExecutedSQL[0], "CREATE TABLE "+schema+".documents")
+	assert.Contains(t, v.ExecutedSQL[3], `CREATE POLICY "readers"`)
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.True(t, after.RowSecurity.Enabled)
+	require.Len(t, after.RowSecurity.Policies, 1)
+	assert.Equal(t, "(owner_id = 7)", *after.RowSecurity.Policies[0].Using)
+
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	v = verdict.Verdict{}
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Empty(t, v.ExecutedSQL)
+	assert.Equal(t, "already converged: row security matches; nothing to run", v.Detail)
+}
+
+// A standalone type holding the table's name refuses as a create collision,
+// on the dry run and the run alike, and nothing is created.
+func TestMigrateDesiredRLSRefusesTypeAtTheTableName(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("DROP TABLE %[1]s.documents; CREATE TYPE %[1]s.documents AS ENUM ('a')", schema))
+	require.NoError(t, err)
+	cmd := desiredCommand(t, url, schema, `CREATE TABLE documents (
+ id int PRIMARY KEY
  );
  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`)
 	for _, dryRun := range []bool{true, false} {
@@ -60,9 +109,9 @@ func TestMigrateDesiredRLSMissingTableIsRefused(t *testing.T) {
 		var v verdict.Verdict
 		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
 		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
-		assert.Empty(t, v.Code)
+		assert.Equal(t, verdict.ReasonCreateCollision, v.Reason)
+		assert.Empty(t, v.ExecutedSQL)
 	}
 	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.ErrorIs(t, err, schemadiff.ErrTableNotFound)

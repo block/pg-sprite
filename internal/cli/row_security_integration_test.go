@@ -54,7 +54,10 @@ func TestPullAndDiffWithRowSecurityRoundTrip(t *testing.T) {
 	assert.Empty(t, report.Statements)
 }
 
-func TestDiffRowSecurityRefusesMissingTableWithoutCreatingIt(t *testing.T) {
+// A desired file with row security for an absent table previews the create
+// that migrate --desired would run, in every output format, and leaves the
+// table absent.
+func TestDiffRowSecurityPreviewsCreateOfMissingTable(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -65,14 +68,40 @@ func TestDiffRowSecurityRefusesMissingTableWithoutCreatingIt(t *testing.T) {
      id bigint PRIMARY KEY
  );
  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`), 0600))
-	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file}
+
 	var out strings.Builder
-	err = cmd.run(t.Context(), &out)
-	require.ErrorIs(t, err, verdict.ErrRefused)
-	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, JSON: true}
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var preview struct {
+		Schema      string   `json:"schema"`
+		Table       string   `json:"table"`
+		Statements  []string `json:"statements"`
+		TableExists *bool    `json:"table_exists"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &preview))
+	assert.Equal(t, schema, preview.Schema)
+	assert.Equal(t, "documents", preview.Table)
+	require.NotNil(t, preview.TableExists)
+	assert.False(t, *preview.TableExists)
+	require.Len(t, preview.Statements, 3)
+	assert.Contains(t, preview.Statements[0], "CREATE TABLE "+schema+".documents")
+	assert.Contains(t, preview.Statements[1], "ENABLE ROW LEVEL SECURITY")
+	assert.Contains(t, preview.Statements[2], "NO FORCE ROW LEVEL SECURITY")
+
+	out.Reset()
+	cmd = &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, SQL: true}
+	require.NoError(t, cmd.run(t.Context(), &out))
+	assert.Contains(t, out.String(), "-- "+schema+".documents does not exist; pg-sprite migrate --desired creates it with its row security in one transaction")
+	assert.Contains(t, out.String(), preview.Statements[1]+";")
+
+	out.Reset()
+	cmd = &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file}
+	require.NoError(t, cmd.run(t.Context(), &out))
+	assert.Contains(t, out.String(), schema+".documents does not exist. migrate --desired creates it with its row security in one transaction:")
+	assert.Contains(t, out.String(), "  "+preview.Statements[0]+";")
+
 	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.ErrorIs(t, err, schemadiff.ErrTableNotFound)
-	assert.NotEmpty(t, out.String(), "refusals must be visible to operators")
 }
 
 func TestDiffRowSecurityRefusesDisableWithoutChangingLiveState(t *testing.T) {

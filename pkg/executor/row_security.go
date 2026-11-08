@@ -19,10 +19,18 @@ import (
 
 // RowSecurityReport contains only committed RLS statements, in execution order.
 // A no-op has an empty Statements slice. Errors return a zero report.
+// TableCreated is true when the run created the table along with its row
+// security, so Statements begins with its CREATE TABLE.
 type RowSecurityReport struct {
-	Schema     string   `json:"schema"`
-	Table      string   `json:"table"`
-	Statements []string `json:"statements"`
+	Schema       string   `json:"schema"`
+	Table        string   `json:"table"`
+	Statements   []string `json:"statements"`
+	TableCreated bool     `json:"table_created,omitempty"`
+}
+
+// plan returns the statements a rolled-back run generated, as a preview.
+func (r RowSecurityReport) plan() RowSecurityPlan {
+	return RowSecurityPlan{Schema: r.Schema, Table: r.Table, Statements: r.Statements}
 }
 
 // RowSecurityPlan contains generated RLS statements in execution order. Preview
@@ -54,7 +62,7 @@ func PreviewRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	if err != nil {
 		return RowSecurityPlan{}, err
 	}
-	return RowSecurityPlan(report), nil
+	return report.plan(), nil
 }
 
 // ExecuteReviewedRowSecurity regenerates SQL under the target lock and refuses

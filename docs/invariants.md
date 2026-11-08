@@ -960,6 +960,7 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 | RS-3 | Bound lock waits, statements, and the whole attempt | `ExecuteRowSecurity`; lock contention and deadline cancellation |
 | RS-4 | Run only admitted, qualified RLS DDL; keep scratch disposable | `RenderRowSecurity` from the scratch catalog and executor readback; qualified-helper, quoted-name, and scratch-cleanup tests |
 | RS-5 | Reviewed RLS execution compares the full ordered generated SQL under the target lock before target DDL; a mismatch refuses without target changes | `ExecuteReviewedRowSecurity`; `TestReviewedRowSecurityRechecksAfterLockWait`, `TestReviewedRowSecurityRefusesDifferentSequences` |
+| RS-6 | A table created with row security commits together with its RLS or not at all | `ExecuteCreateWithRowSecurity`; `TestExecuteCreateWithRowSecurityNeverExposesTheTableWithoutItsPolicies`, `TestExecuteCreateWithRowSecurityRollsBackTheTableWhenAPolicyFails`, `TestExecuteCreateWithRowSecurityRollsBackANameTakenAfterTheProbe` |
 
 ## State, checkpoint, and resume (ST)
 
