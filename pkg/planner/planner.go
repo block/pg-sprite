@@ -517,6 +517,13 @@ func Classify(sql string, facts Facts) (Plan, error) {
 	single := len(ops) == 1
 	for _, op := range ops {
 		d := classifyOp(op, st, facts, sql, single)
+		if op.Kind == statement.OpValidateConstraint && !allTakeShareUpdateExclusiveOnly(ops) {
+			// One ALTER TABLE holds the strongest lock any of its
+			// operations needs for the whole statement, so the
+			// validation scan runs under it: blocking, and only online
+			// beside operations that block neither reads nor writes.
+			d.Reason = ReasonSaferIdiom
+		}
 		if len(d.SaferSQL) > 0 {
 			// Stamped here, in the one place every decision passes
 			// through, so a constructed sequence can never ship without
@@ -527,6 +534,18 @@ func Classify(sql string, facts Facts) (Plan, error) {
 		plan.Decisions = append(plan.Decisions, d)
 	}
 	return plan, nil
+}
+
+// allTakeShareUpdateExclusiveOnly reports a statement whose every
+// operation takes SHARE UPDATE EXCLUSIVE and nothing stronger, so a
+// validation scan among them blocks neither reads nor writes.
+func allTakeShareUpdateExclusiveOnly(ops []statement.Op) bool {
+	for _, op := range ops {
+		if !op.TakesShareUpdateExclusiveOnly() {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyOp routes one operation per the reference table.

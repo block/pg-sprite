@@ -72,9 +72,10 @@ const (
 	// the dedicated concurrent build executor, with its wait policy and
 	// invalid-index verdict.
 	StepConcurrentIndexBuild StepKind = "concurrent-index-build"
-	// StepValidateConstraint: an ALTER TABLE ... VALIDATE CONSTRAINT — a
-	// long online scan under SHARE UPDATE EXCLUSIVE, bounded by the
-	// validate budget rather than the brief one.
+	// StepValidateConstraint: an ALTER TABLE ... VALIDATE CONSTRAINT, alone
+	// or beside operations that also take only SHARE UPDATE EXCLUSIVE — a
+	// long online scan, bounded by the validate budget rather than the
+	// brief one.
 	StepValidateConstraint StepKind = "validate-constraint"
 )
 
@@ -563,10 +564,25 @@ func admitAlterTableStep(st statement.Statement, sql string) (sequenceStep, erro
 			return sequenceStep{}, fmt.Errorf("%s: %w", op.Describe(), ErrUnsupportedSequenceStep)
 		}
 	}
-	if len(ops) == 1 && ops[0].Kind == statement.OpValidateConstraint {
+	if validatesOnline(ops) {
 		return sequenceStep{st: st, kind: StepValidateConstraint}, nil
 	}
 	return sequenceStep{st: st, kind: StepBrief}, nil
+}
+
+// validatesOnline reports whether ops validate a constraint and take no
+// lock stronger than SHARE UPDATE EXCLUSIVE, so the validation scan runs
+// with reads and writes flowing and earns the validate budget rather than
+// the brief one.
+func validatesOnline(ops []statement.Op) bool {
+	validates := false
+	for _, op := range ops {
+		if !op.TakesShareUpdateExclusiveOnly() {
+			return false
+		}
+		validates = validates || op.Kind == statement.OpValidateConstraint
+	}
+	return validates
 }
 
 // adoptionStep returns the index of the admitted step that takes over

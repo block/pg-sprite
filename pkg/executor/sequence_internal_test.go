@@ -34,6 +34,26 @@ func TestAdmitStepClassifiesShapes(t *testing.T) {
 			want: StepValidateConstraint,
 		},
 		{
+			name: "two VALIDATEs get the validate class",
+			sql:  `ALTER TABLE s.t VALIDATE CONSTRAINT c, VALIDATE CONSTRAINT d`,
+			want: StepValidateConstraint,
+		},
+		{
+			name: "a VALIDATE beside SET STATISTICS gets the validate class",
+			sql:  `ALTER TABLE s.t VALIDATE CONSTRAINT c, ALTER COLUMN v SET STATISTICS 500`,
+			want: StepValidateConstraint,
+		},
+		{
+			name: "a VALIDATE beside a blocking operation is brief",
+			sql:  `ALTER TABLE s.t VALIDATE CONSTRAINT c, ALTER COLUMN v SET STORAGE PLAIN`,
+			want: StepBrief,
+		},
+		{
+			name: "SET STATISTICS alone is brief",
+			sql:  `ALTER TABLE s.t ALTER COLUMN v SET STATISTICS 500`,
+			want: StepBrief,
+		},
+		{
 			name: "SET NOT NULL is brief",
 			sql:  `ALTER TABLE s.t ALTER COLUMN v SET NOT NULL`,
 			want: StepBrief,
