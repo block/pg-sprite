@@ -79,6 +79,12 @@ var ErrMultipleOwnedSequences = errors.New("column default uses more than one se
 // defaults would silently move its bounds, step, or type.
 var ErrUnrenderableSequenceOptions = errors.New("sequence options cannot be rendered as a desired schema")
 
+// ErrUnrenderableMergedConstraints is returned for a table with two PRIMARY
+// KEY, UNIQUE, or EXCLUDE constraints declared the same way. Built from one
+// CREATE TABLE, the server keeps only one of them, and a desired file has
+// no other way to declare the second (see ErrDesiredConstraintMerged).
+var ErrUnrenderableMergedConstraints = errors.New("constraints that repeat each other on the same columns cannot be rendered as a desired schema")
+
 // Render renders the canonical model into a desired-state schema file: one
 // CREATE TABLE, with a WITH clause carrying the table's storage parameters,
 // followed by the model's CREATE INDEX statements. The output
@@ -116,6 +122,9 @@ func Render(m Model) (string, error) {
 	}
 	if m.Unlogged {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableUnlogged)
+	}
+	if prior, repeat, ok := repeatedIndexConstraint(m.Constraints); ok {
+		return "", fmt.Errorf("render table %q: constraint %q repeats %q: %w", m.Table, repeat, prior, ErrUnrenderableMergedConstraints)
 	}
 	defs := make([]string, 0, len(m.Columns)+len(m.Constraints))
 	for _, c := range m.Columns {
@@ -163,6 +172,30 @@ func Render(m Model) (string, error) {
 		return "", fmt.Errorf("render table %q: output not admissible as a desired schema: %w", m.Table, err)
 	}
 	return out, nil
+}
+
+// repeatedIndexConstraint returns the first pair of PRIMARY KEY, UNIQUE,
+// or EXCLUDE constraints whose definitions match, which one CREATE TABLE
+// would build as a single constraint. A primary key's definition is
+// compared as the UNIQUE one with the same key, because that is the
+// comparison the server makes.
+func repeatedIndexConstraint(cons []Constraint) (prior, repeat string, ok bool) {
+	seen := map[string]string{}
+	for _, con := range cons {
+		def := con.Def
+		switch {
+		case con.Primary:
+			def = "UNIQUE " + strings.TrimPrefix(def, "PRIMARY KEY ")
+		case strings.HasPrefix(def, "UNIQUE "), strings.HasPrefix(def, "EXCLUDE "):
+		default:
+			continue
+		}
+		if name, dup := seen[def]; dup {
+			return name, con.Name, true
+		}
+		seen[def] = con.Name
+	}
+	return "", "", false
 }
 
 // optionName matches a storage parameter name as the server stores it,

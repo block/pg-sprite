@@ -29,6 +29,13 @@ var ErrDesiredPartitionOf = errors.New("a desired CREATE TABLE ... PARTITION OF 
 // back, so the file is refused before anything runs.
 var ErrDesiredInherits = errors.New("a desired CREATE TABLE ... INHERITS cannot be planned: building it would lock the live parent and add an inheritance edge to it")
 
+// ErrDesiredConstraintMerged is returned when the desired CREATE TABLE
+// names a PRIMARY KEY, UNIQUE, or EXCLUDE constraint that repeats an
+// earlier one exactly, so the server kept only one of them (see
+// confirmNamedConstraintsBuilt). Two such constraints enforce the same
+// rule; the remedy is to declare it once.
+var ErrDesiredConstraintMerged = errors.New("a desired constraint repeats another one on the same columns, and one CREATE TABLE keeps only one of them; declare it once")
+
 // IntrospectDesired materializes a desired-state schema on a scratch schema
 // and introspects it into the canonical model: execute-and-introspect, the
 // decided way the engine understands DDL semantics. The scratch schema is
@@ -123,10 +130,41 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
+	if err := confirmNamedConstraintsBuilt(statements, m); err != nil {
+		return Model{}, err
+	}
 	if err := tx.Rollback(ctx); err != nil {
 		return Model{}, fmt.Errorf("roll back scratch schema: %w", err)
 	}
 	return m, nil
+}
+
+// confirmNamedConstraintsBuilt proves the scratch table owns every PRIMARY
+// KEY, UNIQUE, and EXCLUDE constraint the desired CREATE TABLE names. The
+// server builds one CREATE TABLE's index constraints by dropping any that
+// repeats an earlier one exactly (same columns, INCLUDE list, predicate,
+// operators, and deferrability), keeping the primary key over the others,
+// and raises no error. A named constraint missing from the table it
+// built was dropped that way. Diffing the model anyway would plan the
+// dropped constraint's live copy away, and a table created from the file
+// would lack it, so the build fails instead.
+func confirmNamedConstraintsBuilt(statements []statement.Statement, m Model) error {
+	built := constraintsByName(m.Constraints)
+	for _, st := range statements {
+		if st.Kind() != statement.KindCreateTable {
+			continue
+		}
+		names, err := statement.NamedIndexConstraints(st.SQL())
+		if err != nil {
+			return fmt.Errorf("read the constraint names of desired table %q: %w", m.Table, err)
+		}
+		for _, name := range names {
+			if _, ok := built[name]; !ok {
+				return fmt.Errorf("%w: table %q, constraint %q", ErrDesiredConstraintMerged, m.Table, name)
+			}
+		}
+	}
+	return nil
 }
 
 // refuseLiveParent refuses a desired CREATE TABLE that names a parent,

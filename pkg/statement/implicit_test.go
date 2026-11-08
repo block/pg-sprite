@@ -187,3 +187,22 @@ func TestImplicitRelationNamesRefusesMultipleStatements(t *testing.T) {
 	_, err := statement.ImplicitRelationNames("CREATE TABLE t (id int); CREATE TABLE u (id int)")
 	require.ErrorIs(t, err, statement.ErrNotOneStatement)
 }
+
+// NamedIndexConstraints lists only the index constraints a statement names,
+// in definition order, whether they are declared on the table or inline on
+// a column.
+func TestNamedIndexConstraints(t *testing.T) {
+	names, err := statement.NamedIndexConstraints(`CREATE TABLE t (
+		a int CONSTRAINT a_key UNIQUE,
+		b int UNIQUE,
+		c int CONSTRAINT c_pos CHECK (c > 0),
+		CONSTRAINT t_pk PRIMARY KEY (a),
+		UNIQUE (b),
+		CONSTRAINT t_excl EXCLUDE USING btree (c WITH =)
+	)`)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a_key", "t_pk", "t_excl"}, names)
+
+	_, err = statement.NamedIndexConstraints("CREATE INDEX i ON t (a)")
+	require.ErrorIs(t, err, statement.ErrNotCreateTable)
+}

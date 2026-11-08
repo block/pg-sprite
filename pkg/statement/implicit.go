@@ -90,6 +90,43 @@ func ImplicitRelationNames(sql string) ([]string, error) {
 	return names, nil
 }
 
+// NamedIndexConstraints returns the names a CREATE TABLE gives its PRIMARY
+// KEY, UNIQUE, and EXCLUDE constraints explicitly, table-level and
+// column-inline, in definition order. Unnamed constraints are left out: the
+// server chooses their names, so only a stated name can be looked for in
+// the table the statement builds.
+func NamedIndexConstraints(sql string) ([]string, error) {
+	tree, err := pgquery.Parse(sql)
+	if err != nil {
+		return nil, fmt.Errorf("parse statement: %w", err)
+	}
+	if n := len(tree.GetStmts()); n != 1 {
+		return nil, fmt.Errorf("%w: got %d", ErrNotOneStatement, n)
+	}
+	create := tree.GetStmts()[0].GetStmt().GetCreateStmt()
+	if create == nil {
+		return nil, ErrNotCreateTable
+	}
+	var names []string
+	add := func(con *pganalyze.Constraint) {
+		if con.GetConname() != "" && constraintBuildsIndex(con) {
+			names = append(names, con.GetConname())
+		}
+	}
+	for _, elt := range create.GetTableElts() {
+		if con := elt.GetConstraint(); con != nil {
+			add(con)
+			continue
+		}
+		for _, c := range elt.GetColumnDef().GetConstraints() {
+			if con := c.GetConstraint(); con != nil {
+				add(con)
+			}
+		}
+	}
+	return names, nil
+}
+
 // columnSequenceName returns the name of the sequence the column definition
 // creates in the table's schema, or ok=false when the column owns no
 // sequence there. A serial column and an identity column without options
