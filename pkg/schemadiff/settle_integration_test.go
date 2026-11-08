@@ -2,6 +2,7 @@ package schemadiff_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -55,6 +56,24 @@ func TestDiffTakesEveryReplayOfADesiredExpressionAsTheSame(t *testing.T) {
 		assert.Empty(t, diffDesired(t, pool, schema, ds))
 		replayLiveDefinitions(t, pool, schema)
 		assert.Empty(t, diffDesired(t, pool, schema, ds), "a third parse is on the same chain")
+	})
+
+	t.Run("a recreated table whose check was left NOT VALID", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		createFromDesired(t, pool, schema, nestedRowDesired)
+		replayLiveDefinitions(t, pool, schema)
+		check := liveDefinitions(t, pool, schema)[0]
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(
+			"ALTER TABLE %[1]s.t DROP CONSTRAINT ck, ADD CONSTRAINT ck %[2]s NOT VALID", schema, check))
+		require.NoError(t, err)
+		notValid := liveDefinitions(t, pool, schema)[0]
+		require.Truef(t, strings.HasSuffix(notValid, " NOT VALID"), "the re-added check must be left NOT VALID: %s", notValid)
+		changes := diffDesired(t, pool, schema, ds)
+		require.Len(t, changes, 1, "only the VALIDATE is planned, not a drop and add")
+		assert.Equal(t, schemadiff.ChangeValidateConstraint, changes[0].Kind)
+		assert.Equal(t, fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "ck"`, schema), changes[0].SQL)
+		require.NotNil(t, changes[0].Validates)
+		assert.Equal(t, notValid, changes[0].Validates.Def)
 	})
 
 	t.Run("a real change to the definition", func(t *testing.T) {

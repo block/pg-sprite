@@ -129,8 +129,20 @@ func adoptReplayedText(live, desired Model) Model {
 		}
 	}
 	for i, c := range desired.Constraints {
-		if l, ok := liveCons[c.Name]; ok && slices.Contains(c.DefReplays, l.Def) {
-			desired.Constraints[i].Def = l.Def
+		l, ok := liveCons[c.Name]
+		if !ok {
+			continue
+		}
+		// A live constraint left NOT VALID prints its definition with the
+		// suffix, which no replay carries. The replay is matched without
+		// it and the desired constraint stays validated, so the diff plans
+		// the VALIDATE instead of a drop and add.
+		def := l.Def
+		if l.NotValid {
+			def = strings.TrimSuffix(def, notValidSuffix)
+		}
+		if slices.Contains(c.DefReplays, def) {
+			desired.Constraints[i].Def = def
 		}
 	}
 	for i, ix := range desired.Indexes {
