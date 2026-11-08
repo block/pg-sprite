@@ -90,30 +90,43 @@ func ImplicitRelationNames(sql string) ([]string, error) {
 	return names, nil
 }
 
-// NamedIndexConstraints returns the names a CREATE TABLE gives its PRIMARY
-// KEY, UNIQUE, and EXCLUDE constraints explicitly, table-level and
-// column-inline, in definition order. Unnamed constraints are left out: the
-// server chooses their names, so only a stated name can be looked for in
-// the table the statement builds.
-func NamedIndexConstraints(sql string) ([]string, error) {
+// DeclaredIndexConstraints are the PRIMARY KEY, UNIQUE, and EXCLUDE
+// constraints a CREATE TABLE declares.
+type DeclaredIndexConstraints struct {
+	// Names holds one entry per constraint, table-level and column-inline,
+	// in definition order: the name the statement states, or "" when the
+	// server chooses one.
+	Names []string
+	// Like reports a LIKE clause, which can copy further index constraints
+	// from another table, so the table built can hold more than Names.
+	Like bool
+}
+
+// IndexConstraints returns the PRIMARY KEY, UNIQUE, and EXCLUDE constraints
+// a CREATE TABLE declares.
+func IndexConstraints(sql string) (DeclaredIndexConstraints, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return nil, fmt.Errorf("parse statement: %w", err)
+		return DeclaredIndexConstraints{}, fmt.Errorf("parse statement: %w", err)
 	}
 	if n := len(tree.GetStmts()); n != 1 {
-		return nil, fmt.Errorf("%w: got %d", ErrNotOneStatement, n)
+		return DeclaredIndexConstraints{}, fmt.Errorf("%w: got %d", ErrNotOneStatement, n)
 	}
 	create := tree.GetStmts()[0].GetStmt().GetCreateStmt()
 	if create == nil {
-		return nil, ErrNotCreateTable
+		return DeclaredIndexConstraints{}, ErrNotCreateTable
 	}
-	var names []string
+	var declared DeclaredIndexConstraints
 	add := func(con *pganalyze.Constraint) {
-		if con.GetConname() != "" && constraintBuildsIndex(con) {
-			names = append(names, con.GetConname())
+		if constraintBuildsIndex(con) {
+			declared.Names = append(declared.Names, con.GetConname())
 		}
 	}
 	for _, elt := range create.GetTableElts() {
+		if elt.GetTableLikeClause() != nil {
+			declared.Like = true
+			continue
+		}
 		if con := elt.GetConstraint(); con != nil {
 			add(con)
 			continue
@@ -124,7 +137,7 @@ func NamedIndexConstraints(sql string) ([]string, error) {
 			}
 		}
 	}
-	return names, nil
+	return declared, nil
 }
 
 // columnSequenceName returns the name of the sequence the column definition

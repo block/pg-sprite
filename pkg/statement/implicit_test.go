@@ -188,11 +188,11 @@ func TestImplicitRelationNamesRefusesMultipleStatements(t *testing.T) {
 	require.ErrorIs(t, err, statement.ErrNotOneStatement)
 }
 
-// NamedIndexConstraints lists only the index constraints a statement names,
-// in definition order, whether they are declared on the table or inline on
-// a column.
-func TestNamedIndexConstraints(t *testing.T) {
-	names, err := statement.NamedIndexConstraints(`CREATE TABLE t (
+// IndexConstraints lists every index constraint a statement declares, in
+// definition order, whether it is declared on the table or inline on a
+// column, with "" for one the server names.
+func TestIndexConstraints(t *testing.T) {
+	declared, err := statement.IndexConstraints(`CREATE TABLE t (
 		a int CONSTRAINT a_key UNIQUE,
 		b int UNIQUE,
 		c int CONSTRAINT c_pos CHECK (c > 0),
@@ -201,8 +201,16 @@ func TestNamedIndexConstraints(t *testing.T) {
 		CONSTRAINT t_excl EXCLUDE USING btree (c WITH =)
 	)`)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a_key", "t_pk", "t_excl"}, names)
+	assert.Equal(t, statement.DeclaredIndexConstraints{Names: []string{"a_key", "", "t_pk", "", "t_excl"}}, declared)
 
-	_, err = statement.NamedIndexConstraints("CREATE INDEX i ON t (a)")
+	declared, err = statement.IndexConstraints(`CREATE TABLE t (
+		LIKE other INCLUDING ALL,
+		CONSTRAINT t_pk PRIMARY KEY (a)
+	)`)
+	require.NoError(t, err)
+	assert.Equal(t, statement.DeclaredIndexConstraints{Names: []string{"t_pk"}, Like: true}, declared,
+		"a LIKE clause is reported, since it can copy constraints the statement does not declare")
+
+	_, err = statement.IndexConstraints("CREATE INDEX i ON t (a)")
 	require.ErrorIs(t, err, statement.ErrNotCreateTable)
 }

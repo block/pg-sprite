@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,7 +33,7 @@ var ErrDesiredInherits = errors.New("a desired CREATE TABLE ... INHERITS cannot 
 // ErrDesiredConstraintMerged is returned when the desired CREATE TABLE
 // names a PRIMARY KEY, UNIQUE, or EXCLUDE constraint that repeats an
 // earlier one exactly, so the server kept only one of them (see
-// confirmNamedConstraintsBuilt). Two such constraints enforce the same
+// confirmIndexConstraintsBuilt). Two such constraints enforce the same
 // rule; the remedy is to declare it once.
 var ErrDesiredConstraintMerged = errors.New("a desired constraint repeats another one on the same columns, and one CREATE TABLE keeps only one of them; declare it once")
 
@@ -130,7 +131,7 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
-	if err := confirmNamedConstraintsBuilt(statements, m); err != nil {
+	if err := confirmIndexConstraintsBuilt(statements, m); err != nil {
 		return Model{}, err
 	}
 	if err := tx.Rollback(ctx); err != nil {
@@ -139,32 +140,54 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	return m, nil
 }
 
-// confirmNamedConstraintsBuilt proves the scratch table owns every PRIMARY
-// KEY, UNIQUE, and EXCLUDE constraint the desired CREATE TABLE names. The
+// confirmIndexConstraintsBuilt proves the scratch table holds every PRIMARY
+// KEY, UNIQUE, and EXCLUDE constraint the desired CREATE TABLE declares. The
 // server builds one CREATE TABLE's index constraints by dropping any that
 // repeats an earlier one exactly (same columns, INCLUDE list, predicate,
 // operators, and deferrability), keeping the primary key over the others,
-// and raises no error. A named constraint missing from the table it
-// built was dropped that way. Diffing the model anyway would plan the
-// dropped constraint's live copy away, and a table created from the file
-// would lack it, so the build fails instead.
-func confirmNamedConstraintsBuilt(statements []statement.Statement, m Model) error {
+// and raises no error. When the earlier constraint is unnamed it takes the
+// dropped one's name, so a missing name does not catch every merge, and the
+// count of constraints built is compared as well. Diffing the model anyway
+// would plan the dropped constraint's live copy away, and a table created
+// from the file would lack it, so the build fails instead.
+func confirmIndexConstraintsBuilt(statements []statement.Statement, m Model) error {
 	built := constraintsByName(m.Constraints)
 	for _, st := range statements {
 		if st.Kind() != statement.KindCreateTable {
 			continue
 		}
-		names, err := statement.NamedIndexConstraints(st.SQL())
+		declared, err := statement.IndexConstraints(st.SQL())
 		if err != nil {
-			return fmt.Errorf("read the constraint names of desired table %q: %w", m.Table, err)
+			return fmt.Errorf("read the index constraints of desired table %q: %w", m.Table, err)
 		}
-		for _, name := range names {
-			if _, ok := built[name]; !ok {
+		for _, name := range declared.Names {
+			if _, ok := built[name]; name != "" && !ok {
 				return fmt.Errorf("%w: table %q, constraint %q", ErrDesiredConstraintMerged, m.Table, name)
 			}
 		}
+		// A LIKE clause can copy constraints the file does not declare, so
+		// only the names are checked for it.
+		if declared.Like {
+			continue
+		}
+		if n := countIndexConstraints(m.Constraints); n != len(declared.Names) {
+			return fmt.Errorf("%w: table %q declares %d primary key, unique, and exclusion constraints, and building it kept %d",
+				ErrDesiredConstraintMerged, m.Table, len(declared.Names), n)
+		}
 	}
 	return nil
+}
+
+// countIndexConstraints counts the PRIMARY KEY, UNIQUE, and EXCLUDE
+// constraints among cons.
+func countIndexConstraints(cons []Constraint) int {
+	n := 0
+	for _, con := range cons {
+		if con.Primary || strings.HasPrefix(con.Def, "UNIQUE ") || strings.HasPrefix(con.Def, "EXCLUDE ") {
+			n++
+		}
+	}
+	return n
 }
 
 // refuseLiveParent refuses a desired CREATE TABLE that names a parent,

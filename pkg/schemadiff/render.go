@@ -178,7 +178,9 @@ func Render(m Model) (string, error) {
 // or EXCLUDE constraints whose definitions match, which one CREATE TABLE
 // would build as a single constraint. A primary key's definition is
 // compared as the UNIQUE one with the same key, because that is the
-// comparison the server makes.
+// comparison the server makes. The repeat is the constraint the server
+// would drop: the later one, or the UNIQUE one when the other is the
+// primary key, as the desired build reports it.
 func repeatedIndexConstraint(cons []Constraint) (prior, repeat string, ok bool) {
 	seen := map[string]string{}
 	for _, con := range cons {
@@ -191,6 +193,9 @@ func repeatedIndexConstraint(cons []Constraint) (prior, repeat string, ok bool) 
 			continue
 		}
 		if name, dup := seen[def]; dup {
+			if con.Primary {
+				return con.Name, name, true
+			}
 			return name, con.Name, true
 		}
 		seen[def] = con.Name
