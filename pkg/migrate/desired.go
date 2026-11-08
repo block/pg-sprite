@@ -436,7 +436,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		FailedStepSQL: stepErr.SQL,
 		Detail:        createFailureDetail(execErr),
 	}
-	result.Verdicts = append(result.Verdicts, withServerError(failed, execErr))
+	result.Verdicts = append(result.Verdicts, WithServerError(failed, execErr))
 	result.Outcome = verdict.OutcomeFailed
 	result.Detail = committedPrefixDetail(stepErr.Step-1, len(report.Statements), failedWhat(failed.Code))
 	return result, fmt.Errorf("planned statement %d: %w", stepErr.Step, execErr)

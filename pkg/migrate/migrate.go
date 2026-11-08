@@ -247,7 +247,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 // before acting on it.
 func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
 	v, err := runStatement(ctx, pool, st, opts, adopts, validates)
-	return withServerError(v, err), err
+	return WithServerError(v, err), err
 }
 
 // runStatement is run before a failed verdict records the server error
