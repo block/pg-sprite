@@ -98,3 +98,41 @@ func TestMigrateAlterRejectsSchemaFlag(t *testing.T) {
 	_, err = parser.Parse([]string{"migrate", "--url", "postgres://localhost/test", "--alter", "ALTER TABLE documents ADD COLUMN body text", "--schema", "app"})
 	require.EqualError(t, err, "migrate: --schema requires --desired; qualify the table in --alter instead")
 }
+
+func TestMigrateAlterRejectsExtensionSchemaFlag(t *testing.T) {
+	root := New("test")
+	parser, err := kong.New(root, kong.Vars{"version": "test"})
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{"migrate", "--url", "postgres://localhost/test", "--alter", "ALTER TABLE documents ADD COLUMN email citext", "--extension-schema", "extensions"})
+	require.EqualError(t, err, "migrate: --extension-schema requires --desired; qualify extension names in --alter instead")
+}
+
+// --extension-schema is refused before connecting when the file declares
+// row security, which does not resolve names against extension schemas, or
+// when it names a schema that cannot hold one; the port refuses every
+// connection, so reaching it would fail differently.
+func TestMigrateDesiredRefusesExtensionSchemaBeforeConnecting(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sql, schema, want string
+	}{
+		"row security": {
+			sql: `CREATE TABLE documents (id int PRIMARY KEY, email citext);
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`,
+			schema: "extensions",
+			want:   "--extension-schema is not supported for a file that declares row security",
+		},
+		"system schema": {
+			sql:    "CREATE TABLE documents (id int PRIMARY KEY, email citext);",
+			schema: "pg_catalog",
+			want:   `--extension-schema: invalid extension schema: "pg_catalog" is a system schema`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := desiredCommand(t, "postgres://localhost:1/test", "public", tc.sql, "--extension-schema", tc.schema)
+			var out strings.Builder
+			err := cmd.run(t.Context(), &out)
+			require.ErrorContains(t, err, tc.want)
+			assert.Empty(t, out.String())
+		})
+	}
+}

@@ -134,3 +134,44 @@ func TestParseOneRecognizesCreateTable(t *testing.T) {
 	assert.Equal(t, "prod", st.Schema())
 	assert.Equal(t, "events", st.Table())
 }
+
+// Extension schemas are an explicit, ordered list the caller sets on a
+// parsed file. A copy carries them; the original and the returned slice
+// stay independent, and an empty list clears them.
+func TestDesiredSchemaWithExtensionSchemas(t *testing.T) {
+	ds, err := ParseDesired("CREATE TABLE events (id bigint PRIMARY KEY, email citext)")
+	require.NoError(t, err)
+	assert.Empty(t, ds.ExtensionSchemas())
+
+	widened, err := ds.WithExtensionSchemas("extensions", "util")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"extensions", "util"}, widened.ExtensionSchemas())
+	assert.Empty(t, ds.ExtensionSchemas(), "the original keeps its empty list")
+	assert.Equal(t, ds.Statements(), widened.Statements())
+
+	got := widened.ExtensionSchemas()
+	got[0] = "public"
+	assert.Equal(t, []string{"extensions", "util"}, widened.ExtensionSchemas(), "the returned slice is a copy")
+
+	cleared, err := widened.WithExtensionSchemas()
+	require.NoError(t, err)
+	assert.Empty(t, cleared.ExtensionSchemas())
+}
+
+func TestDesiredSchemaWithExtensionSchemasRefusals(t *testing.T) {
+	ds, err := ParseDesired("CREATE TABLE events (id bigint PRIMARY KEY)")
+	require.NoError(t, err)
+	for name, schemas := range map[string][]string{
+		"empty name":         {""},
+		"duplicate":          {"extensions", "extensions"},
+		"pg_catalog":         {"pg_catalog"},
+		"pg_temp":            {"pg_temp"},
+		"pg_toast":           {"extensions", "pg_toast"},
+		"information_schema": {"information_schema"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ds.WithExtensionSchemas(schemas...)
+			require.ErrorIs(t, err, ErrExtensionSchema)
+		})
+	}
+}

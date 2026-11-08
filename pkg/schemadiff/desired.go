@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,8 +43,12 @@ var ErrDesiredInherits = errors.New("a desired CREATE TABLE ... INHERITS cannot 
 // empty copy of each one, so no foreign key ever binds to a live table, and
 // planning takes only the ACCESS SHARE lock a plain SELECT takes on it (see
 // createReferencedStandIns).
+//
+// The file's unqualified names also resolve against the desired schema's
+// extension schemas, which the model still prints qualified (see
+// scratchRunPath).
 func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredSchema) (Model, error) {
-	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()})
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()}, desired.ExtensionSchemas())
 }
 
 // referencedFrom names the live tables the scratch schema copies before the
@@ -54,17 +59,17 @@ type referencedFrom struct {
 	tables []string
 }
 
-func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
+func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement, refs referencedFrom, extensions []string) (Model, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return Model{}, fmt.Errorf("begin scratch transaction: %w", err)
 	}
-	return introspectDesiredTransaction(ctx, tx, table, statements, refs)
+	return introspectDesiredTransaction(ctx, tx, table, statements, refs, extensions)
 }
 
 // introspectDesiredTransaction owns tx, which may be a savepoint. Every exit
 // rolls it back, leaving its parent's live target and settings untouched.
-func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
+func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement, refs referencedFrom, extensions []string) (Model, error) {
 	// The scratch transaction is never committed: rollback is the cleanup
 	// path for success and failure alike, so the redundant-closer exception
 	// does not apply — this rollback is load-bearing and its error is
@@ -93,7 +98,7 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	// definitions print with. The path is built by dbconn so it upholds
 	// CO-9 like the session's.
 	path := scratchSearchPath(scratch, refs.schema)
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(scratchRunPath(path, extensions)...)); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
 	if err := createReferencedStandIns(ctx, tx, scratch, refs.schema, refs.tables); err != nil {
@@ -166,6 +171,23 @@ func scratchSearchPath(scratch, target string) []string {
 		return []string{scratch, "public"}
 	}
 	return append([]string{scratch}, searchPathFor(target)...)
+}
+
+// scratchRunPath is the search_path the desired statements run under: the
+// introspection path, then each extension schema it does not already
+// list. The extension schemas widen only what the file's unqualified names
+// resolve to. The model is introspected under path alone, so a type,
+// function, or operator found in an extension schema prints qualified, as
+// the live table's does: both sides compare equal, and every statement a
+// plan renders names the object it resolved to wherever it later runs.
+func scratchRunPath(path, extensions []string) []string {
+	run := slices.Clone(path)
+	for _, schema := range extensions {
+		if !slices.Contains(run, schema) {
+			run = append(run, schema)
+		}
+	}
+	return run
 }
 
 // scratchSchemaName returns a collision-resistant scratch schema name. The
