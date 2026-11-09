@@ -42,9 +42,14 @@ func (c *DiffCmd) writeRowSecurityDiff(ctx context.Context, out io.Writer, pool 
 }
 
 // writeRowSecurityPlan emits the plan for a table that exists, or the
-// refusal or error its planning returned.
+// refusal or error its planning returned. When the row security matches, a
+// refused table change is the table plan's own error, returned as it is for
+// a file without row security and as migrate --desired returns it.
 func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, report plan.Report, err error) error {
 	if err != nil {
+		if errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
+			return err
+		}
 		if errors.Is(err, schemadiff.ErrUnsupportedChange) {
 			return c.writeRowSecurityRefusal(out, err)
 		}

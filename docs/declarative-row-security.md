@@ -162,6 +162,13 @@ second run of the same file restores the policies the file declares. A table
 dropped after its row security was compared is refused rather than created
 without its row security, and nothing runs.
 
+The JSON a run prints depends on what it finds, not on the command. A run
+that changes the table prints `migrate.DesiredResult`. A run that finds the
+file already matching, such as a rerun after the table change, goes to the
+row security executor and prints a single verdict: `outcome` is `executed`
+and `executed_sql` is absent. A script that reruns the same command reads
+the top-level `outcome` from either.
+
 A file whose row security differs from the live table is refused when its
 table definition differs too. Converge the two separately: change the row
 security first with the table definition unchanged, then change the table.
