@@ -43,8 +43,13 @@ import (
 // a destructive-change refusal verdict carries; no report emits it, but the
 // report embeds the whole guidance vocabulary. Version 15 added the
 // report-level advisories field and its closed kind vocabulary for the
-// invalid indexes a diff observes and declines to drop.
-const FormatVersion = 15
+// invalid indexes a diff observes and declines to drop. Version 16 added
+// the dependent-policy planner reason and the dependent_policies decision
+// field. Version 17 added the not-null-without-default planner reason.
+// Version 18 added the dependent-trigger, dependent-generated-column, and
+// partition-key planner reasons and the dependent_triggers,
+// dependent_generated_columns, and partition_key_tables decision fields.
+const FormatVersion = 18
 
 // Source identifies which front door derived the plan.
 type Source string

@@ -59,6 +59,7 @@ func TestMigrateReportsABlockWritesDataFaultAndLeavesNothingBehind(t *testing.T)
 	plantDataFault(t, pool, table)
 
 	cmd := newMigrateCmd(url, dataFaultAlter(table))
+	cmd.CopyAndSwap = true
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	cmd.BlockWrites = table.Schema + "." + table.Table
 	cmd.JSON = true
@@ -94,6 +95,7 @@ func TestMigrateReportsALiveDataFaultAndLeavesNothingBehind(t *testing.T) {
 	})
 
 	cmd := newMigrateCmd(url, dataFaultAlter(table))
+	cmd.CopyAndSwap = true
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	cmd.JSON = true
 	var out strings.Builder
@@ -154,6 +156,8 @@ func assertDataFaultVerdict(t *testing.T, runErr error, stdout string, table tes
 	assert.Equal(t, table.Schema+"."+table.Table, v.Table)
 	assert.False(t, v.Forced)
 	assert.Equal(t, writesBlocked, v.WritesBlocked, "the verdict says whether the table was offline for writes")
+	assert.True(t, v.Abandoned, "the typed field says the run was discarded")
+	assert.Contains(t, stdout, `"abandoned": true`, "the field is on the wire for a consumer that does not read the detail")
 	assert.Contains(t, v.Detail, "the run was abandoned")
 	assert.Contains(t, v.Detail, released)
 	assert.NotContains(t, v.Detail, "--restart", "nothing remains for a restart to discard")

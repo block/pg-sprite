@@ -1,10 +1,13 @@
 package schemadiff_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,29 +21,106 @@ import (
 // built on: the index on the table whose drop would remove one, the primary
 // key or unique constraint that owns it, and every column it covers,
 // INCLUDE columns too, and apart from those the columns of the table's own
-// identity index. A table
-// whose identity is not an index reports nothing, and the facts stay out of
-// the model's JSON, so no digest of the model moves with them.
+// identity index. Under REPLICA IDENTITY DEFAULT the primary key is the
+// identity index once a publication publishes the table's updates or
+// deletes, whether it lists the table, a partitioned table above it, or the
+// table's schema. A table whose identity is FULL, or DEFAULT with no
+// publication publishing its updates or deletes, reports nothing, and the
+// facts stay out of the model's JSON, so no digest of the model moves with
+// them.
 func TestIntrospectReplicaIdentity(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
+	major, err := dbconn.ServerMajor(t.Context(), pool)
+	require.NoError(t, err)
+
 	cases := []struct {
-		name  string
-		setup string
-		table string
-		want  schemadiff.ReplicaIdentityKeys
+		name     string
+		setup    string
+		table    string
+		minMajor int
+		want     schemadiff.ReplicaIdentityKeys
 	}{
 		{
-			name:  "default identity",
+			name:  "default identity no publication publishes",
 			setup: `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, ref text NOT NULL UNIQUE)`,
 			table: "t",
 		},
 		{
+			name: "default identity on a table a publication publishes",
+			setup: `CREATE TABLE %[1]s.t (id bigint, tenant bigint, ref text NOT NULL UNIQUE, CONSTRAINT t_pk PRIMARY KEY (tenant, id));
+				CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.t`,
+			table: "t",
+			want: schemadiff.ReplicaIdentityKeys{
+				Indexes:     []string{"t_pk"},
+				Constraints: []string{"t_pk"},
+				Columns:     []string{"id", "tenant"},
+				OwnColumns:  []string{"id", "tenant"},
+			},
+		},
+		{
+			name: "default identity on a table published for deletes only",
+			setup: `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY);
+				CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.t WITH (publish = 'insert, delete')`,
+			table: "t",
+			want: schemadiff.ReplicaIdentityKeys{
+				Indexes:     []string{"t_pkey"},
+				Constraints: []string{"t_pkey"},
+				Columns:     []string{"id"},
+				OwnColumns:  []string{"id"},
+			},
+		},
+		{
+			name: "default identity on a table published for inserts only",
+			setup: `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY);
+				CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.t WITH (publish = 'insert, truncate')`,
+			table: "t",
+		},
+		{
+			name: "default identity on a table its schema's publication publishes",
+			setup: `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY);
+				CREATE PUBLICATION %[1]s_pub FOR TABLES IN SCHEMA %[1]s`,
+			table:    "t",
+			minMajor: 15,
+			want: schemadiff.ReplicaIdentityKeys{
+				Indexes:     []string{"t_pkey"},
+				Constraints: []string{"t_pkey"},
+				Columns:     []string{"id"},
+				OwnColumns:  []string{"id"},
+			},
+		},
+		{
+			name: "default identity on partitions a publication publishes through their parent",
+			setup: `CREATE TABLE %[1]s.p (id bigint, ref text NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id);
+				CREATE TABLE %[1]s.p_1 PARTITION OF %[1]s.p FOR VALUES FROM (0) TO (100);
+				CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.p WITH (publish_via_partition_root = true)`,
+			table: "p",
+			want: schemadiff.ReplicaIdentityKeys{
+				Indexes:     []string{"p_pkey"},
+				Constraints: []string{"p_pkey"},
+				Columns:     []string{"id"},
+			},
+		},
+		{
+			name: "default identity on one partition a publication publishes",
+			setup: `CREATE TABLE %[1]s.p (id bigint, ref text NOT NULL, PRIMARY KEY (id)) PARTITION BY RANGE (id);
+				CREATE TABLE %[1]s.p_1 PARTITION OF %[1]s.p FOR VALUES FROM (0) TO (100);
+				CREATE TABLE %[1]s.p_2 PARTITION OF %[1]s.p FOR VALUES FROM (100) TO (200);
+				CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.p_2`,
+			table: "p",
+			want: schemadiff.ReplicaIdentityKeys{
+				Indexes:     []string{"p_pkey"},
+				Constraints: []string{"p_pkey"},
+				Columns:     []string{"id"},
+			},
+		},
+		{
 			name: "full identity",
 			setup: `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY);
-				ALTER TABLE %[1]s.t REPLICA IDENTITY FULL`,
+				ALTER TABLE %[1]s.t REPLICA IDENTITY FULL;
+				CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.t`,
 			table: "t",
 		},
 		{
@@ -129,7 +209,11 @@ func TestIntrospectReplicaIdentity(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if major < c.minMajor {
+				t.Skipf("the case needs PostgreSQL %d or later; server reports %d", c.minMajor, major)
+			}
 			schema := testutil.NewSchema(t, pool)
+			dropPublication(t, pool, schema+"_pub")
 			_, err := pool.Exec(t.Context(), fmt.Sprintf(c.setup, schema))
 			require.NoError(t, err)
 			m, err := schemadiff.Introspect(t.Context(), pool, schema, c.table)
@@ -141,6 +225,87 @@ func TestIntrospectReplicaIdentity(t *testing.T) {
 			assert.Equal(t, mustJSON(t, withoutFacts), mustJSON(t, m), "the facts are not part of the model's JSON")
 		})
 	}
+}
+
+// The replica identity is read in the transaction's own snapshot, so a
+// publication dropped by another session after the snapshot was taken is
+// still counted, and the read does not fail looking it up.
+func TestReadReplicaIdentitySurvivesAPublicationDroppedUnderneath(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	publication := schema + "_pub"
+	dropPublication(t, pool, publication)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id bigint PRIMARY KEY);
+		CREATE PUBLICATION %[1]s_pub FOR TABLE %[1]s.t`, schema))
+	require.NoError(t, err)
+	var oid uint32
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", schema+".t").Scan(&oid))
+
+	tx, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+	_, err = tx.Exec(t.Context(), "SELECT 1")
+	require.NoError(t, err, "take the snapshot")
+	_, err = pool.Exec(t.Context(), "DROP PUBLICATION "+pgx.Identifier{publication}.Sanitize())
+	require.NoError(t, err)
+
+	keys, err := schemadiff.ReadReplicaIdentity(t.Context(), tx, oid)
+	require.NoError(t, err)
+	assert.Equal(t, schemadiff.ReplicaIdentityKeys{
+		Indexes:     []string{"t_pkey"},
+		Constraints: []string{"t_pkey"},
+		Columns:     []string{"id"},
+		OwnColumns:  []string{"id"},
+	}, keys)
+}
+
+// A publication FOR ALL TABLES publishes every permanent table, so the
+// primary key of a DEFAULT table is its identity, but it never publishes an
+// unlogged table, whose primary key stays free to drop. A publication for
+// all tables reaches every database on the server, so the test needs a
+// server of its own.
+func TestIntrospectReplicaIdentityUnderAPublicationForAllTables(t *testing.T) {
+	testutil.SkipOnSharedServer(t, "creates a publication FOR ALL TABLES")
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	dropPublication(t, pool, schema+"_pub")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.logged (id bigint PRIMARY KEY);
+		CREATE UNLOGGED TABLE %[1]s.unlogged (id bigint PRIMARY KEY);
+		CREATE PUBLICATION %[1]s_pub FOR ALL TABLES WITH (publish = 'update')`, schema))
+	require.NoError(t, err)
+
+	logged, err := schemadiff.Introspect(t.Context(), pool, schema, "logged")
+	require.NoError(t, err)
+	assert.Equal(t, schemadiff.ReplicaIdentityKeys{
+		Indexes:     []string{"logged_pkey"},
+		Constraints: []string{"logged_pkey"},
+		Columns:     []string{"id"},
+		OwnColumns:  []string{"id"},
+	}, logged.ReplicaIdentity)
+
+	unlogged, err := schemadiff.Introspect(t.Context(), pool, schema, "unlogged")
+	require.NoError(t, err)
+	assert.Equal(t, schemadiff.ReplicaIdentityKeys{}, unlogged.ReplicaIdentity)
+}
+
+// dropPublication drops the named publication when the test ends, if the
+// test created it. A publication belongs to the database, not to a schema,
+// so dropping the test's schema leaves it behind.
+func dropPublication(t *testing.T, pool *pgxpool.Pool, name string) {
+	t.Helper()
+	t.Cleanup(func() {
+		// t.Context is cancelled by cleanup time; strip the cancellation.
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP PUBLICATION IF EXISTS "+pgx.Identifier{name}.Sanitize())
+		if err != nil {
+			t.Logf("drop publication %s: %v", name, err)
+		}
+	})
 }
 
 func mustJSON(t *testing.T, m schemadiff.Model) string {

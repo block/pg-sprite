@@ -44,11 +44,13 @@ const (
 // AddColumnProbes returns, for each ADD COLUMN of an ALTER TABLE, a
 // single-command ALTER TABLE that adds the same column to schema.table,
 // keyed by column name. A probe keeps everything that decides whether the
-// server rewrites the table to add the column: its type and collation, its
-// DEFAULT, NOT NULL, and identity. It drops the inline CHECK, UNIQUE,
-// PRIMARY KEY, REFERENCES, and EXCLUDE constraints, which scan the table or
-// build an index but never rewrite it, and which a probe table cannot
-// always carry, and an identity's SEQUENCE NAME, so the probe's sequence is
+// server rewrites the table to add the column, or refuses it for leaving
+// an existing row NULL: its type and collation, its DEFAULT, NOT NULL, and
+// identity. An inline PRIMARY KEY becomes the NOT NULL it implies. The
+// probe drops the inline CHECK, UNIQUE, REFERENCES, and EXCLUDE
+// constraints and the rest of a PRIMARY KEY, which scan the table or build
+// an index but never rewrite it, and which a probe table cannot always
+// carry, and an identity's SEQUENCE NAME, so the probe's sequence is
 // created beside the probe table rather than in the named schema. A
 // generated column gets no probe: the planner routes it by its generation
 // alone, and its expression may name a column the same change adds, which
@@ -85,6 +87,10 @@ func AddColumnProbes(sql, schema, table string) (map[string]AddColumnProbe, erro
 		}
 		kept := make([]*pganalyze.Node, 0, len(def.GetConstraints()))
 		for _, c := range def.GetConstraints() {
+			if c.GetConstraint().GetContype() == pganalyze.ConstrType_CONSTR_PRIMARY {
+				kept = append(kept, notNullConstraint())
+				continue
+			}
 			if !decidesRewrite(c.GetConstraint().GetContype()) {
 				continue
 			}
@@ -106,6 +112,13 @@ func AddColumnProbes(sql, schema, table string) (map[string]AddColumnProbe, erro
 		probes[def.GetColname()] = AddColumnProbe{SQL: out, IfNotExists: cmd.GetMissingOk()}
 	}
 	return probes, nil
+}
+
+// notNullConstraint is an inline NOT NULL column constraint.
+func notNullConstraint() *pganalyze.Node {
+	return &pganalyze.Node{Node: &pganalyze.Node_Constraint{Constraint: &pganalyze.Constraint{
+		Contype: pganalyze.ConstrType_CONSTR_NOTNULL,
+	}}}
 }
 
 // withoutSequenceName removes the SEQUENCE NAME option from an identity

@@ -203,7 +203,8 @@ transaction; chunks are cut and registered under one lock, and the ledger refuse
 does not start just above the frontier (`copy-frontier-broken`, a typed `copier.RefusalCause`),
 so the frontier never runs ahead of an unregistered chunk; a chunk is registered in flight before its transaction begins and leaves the in-flight set
 only when it commits — a chunk whose transaction did not commit stays in flight, so its keys
-never read as landed; a resumed copy first deletes every shadow row above W in bounded batches,
+never read as landed; a resumed copy, and a reconcile before its recopy pass over a partial
+watermark (`copier.ClearAbove`, ST-4), first deletes every shadow row above W in bounded batches,
 each in its own guarded transaction, before its first chunk is cut — the whole shadow when
 nothing landed, since a zero watermark says nothing about what an earlier run left above it — so
 every key above W is genuinely uncut when the applier starts discarding for it; the first clear
@@ -536,7 +537,14 @@ acknowledgement's locked-table lookup, qualify every function, relation, type, a
 a planted `oid = regclass` operator on a path that lists the catalog implicitly, and decoy
 `pg_class`, `pg_namespace`, `pg_index`, `to_regclass`, `quote_ident`, `oid = oid`, and `text` on a
 shadowing `<schema>, pg_catalog` path, do not change either answer — the replica identity read
-the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), and `pkg/checksum` (the column-type read, the relation check,
+the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), `pkg/checkpoint` (`Ensure`
+runs on whatever pool the caller passes, so its lock key, owner read, and column read qualify
+every function, relation, type, and operator; a lookalike `pg_get_userbyid` planted on a
+shadowing `<schema>, pg_catalog` path would otherwise name an owner that is not this role and
+refuse the engine's own table as foreign, and an empty `pg_namespace` or `pg_attribute` would
+report the schema absent or every column missing — decoy relations, functions, and operators on
+that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the text is held
+by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -568,8 +576,11 @@ base type, element, and collation; a collation's whole catalog row but its oid a
 locale and ICU rules included in whichever columns the server version keeps them —
 rendered from the catalog alone, never through a deparser. Every guarded transaction of the
 copier, the verifier, and the applier, and the cutover's drain, recomputes it before it reads
-or writes and refuses when it differs (`copy-conversion-drift` from the copier,
-`ErrInvariantViolation` from the others). The check and the statements that evaluate the
+or writes and refuses when it differs: each wraps the one `chunksql.ErrConversionDrift`
+sentinel — the copier as its `copy-conversion-drift`, the verifier and the applier as
+`ErrInvariantViolation` — and `Runner.Run` re-mints all three as the shadow cause
+`copy-conversion-drift`, so a run stopped by a changed catalog reads the same cause whether
+a chunk, a verifying read, or a catch-up flush noticed it. The check and the statements that evaluate the
 expressions are separate statements, so the copier's chunk, the applier's flush, the verifier's
 repair, and the drain recompute it once more after their writes and before they commit. Each
 of those write transactions is `READ COMMITTED` whatever the server or role configures as
@@ -666,7 +677,11 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
 *Enforced today:* `pkg/dbconn` `AcquireTableLock` (`TableLock` proof carried by
 `TableLockSession`; affinity refusal behind transaction-mode and statement-mode PgBouncer,
 two-instance refusal, keepalive-loss, and `Bind`
-cancellation tests); `pkg/schemachange` shadow build, drop, and inspect each require the
+cancellation tests), and `TableLockSession.Confirm` and `LookupTableLockHolder` read
+`pg_locks` scoped to the connection's own database, so a lock the session holds in another
+database of the same server — where it excludes nothing on this database's table — confirms
+as `ErrTableLockNotHeld` and is not reported as the table's holder (same-key-in-another-database
+test); `pkg/schemachange` shadow build, drop, and inspect each require the
 session for the proven table, run under its `Bind` context, and confirm from their own
 transaction that the session's backend holds the lock before the first write (nil-session,
 wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
@@ -1086,7 +1101,9 @@ it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
 row's position — a ceiling abort included, so the backlog is drained by resuming — or the
 operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`, or has a
-restart (`RunOptions.Restart`) do the same sequence under the run's own lock, where
+restart (`RunOptions.Restart`) do the same sequence under the run's own lock — a data fault
+is the one stop the Runner abandons itself, through the same discard, since a resume would
+meet the same rows (abandons-on-a-data-fault and holds-a-run-whose-abandon-fails tests) — where
 `Runner.discardRow` drops a slot only when it is the target's derived name and refuses any other
 as `resume-row-mismatch` before discarding anything (refuses-a-row-naming-another-engine-slot
 test); the slot
@@ -1170,7 +1187,9 @@ dies restarts as a reconcile, and the slot it is about to make is owned by the r
 moment it exists (ST-3) — replaces whatever slot bears the derived name with a fresh one through
 `decode.ReplaceSlot`, keeping the publication in place, since the source's writers look it up as
 they run and one dropped under them fails the write, and
-— when the watermark says anything landed — runs one `checksum` pass at or below the watermark
+— when the watermark says anything landed — clears the shadow above the watermark through
+`copier.ClearAbove`, as the copier that resumes from it would first (CO-4), so no shadow row
+lies outside the pass that follows, then runs one `checksum` pass at or below the watermark
 under the `recopy` policy (D14), recopying only the chunks the gap touched without a reread,
 since the source is live and the new slot carries every write that lands after the recopy,
 then writes the row back to `copying` or `catching_up` by the watermark with the new slot's
@@ -1184,21 +1203,26 @@ refuses-replaced-relations-before-its-marker,
 leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
 refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
 refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
-reads-a-slot-the-server-reports-lost-as-reconcile, and
-survives-a-unique-value-moved-during-its-recopy tests). The recopy pass compares a chunk and
+reads-a-slot-the-server-reports-lost-as-reconcile,
+survives-a-unique-value-moved-during-its-recopy, and
+clears-the-shadow-above-a-partial-watermark-before-its-recopy tests). The recopy pass compares a chunk and
 recopies it in separate statements against a live source, so a source that moves a unique
 value from a row in a chunk the compare read equal to a row in a differing chunk, between the
 two, makes the recopy collide with a shadow row the compare left alone; the one recopy
 transaction rolls back, the pass compares again, and the recopy cut from that comparison
 covers both chunks and lands (CO-3). A source that moves a value into the differing chunks
 before every recopy exhausts the pass's bounded attempts; the pass then ends in the last
-collision's error with the row still in `reconciling` and the shadow unchanged, and the next
-attempt restarts the reconcile — closed, never a shadow with a row the source lacks. *Known
-limit:* on resume the reconcile runs before the copier clears the shadow rows above a partial
-watermark, and the pass compares only through that watermark, so a unique value the source
-moves out of a shadow row above it into a differing chunk collides on every attempt of every
-reconcile until the source moves it back; the run stays in `reconciling`, closed, and
-`--restart` (`CopySwapOptions.Restart`) starts it over. *Source:*
+collision's error with the row still in `reconciling`, no recopy committed, and the watermark
+unmoved, and the next attempt restarts the reconcile — closed, never a shadow with a row the
+source lacks. The pass compares only through the watermark, which is why the reconcile clears
+the shadow above a partial watermark before it, and before any slot command so a new slot
+retains WAL only while the pass runs: a unique value the source moved out of a shadow row
+above the watermark into a differing chunk below it would otherwise collide with a row no
+comparison can reach, on every attempt of every reconcile, until the source moved it back. A
+clear that fails, a lock timeout behind a writer still holding the shadow included, ends the
+attempt before the marker with the row and its watermark as they were
+(retries-after-the-clear-fence-times-out test); with nothing landed there is no pass and no
+clear (with-nothing-landed-leaves-the-shadow-alone test). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
@@ -1521,8 +1545,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
-  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`, which decides every
-  shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
+  and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/planner`
+  (`destructiveOp`, which decides every shape in `statement.OpKinds()` explicitly and
+  treats an unclassified one as destructive;
   `TestEveryOpKindIsClassifiedForDestructiveness`,
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
   `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
@@ -1568,6 +1593,46 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `table_usage_idle_integration_test.go`; a reset between the read's statistics reads not
   seen, and a role's saved `track_counts = off` unknown, in
   `table_usage_coverage_integration_test.go`. *Source:* [table usage](table-usage.md).
+- <a id="rf-12"></a>**RF-12** — Every operation whose refusal an operator lifts with a typed
+  acknowledgement is listed in one registry with that acknowledgement, and the list is
+  complete: every shape the planner marks destructive, a blocking `DROP INDEX` or `REINDEX`,
+  the submitted form that blocks the table where the planner has no safer sequence, a
+  copy-and-swap restart, and a copy-and-swap that blocks the table's writes. The entries lose
+  structure or data, availability for a bounded window, or a stopped run's progress. On
+  `migrate --alter`, an entry whose acknowledgement is missing is refused with its declared
+  reason, except the restart: without `--restart` a stopped run resumes and nothing is
+  discarded, and a leftover no checkpoint records is refused and left standing. An
+  acknowledgement that names any table but the resolved target is a usage error that executes
+  nothing. Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
+  own sentinel before any database work, and `migrate --desired` rejects each flag. A new
+  string field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a new
+  destructive shape, or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry
+  entry and a desired-state decision. RF-10, RF-5, and AB-1..AB-5 state what each gate does;
+  this invariant states that the set of acknowledgement gates is complete. Irreversible steps
+  the engine takes on its own, with no operator decision to acknowledge, are outside the
+  registry and held by their own invariants: dropping the retained source after a committed
+  swap (unless `KeepOld`; ST-6 holds it to the relation the swap retained), dropping its own
+  shadow under the table lock and the shadow's proof (LK-1), reaping an orphaned slot (ST-3),
+  dropping an index `DropAbandonedIndex` has proven abandoned (`ErrAbandonmentUnproven`
+  otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
+  Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
+  refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
+  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and, for a CLI flag,
+  the `SCHEMA.TABLE` placeholder plus its sentinel and field in
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
+  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
+  `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
+  `ErrBlockWritesNotSupported`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
+  registry's shape and the desired-state rejections;
+  `TestEveryOpKindIsClassifiedForDestructiveness` and
+  `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
+  derives; `TestIrreversibleOperationsAreGated` for each entry's refusal and wrong-target usage
+  error against real PostgreSQL with the table, checkpoint, and write path unchanged, and a
+  restart's unrecorded leftover left standing; and
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for each CLI flag reaching exactly its own
+  field and sentinel.
+  *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
 
 ## Orchestration / control-plane (OC)
 
@@ -1659,7 +1724,7 @@ about **how we write and review the code**.
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
-| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, demo refusal smoke |
+| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, desired-state execution rejects every acknowledgement, demo refusal smoke |
 | AB-3, AB-4, AB-5, RF-9 | accepted-blocking rollout step 4 | catalog-resolved acknowledgement, mismatch executes nothing, ineligible refusals untouched, grammar rejects `--force`/`--dry-run`/missing budget, accepted verdict identity and exit 3, demo exit-code smoke |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
@@ -1671,4 +1736,5 @@ about **how we write and review the code**.
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | RF-11 | table usage primitive (ahead of any drop path) | per-branch window-edge and partition-aggregation unit tests; recent, lock-holder, version, reset, and partitioned-table integration tests on 14 → 18 |
+| RF-12 | irreversible-operations registry | registry completeness and desired-state rejection unit tests; per-entry refusal and wrong-target integration test; CLI flag-to-entry walk |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

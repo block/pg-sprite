@@ -175,6 +175,15 @@ type Op struct {
 	IfNotExists bool
 	// GeneratedStored is true for ADD COLUMN ... GENERATED ... STORED.
 	GeneratedStored bool
+	// ColumnStorage is true for the OpSetColumnOptions that is ALTER
+	// COLUMN ... SET STORAGE, which takes ACCESS EXCLUSIVE where SET
+	// STATISTICS and the column's SET / RESET options take SHARE UPDATE
+	// EXCLUSIVE.
+	ColumnStorage bool
+	// RelOptions are the storage parameters an OpSetRelOptions sets or
+	// resets, in statement order, each named as written, with its
+	// namespace prefix ("toast.autovacuum_enabled") where it has one.
+	RelOptions []string
 	// InlineConstraints are the table-constraint families an added column
 	// carries inline (UNIQUE, PRIMARY KEY, REFERENCES, CHECK) — each does
 	// the same index build or validation scan as its ADD CONSTRAINT form.
@@ -468,13 +477,14 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 	case pganalyze.AlterTableType_AT_DropNotNull:
 		return Op{Kind: OpDropNotNull, Column: cmd.GetName()}
 	case pganalyze.AlterTableType_AT_SetStatistics,
-		pganalyze.AlterTableType_AT_SetStorage,
 		pganalyze.AlterTableType_AT_SetOptions,
 		pganalyze.AlterTableType_AT_ResetOptions:
 		return Op{Kind: OpSetColumnOptions, Column: cmd.GetName()}
+	case pganalyze.AlterTableType_AT_SetStorage:
+		return Op{Kind: OpSetColumnOptions, Column: cmd.GetName(), ColumnStorage: true}
 	case pganalyze.AlterTableType_AT_SetRelOptions,
 		pganalyze.AlterTableType_AT_ResetRelOptions:
-		return Op{Kind: OpSetRelOptions}
+		return Op{Kind: OpSetRelOptions, RelOptions: relOptionNames(cmd.GetDef().GetList())}
 	case pganalyze.AlterTableType_AT_SetTableSpace:
 		return Op{Kind: OpSetTablespace, Name: cmd.GetName()}
 	case pganalyze.AlterTableType_AT_AddConstraint:
@@ -741,4 +751,19 @@ func isConstantExpr(node *pganalyze.Node) bool {
 	default:
 		return false
 	}
+}
+
+// relOptionNames names the storage parameters a SET (...) or RESET (...)
+// list sets, each with its namespace prefix where it has one.
+func relOptionNames(list *pganalyze.List) []string {
+	var names []string
+	for _, item := range list.GetItems() {
+		de := item.GetDefElem()
+		name := de.GetDefname()
+		if de.GetDefnamespace() != "" {
+			name = de.GetDefnamespace() + "." + name
+		}
+		names = append(names, name)
+	}
+	return names
 }

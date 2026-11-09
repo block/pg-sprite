@@ -28,8 +28,10 @@ Concretely:
   real PostgreSQL, across every supported major in CI. The integration
   suite runs under `-race` on the newest major only (PostgreSQL 18): the
   code that runs goroutines does not branch on the server version, so a
-  data race CI catches surfaces on that job whatever version it is named
-  for. The other majors run the suite without the detector.
+  data race CI catches surfaces there whatever version it is named for.
+  That race run is split across two jobs, `pkg/schemachange` alone and
+  every other package, so the slowest package does not set its length. The
+  other majors run the suite without the detector.
 - **The matrix is a gate, not advisory.** The `all-green` sentinel job
   requires the full version matrix; docs-only changes are the only path
   that skips it, and even they must pass the unit job — the guards that
@@ -196,7 +198,7 @@ capability no peer suite has.
 | `make test-unit` | Race-enabled unit tests, no Docker (`SKIP_INTEGRATION=1`). |
 | `make test` | Full suite; integration tests start disposable PostgreSQL containers (testcontainers). `PG_VERSION` selects the major (default 16). |
 | `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix, except that it runs `-race` on every major where CI runs it on PostgreSQL 18 only. |
-| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. Runs under `-race` by default; `make test-db RACE=` drops the detector for a faster loop. |
+| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. Runs under `-race` by default; `make test-db RACE=` drops the detector for a faster loop. `TEST_PKGS` narrows the packages (default `./...`). `make test-db-slow` and `make test-db-rest` are the two halves CI's race job runs on separate runners: `pkg/schemachange` alone, and every other package. |
 | `make test-own-server` | The tests that need a server of their own — they create a cluster-level role or a tablespace, or check which image the harness chose — and therefore skip when `PG_DSN` is set. Runs exactly those tests against disposable containers, with `PG_DSN` cleared. CI's version matrix and the release workflow run it right after `make test-db`, so a `PG_DSN` run plus this target is the whole suite. A test opts in through `testutil.SkipOnSharedServer`, and a completeness test holds the target's `-run` list to the set of callers. |
 | `make test-aws-boundary` | AWS-boundary tests against Ministack's RDS/Aurora control plane. Needs Docker only; see the tier table below. |
 | `make demo-check` | The demo tour in check mode against the built `bin/pg-sprite` and the compose database — CI's artifact smoke test (TM-8). Needs Docker and `jq`. |
@@ -420,6 +422,7 @@ same package cover the rest of it.
 | Greenfield `CREATE TABLE` path: shape refusals, claimed-name collisions, post-commit name verification | [pkg/executor](../pkg/executor/create_integration_test.go) |
 | Accepted-blocking execution primitive (`ExecuteAcceptedBlocking`) and its eligibility rule | [pkg/executor](../pkg/executor/accepted_blocking_integration_test.go), [pkg/verdict](../pkg/verdict/accepted_blocking_test.go) |
 | Imperative front door (`migrate.Run`): gate, resolve, route, execute, verdict; `--force` acknowledgement; refusal reason → class registry | [pkg/migrate](../pkg/migrate/run_integration_test.go), [registry](../pkg/migrate/refusal_registry_test.go) |
+| Irreversible-operations registry: every entry refused without its acknowledgement and a usage error from its own check when the acknowledgement names another table, with nothing executed; a restart's leftover left standing; each CLI acknowledgement flag reaching exactly its own field and sentinel | [pkg/migrate](../pkg/migrate/irreversible_registry_integration_test.go), [registry (unit)](../pkg/migrate/irreversible_registry_test.go), [CLI flags](../internal/cli/acknowledgement_flags_test.go) |
 | Desired-state execution loop (`migrate.RunDesired`): whole-plan admission, destructive guard, fingerprint pin, per-statement verdicts | [pkg/migrate](../pkg/migrate/desired_integration_test.go) |
 | Offline `suggest`: safer-form mapping, typed caveats, and residue checks against a live server | [pkg/suggest](../pkg/suggest/suggest_test.go), [residue](../pkg/suggest/residue_integration_test.go) |
 | `pull`: per-table export, refuse-don't-guess shapes, create-only file writes, and the managed-table catalog query | [CLI pull](../internal/cli/pull_integration_test.go), [pkg/schemadiff](../pkg/schemadiff/managed_tables_integration_test.go) |

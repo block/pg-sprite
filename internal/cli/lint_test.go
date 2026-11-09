@@ -137,6 +137,31 @@ docs:
 `)
 }
 
+// A VALIDATE CONSTRAINT in the same BEGIN … COMMIT block as the NOT VALID
+// constraint it validates names why it blocks and how to fix it, and links
+// its own reference section.
+func TestLintTextValidateInTransactionSaysHowToFixIt(t *testing.T) {
+	var out strings.Builder
+	cmd := LintCmd{}
+	err := cmd.runLint(strings.NewReader("BEGIN;\nALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID;\nALTER TABLE t VALIDATE CONSTRAINT c;\nCOMMIT;\n"), &out)
+	require.ErrorIs(t, err, ErrLintFindings)
+	assert.Contains(t, out.String(), `<stdin>:3:1:
+  ALTER TABLE t VALIDATE CONSTRAINT c;
+
+warning[validate-in-transaction]:
+  VALIDATE CONSTRAINT c — an earlier statement in this transaction block
+  locked the table, and the validation scans every row while that lock is
+  held until COMMIT
+
+help:
+  commit before this statement, so the validation runs in a transaction of
+  its own and blocks neither reads nor writes
+
+docs:
+  `+onlineDDLReferenceURL+`#validate-in-transaction
+`)
+}
+
 func TestLintParseFailureIsErrorNotFinding(t *testing.T) {
 	var out strings.Builder
 	cmd := LintCmd{}

@@ -197,7 +197,7 @@ func TestReportJSONShape(t *testing.T) {
 	suggestion, err := json.Marshal(report.Findings[0].Suggestion)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 10,
 		"postgres_versions": "14-18",
 		"findings": [
 			{
@@ -224,7 +224,7 @@ func TestReportJSONCleanFindingsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 10,
 		"postgres_versions": "14-18",
 		"findings": [],
 		"errors": 0,
@@ -277,6 +277,85 @@ func TestCheckFlagsConcurrentInsideTransactionBlock(t *testing.T) {
 			assert.Equal(t, tc.flagged, flagged)
 		})
 	}
+}
+
+// A VALIDATE CONSTRAINT in a transaction block after an earlier statement
+// locked the same table scans under that lock until the block ends. Lint
+// flags it as a warning; outside a block, after the block ends, or on
+// another table, the validation takes only its own lock.
+func TestCheckValidateInTransaction(t *testing.T) {
+	cases := []struct {
+		name   string
+		script string
+		// flagged lists the statement indexes carrying the finding.
+		flagged []int
+	}{
+		{name: "after its not valid add", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after a not valid foreign key", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT fk; COMMIT", flagged: []int{3}},
+		{name: "after an unnamed add", script: "BEGIN; ALTER TABLE t ADD CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT t_n_check; COMMIT", flagged: []int{3}},
+		{name: "after another change to the table", script: "BEGIN; ALTER TABLE t ADD COLUMN x int; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after an index build", script: "BEGIN; CREATE INDEX i ON t (c); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "start transaction", script: "START TRANSACTION; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "qualified then unqualified", script: "BEGIN; ALTER TABLE app.t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "two validates", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c, VALIDATE CONSTRAINT d; COMMIT", flagged: []int{3, 3}},
+		{name: "after a savepoint", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; SAVEPOINT s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{4}},
+		{name: "block never closed", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c", flagged: []int{3}},
+		{name: "no block", script: "ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT c"},
+		{name: "after commit", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; COMMIT; ALTER TABLE t VALIDATE CONSTRAINT c"},
+		{name: "after commit in a new block", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; COMMIT; BEGIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after commit and chain", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; COMMIT AND CHAIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "another table", script: "BEGIN; ALTER TABLE u ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE t VALIDATE CONSTRAINT d; COMMIT"},
+		{name: "another schema", script: "BEGIN; ALTER TABLE a.t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; ALTER TABLE b.t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after only validates", script: "BEGIN; ALTER TABLE t VALIDATE CONSTRAINT c; ALTER TABLE t VALIDATE CONSTRAINT d; COMMIT"},
+		{name: "after a nested begin", script: "BEGIN; ALTER TABLE t ADD CONSTRAINT c CHECK (n > 0) NOT VALID; BEGIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{4}},
+		{name: "after a reindex table", script: "BEGIN; REINDEX TABLE t; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after a set storage", script: "BEGIN; ALTER TABLE t ALTER COLUMN n SET STORAGE PLAIN; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after user_catalog_table", script: "BEGIN; ALTER TABLE t SET (user_catalog_table = true); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{3}},
+		{name: "after a set statistics", script: "BEGIN; ALTER TABLE t ALTER COLUMN n SET STATISTICS 500; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after a column option", script: "BEGIN; ALTER TABLE t ALTER COLUMN n SET (n_distinct = 100); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after a fillfactor", script: "BEGIN; ALTER TABLE t SET (fillfactor = 70); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "after an autovacuum reset", script: "BEGIN; ALTER TABLE t RESET (autovacuum_enabled, toast.autovacuum_enabled); ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "rolled back to a savepoint", script: "BEGIN; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "locked before the savepoint", script: "BEGIN; ALTER TABLE t ADD COLUMN y int; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{6}},
+		{name: "released savepoint", script: "BEGIN; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; RELEASE s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{5}},
+		{name: "rolled back to an outer savepoint", script: "BEGIN; SAVEPOINT a; SAVEPOINT b; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO a; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "rolled back twice to a savepoint", script: "BEGIN; SAVEPOINT s; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO s; ALTER TABLE t ADD COLUMN y int; ROLLBACK TO s; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+		{name: "rolled back to an inner savepoint", script: "BEGIN; SAVEPOINT a; ALTER TABLE t ADD COLUMN y int; SAVEPOINT b; ALTER TABLE t ADD COLUMN x int; ROLLBACK TO b; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT", flagged: []int{7}},
+		{name: "released then rolled back to an outer savepoint", script: "BEGIN; SAVEPOINT a; SAVEPOINT b; ALTER TABLE t ADD COLUMN x int; RELEASE b; ROLLBACK TO a; ALTER TABLE t VALIDATE CONSTRAINT c; COMMIT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := lint.Check(tc.script)
+			require.NoError(t, err)
+			var flagged []int
+			for _, f := range report.Findings {
+				if f.Code != lint.CodeValidateInTransaction {
+					continue
+				}
+				flagged = append(flagged, f.Statement)
+				assert.Equal(t, lint.SeverityWarning, f.Severity)
+				assert.Empty(t, f.Reason)
+				assert.Empty(t, f.Suggestion)
+			}
+			assert.Equal(t, tc.flagged, flagged)
+		})
+	}
+}
+
+func TestCheckValidateInTransactionNamesTheOperation(t *testing.T) {
+	report, err := lint.Check("BEGIN;\nALTER TABLE t ADD CONSTRAINT t_n_pos CHECK (n > 0) NOT VALID;\nALTER TABLE t VALIDATE CONSTRAINT t_n_pos;\nCOMMIT;")
+	require.NoError(t, err)
+	var found *lint.Finding
+	for i := range report.Findings {
+		if report.Findings[i].Code == lint.CodeValidateInTransaction {
+			found = &report.Findings[i]
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, 3, found.Statement)
+	assert.Equal(t, 3, found.Line)
+	assert.Equal(t, "ALTER TABLE t VALIDATE CONSTRAINT t_n_pos", found.SQL)
+	assert.Equal(t, "VALIDATE CONSTRAINT t_n_pos", found.Operation)
 }
 
 func TestCheckConcurrentInTransactionNamesTheOperation(t *testing.T) {

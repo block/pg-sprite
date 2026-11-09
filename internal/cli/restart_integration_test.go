@@ -41,6 +41,7 @@ func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 
 	alter := fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema)
 	plain := newMigrateCmd(url, alter)
+	plain.CopyAndSwap = true
 	plain.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	plain.BlockWrites = schema + ".t"
 	plain.JSON = true
@@ -52,6 +53,7 @@ func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 	require.Equal(t, verdict.Cause(schemachange.CauseShadowUnrecorded), refused.Cause, "a plain run will not guess what built the leftover")
 
 	restart := newMigrateCmd(url, alter)
+	restart.CopyAndSwap = true
 	restart.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	restart.BlockWrites = schema + ".t"
 	restart.JSON = true
@@ -99,6 +101,7 @@ func TestMigrateRestartAckMismatchExecutesNothing(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.CopyAndSwap = true
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
 	cmd.BlockWrites = schema + ".t"
 	cmd.Restart = "wrong.table"

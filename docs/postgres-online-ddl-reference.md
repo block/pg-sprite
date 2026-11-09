@@ -55,7 +55,12 @@ the lock queue below applies to every query on the parent) and `app-breaking-ren
 catalog change is instant; the running application code that still uses the old name is
 what breaks, so `migrate` refuses it as `rewrite-required` unless forced). `replica-identity` is a refusal: the operation would drop what the table's
 replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
-drops a column a view reads, which PostgreSQL refuses. `cascading-drop` is a refusal as well:
+drops a column a view reads, which PostgreSQL refuses, and `dependent-policy`,
+`dependent-trigger`, `dependent-generated-column`, and `partition-key` are the same refusal
+for a column a row-level security policy, a trigger, a generated column, or a partition key
+depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
+that nothing fills to a table with rows, which PostgreSQL refuses. `cascading-drop` is a
+refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
@@ -233,6 +238,12 @@ ALTER TABLE child ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES parent (id) NOT
 ALTER TABLE child VALIDATE CONSTRAINT fk;  -- SHARE UPDATE EXCLUSIVE, online
 ```
 
+Each statement must commit on its own. A lock is held until its transaction ends,
+so a `VALIDATE` in the same transaction block as the `ADD`, or in the same `ALTER
+TABLE` statement, scans every row under the `ADD`'s lock instead. `lint` flags the
+block form as [`validate-in-transaction`](#validate-in-transaction), and the planner
+refuses the one-statement form until it is split.
+
 ### Safe pattern: add a primary key / unique constraint online
 
 ```sql
@@ -350,6 +361,15 @@ writes, only competing DDL and vacuum:
 The submitted form is already PostgreSQL's safe online idiom (for example
 `CREATE INDEX CONCURRENTLY` or `ADD CONSTRAINT ... NOT VALID`). It runs as
 written and does not block the table while it runs.
+
+`VALIDATE CONSTRAINT` is the idiom only in a statement of its own, or beside other
+operations that take `SHARE UPDATE EXCLUSIVE` alone: another `VALIDATE`, `SET
+STATISTICS`, a column's `SET` / `RESET` options, and every table storage parameter
+except `user_catalog_table`. One `ALTER TABLE` holds the strongest lock any of its
+operations needs for the whole statement, so a `VALIDATE` beside any other operation,
+`SET STORAGE` included, scans under that lock. The planner classifies it as [`safer-idiom`](#safer-idiom), and the statement
+is refused with [`rewrite-required`](#rewrite-required) and the advice to submit each
+operation as its own statement.
 
 The bucket is not uniform: the concurrent builds and `VALIDATE` hold only
 `SHARE UPDATE EXCLUSIVE` while they work, and the `NOT VALID` / `USING INDEX`
@@ -515,12 +535,18 @@ blocking access to every partition. Flagged so it is scheduled deliberately.
 |---|---|---|---|
 | refused — never executed | — | — | 2 |
 
-The operation drops what the table's `REPLICA IDENTITY USING INDEX` keys on: the
-index itself, the constraint that owns it, or one of its key columns, which takes
-the index with it. PostgreSQL keeps the setting and leaves the table with no usable
-identity, so every `UPDATE` and `DELETE` on it fails while a publication publishes
-them. Move the identity first (`ALTER TABLE … REPLICA IDENTITY USING INDEX` another
-unique index, or `REPLICA IDENTITY DEFAULT` when a primary key remains), then re-plan.
+The operation drops what the table's replica identity index keys on: the index
+itself, the constraint that owns it, or one of its key columns, which takes the
+index with it. The index is the one `REPLICA IDENTITY USING INDEX` selects, or the
+primary key under `REPLICA IDENTITY DEFAULT`. PostgreSQL keeps the setting and
+leaves the table with no usable identity, so every `UPDATE` and `DELETE` on it
+fails while a publication publishes them. A `DEFAULT` table counts its primary key
+only while a publication publishes its updates or deletes, by listing the table, a
+partitioned table above it, or its schema, or by publishing all tables; on any
+other table the primary key stays free to drop. Move the identity first
+(`ALTER TABLE … REPLICA IDENTITY USING INDEX` a unique index the drop leaves in
+place, `REPLICA IDENTITY DEFAULT` when a primary key remains, or
+`REPLICA IDENTITY FULL`, which logs every column of the old row), then re-plan.
 The planner judges this from live facts, so the linter, which has none, never
 reports it.
 
@@ -549,6 +575,144 @@ The planner reads the views from live facts, so the linter, which has none, neve
 reports it, and the server's own refusal remains the backstop for a view created
 after planning.
 
+### `dependent-policy`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a row-level security
+policy reads in its `USING` or `WITH CHECK` expression. PostgreSQL refuses both
+while the policy exists (`cannot alter type of a column used in a policy
+definition`), even a type change it would otherwise relabel without a rewrite, such
+as `varchar(36)` → `varchar(64)`, so the statement could only fail. The policy
+counts wherever it is defined: a policy on another table whose expression reads the
+column through a subquery blocks the change too. The change reaches partitions and
+inheritance children the same way as for `dependent-view`. The plan names each
+policy as `"policy" ON "schema"."table"` in `decisions[].dependent_policies`, and a
+refused run's verdict in `dependent_policies`. The manual path depends on the
+change, and the refusal's help names the one that applies. Before a drop, change the
+policies so they no longer read the column, then re-plan the drop. A type change
+PostgreSQL runs in place, such as that widening, can run in one transaction that
+drops the policies, runs the change, and recreates them: outside one, the table is
+briefly without them, which hides the rows a permissive policy admitted and shows the
+rows a restrictive policy filtered out. A type change that rewrites the table cannot
+take that path, because the transaction would block the table for the whole rewrite,
+and copy-and-swap rebuilds the table's policies before it retypes the column, so it
+meets the same refusal. Add a column of the new type instead, backfill it, point the
+policies at it, then drop the old column. A rename is not refused, because a policy follows
+the column. `DROP COLUMN … CASCADE`, which drops the policies with the column, is
+refused as `cascading-drop` instead. When a view and a policy both read the column,
+the decision is `dependent-view`; re-plan after the views are handled. The planner
+reads the policies from live facts, so the linter, which has none, never reports it,
+and the server's own refusal remains the backstop for a policy created after
+planning.
+
+### `dependent-trigger`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a trigger's `UPDATE OF`
+list or `WHEN` condition names. PostgreSQL refuses both while the trigger exists
+(`cannot alter type of a column used in a trigger definition`, and `cannot drop
+column … because other objects depend on it` for a drop), even a type change it would
+otherwise relabel without a rewrite, so the statement could only fail. A trigger whose
+function body reads the column does not count: the server records no dependency on
+it and lets the change run. The change reaches partitions and inheritance children
+the same way as for `dependent-view`. The plan names each trigger as `"trigger" ON
+"schema"."table"` in `decisions[].dependent_triggers`, and a refused run's verdict in
+`dependent_triggers`. The manual path follows the same three cases as
+`dependent-policy`: before a drop, change the triggers so they no longer name the
+column; around a type change PostgreSQL runs in place, drop the triggers, run the
+change, and recreate them in one transaction; for a type change that rewrites the
+table, add a column of the new type, backfill it, and point the triggers at it, since
+copy-and-swap refuses a table with triggers. A rename is not refused, because a
+trigger follows the column. A partition's clone of a trigger on its partitioned
+parent is not named on its own: PostgreSQL drops the clones with the parent's trigger
+and refuses to drop one alone. When a view or a policy also depends on the column,
+the decision's reason names those first, and `dependent_triggers` still names the
+triggers.
+
+### `dependent-generated-column`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a generated column's
+expression reads. PostgreSQL refuses both while the generated column exists (`cannot
+alter type of a column used by a generated column`, and `cannot drop column … because
+other objects depend on it` for a drop), even a type change it would otherwise relabel,
+so the statement could only fail. PostgreSQL 14 is the exception for a drop: it drops
+the generated column along with the column without saying so, so there the refusal is
+what keeps the generated column. The plan names each generated column as
+`"schema"."table"."column"` in `decisions[].dependent_generated_columns`, and a refused
+run's verdict in `dependent_generated_columns`. Drop those generated columns first,
+then re-plan. Adding a `STORED` generated column back afterwards, or changing its
+expression instead, rewrites the table. A partition's copy of the table's own
+generated column is not named on its own, since dropping the table's copy drops it
+and PostgreSQL refuses to drop it alone. A generated column that an earlier statement
+of the same plan drops does not count. Within one `ALTER TABLE`, PostgreSQL runs every
+drop before its other operations, wherever the drop is written, and runs the drops
+themselves in the order written. So a type change ignores a generated column the
+statement drops anywhere, while a drop ignores only one dropped before it: `DROP
+COLUMN total, DROP COLUMN amount` runs, and `DROP COLUMN amount, DROP COLUMN total` is
+refused. A `diff` plan drops generated columns before the columns they read. A copy
+the drop leaves in place still counts, such as a child's copy under `ONLY` or one the
+child declares itself. When a view, a policy, or a trigger also depends on the column,
+the decision's reason names those first, and `dependent_generated_columns` still names
+the generated columns.
+
+### `partition-key`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column in the partition key of the
+table or of a partitioned table below it that the change reaches. PostgreSQL never
+does either (`cannot alter column "…" because it is part of the partition key of
+relation "…"`, SQLSTATE `42P16`), whether the key names the column directly or uses
+it in an expression, so the statement could only fail. The plan names each
+partitioned table in `decisions[].partition_key_tables`, and a refused run's verdict
+in `partition_key_tables`. There is no in-place path: create a new partitioned table
+with the new column definition and move the rows into it. A sub-partition's key
+counts against a recursive change and not against one under `ONLY`. The partition key
+is judged before every other dependent, since no object can be moved aside to let the
+change run.
+
+### `not-null-without-default`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+
+The operation adds a `NOT NULL` column that nothing fills (no default, identity, or
+generation expression of its own, and no `DEFAULT` on its domain) to a table that
+holds rows. The column is `NOT NULL` whether the statement spells it or it comes from
+the column's domain or an inline `PRIMARY KEY`. The rows counted are the table's and
+those of its partitions and inheritance children that store rows locally; a foreign
+table's rows are not read, since PostgreSQL does not check them. Every existing row would hold `NULL` in the new column, so PostgreSQL
+refuses the statement (`column "…" of relation "…" contains null values`, SQLSTATE
+`23502`), and only after it has queued for and taken the table's `ACCESS EXCLUSIVE`
+lock and checked the rows. The statement could only fail. Give the column a constant
+default instead, which PostgreSQL stores in the catalog without rewriting the table
+(`fast-default`), or add the column without `NOT NULL`, backfill it, and set `NOT
+NULL` afterwards, which the planner runs as its safer sequence (`safer-idiom`). An
+empty table has no rows to fill, so the same statement is `metadata-only` there, and
+a column the table already has is not refused, since `ADD COLUMN IF NOT EXISTS`
+skips it, unless the same statement drops the column first. The planner asks the
+server: it adds the column to a one-row temporary table, where PostgreSQL's own
+refusal says whether the column is `NOT NULL` and nothing fills it, and only then reads whether the table holds
+rows, reading at most one row and never waiting for a lock. A read that another
+session's lock blocks fails the plan rather than guessing. The linter has no live facts and never
+reports it. Rows a row-level security policy hides from the role do not count, and
+the server's own refusal remains the backstop for them and for rows inserted after
+planning.
+
 ### `cascading-drop`
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |
@@ -556,8 +720,8 @@ after planning.
 | refused — never executed | — | — | 2 |
 
 The operation is a `DROP COLUMN`, `DROP CONSTRAINT`, or `DROP INDEX` with `CASCADE`.
-PostgreSQL then also drops whatever depends on the target: a view or materialized
-view that reads the column, or another table's foreign key on a dropped primary key
+PostgreSQL then also drops whatever depends on the target: a view, materialized
+view, or row-level security policy that reads the column, or another table's foreign key on a dropped primary key
 or unique constraint. Those objects are not named in the statement, so the plan
 cannot show them, and dropping a foreign key locks the table that holds it, which the
 one-table lock does not cover. `DROP INDEX CONCURRENTLY` does not accept `CASCADE`
@@ -604,6 +768,34 @@ PARTITION`) sits inside a transaction block the script opens with `BEGIN` or
 so the script stops at that statement and the whole block rolls back. Move the
 statement out of the block and run it on its own. Only `lint` reports this code:
 it is a property of the script, and `migrate` takes one statement at a time.
+
+### `validate-in-transaction`
+
+| Verdict | Lock | Scan / rewrite | Lint exit |
+|---|---|---|---|
+| lint warning — runs, but blocks | the lock the earlier statement took, held until `COMMIT` | full validation scan under that lock | 1 |
+
+A `VALIDATE CONSTRAINT` sits inside a transaction block the script opens with
+`BEGIN` or `START TRANSACTION`, after an earlier statement in the same block locked
+the same table. The usual case is the `ADD CONSTRAINT ... NOT VALID` it validates.
+A lock is held until the block ends, so the validation scans every row while the
+table is still under the earlier statement's lock: `ACCESS EXCLUSIVE` for a `CHECK`,
+which blocks reads and writes, and `SHARE ROW EXCLUSIVE` for a foreign key, which
+blocks writes. On its own, `VALIDATE` takes only `SHARE UPDATE EXCLUSIVE`, which
+blocks neither. Commit before the `VALIDATE` so it runs in a transaction of its own.
+
+Lint follows the block the way PostgreSQL does. A `BEGIN` inside an open block keeps
+its locks. `ROLLBACK TO SAVEPOINT` releases the locks taken since the savepoint, and
+`RELEASE SAVEPOINT` keeps them. `REINDEX TABLE` holds `SHARE` on the table, `TRUNCATE`
+holds `ACCESS EXCLUSIVE`, and `LOCK TABLE` holds the mode it names, which counts from
+`SHARE` up. A table renamed in the block keeps its lock under the new name. An earlier
+statement that takes `SHARE UPDATE EXCLUSIVE` alone, such as `SET STATISTICS`, does
+not count. Lint matches tables by the name each statement gives, so it does not see a
+lock a statement takes on a table it does not name: the table a foreign key
+references, the table under an index that `DROP INDEX` names, a partition or child
+that a statement reaches without naming it, or a table that `TRUNCATE ... CASCADE`
+or a new trigger locks. Only `lint` reports this code: it is a property of the
+script, and `migrate` takes one statement at a time.
 
 ### `rewrite-required`
 

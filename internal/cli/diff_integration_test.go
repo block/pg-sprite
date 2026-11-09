@@ -161,7 +161,7 @@ func TestDiffNeverWrites(t *testing.T) {
 		"INSERT INTO %s.events SELECT g, g FROM generate_series(1, 10) g", schema))
 	require.NoError(t, err)
 
-	cmd := newDiffCmd(t, url, schema, "CREATE TABLE events (id bigint PRIMARY KEY, name text NOT NULL)")
+	cmd := newDiffCmd(t, url, schema, "CREATE TABLE events (id bigint PRIMARY KEY, name text)")
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
 

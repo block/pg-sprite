@@ -80,6 +80,7 @@ func (f copySwapFixture) createOrders(t *testing.T) {
 func (f copySwapFixture) options() Options {
 	opts := DefaultOptions()
 	opts.CopySwap = CopySwapOptions{
+		Enabled:       true,
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
 		BlockWrites:   f.schema + ".orders",

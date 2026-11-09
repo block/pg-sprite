@@ -78,7 +78,7 @@ dry_run() {
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -168,8 +168,9 @@ execute_native() {
 # execute_copy_swap sql
 #
 # Runs a schema change the planner routes to copy-and-swap and requires the
-# route's own outcome and exit 0. The free-disk declaration is the route's
-# admission for the shadow table and its indexes; the demo tables are tiny,
+# route's own outcome and exit 0. --copy-and-swap opens the route, which is
+# a preview and stays closed without it. The free-disk declaration is the
+# route's admission for the shadow table and its indexes; the demo tables are tiny,
 # so the figure only has to be non-zero. The compose database runs with
 # logical decoding on, so the run streams the source's writes through a
 # replication slot the way it does against a production server.
@@ -177,11 +178,11 @@ execute_copy_swap() {
     local sql="$1" out status=0
     step "execute (copy-and-swap): $sql"
     if [ "$CHECK" = 1 ]; then
-        out=$("$PGS" migrate --url "$PG_DSN" --json --free-disk 1GiB --alter "$sql") || status=$?
+        out=$("$PGS" migrate --url "$PG_DSN" --json --copy-and-swap --free-disk 1GiB --alter "$sql") || status=$?
         assert_eq "exit of [$sql]" 0 "$status"
         assert_eq "outcome of [$sql]" "executed-via-copy-and-swap" "$(jq -r '.outcome' <<<"$out")"
     else
-        "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql"
+        "$PGS" migrate --url "$PG_DSN" --copy-and-swap --free-disk 1GiB --alter "$sql"
     fi
 }
 
@@ -199,14 +200,15 @@ execute_data_fault() {
     local table="$1" sql="$2" out status=0
     step "execute (copy-and-swap, expect a data fault): $sql"
     if [ "$CHECK" = 1 ]; then
-        out=$("$PGS" migrate --url "$PG_DSN" --json --free-disk 1GiB --alter "$sql" 2>/dev/null) || status=$?
+        out=$("$PGS" migrate --url "$PG_DSN" --json --copy-and-swap --free-disk 1GiB --alter "$sql" 2>/dev/null) || status=$?
         assert_eq "data-fault exit of [$sql]" 1 "$status"
         assert_eq "outcome of [$sql]" "failed" "$(jq -r '.outcome' <<<"$out")"
         assert_eq "code of [$sql]" "data-fault" "$(jq -r '.code' <<<"$out")"
         assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
         assert_eq "forced of [$sql]" false "$(jq -r '.forced // false' <<<"$out")"
+        assert_eq "abandoned of [$sql]" true "$(jq -r '.abandoned // false' <<<"$out")"
     else
-        "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql" \
+        "$PGS" migrate --url "$PG_DSN" --copy-and-swap --free-disk 1GiB --alter "$sql" \
             || echo "(exit $? — expected 1: a row will not fit the new type; the run abandoned itself and dropped its shadow, slot, and checkpoint row)"
     fi
 }
@@ -305,7 +307,7 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
@@ -332,7 +334,7 @@ diff_advisory() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         assert_eq "advisory count of [$desired]" 1 "$(jq -r '.advisories | length' <<<"$out")"
@@ -360,7 +362,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -401,7 +403,7 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 15 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 18 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
             case "$(basename "$desired")" in
             contacts.sql)
@@ -497,7 +499,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" lint --json risky.sql) || status=$?
         assert_eq "lint exit" 1 "$status"
-        assert_eq "lint format_version" 6 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "lint format_version" 10 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "lint errors" 1 "$(jq -r '.errors' <<<"$out")"
     else
         "$PGS" lint risky.sql || echo "(exit $? — error findings gate, by design)"

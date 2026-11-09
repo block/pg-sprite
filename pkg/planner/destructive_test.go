@@ -32,6 +32,8 @@ func TestEveryOpKindIsClassifiedForDestructiveness(t *testing.T) {
 		statement.OpDropIndex,
 		statement.OpDropNotNull,
 	}, destructive)
+	assert.Equal(t, destructive, DestructiveOpKinds(),
+		"the exported set is the classification, in statement.OpKinds() order")
 }
 
 // A shape outside the classified set is treated as destructive, so the

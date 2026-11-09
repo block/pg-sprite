@@ -390,6 +390,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 		report, err := r.swap(ctx, pool, lock, target, &state)
 		result.Verification = report
 		if err != nil {
+			err = driftRefusal(err, state.cp.Schema, state.cp.Table)
 			return Result{}, r.abandonOnDataFault(ctx, pool, lock, target, &state, err)
 		}
 	}

@@ -84,6 +84,11 @@ func Reasons() []Reason {
 		ReasonPartitionParentLock,
 		ReasonReplicaIdentity,
 		ReasonDependentView,
+		ReasonDependentPolicy,
+		ReasonDependentTrigger,
+		ReasonDependentGeneratedColumn,
+		ReasonPartitionKey,
+		ReasonNotNullWithoutDefault,
 		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
@@ -153,13 +158,15 @@ const (
 	// EXCLUSIVE on the partitioned parent — no scan, but it queues behind
 	// and then blocks every query on the parent while held.
 	ReasonPartitionParentLock Reason = "partition-parent-lock"
-	// ReasonReplicaIdentity: the operation drops what the table's
-	// REPLICA IDENTITY USING INDEX keys on — the index itself, the
-	// constraint that owns it, or one of its columns. The setting outlives
-	// the index, so the table is left with no usable identity, and every
-	// UPDATE and DELETE on it fails while a publication publishes them.
-	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
-	// re-plan.
+	// ReasonReplicaIdentity: the operation drops what the table's replica
+	// identity index keys on — the index itself, the constraint that owns
+	// it, or one of its columns. The index is the one REPLICA IDENTITY
+	// USING INDEX selects, or the primary key under REPLICA IDENTITY
+	// DEFAULT while a publication publishes the table's updates or
+	// deletes. The setting outlives the index, so the table is left with
+	// no usable identity, and every UPDATE and DELETE on it fails while a
+	// publication publishes them. Move the identity first (ALTER TABLE ...
+	// REPLICA IDENTITY), then re-plan.
 	ReasonReplicaIdentity Reason = "replica-identity"
 	// ReasonDependentView: the operation changes the type of, or drops, a
 	// column that a view or materialized view reads. PostgreSQL refuses
@@ -167,13 +174,50 @@ const (
 	// nothing, so the statement could only fail. The decision names the
 	// views; change or drop them first, then re-plan.
 	ReasonDependentView Reason = "dependent-view"
+	// ReasonDependentPolicy: the operation changes the type of, or drops,
+	// a column that a row-level security policy reads, in its USING or
+	// WITH CHECK expression, on this table or on another table that reads
+	// the column through a subquery. PostgreSQL refuses both while the
+	// policy exists, even a type change that rewrites nothing, so the
+	// statement could only fail. The decision names the policies; drop
+	// them first and recreate them after the change, then re-plan.
+	ReasonDependentPolicy Reason = "dependent-policy"
+	// ReasonDependentTrigger: the operation changes the type of, or drops,
+	// a column that a trigger's UPDATE OF list or WHEN condition names.
+	// PostgreSQL refuses both while the trigger exists, even a type change
+	// that rewrites nothing, so the statement could only fail. The
+	// decision names the triggers; a trigger whose function reads the
+	// column does not count, since the server records no dependency for
+	// it.
+	ReasonDependentTrigger Reason = "dependent-trigger"
+	// ReasonDependentGeneratedColumn: the operation changes the type of,
+	// or drops, a column that a generated column's expression reads.
+	// PostgreSQL refuses both while the generated column exists, so the
+	// statement could only fail, except that PostgreSQL 14 drops the
+	// generated column along with a dropped column, so there the refusal
+	// is what keeps it. The decision names the generated columns.
+	ReasonDependentGeneratedColumn Reason = "dependent-generated-column"
+	// ReasonPartitionKey: the operation changes the type of, or drops, a
+	// column in the partition key of the table or of a partitioned table
+	// below it that the change reaches. PostgreSQL never changes or drops
+	// a partition key column, so the statement could only fail; the only
+	// path is a new partitioned table with the new key, the rows moved
+	// into it. The decision names the partitioned tables.
+	ReasonPartitionKey Reason = "partition-key"
+	// ReasonNotNullWithoutDefault: the operation adds a NOT NULL column
+	// with no default to a table that holds rows. Every existing row would
+	// hold NULL in the new column, so PostgreSQL refuses the statement
+	// (SQLSTATE 23502) after taking the table's exclusive lock; it could
+	// only fail. A default, identity, or generated column fills the rows,
+	// and an empty table has none to fill, so neither is refused.
+	ReasonNotNullWithoutDefault Reason = "not-null-without-default"
 	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
-	// depends on what it drops: a view that reads a dropped column, or
-	// another table's foreign key on a dropped key. Those objects are not
-	// in the statement, so neither the plan nor the table's lock covers
-	// them. Drop each dependent object as its own change, then resubmit
-	// without CASCADE, which PostgreSQL refuses while anything still
-	// depends on the target.
+	// depends on what it drops: a view or policy that reads a dropped
+	// column, or another table's foreign key on a dropped key. Those
+	// objects are not in the statement, so neither the plan nor the
+	// table's lock covers them. Drop each dependent object as its own
+	// change, then resubmit without CASCADE, which PostgreSQL refuses
+	// while anything still depends on the target.
 	ReasonCascadingDrop Reason = "cascading-drop"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
@@ -253,8 +297,113 @@ type Decision struct {
 	SaferSQLExecution Execution `json:"safer_sql_execution,omitempty"`
 	// DependentViews names the views and materialized views that read the
 	// column, each schema-qualified with every identifier quoted, present
-	// exactly for dependent-view decisions.
+	// whenever one blocks the change, whatever the decision's reason.
 	DependentViews []string `json:"dependent_views,omitempty"`
+	// DependentPolicies names the row-level security policies that read
+	// the column, each rendered "policy" ON "schema"."table" with every
+	// identifier quoted, present whenever one blocks the change, whatever
+	// the decision's reason.
+	DependentPolicies []string `json:"dependent_policies,omitempty"`
+	// DependentTriggers names the triggers whose UPDATE OF list or WHEN
+	// condition names the column, each rendered "trigger" ON
+	// "schema"."table" with every identifier quoted, present whenever one
+	// blocks the change, whatever the decision's reason.
+	DependentTriggers []string `json:"dependent_triggers,omitempty"`
+	// DependentGeneratedColumns names the generated columns whose
+	// expression reads the column, each rendered "schema"."table"."column"
+	// with every identifier quoted, present whenever one blocks the change,
+	// whatever the decision's reason. A copy that dropping the table's own
+	// generated column removes is left out, since PostgreSQL refuses to
+	// drop it on its own.
+	DependentGeneratedColumns []string `json:"dependent_generated_columns,omitempty"`
+	// PartitionKeyTables names the partitioned tables whose partition key
+	// includes the column, each schema-qualified with every identifier
+	// quoted, present exactly for partition-key decisions.
+	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
+	// DependentFix is the manual path for the policies and triggers that
+	// block the change, which depends on what the change would do with
+	// those dependents out of the way. Like Kind, it is not part
+	// of the plan-report contract: it selects the help the engine's own
+	// text renders.
+	DependentFix DependentFix `json:"-"`
+}
+
+// DependentFix is the manual path for a change PostgreSQL refuses while a
+// row-level security policy or a trigger reads the column: objects that
+// can be dropped and recreated around the change.
+type DependentFix string
+
+const (
+	// DependentFixRewriteDependents is for a column drop. The dependents
+	// have to stop reading the column before it can go, and the drop then
+	// plans on its own.
+	DependentFixRewriteDependents DependentFix = "rewrite-dependents"
+	// DependentFixRecreateAroundChange is for a type change PostgreSQL runs
+	// in place. Dropping the dependents, running the change, and
+	// recreating them in one transaction holds the table's exclusive lock
+	// only briefly, and no session sees the table without them.
+	DependentFixRecreateAroundChange DependentFix = "recreate-around-change"
+	// DependentFixExpandContract is for a type change that rewrites the
+	// table. Recreating the dependents around it would hold the exclusive
+	// lock for the whole rewrite, and copy-and-swap rebuilds the table's
+	// policies before it retypes the column, so it meets the same refusal
+	// (it refuses a table with triggers outright). A new column of the
+	// target type takes the dependents over instead.
+	DependentFixExpandContract DependentFix = "expand-contract"
+)
+
+// GeneratedColumnHelp is the operator-facing manual path for a
+// dependent-generated-column decision, phrased to follow a sentence that
+// names the generated columns.
+const GeneratedColumnHelp = "drop those generated columns first, then re-plan; " +
+	"adding a stored one back afterwards, or changing a stored one's expression instead, rewrites the table"
+
+// PartitionKeyHelp is the operator-facing manual path for a partition-key
+// decision, phrased to follow a sentence that names the partitioned
+// tables.
+const PartitionKeyHelp = "create a new partitioned table with the new column definition and move the rows into it"
+
+// DependentsPhrase names dependents after "read by": the singular noun
+// before one name and the plural before several, joined with commas.
+func DependentsPhrase(singular, plural string, names []string) string {
+	noun := singular
+	if len(names) > 1 {
+		noun = plural
+	}
+	return noun + " " + strings.Join(names, ", ")
+}
+
+// Help is the operator-facing manual path, phrased to follow a sentence
+// that names the dependents; plural is their noun, such as "policies".
+func (f DependentFix) Help(plural string) string {
+	switch f {
+	case DependentFixRewriteDependents:
+		return "change those " + plural + " so they no longer read the column, then re-plan the drop"
+	case DependentFixRecreateAroundChange:
+		return "this type change runs in place, without rewriting the table, so in one transaction drop those " + plural + ", run the change, and recreate them"
+	case DependentFixExpandContract:
+		return "this type change rewrites the table, so recreating the " + plural + " around it would block the table for the whole rewrite; " +
+			"add a column of the new type instead, backfill it, point those " + plural + " at it, then drop the old column"
+	}
+	return string(f)
+}
+
+// OtherDependents phrases the dependents that block the change besides
+// the kind its reason names, such as the triggers on a dependent-policy
+// decision, or returns "" when there are none. PostgreSQL refuses the
+// change until every one of them is out of the way.
+func (d Decision) OtherDependents() string {
+	var others []string
+	add := func(reason Reason, singular, plural string, names []string) {
+		if d.Reason != reason && len(names) > 0 {
+			others = append(others, DependentsPhrase(singular, plural, names))
+		}
+	}
+	add(ReasonDependentView, "view", "views", d.DependentViews)
+	add(ReasonDependentPolicy, "policy", "policies", d.DependentPolicies)
+	add(ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers)
+	add(ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns)
+	return strings.Join(others, " and ")
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -293,7 +442,7 @@ type Plan struct {
 // wrong fact can upgrade a rewrite to native. Missing facts never let an
 // unsafe change succeed: the zero value is valid, routes every type change
 // to copy-and-swap, and only defers some refusals, such as a column a view
-// reads, to the server's own refusal at execution.
+// or a policy reads, to the server's own refusal at execution.
 type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
@@ -306,7 +455,8 @@ type Facts struct {
 	// rebuilt: never a relabel.
 	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
-	// its partitions key on; the zero value when none selects an index.
+	// the tables below it key on; the zero value when none has one to
+	// protect.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
 	// AddColumnProofs maps a column the change adds to what the server
 	// proved about adding it (preflight.AddColumnRewrites). A column absent
@@ -318,7 +468,7 @@ type Facts struct {
 	// DependentViews maps a column to the views and materialized views that
 	// read it, on the table or on any table below it, which is what a
 	// recursive ALTER COLUMN TYPE changes
-	// (preflight.ColumnDependentViews). A column absent from the map has
+	// (preflight.ReadColumnDependents). A column absent from the map has
 	// none, or the facts were not read, as in an offline lint; either way
 	// the server's own refusal at execution remains the backstop.
 	DependentViews map[string][]string
@@ -330,6 +480,46 @@ type Facts struct {
 	// OwnDependentViews is DependentViews for the table alone, which is
 	// all an ALTER TABLE ONLY changes.
 	OwnDependentViews map[string][]string
+	// DependentPolicies maps a column to the row-level security policies
+	// that read it, wherever they are defined, on the table or on any
+	// table below it (preflight.ReadColumnDependents), each rendered
+	// "policy" ON "schema"."table". A column absent from the map has none,
+	// or the facts were not read; either way the server's own refusal at
+	// execution remains the backstop.
+	DependentPolicies map[string][]string
+	// DropDependentPolicies is DependentPolicies for the tables whose copy
+	// of the column a recursive DROP COLUMN drops.
+	DropDependentPolicies map[string][]string
+	// OwnDependentPolicies is DependentPolicies for the table alone.
+	OwnDependentPolicies map[string][]string
+	// DependentTriggers maps a column to the triggers whose UPDATE OF list
+	// or WHEN condition names it (preflight.ReadColumnDependents), each
+	// rendered "trigger" ON "schema"."table". A trigger whose function
+	// reads the column is not one: the server records no dependency for
+	// it and lets the change run.
+	DependentTriggers ColumnDependents
+	// GeneratedColumnCopies maps each generated column to its own copies,
+	// named as DependentGeneratedColumns names them, so a statement that
+	// drops a generated column stops it blocking a change to the columns
+	// it reads (preflight.ReadColumnDependents).
+	GeneratedColumnCopies ColumnDependents
+	// DependentGeneratedColumns maps a column to the generated columns
+	// whose expression reads it, each rendered "schema"."table"."column".
+	DependentGeneratedColumns ColumnDependents
+	// PartitionKeys maps a column to the partitioned tables whose
+	// partition key includes it, each schema-qualified.
+	PartitionKeys ColumnDependents
+	// NullFilledColumns are the columns the statement adds NOT NULL, as
+	// spelled or through the column's domain or an inline PRIMARY KEY,
+	// that PostgreSQL would refuse to add because the table, or a
+	// partition or inheritance child below it with storage of its own,
+	// holds a row the column would be NULL in
+	// (preflight.NullFilledColumns). It is read only for the columns
+	// NullFillCandidates names. A column absent from the map gets a value
+	// in every row, the table holds none, or the fact was not read, as in
+	// an offline lint; without it the server's own refusal at execution
+	// remains the backstop.
+	NullFilledColumns map[string]bool
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -361,22 +551,113 @@ func FactsFrom(live schemadiff.Model) Facts {
 	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
 }
 
+// ColumnDependents maps a column to the objects that depend on it, read
+// for each set of tables an ALTER COLUMN TYPE or DROP COLUMN reaches
+// (preflight.ReadColumnDependents). A column absent from a map has none,
+// or the facts were not read, as in an offline lint; either way the
+// server's own refusal at execution remains the backstop.
+type ColumnDependents struct {
+	// Tree covers the table and every table below it, which is what a
+	// recursive ALTER COLUMN TYPE changes.
+	Tree map[string][]string
+	// Drop covers the tables whose copy of the column a recursive DROP
+	// COLUMN drops: a child that declares the column itself or also
+	// inherits it from a table outside the drop keeps its copy.
+	Drop map[string][]string
+	// Own covers the table alone, which is all an ALTER TABLE ONLY
+	// changes.
+	Own map[string][]string
+}
+
+// reached returns the dependents of the column op retypes or drops
+// (dependentsReached).
+func (c ColumnDependents) reached(op statement.Op) []string {
+	return dependentsReached(op, c.Tree, c.Drop, c.Own)
+}
+
 // viewsReadingColumn returns the views that read the column op retypes or
-// drops: the two column changes PostgreSQL refuses while a view reads the
-// column. A rename is not one of them, since a view follows the column.
-// Under ONLY the change stops at the table, so only its own views count,
-// and a recursive drop counts only the copies of the column it drops.
+// drops (dependentsReached).
 func viewsReadingColumn(op statement.Op, facts Facts) []string {
+	return dependentsReached(op, facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews)
+}
+
+// policiesReadingColumn returns the policies that read the column op
+// retypes or drops (dependentsReached).
+func policiesReadingColumn(op statement.Op, facts Facts) []string {
+	return dependentsReached(op, facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies)
+}
+
+// dependentsReached returns the dependents that read the column op
+// retypes or drops: the two column changes PostgreSQL refuses while a
+// view, a policy, a trigger, a generated column, or a partition key reads
+// the column. A rename is not one of them, since each follows the column. Under ONLY the change stops at
+// the table, so only its own dependents count, and a recursive drop
+// counts only the copies of the column it drops.
+func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []string {
 	switch {
 	case op.Kind != statement.OpAlterColumnType && op.Kind != statement.OpDropColumn:
 		return nil
 	case op.Only:
-		return facts.OwnDependentViews[op.Column]
+		return own[op.Column]
 	case op.Kind == statement.OpDropColumn:
-		return facts.DropDependentViews[op.Column]
+		return drop[op.Column]
 	default:
-		return facts.DependentViews[op.Column]
+		return tree[op.Column]
 	}
+}
+
+// dependentFix picks the manual path for a change that dependents block:
+// a drop needs them rewritten, and a type change is judged by what the
+// conversion itself costs, whatever else also blocks it.
+func dependentFix(op statement.Op, facts Facts) DependentFix {
+	if op.Kind == statement.OpDropColumn {
+		return DependentFixRewriteDependents
+	}
+	if route, _, _ := classifyTypeChange(op, facts); route == RouteNative {
+		return DependentFixRecreateAroundChange
+	}
+	return DependentFixExpandContract
+}
+
+// NotNullWithoutDefaultHelp is the operator-facing manual path for a
+// not-null-without-default decision.
+const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
+	"or add it without NOT NULL, backfill it, then set NOT NULL"
+
+// NullFillCandidates names the columns the operations of one ALTER TABLE
+// add with no DEFAULT of their own, the ones whose existing rows may be
+// left NULL: a front door reads Facts.NullFilledColumns only for these.
+// The statement need not spell NOT NULL, since the column's domain or an
+// inline PRIMARY KEY can make it NOT NULL, so the server's probe decides
+// which candidates PostgreSQL would refuse. columns are the table's live
+// columns. A column the table already has is skipped by ADD COLUMN IF NOT
+// EXISTS, and refused as a duplicate otherwise, so neither fills anything,
+// unless an earlier operation of the same statement drops it, which makes
+// the add a new column again.
+func NullFillCandidates(ops []statement.Op, columns map[string]string) []string {
+	dropped := map[string]bool{}
+	var candidates []string
+	for _, op := range ops {
+		if op.Kind == statement.OpDropColumn {
+			dropped[op.Column] = true
+			continue
+		}
+		if op.Kind != statement.OpAddColumn || op.Default != statement.DefaultNone || op.GeneratedStored {
+			continue
+		}
+		if _, exists := columns[op.Column]; exists && !dropped[op.Column] {
+			continue
+		}
+		candidates = append(candidates, op.Column)
+	}
+	return candidates
+}
+
+// fillsNotNullWithNull reports whether op adds a NOT NULL column that
+// PostgreSQL would refuse because a row of the table would hold NULL in
+// it.
+func fillsNotNullWithNull(op statement.Op, facts Facts) bool {
+	return op.Kind == statement.OpAddColumn && facts.NullFilledColumns[op.Column]
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -408,11 +689,28 @@ func Classify(sql string, facts Facts) (Plan, error) {
 		return Plan{}, err
 	}
 	plan := Plan{Statement: sql, Route: RouteNative}
+	// PostgreSQL runs every drop of an ALTER TABLE before its other
+	// operations, wherever the drop is written, and runs the drops
+	// themselves in the order written. So a drop sees only the generated
+	// columns the drops written before it remove, and every other
+	// operation sees all of them removed.
+	afterDrops := withoutDroppedGeneratedColumns(ops, facts)
 	// Safer rewrites are only constructed for single-operation statements:
 	// a partial rewrite of a multi-operation ALTER would be misleading.
 	single := len(ops) == 1
-	for _, op := range ops {
-		d := classifyOp(op, st, facts, sql, single)
+	for i, op := range ops {
+		opFacts := afterDrops
+		if op.Kind == statement.OpDropColumn {
+			opFacts = withoutDroppedGeneratedColumns(ops[:i], facts)
+		}
+		d := classifyOp(op, st, opFacts, sql, single)
+		if op.Kind == statement.OpValidateConstraint && !allTakeShareUpdateExclusiveOnly(ops) {
+			// One ALTER TABLE holds the strongest lock any of its
+			// operations needs for the whole statement, so the
+			// validation scan runs under it: blocking, and only online
+			// beside operations that block neither reads nor writes.
+			d.Reason = ReasonSaferIdiom
+		}
 		if len(d.SaferSQL) > 0 {
 			// Stamped here, in the one place every decision passes
 			// through, so a constructed sequence can never ship without
@@ -423,6 +721,111 @@ func Classify(sql string, facts Facts) (Plan, error) {
 		plan.Decisions = append(plan.Decisions, d)
 	}
 	return plan, nil
+}
+
+// FactsAfter returns facts as they stand once sql has run: the generated
+// columns it drops no longer block a later statement's change to the
+// columns they read.
+func FactsAfter(sql string, facts Facts) (Facts, error) {
+	ops, err := statement.ParseOps(sql)
+	if err != nil {
+		return Facts{}, err
+	}
+	return withoutDroppedGeneratedColumns(ops, facts), nil
+}
+
+// withoutDroppedGeneratedColumns removes, from the generated columns that
+// read each column, the copies the drops among ops remove. A copy the drop
+// does not reach, such as a child's under ONLY or one the child declares
+// itself, stays.
+func withoutDroppedGeneratedColumns(ops []statement.Op, facts Facts) Facts {
+	dropped := map[string]bool{}
+	for _, op := range ops {
+		if op.Kind != statement.OpDropColumn {
+			continue
+		}
+		for _, name := range facts.GeneratedColumnCopies.reached(op) {
+			dropped[name] = true
+		}
+	}
+	if len(dropped) == 0 {
+		return facts
+	}
+	g := facts.DependentGeneratedColumns
+	facts.DependentGeneratedColumns = ColumnDependents{
+		Tree: withoutNames(g.Tree, dropped),
+		Drop: withoutNames(g.Drop, dropped),
+		Own:  withoutNames(g.Own, dropped),
+	}
+	return facts
+}
+
+// withoutNames copies deps without the named dependents, leaving out a
+// column none remain for.
+func withoutNames(deps map[string][]string, names map[string]bool) map[string][]string {
+	out := make(map[string][]string, len(deps))
+	for column, objects := range deps {
+		kept := slices.DeleteFunc(slices.Clone(objects), func(name string) bool { return names[name] })
+		if len(kept) > 0 {
+			out[column] = kept
+		}
+	}
+	return out
+}
+
+// withoutInheritedCopies leaves out of generated the copies that dropping
+// the table's own copy of the same generated column removes. PostgreSQL
+// refuses to drop an inherited copy on its own, so naming one would point
+// the operator at a drop that fails.
+func withoutInheritedCopies(generated []string, copies ColumnDependents) []string {
+	named := map[string]bool{}
+	for _, name := range generated {
+		named[name] = true
+	}
+	removed := map[string]bool{}
+	for column, own := range copies.Own {
+		if len(own) != 1 || !named[own[0]] {
+			continue
+		}
+		for _, name := range copies.Drop[column] {
+			if name != own[0] {
+				removed[name] = true
+			}
+		}
+	}
+	if len(removed) == 0 {
+		return generated
+	}
+	return slices.DeleteFunc(slices.Clone(generated), func(name string) bool { return removed[name] })
+}
+
+// dependentReason is the refusal reason for the first kind of dependent
+// that blocks d, in the order views, policies, triggers, generated
+// columns.
+func dependentReason(d Decision) (Reason, bool) {
+	switch {
+	case len(d.DependentViews) > 0:
+		return ReasonDependentView, true
+	case len(d.DependentPolicies) > 0:
+		return ReasonDependentPolicy, true
+	case len(d.DependentTriggers) > 0:
+		return ReasonDependentTrigger, true
+	case len(d.DependentGeneratedColumns) > 0:
+		return ReasonDependentGeneratedColumn, true
+	}
+	return "", false
+}
+
+// allTakeShareUpdateExclusiveOnly reports a statement whose every
+// operation takes SHARE UPDATE EXCLUSIVE and nothing stronger, so a
+// validation scan among them blocks neither reads nor writes.
+func allTakeShareUpdateExclusiveOnly(ops []statement.Op) bool {
+	for _, op := range ops {
+		if !op.TakesShareUpdateExclusiveOnly() {
+			return false
+		}
+	}
+	return true
 }
 
 // classifyOp routes one operation per the reference table.
@@ -436,8 +839,23 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteRefuse, ReasonCascadingDrop
 		return d
 	}
-	if views := viewsReadingColumn(op, facts); len(views) > 0 {
-		d.Route, d.Reason, d.DependentViews = RouteRefuse, ReasonDependentView, views
+	// A partition key comes first among the dependents: no other object
+	// can be moved aside to let the change run.
+	if tables := facts.PartitionKeys.reached(op); len(tables) > 0 {
+		d.Route, d.Reason, d.PartitionKeyTables = RouteRefuse, ReasonPartitionKey, tables
+		return d
+	}
+	// Every kind of dependent that blocks the change is named, so the
+	// manual path clears all of them; the reason is the first kind.
+	d.DependentViews = viewsReadingColumn(op, facts)
+	d.DependentPolicies = policiesReadingColumn(op, facts)
+	d.DependentTriggers = facts.DependentTriggers.reached(op)
+	d.DependentGeneratedColumns = withoutInheritedCopies(facts.DependentGeneratedColumns.reached(op), facts.GeneratedColumnCopies)
+	if len(d.DependentPolicies) > 0 || len(d.DependentTriggers) > 0 {
+		d.DependentFix = dependentFix(op, facts)
+	}
+	if reason, blocked := dependentReason(d); blocked {
+		d.Route, d.Reason = RouteRefuse, reason
 		return d
 	}
 	switch op.Kind {
@@ -457,6 +875,8 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		switch {
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
+		case fillsNotNullWithNull(op, facts):
+			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
 		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:

@@ -376,9 +376,16 @@ func (p *statementPause) resume() { p.releaseOnce.Do(func() { close(p.release) }
 // pause.
 func (f copierFixture) pausedPool(t *testing.T, pause *statementPause) *pgxpool.Pool {
 	t.Helper()
+	return f.tracedPool(t, pause)
+}
+
+// tracedPool is a pool for the schema under test whose connections carry
+// tracer.
+func (f copierFixture) tracedPool(t *testing.T, tracer pgx.QueryTracer) *pgxpool.Pool {
+	t.Helper()
 	poolConfig, err := pgxpool.ParseConfig(f.cfg.URL)
 	require.NoError(t, err)
-	poolConfig.ConnConfig.Tracer = pause
+	poolConfig.ConnConfig.Tracer = tracer
 	pool, err := pgxpool.NewWithConfig(t.Context(), poolConfig)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
