@@ -1,6 +1,6 @@
 # Adapted from supabase/supabase docker/volumes/pooler/pooler.exs (Apache-2.0).
 # Source: https://github.com/supabase/supabase/blob/1f28a3756978c79dc7f2208d7519e42586060eec/docker/volumes/pooler/pooler.exs
-# Validated with Supavisor 2.9.12. On upgrades, compare upstream and update
+# Validated with Supavisor 2.10.0. On upgrades, compare upstream and update
 # this reference together with compose/supabase.yml (see integration/supabase/README.md).
 {:ok, _} = Application.ensure_all_started(:supavisor)
 
