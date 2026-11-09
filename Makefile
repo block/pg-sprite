@@ -66,9 +66,9 @@ test-db-rest:
 # The tests that need a server of their own (testutil.SkipOnSharedServer):
 # they create a cluster-level role or a tablespace, or check which image the
 # harness chose, so test-db skips them. This runs exactly those the container
-# way, with PG_DSN cleared; CI's matrix and the release job run it beside
-# test-db, and internal/testutil's own-server completeness test holds the
-# list here to the helper's callers.
+# way, with PG_DSN cleared; CI's matrix and the release workflow's test job
+# run it beside test-db, and internal/testutil's own-server completeness test
+# holds the list here to the helper's callers.
 test-own-server:
 	PG_DSN= $(GO) test $(RACE) -count=1 -run '^(TestServerMajorMatchesRequestedVersion|TestCheckPrivilegesReplicationAccess|TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC|TestBuildShadowKeepsTheSourceTablespace|TestIntrospectReplicaIdentityUnderAPublicationForAllTables)$$' ./internal/testutil ./pkg/preflight ./pkg/schemachange ./pkg/schemadiff
 
