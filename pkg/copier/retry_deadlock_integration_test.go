@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -83,7 +84,7 @@ type shadowWriter struct {
 	// committedFirst, when set, is a statement committed on its own before
 	// the writer's transaction begins.
 	committedFirst string
-	clock          *hookedClock
+	clock          *testutil.HookedClock
 	// begun is closed once tx, pid, and err are set.
 	begun chan struct{}
 	tx    pgx.Tx
@@ -104,7 +105,7 @@ func (f copierFixture) shadowWriterAtFirstChunk(t *testing.T, shadow schemachang
 		shadowName: pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize(),
 		begun:      make(chan struct{}),
 	}
-	w.clock = &hookedClock{hook: func() {
+	w.clock = testutil.NewHookedClock(func() {
 		defer close(w.begun)
 		// The hook runs on a copier worker; failures are reported through
 		// err and checked on the test goroutine.
@@ -136,7 +137,7 @@ func (f copierFixture) shadowWriterAtFirstChunk(t *testing.T, shadow schemachang
 		if _, err := tx.Exec(t.Context(), "INSERT INTO "+w.shadowName+" (id, slot) VALUES (2001, 20)"); err != nil {
 			w.err = fmt.Errorf("hold slot 20 under key 2001: %w", err)
 		}
-	}}
+	})
 	t.Cleanup(func() {
 		select {
 		case <-w.begun:
@@ -190,7 +191,7 @@ type deadlockCopy struct {
 	results chan error
 }
 
-func (f copierFixture) startDeadlockCopy(t *testing.T, target preflight.CopySwapTarget, lock *dbconn.TableLockSession, shadow schemachange.BuiltShadow, clock *hookedClock) deadlockCopy {
+func (f copierFixture) startDeadlockCopy(t *testing.T, target preflight.CopySwapTarget, lock *dbconn.TableLockSession, shadow schemachange.BuiltShadow, clock *testutil.HookedClock) deadlockCopy {
 	t.Helper()
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:          1,

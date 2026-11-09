@@ -545,7 +545,7 @@ func TestVerifierAbortsWhenTheLockIsLostMidPass(t *testing.T) {
 	f.copy(t, target, shadow, buildLock)
 	require.NoError(t, buildLock.Release(t.Context()))
 	lock := f.lock(t, "orders", dbconn.WithTableLockKeepalive(100*time.Millisecond))
-	clock := &hookedClock{hook: func() {
+	clock := testutil.NewHookedClock(func() {
 		f.terminateBackend(t, lock.BackendPID())
 		const lockLossDeadline = 15 * time.Second
 		select {
@@ -553,7 +553,7 @@ func TestVerifierAbortsWhenTheLockIsLostMidPass(t *testing.T) {
 		case <-time.After(lockLossDeadline):
 			t.Errorf("lock session did not report loss within %s", lockLossDeadline)
 		}
-	}}
+	})
 
 	v, err := checksum.NewVerifier(target, shadow, lock, checksum.Options{Chunker: chunkRows, Clock: clock})
 	require.NoError(t, err)
@@ -611,20 +611,6 @@ func (f verifierFixture) terminateBackend(t *testing.T, pid uint32) {
 		require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)`, pid).Scan(&alive))
 		return !alive
 	}, backendExitDeadline, 50*time.Millisecond, "terminated backend should leave pg_stat_activity")
-}
-
-// hookedClock is a Clock whose first reading runs a hook. The verifier
-// reads the clock once before each chunk's transaction begins, so the hook
-// lands after the column-type read has committed and before the first
-// chunk's digest transaction opens.
-type hookedClock struct {
-	once sync.Once
-	hook func()
-}
-
-func (c *hookedClock) Now() time.Time {
-	c.once.Do(c.hook)
-	return time.Now()
 }
 
 // poolWithRuntimeParam is a pool on the fixture's server whose every session

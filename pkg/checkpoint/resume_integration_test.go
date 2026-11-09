@@ -73,63 +73,6 @@ func (f copyFixture) prepare(t *testing.T, rows int64) (preflight.CopySwapTarget
 	return target, lock, shadow
 }
 
-// hookedClock runs hook on its first reading. The copier reads its clock
-// after the resume clear and the first claim, before the first chunk
-// transaction, so a hook there meets the copy as a concurrent writer.
-type hookedClock struct {
-	once sync.Once
-	hook func()
-}
-
-func (c *hookedClock) Now() time.Time {
-	c.once.Do(c.hook)
-	return time.Now()
-}
-
-// pinShadowKey inserts key into the shadow in a transaction left open at
-// the copier's first clock reading, so the chunk holding key waits on the
-// unique index and every other chunk lands around it; the run is then
-// cancelled with that one chunk in flight, which is the mid-copy kill the
-// checkpoint must survive. The returned func waits for the pin and rolls
-// it back. The cleanup first disarms the hook, so a test that fails
-// before the copier reads its clock ends with no pin to roll back instead
-// of waiting on a reading that never comes.
-func (f copyFixture) pinShadowKey(t *testing.T, shadow schemachange.BuiltShadow, key int64) (clock *hookedClock, pinned chan struct{}, release func()) {
-	t.Helper()
-	pinned = make(chan struct{})
-	var tx pgx.Tx
-	var pinErr error
-	clock = &hookedClock{hook: func() {
-		defer close(pinned)
-		tx, pinErr = f.pool.Begin(t.Context())
-		if pinErr != nil {
-			return
-		}
-		if _, pinErr = tx.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, qty) VALUES ($1, 0)", key); pinErr != nil {
-			// A failed insert leaves the transaction holding its pooled
-			// connection, and the package's pool.Close waits on it, so it
-			// is rolled back here, before release reports pinErr.
-			_ = tx.Rollback(context.WithoutCancel(t.Context()))
-			tx = nil
-		}
-	}}
-	var once sync.Once
-	release = func() {
-		once.Do(func() {
-			<-pinned
-			require.NoError(t, pinErr)
-			if tx != nil {
-				assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
-			}
-		})
-	}
-	t.Cleanup(func() {
-		clock.once.Do(func() { close(pinned) })
-		release()
-	})
-	return clock, pinned, release
-}
-
 // A copy killed mid-way resumes from the checkpoint and converges: the
 // first run's committed watermark is saved with the shadow's fingerprints,
 // a new run loads it with the same fingerprints, hands it to the copier,
@@ -142,13 +85,13 @@ func TestResumeFromCheckpointConvergesAfterAMidCopyKill(t *testing.T) {
 	f := newCopyFixture(t)
 	const rows = 2000
 	target, lock, shadow := f.prepare(t, rows)
-	clock, pinned, release := f.pinShadowKey(t, shadow, 1050)
+	pin := testutil.PinShadowKey(t, f.pool, pgx.Identifier{f.schema, shadow.ShadowTable()}, 1050, 0)
 
 	first, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:     4,
 		LockTimeout: 30 * time.Second,
 		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
-		Clock:       clock,
+		Clock:       pin.Clock(),
 	})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -158,12 +101,7 @@ func TestResumeFromCheckpointConvergesAfterAMidCopyKill(t *testing.T) {
 	wg.Go(func() { results <- first.Run(ctx, f.pool) })
 	t.Cleanup(wg.Wait)
 
-	const pinDeadline = 15 * time.Second
-	select {
-	case <-pinned:
-	case <-time.After(pinDeadline):
-		t.Fatalf("the copier did not reach its first chunk within %s", pinDeadline)
-	}
+	pin.Wait(t)
 	const landedDeadline = 15 * time.Second
 	require.Eventually(t, func() bool {
 		pos := first.Position()
@@ -190,7 +128,7 @@ func TestResumeFromCheckpointConvergesAfterAMidCopyKill(t *testing.T) {
 		TargetFingerprint: shadow.TargetFingerprint(),
 		Phase:             checkpoint.PhaseCopying,
 	}))
-	release()
+	pin.Release(t)
 
 	// While nothing runs, the source moves above the watermark.
 	f.exec(t, "UPDATE %s.orders SET qty = 999 WHERE id = 1500")
