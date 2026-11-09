@@ -16,8 +16,8 @@ import (
 // Ensure's reads spell: empty pg_namespace, pg_class, and pg_attribute
 // relations; pg_get_userbyid, hashtext, quote_ident, and
 // pg_advisory_xact_lock functions that record each call in calls and
-// answer wrongly; and = on oid, > on smallint and integer, and || on text
-// operators that do the same. Its pool lists the schema ahead of an
+// answer wrongly; and = on oid, = on name, > on smallint and integer, and
+// || on text operators that do the same. Its pool lists the schema ahead of an
 // explicit pg_catalog, so an unqualified name in a read resolves to the
 // lookalike. The pool is raw on purpose: a pkg/dbconn pool drops that
 // shadowing pg_catalog entry, and a library caller's own pool may not.
@@ -72,6 +72,15 @@ func plantDecoyCatalog(t *testing.T, f storeFixture) decoyCatalog {
 			LEFTARG  = oid,
 			RIGHTARG = oid,
 			FUNCTION = %[1]s.decoy_oid_eq
+		)`,
+		`
+		CREATE FUNCTION %[1]s.decoy_name_eq(name, name) RETURNS boolean LANGUAGE sql
+		AS 'INSERT INTO %[1]s.calls VALUES (''name = name''); SELECT false'`,
+		`
+		CREATE OPERATOR %[1]s.= (
+			LEFTARG  = name,
+			RIGHTARG = name,
+			FUNCTION = %[1]s.decoy_name_eq
 		)`,
 		`
 		CREATE FUNCTION %[1]s.decoy_int2_gt_int4(smallint, integer) RETURNS boolean LANGUAGE sql
