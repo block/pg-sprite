@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/jackc/pgx/v5"
@@ -256,4 +258,69 @@ func TestMigrateDesiredRLSPrivilegeRefusals(t *testing.T) {
 			assert.Equal(t, before, after)
 		})
 	}
+}
+
+// A pulled file declares row security for every table that has it, so adding
+// a column means editing a file that also declares the table's policies.
+// With the row security unchanged, diff and the dry run both show the table
+// plan, the run commits it as an ordinary desired run, the policies stay as
+// they were, and a rerun finds nothing to do.
+func TestMigrateDesiredRLSChangesOnlyTheTable(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, schema))
+	require.NoError(t, err)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	const file = `CREATE TABLE documents (
+ id int PRIMARY KEY,
+ owner_id int NOT NULL,
+ title text
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 7);`
+	addColumn := "ALTER TABLE " + schema + ".documents ADD COLUMN title text"
+	cmd := desiredCommand(t, url, schema, file)
+
+	diff := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: cmd.Desired, JSON: true}
+	var out strings.Builder
+	require.NoError(t, diff.run(t.Context(), &out))
+	var report plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, addColumn, report.Statements[0].SQL)
+
+	cmd.DryRun = true
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var preview plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &preview))
+	assert.Equal(t, report.Statements, preview.Statements)
+	assert.Equal(t, report.Fingerprint, preview.Fingerprint)
+	unchanged, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before, unchanged, "the dry run changes nothing")
+
+	cmd.DryRun = false
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var result migrate.DesiredResult
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &result))
+	assert.Equal(t, verdict.OutcomeExecuted, result.Outcome)
+	require.NotNil(t, result.Convergence)
+	assert.Equal(t, migrate.ConvergenceVerified, result.Convergence.Status)
+	require.Len(t, result.Verdicts, 1)
+	assert.Equal(t, addColumn, result.Verdicts[0].Statement)
+	assert.Equal(t, verdict.OutcomeExecuted, result.Verdicts[0].Outcome)
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before.RowSecurity, after.RowSecurity, "the policies are unchanged")
+	assert.Len(t, after.Columns, len(before.Columns)+1)
+
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var again verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &again))
+	assert.Equal(t, verdict.OutcomeExecuted, again.Outcome)
+	assert.Empty(t, again.ExecutedSQL, "a rerun finds nothing to do")
 }

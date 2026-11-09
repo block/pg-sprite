@@ -6,28 +6,49 @@ import (
 	"io"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, desired statement.DesiredWithRowSecurity) error {
-	if c.DryRun {
-		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
-		return diff.runRowSecurityDiff(ctx, out, desired, executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout})
-	}
+	b := executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	report, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, executor.Budget{
-		LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout,
-	})
-	v := rowSecurityVerdict(c.Schema+"."+desired.Table(), report, runErr)
+	report, planErr := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
+	diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
+	if changesOnlyTheTable(report, planErr) {
+		if c.DryRun {
+			// Preview uses desired-state admission, as for a file without
+			// row security: RunDesired refuses a destructive plan whole.
+			plan.RefuseDestructive(&report)
+			return diff.writeDiffReport(out, report)
+		}
+		result, runErr := migrate.RunDesiredWithRowSecurity(ctx, pool, migrate.RowSecurityRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))
+		return c.finishDesired(out, result, runErr)
+	}
+	if c.DryRun {
+		return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
+	}
+	runReport, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, b)
+	v := rowSecurityVerdict(c.Schema+"."+desired.Table(), runReport, runErr)
 	emitErr := c.emit(out, v)
 	return errors.Join(emitErr, runErr)
+}
+
+// changesOnlyTheTable reports whether planning a row-security file found
+// the live row security matching and only the table definition differing,
+// the case RunDesiredWithRowSecurity converges. Every other case, a create,
+// a row security change, a refusal, or no change at all, goes to the
+// atomic row security executor, which derives it again under its lock.
+func changesOnlyTheTable(report plan.Report, planErr error) bool {
+	return planErr == nil && len(report.Statements) > 0
 }
 
 // A failed commit is not evidence of rollback. Preserve its distinct code and

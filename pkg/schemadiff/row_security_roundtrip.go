@@ -2,6 +2,7 @@ package schemadiff
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -154,10 +155,18 @@ func renderPolicy(b *strings.Builder, target string, p Policy) error {
 	return nil
 }
 
+// ErrOnlyTableDiffers is returned by DiffWithRowSecurity when the row
+// security matches and only the table definition differs. It wraps
+// ErrUnsupportedChange, so a caller that treats every difference as a
+// refusal still refuses; diffplan.PlanWithRowSecurity plans the table
+// definition on its own instead, which leaves the row security unchanged.
+var ErrOnlyTableDiffers = errors.New("the row security matches and only the table definition differs")
+
 // DiffWithRowSecurity checks equality of a complete RLS-scoped declaration.
-// Security deltas and mixed table/security changes return ErrUnsupportedChange;
-// this comparison never emits executable policy SQL. The dedicated atomic
-// executor uses it to verify convergence. Table-only callers retain Diff.
+// Security deltas and mixed table/security changes return ErrUnsupportedChange,
+// and table changes under matching row security return ErrOnlyTableDiffers,
+// which wraps it; this comparison never emits executable SQL. The dedicated
+// atomic executor uses it to verify convergence. Table-only callers retain Diff.
 func DiffWithRowSecurity(schema string, live, desired Model) ([]Change, error) {
 	if live.Table != desired.Table {
 		return nil, ErrDifferentTables
@@ -172,7 +181,7 @@ func DiffWithRowSecurity(schema string, live, desired Model) ([]Change, error) {
 		return nil, err
 	}
 	if len(changes) != 0 {
-		return nil, fmt.Errorf("table changes with managed row security are not supported: %w", ErrUnsupportedChange)
+		return nil, fmt.Errorf("%w: %w", ErrOnlyTableDiffers, ErrUnsupportedChange)
 	}
 	return changes, nil
 }

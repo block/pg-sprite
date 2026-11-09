@@ -1450,9 +1450,12 @@ when that plan is empty; otherwise the result is failed with `ErrNotConverged`, 
 statement it ran keeps its executed verdict, and the result's typed convergence status carries
 the plan a rerun would execute. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
 the create-name checks), because deriving a plan needs `CREATE` on the database.
-*Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`). Tests:
-`TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
-`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`.
+*Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`; for a file that declares row
+security, `RunDesiredWithRowSecurity` → `verifyRowSecurityConverged`, whose fresh plan
+includes the row security). Tests: `TestRunDesired`,
+`TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
+`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`,
+`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`.
 *Source:* review of desired-state outcome reporting.
 
 ## Refusals and preflight (RF)

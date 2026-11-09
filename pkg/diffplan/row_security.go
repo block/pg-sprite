@@ -13,10 +13,15 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// PlanWithRowSecurity verifies an explicitly RLS-scoped desired definition.
-// Only an unchanged existing table produces a report, with no executable steps.
-// Deltas return RowSecurityReviewRequired, wrapping ErrUnsupportedChange. A
-// missing table returns schemadiff.ErrTableNotFound; preview its creation with
+// PlanWithRowSecurity plans an explicitly RLS-scoped desired definition. An
+// unchanged existing table produces a report with no executable steps. When
+// the live row security matches the file and only the table definition
+// differs, the report is the plan Plan derives for the file's table
+// definition: it changes the table and never its row security, and
+// migrate.RunDesiredWithRowSecurity runs it. A row security delta, alone or
+// with table changes, returns RowSecurityReviewRequired, wrapping
+// ErrUnsupportedChange. A missing table returns schemadiff.ErrTableNotFound;
+// preview its creation with
 // executor.PreviewDesiredCreateWithRowSecurity. The distinct parsed
 // type cannot be passed to RunDesired or ExecuteCreate. Inspection still needs
 // CREATE privilege for its rolled-back scratch schema, just like Plan.
@@ -36,6 +41,9 @@ func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string,
 		return plan.Report{}, err
 	}
 	if _, err := schemadiff.DiffWithRowSecurity(schema, live, model); err != nil {
+		if errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
+			return Plan(ctx, pool, Request{Schema: schema, Desired: desired.TableDefinition()})
+		}
 		review, reviewErr := schemadiff.ReviewRowSecurity(schema, live, model)
 		if reviewErr != nil {
 			return plan.Report{}, reviewErr

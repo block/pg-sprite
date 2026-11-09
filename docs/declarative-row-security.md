@@ -138,6 +138,32 @@ standalone type at the table's name refuses as `create-collision`. The
 [atomic RLS contract](atomic-row-security.md#create-a-missing-table-with-its-row-security)
 lists the steps.
 
+### Change the table when the row security matches
+
+`pull` writes the row security into the file of every table that has it, so
+adding a column or an index means editing a file that also declares the
+table's policies. When the live row security matches the file and only the
+table definition differs, the file is planned and run like a file without row
+security. `diff` and `migrate --dry-run` show the ordinary plan, and `--json`
+returns the ordinary [plan report](plan-report.md), fingerprint included.
+
+`migrate --desired` runs that plan through the desired-state sequence. Its
+JSON is `migrate.DesiredResult` with `plan`, `verdicts`, `outcome`, and
+`convergence`, and earlier committed steps stay committed if a later step
+fails. The run never writes a policy or a row security setting. After the
+last commit it plans again, row security included, and reports `executed`
+only when that plan is empty. If another session changed the policies while
+the table plan ran, the run fails, its error says that the row security no
+longer matches the file, and `convergence.status` is `unverifiable`. The table
+statements stay committed. Review the policy change before running again: a
+second run of the same file restores the policies the file declares.
+
+A file whose row security differs from the live table is refused when its
+table definition differs too. Converge the two separately: change the row
+security first with the table definition unchanged, then change the table.
+Go callers run the table change with `migrate.RunDesiredWithRowSecurity`,
+which refuses a file whose row security differs before anything runs.
+
 Ordinary files use the existing desired-state sequence instead; their JSON is
 `migrate.DesiredResult` with `plan`, `verdicts`, and overall `outcome`. Earlier
 committed steps stay committed if a later step fails. Mixed table/RLS changes
@@ -222,8 +248,10 @@ security. Such a helper runs with its owner's access, so it must check the
 caller's authorization itself. Other
 [table export limits](pull.md#refused-table-shapes) still apply.
 
-An unchanged definition produces an empty plan. Any table or RLS difference in
-this mode is refused. A missing live table is previewed as a
+An unchanged definition produces an empty plan. A table difference with
+matching row security produces the
+[ordinary table plan](#change-the-table-when-the-row-security-matches). Any
+other difference in this mode is refused. A missing live table is previewed as a
 [create with its row security](#create-a-new-table-with-its-row-security). No partial plan is emitted. Admission errors exit 1 with a diagnostic; unsupported
 RLS comparisons exit 2 with a refusal verdict. `--json` returns a verdict with
 `outcome`, `reason`, and `detail` for those refusals; successful comparisons retain
@@ -237,7 +265,8 @@ admitted, and refuses with that front door's typed errors. A caller that only
 handles row-security files uses `ParseDesiredWithRowSecurity` directly; both feed
 `diffplan.PlanWithRowSecurity`, and `RenderWithRowSecurity` writes a file back out.
 The row-security declaration is a separate type. Only the dedicated atomic RLS
-executor accepts it for live execution; generic native and create executors do not.
+executor and `migrate.RunDesiredWithRowSecurity`, which changes only the table,
+accept it for live execution; generic native and create executors do not.
 `HasRowSecurityDeclaration` stays for callers that only need to know whether SQL
 declares row security, without admitting it.
 
@@ -291,7 +320,8 @@ catalog codes `*`, `r`, `a`, `w`, `d`), `permissive`, `roles`, `using`, `with_ch
 and `comment`. Null clauses remain null; they are not rewritten as predicates.
 Consumers must reject unknown versions, kinds, or impact values.
 
-Mixed table/policy changes set `table_changed`; the entire change remains blocked.
+When the row security and the table both differ, the review sets
+`table_changed`, and the entire change remains blocked.
 If the table comparison is unsupported, `table_comparison_complete` is false and
 `table_comparison_error` explains why; `table_changed: false` then means unknown,
 not unchanged. This review contains no execution SQL or approval fingerprint.
@@ -352,8 +382,9 @@ this table-scoped work.
    diff. Implemented through automatic export and SQL declarations. A table that
    does not exist yet is created together with its row security in one transaction.
 3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
-   and verifies one table's RLS state in one bounded transaction. Mixed changes remain
-   unsupported; a policy that reads another schema-qualified table is supported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
+   and verifies one table's RLS state in one bounded transaction. A table change
+   runs on its own when the row security already matches; a change to both
+   remains unsupported. A policy that reads another schema-qualified table is supported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
 4. **Prove application behavior.** The local Supabase harness now checks real
    PostgREST requests from two authenticated users and anonymous callers, allowed
    and denied writes, changed visibility, and rollback after a cancelled apply.

@@ -28,6 +28,13 @@ func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, desired
 	}
 	defer pool.Close()
 	report, err := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
+	return c.writeRowSecurityDiff(ctx, out, pool, desired, b, report, err)
+}
+
+// writeRowSecurityDiff emits what diffplan.PlanWithRowSecurity planned: the
+// plan, its refusal, or, for a table that does not exist, a preview of the
+// create.
+func (c *DiffCmd) writeRowSecurityDiff(ctx context.Context, out io.Writer, pool *pgxpool.Pool, desired statement.DesiredWithRowSecurity, b executor.Budget, report plan.Report, err error) error {
 	if errors.Is(err, schemadiff.ErrTableNotFound) {
 		return c.previewCreateWithRowSecurity(ctx, out, pool, desired, b)
 	}

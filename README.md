@@ -89,7 +89,8 @@ refusal — never a silently wrong or incomplete result:
   [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables,
   and creates a missing table together with its row security in one transaction, through
   `migrate --desired` or the Go API. Only the Go API supports binding execution to an ordered
-  SQL review, and only for an existing table; mixed table/policy changes remain unsupported. See the workflow and roadmap in
+  SQL review, and only for an existing table. A table change in a file whose row security already
+  matches runs as an ordinary desired run; a change to both remains unsupported. See the workflow and roadmap in
   [declarative-row-security.md](docs/declarative-row-security.md).
 - **Foreign keys** are planned but not executed declaratively: a desired
   file may declare them, `diff` shows an added or dropped foreign key with
