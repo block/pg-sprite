@@ -215,6 +215,9 @@ policies, commands, roles, omitted clauses, expressions, and policy comments.
 Qualify every external helper and type in policy expressions, including objects
 in `public`: use `public.doc_status`, not `doc_status`. Policy inspection searches
 only its scratch schema and PostgreSQL built-ins, preventing accidental bindings.
+`--extension-schema` does not change that: it applies to the table definition
+only, so a column can be `email citext` while a policy that compares with it
+writes `extensions.citext`.
 Qualified helpers such as `auth.uid()` work, including `(SELECT auth.uid())`.
 A policy may read another table, such as a membership check written as
 `EXISTS (SELECT 1 FROM public.team_members m WHERE m.user_id = auth.uid())`, when

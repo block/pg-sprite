@@ -198,3 +198,26 @@ func TestDesiredRowSecurityRequiresTableDefinition(t *testing.T) {
 	require.ErrorIs(t, err, ErrRowSecurityDeclaration)
 	require.ErrorIs(t, err, ErrRowSecurityTableDefinitionRequired)
 }
+
+// Extension schemas widen only the table definition of a row-security
+// file. The declaration's statements, policies included, are unchanged, the
+// table definition carries the list, and the same names are refused as for
+// a file without row security.
+func TestDesiredWithRowSecurityWithExtensionSchemas(t *testing.T) {
+	d, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint PRIMARY KEY, email citext);
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (id > 0);`)
+	require.NoError(t, err)
+	assert.Empty(t, d.ExtensionSchemas())
+
+	widened, err := d.WithExtensionSchemas("extensions")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"extensions"}, widened.ExtensionSchemas())
+	assert.Equal(t, []string{"extensions"}, widened.TableDefinition().ExtensionSchemas())
+	assert.Equal(t, d.Statements(), widened.Statements())
+	assert.Equal(t, d.TableDefinition().Statements(), widened.TableDefinition().Statements())
+	assert.Empty(t, d.ExtensionSchemas(), "the original keeps its empty list")
+
+	_, err = d.WithExtensionSchemas("pg_catalog")
+	require.ErrorIs(t, err, ErrExtensionSchema)
+}
