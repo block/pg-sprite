@@ -40,8 +40,12 @@ func MinPoolConns(o copier.Options) int32 {
 // wrapping executor.ErrPoolTooSmall, the refusal the native route's
 // admission gives, so a caller classifies both with one errors.Is. Run
 // calls it before it takes the table lock; a front door that refuses
-// earlier calls it too.
+// earlier calls it too. A nil pool is refused with ErrInvariantViolation,
+// since no run can proceed without one.
 func CheckPool(pool *pgxpool.Pool, o copier.Options) error {
+	if pool == nil {
+		return fmt.Errorf("%w: a run requires a pool", ErrInvariantViolation)
+	}
 	need := MinPoolConns(o)
 	have := pool.Config().MaxConns
 	if have >= need {

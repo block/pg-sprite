@@ -124,6 +124,21 @@ The application's pooler and pg-sprite share the server's `max_connections`, whi
 to cover the application's backends plus pg-sprite's pool, its dedicated sessions, and,
 for copy-and-swap, its replication connections.
 
+### The copy-and-swap pool floor
+
+A copy-and-swap run needs one pool connection per copy worker and two beside them, one
+for the catch-up's flushes and one for checkpoint saves and progress reads: six with the
+default four workers (`schemachange.MinPoolConns`). A pool of only the workers would leave
+the flushes waiting behind the copy while the slot's lag grows, so a smaller pool is
+refused with `executor.ErrPoolTooSmall` (`code: pool-too-small` on a verdict) before the
+run takes the table lock or creates anything. The refusal is the same from every entry
+point: `migrate`, the library's `migrate.Run` and `migrate.RunDesired`, and
+`schemachange.Runner.Run` called directly. It also applies to resuming or restarting a
+stopped run, which keeps its slot or write fence and its checkpoint row until the pool is
+raised; a stopped live run's slot retains WAL on the source meanwhile. Raise the pool
+(`pool_max_conns` on the URL) to at least the floor; the CLI's pool holds at least six
+unless the URL sets `pool_max_conns`.
+
 ## Declarative model boundaries
 
 The declarative front door (desired-state files, `diff`, and schema export)

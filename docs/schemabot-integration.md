@@ -375,20 +375,36 @@ the pool besides; an importer running many tables from one process sizes for bot
   `schemachange.MinPoolConns(Copier)`, which `migrate.CopySwapMinConns(Copier)` returns
   too, and the sizing rule does not depend on which entry point a host calls: `Runner.Run`
   refuses a smaller pool before it takes the table lock
-  (`TestRunnerRefusesAPoolBelowTheFloorBeforeCreatingAnything`), and the front doors
+  (`TestRunnerRefusesAPoolBelowTheFloorBeforeCreatingAnything`,
+  `TestRunnerRefusesAPoolBelowTheFloorBeforeTakingTheTableLock`), and the front doors
   (`migrate.Run` and `migrate.RunDesired`) refuse it earlier still, before the preflight; in
   every case nothing is created and the error matches
-  `errors.Is(err, executor.ErrPoolTooSmall)`. The floor is the workers plus two, six with the
-  default workers: one connection beyond the workers keeps the flushes landing while every
-  worker holds its connection (`TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits`),
+  `errors.Is(err, executor.ErrPoolTooSmall)`. Only the front doors turn the refusal into a
+  verdict (`code: pool-too-small`, with the remedy in `detail`); `Runner.Run` returns the
+  wrapped sentinel alone, so an adapter on it maps the error itself, and
+  `executor.OutcomeCode(err)` answers `pool-too-small` for it. The error's text carries only
+  the connection counts (needed, copy workers, held), no table or connection names, so it is
+  safe to render. A nil pool is refused with `schemachange.ErrInvariantViolation`. The floor
+  is the workers plus two, six with the default workers: one connection beyond the workers
+  keeps the flushes landing while every worker holds its connection
+  (`TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits`),
   and the second is headroom so the flushes and the checkpoint saves and progress reads do
   not queue behind one another. The check also runs when a stopped
   run resumes or is restarted, so a run stopped before the pool was shrunk is refused, and
-  keeps its slot or fence and its checkpoint row, until the pool is raised again. The floor
+  keeps its slot or fence and its checkpoint row, until the pool is raised again. While a
+  stopped live run is refused this way its slot keeps retaining WAL on the source, so a host
+  alerts on the slot's lag and raises the pool promptly. The check runs before the row is
+  read, so it applies whatever the row still needs: a row past its swap that has only the old
+  table left to drop, and a `Restart` that only discards, are refused on a pool below the
+  floor too. The floor
   is per run: a host running several copy-and-swap runs at once from one pool sizes it for
   all of them. A host that builds its pool with
   `pkg/dbconn` sizes it with `dbconn.Config.MaxConnsFloor`, which raises only the default
-  size and keeps a `pool_max_conns` the URL sets.
+  size and keeps a `pool_max_conns` the URL sets. A host that opens its pool another way
+  sets the pool's maximum (`pool_max_conns` on the DSN, or `pgxpool.Config.MaxConns`) to at
+  least `schemachange.MinPoolConns(Copier)`: `pgxpool`'s default is the larger of 4 and the
+  machine's CPU count, below the default floor of six on a machine with fewer than six CPUs,
+  and every run on such a pool is refused.
 
 ### What `Runner.Run` returns
 
