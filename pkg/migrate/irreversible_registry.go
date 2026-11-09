@@ -16,7 +16,8 @@ import (
 // acknowledgement names the resolved SCHEMA.TABLE, so one left on a script
 // cannot reach another table. Desired-state execution takes none of them:
 // it refuses a plan holding a destructive statement whole, and rejects
-// every acknowledgement before any database work. The destructive operation
+// every acknowledgement before any database work, and
+// Options.WithoutAcknowledgements clears the same set. The destructive operation
 // shapes are not listed here but derived from the planner, the one answer
 // both destructive gates use. TestIrreversibleOperationRegistryIsComplete
 // fails when an acknowledgement, a string field on Options or
@@ -60,6 +61,41 @@ func (a ackKind) value(opts Options) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// clear removes the acknowledgement from opts. The bool is false only for a
+// kind this switch does not name, which the registry's completeness test
+// rejects.
+func (a ackKind) clear(opts *Options) bool {
+	switch a {
+	case ackForce:
+		opts.Force = ""
+	case ackAcceptBlocking:
+		opts.AcceptBlocking = ""
+	case ackAllowDestructive:
+		opts.AllowDestructive = ""
+	case ackRestart:
+		opts.CopySwap.Restart = ""
+	case ackBlockWrites:
+		opts.CopySwap.BlockWrites = ""
+	default:
+		return false
+	}
+	return true
+}
+
+// WithoutAcknowledgements returns a copy of o with every typed
+// acknowledgement cleared — Force, AcceptBlocking, AllowDestructive,
+// CopySwap.Restart, CopySwap.BlockWrites, and any added later — and every
+// other field unchanged. It is the desired-state front door's view of a
+// policy: an adapter that builds one Options for both front doors passes
+// [RunDesired] o.WithoutAcknowledgements(), which RunDesired never rejects
+// for an acknowledgement. o itself is not modified.
+func (o Options) WithoutAcknowledgements() Options {
+	for _, a := range ackKinds() {
+		a.clear(&o)
+	}
+	return o
 }
 
 // desiredErr is the sentinel RunDesired returns when the acknowledgement

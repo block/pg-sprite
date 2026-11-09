@@ -90,6 +90,34 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 		}
 	})
 
+	// The desired-state view clears every acknowledgement the registry
+	// walks, so a new acknowledgement without a clear case fails here
+	// rather than reaching an adapter as a run-time rejection.
+	t.Run("the desired-state view clears every acknowledgement and nothing else", func(t *testing.T) {
+		for _, a := range acks {
+			cleared := withAck(t, DefaultOptions(), a, "app.orders")
+			require.True(t, a.clear(&cleared), "acknowledgement %q cannot be cleared", a)
+			v, _ := a.value(cleared)
+			assert.Empty(t, v, "acknowledgement %q clears another field than it reads", a)
+		}
+
+		shared := DefaultOptions()
+		shared.CreateOwner = "app_owner"
+		shared.CopySwap.Enabled = true
+		want := shared
+		for _, a := range acks {
+			shared = withAck(t, shared, a, "app.orders")
+		}
+
+		view := shared.WithoutAcknowledgements()
+		assert.Equal(t, want, view)
+		require.NoError(t, rejectDesiredAcks(view))
+		for _, a := range acks {
+			v, _ := a.value(shared)
+			assert.Equal(t, "app.orders", v, "the view modified the original's %q", a)
+		}
+	})
+
 	// Two acknowledgements left set together are also an unrunnable pair on
 	// the imperative front door; desired-state execution still names the
 	// first one's sentinel, so an adapter keying on the sentinels sees it.

@@ -496,7 +496,7 @@ fence goes on. `RunDesired` rejects both `BlockWrites` and `Restart`, as it reje
 acknowledgement ([below](#rundesired-takes-no-acknowledgement)). A stopped desired-plan copy is
 resumed by running the plan again, or started over by running the stopped statement through
 `Run` with `CopySwap.Restart`. An adapter that builds one `Options` for both front doors passes
-`RunDesired` a copy with `CopySwap.BlockWrites` and `CopySwap.Restart` cleared. Three further
+`RunDesired` `opts.WithoutAcknowledgements()`, which clears both. Three further
 fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
@@ -686,7 +686,10 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`, `ErrBlockWritesNotSupported`.
   A `BlockWrites` value would let the derived plan, not the operator, decide how many fenced
   copies take the table offline. An adapter that reuses one
-  `Options` value for both front doors clears them before calling `RunDesired`.
+  `Options` value for both front doors passes `RunDesired` `opts.WithoutAcknowledgements()`:
+  a copy with every acknowledgement cleared and every other field kept, drawn from the same
+  list `RunDesired` rejects from, so an acknowledgement added in a later release is cleared
+  without an adapter change.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
