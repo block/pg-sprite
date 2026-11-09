@@ -391,6 +391,11 @@ func TestRowSecurityRefusalRegistry(t *testing.T) {
 		{"privileges", errors.Join(executor.ErrRowSecurityRefused, executor.ErrRowSecurityPrivileges), verdict.ReasonInsufficientPrivileges, verdict.ClassEnvironmental},
 		{"unsupported", executor.ErrRowSecurityRefused, verdict.ReasonUnsupportedStatement, verdict.ClassCapabilityBoundary},
 		{"missing-table", executor.ErrTableNotFound, verdict.ReasonUnsupportedStatement, verdict.ClassEnvironmental},
+		{"missing-schema", preflight.ErrSchemaNotFound, verdict.ReasonUnsupportedStatement, verdict.ClassEnvironmental},
+		{"create-privileges", &preflight.PrivilegeError{Tier: preflight.TierCreateTable, Check: "has_schema_privilege(app, CREATE)"}, verdict.ReasonInsufficientPrivileges, verdict.ClassEnvironmental},
+		{"create-owner-not-found", preflight.ErrCreateOwnerNotFound, verdict.ReasonInsufficientPrivileges, verdict.ClassEnvironmental},
+		{"create-collision", executor.ErrCreateCollision, verdict.ReasonCreateCollision, verdict.ClassEnvironmental},
+		{"create-admission", executor.ErrIfNotExistsUnsupported, verdict.ReasonUnsupportedStatement, verdict.ClassByDesign},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

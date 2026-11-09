@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -37,7 +38,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		if err := refuseExtensionSchemasWithRowSecurity(c.ExtensionSchema); err != nil {
 			return err
 		}
-		return c.runRowSecurityDiff(ctx, out, rowSecurity)
+		return c.runRowSecurityDiff(ctx, out, rowSecurity, migrate.DefaultOptions().Budget.Brief)
 	}
 	ds, ok := file.Schema()
 	if !ok {

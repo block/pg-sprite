@@ -1,8 +1,9 @@
 # Atomic row security changes
 
 The dedicated executor, available through the Go API and `migrate --desired`, converges the complete RLS definition of one existing
-ordinary table. It does not change columns, indexes, or constraints and does not
-create missing tables. `diff` remains a preview. See the [CLI workflow](declarative-row-security.md#apply-the-declaration) for commands and output.
+ordinary table. It does not change columns, indexes, or constraints. When the
+table does not exist yet, `migrate --desired` [creates it with its row security](#create-a-missing-table-with-its-row-security)
+in one transaction instead. `diff` remains a preview. See the [CLI workflow](declarative-row-security.md#apply-the-declaration) for commands and output.
 
 ## Call the Go API
 
@@ -86,6 +87,71 @@ administration of those dependencies is not serialized by the table lock.
 
 These checks belong to the executor, regardless of whether a CLI or orchestrator
 calls it. SchemaBot can retain its existing replan and consent workflow.
+
+## Create a missing table with its row security
+
+When the desired table does not exist, `executor.ExecuteDesiredRowSecurity`
+creates it and its row security in one transaction, so no other session can see
+the table before its policies. That matters wherever new tables are granted to
+client roles by default: Supabase's default privileges grant every new table in
+`public` to `anon` and `authenticated`, and a table created before its RLS is
+readable and writable through the Data API until the RLS lands.
+
+```go
+budget := executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second}
+report, err := executor.ExecuteDesiredRowSecurity(ctx, pool, "public", "", desired, budget)
+if err != nil {
+    return err
+}
+// report.TableCreated is true when this run created the table; report.Statements
+// begins with its CREATE TABLE.
+```
+
+`ExecuteDesiredRowSecurity` converges an existing table as `ExecuteRowSecurity`
+does. For an absent table it proves the name is free and that the role can
+create there, as the create owner when the fourth argument names one, then runs
+the create. Callers that mint those proofs themselves can call
+`ExecuteCreateWithRowSecurity` directly. One deadline covers the whole attempt,
+the probes included. The create:
+
+1. Probes the names the table and its indexes claim, then begins one transaction
+   with the same budgets as the existing-table path. It checks database CREATE
+   for the scratch schema and materializes the desired SQL in a rolled-back
+   savepoint. A table shape the row security path does not support refuses
+   here, before any target DDL.
+2. Runs the admitted `CREATE TABLE` and its `CREATE INDEX` statements, qualified,
+   as the create owner when one is set.
+3. Reads back the names the table claimed. A name an occupant took after the
+   probe, which makes PostgreSQL choose another, refuses as `create-collision`.
+4. Renders and runs the RLS statements as for an existing table (RS-4).
+5. Reads the owner after every statement has run, so an owner changed by an
+   event trigger is caught; an owner other than the proven one is an invariant
+   violation. Then it reads back the whole table, RLS included, and compares it
+   with the desired file.
+6. Commits. A lost commit response is an unknown outcome, as for an existing
+   table.
+
+A failure at any step before the commit leaves nothing behind.
+`executor.PreviewDesiredCreateWithRowSecurity` runs the same transaction and
+rolls it back, so `diff` and `migrate --dry-run` list exactly the statements a
+run would commit. Because the preview runs the target DDL, no catalog change
+survives it, but what a rollback does not undo does: an event trigger on that
+DDL runs, and a sequence it advances keeps the value it reached. `diff --sql`
+wraps the statements in `BEGIN` and `COMMIT`, with the `SET LOCAL search_path`
+each part runs under: the table's statements under the schema and then
+`public`, and the row security under `pg_catalog` alone. A table that appears
+between planning and the preview is previewed as the existing table it now
+is. A run does not execute a saved preview: it re-derives the statements, and
+there is no reviewed variant of the create path.
+
+A standalone type at the table's name refuses as `create-collision`. So does a
+table that appears at the name between the probe and the `CREATE TABLE`: the
+run rolls back, and the next run finds the table and converges it with
+`ExecuteRowSecurity`.
+
+- **RS-6:** A table created with row security commits together with its RLS or
+  not at all. A failure at any step, including the readback, leaves no table,
+  index, or policy behind.
 
 ## Bind execution to reviewed SQL
 

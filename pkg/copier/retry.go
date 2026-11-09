@@ -65,8 +65,8 @@ func collided(err error) bool {
 // another pass on the same terms as a collision. The match is by SQLSTATE
 // alone, so a deadlock on any statement of the pass — the guard's table
 // locks included — earns the pass too; that is as safe, since the pass
-// still committed nothing. Only this side of the cycle is retried: a flush
-// the server picks as the victim fails the catch-up.
+// still committed nothing. The applier gives a flush the server picks as
+// the victim the same answer: the batch is requeued and flushed again.
 func deadlocked(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {

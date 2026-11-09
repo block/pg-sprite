@@ -95,6 +95,7 @@ func captureFailed(err error) bool {
 		applier.ErrInvariantViolation,
 		applier.ErrTableLockLost,
 		applier.ErrBatchDeferred,
+		applier.ErrBatchDeadlocked,
 		decode.ErrStreamEnded,
 		decode.ErrSlotLost,
 		decode.ErrSlotLagCeiling,

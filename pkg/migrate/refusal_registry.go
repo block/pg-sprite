@@ -275,12 +275,16 @@ func rowSecurityUnsupportedRefusal() verdict.Refusal {
 }
 
 // RowSecurityRefusal classifies typed admission failures from the atomic RLS
-// executor. Operational errors are not refusals. Privilege causes take priority
-// over the general admission sentinel they also wrap. The executor builds the
-// declaration on the same scratch schema as RunDesired, so a desired-file
-// shape refusal is classified the same way on both paths.
+// executors, including the creation proofs and create-path admission of a
+// table created with its row security. Operational errors are not refusals.
+// Privilege causes take priority over the general admission sentinel they
+// also wrap. The executor builds the declaration on the same scratch schema
+// as RunDesired, so a desired-file shape refusal is classified the same way
+// on both paths.
 func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
-	if errors.Is(err, executor.ErrRowSecurityPrivileges) {
+	var privErr *preflight.PrivilegeError
+	if errors.Is(err, executor.ErrRowSecurityPrivileges) || errors.As(err, &privErr) ||
+		errors.Is(err, preflight.ErrCreateOwnerNotFound) {
 		return insufficientPrivilegesRefusal(), true
 	}
 	if refusal, ok := desiredShapeRefusal(err); ok {
@@ -289,7 +293,15 @@ func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
 	if errors.Is(err, executor.ErrRowSecurityRefused) {
 		return rowSecurityUnsupportedRefusal(), true
 	}
-	if errors.Is(err, executor.ErrTableNotFound) {
+	if errors.Is(err, executor.ErrCreateCollision) {
+		return createCollisionRefusal(), true
+	}
+	if r, ok := createAdmissionRefusal(err); ok {
+		return r, true
+	}
+	// A table in a schema that does not exist is missing as surely as one
+	// absent from a schema that does: the create path cannot run there.
+	if errors.Is(err, executor.ErrTableNotFound) || errors.Is(err, preflight.ErrSchemaNotFound) {
 		return plan.RowSecurityMissingTableRefusal(), true
 	}
 	return verdict.Refusal{}, false

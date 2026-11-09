@@ -19,14 +19,26 @@ import (
 
 // RowSecurityReport contains only committed RLS statements, in execution order.
 // A no-op has an empty Statements slice. Errors return a zero report.
+// TableCreated is true when the run created the table along with its row
+// security, so Statements begins with its CREATE TABLE.
 type RowSecurityReport struct {
-	Schema     string   `json:"schema"`
-	Table      string   `json:"table"`
-	Statements []string `json:"statements"`
+	Schema       string   `json:"schema"`
+	Table        string   `json:"table"`
+	Statements   []string `json:"statements"`
+	TableCreated bool     `json:"table_created,omitempty"`
 }
 
-// RowSecurityPlan contains generated RLS statements in execution order. Preview
-// rolls back without target DDL; a plan is not an execution permission.
+// plan returns the statements a rolled-back run generated, as a preview.
+func (r RowSecurityReport) plan() RowSecurityPlan {
+	return RowSecurityPlan{Schema: r.Schema, Table: r.Table, Statements: r.Statements}
+}
+
+// RowSecurityPlan contains generated RLS statements in execution order. A
+// preview of an existing table runs no target DDL. A preview of a table that
+// does not exist yet runs the whole create transaction on the target,
+// readback included, and rolls it back: no catalog change survives, but
+// what a rollback does not undo does, such as a sequence an event trigger
+// on that DDL advances. A plan is not an execution permission.
 type RowSecurityPlan struct {
 	Schema     string   `json:"schema"`
 	Table      string   `json:"table"`
@@ -54,7 +66,7 @@ func PreviewRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	if err != nil {
 		return RowSecurityPlan{}, err
 	}
-	return RowSecurityPlan(report), nil
+	return report.plan(), nil
 }
 
 // ExecuteReviewedRowSecurity regenerates SQL under the target lock and refuses
@@ -222,11 +234,9 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 }
 
 func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
-	// Render refuses unsupported shapes even when two models happen to match.
-	table := withoutExportOnlyRefusals(live)
-	table.RowSecurity = schemadiff.RowSecurity{}
-	if _, err := schemadiff.Render(table); err != nil {
-		return fmt.Errorf("row security target: %w", err)
+	table, err := rowSecurityTableShape(live)
+	if err != nil {
+		return err
 	}
 	wanted.RowSecurity = schemadiff.RowSecurity{}
 	changes, err := schemadiff.Diff(schema, table, wanted)
@@ -237,6 +247,19 @@ func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 		return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
 	}
 	return nil
+}
+
+// rowSecurityTableShape returns m without its row security or the facts
+// only an export refuses, and refuses a table shape the row security path
+// does not support. Render refuses unsupported shapes even when two models
+// happen to match.
+func rowSecurityTableShape(m schemadiff.Model) (schemadiff.Model, error) {
+	table := withoutExportOnlyRefusals(m)
+	table.RowSecurity = schemadiff.RowSecurity{}
+	if _, err := schemadiff.Render(table); err != nil {
+		return schemadiff.Model{}, fmt.Errorf("row security target: %w", err)
+	}
+	return table, nil
 }
 
 // withoutExportOnlyRefusals returns live without the facts that only an
