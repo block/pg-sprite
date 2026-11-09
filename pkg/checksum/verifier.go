@@ -313,48 +313,52 @@ func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.
 	if err != nil {
 		return Report{}, err
 	}
-	report, _, err := v.sweep(ctx, pool, stmts, through, false)
-	return report, err
+	return v.sweep(ctx, pool, stmts, through, nil)
 }
 
-// sweep cuts and compares every chunk at or below through. A quiesced sweep
-// reports each differing chunk as a mismatch. A live sweep instead returns
-// each differing chunk as an observation of its rows carrying the position
-// of the marker its transaction wrote, for the caller to settle; the report
-// then has no mismatches of its own. Both count a differing chunk as
-// mismatched.
-func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, stmts statements, through copier.Watermark, live bool) (Report, []observation, error) {
+// sweep cuts and compares every chunk at or below through. A quiesced
+// sweep, with a nil differ, reports each differing chunk as a mismatch. A
+// live sweep instead hands each differing chunk to differ as an
+// observation of its rows carrying the position of the marker its
+// transaction wrote, for the caller to settle, before it reads the next
+// chunk; the report then has no mismatches of its own. Both count a
+// differing chunk as mismatched. The time differ takes is not the chunk's,
+// so the chunker's sizing feedback leaves it out.
+func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, stmts statements, through copier.Watermark, differ func(context.Context, observation) error) (Report, error) {
 	chunker, err := copier.NewChunker(v.target, copier.Watermark{}, v.opts.Chunker)
 	if err != nil {
-		return Report{}, nil, err
+		return Report{}, err
 	}
 	report := Report{Through: through}
-	var differing []observation
+	live := differ != nil
 	for {
 		started := v.opts.Clock.Now()
 		next, ok, err := v.compareNext(ctx, pool, chunker, stmts, through, live)
 		if err != nil {
-			return Report{}, nil, err
+			return Report{}, err
 		}
 		if !ok {
-			return report, differing, nil
+			return report, nil
 		}
+		elapsed := v.opts.Clock.Now().Sub(started)
 		v.countCompared(next.source.Rows)
 		report.Chunks++
 		report.Rows += next.source.Rows
 		if next.source != next.shadow {
 			v.countMismatch()
 			if live {
-				differing = append(differing, next.rows)
+				if err := differ(ctx, next.rows); err != nil {
+					return Report{}, err
+				}
 			} else {
 				report.Mismatches = append(report.Mismatches, Mismatch{Chunk: next.compared, Source: next.source, Shadow: next.shadow})
 			}
 		}
 		if next.compared.Upper() == through.Value() {
-			return report, differing, nil
+			return report, nil
 		}
-		if err := chunker.Feedback(next.cut, v.opts.Clock.Now().Sub(started)); err != nil {
-			return Report{}, nil, err
+		if err := chunker.Feedback(next.cut, elapsed); err != nil {
+			return Report{}, err
 		}
 	}
 }

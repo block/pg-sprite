@@ -8,6 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/copier"
 )
 
 // The rows statement is the digest statement's companion in one string:
@@ -94,4 +96,60 @@ func TestRowsDeriveTheServersDigest(t *testing.T) {
 			require.NoError(t, confirmDigest("source", server, rows))
 		})
 	}
+}
+
+// A live sweep judges a differing chunk from its rows only once each
+// side's rows derive the digest the server aggregated in the same
+// snapshot; a side whose rows do not is a pass whose two renderings of
+// the chunk describe different rows, and the read fails closed before
+// anything is judged or marked (CO-1). Each side is checked on its own:
+// the rows are read from real tables, and the digest handed in is the
+// server's for one side and not the one the other side's rows derive.
+func TestReadDifferingConfirmsEachSideAgainstItsDigest(t *testing.T) {
+	f := newProofFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.orders_new (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	f.exec(t, `
+		INSERT INTO %s.orders (id, qty) VALUES
+			(1, 5),
+			(2, 7)`)
+	f.exec(t, `
+		INSERT INTO %s.orders_new (id, qty) VALUES
+			(1, 5),
+			(2, 8)`)
+	target := f.prove(t, "orders")
+	types := []columnType{
+		{name: "id", typeName: "bigint"},
+		{name: "qty", typeName: "integer"},
+	}
+	stmts := statements{
+		source: sideSQL{digest: digestSQL(target, f.schema, "orders", types, nil), rows: rowsSQL(target, f.schema, "orders", types, nil)},
+		shadow: sideSQL{digest: digestSQL(target, f.schema, "orders_new", types, nil), rows: rowsSQL(target, f.schema, "orders_new", types, nil)},
+	}
+	v := &Verifier{target: target, shadow: fakeShadow{schema: f.schema, source: "orders", shadow: "orders_new"}}
+	chunk, err := copier.NewChunk(1, 2)
+	require.NoError(t, err)
+
+	tx, err := f.pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context()))) })
+	source, shadow, err := v.digestRange(t.Context(), tx, stmts, 1, 2)
+	require.NoError(t, err)
+	require.NotEqual(t, source, shadow, "key 2 differs, so the chunk is one a live sweep reads the rows of")
+
+	_, err = v.readDiffering(t.Context(), tx, stmts, chunk, shadow, shadow)
+	require.ErrorIs(t, err, ErrInvariantViolation, "the source's rows do not derive the digest handed in for the source")
+	assert.ErrorContains(t, err, "(CO-1): source rows")
+
+	_, err = v.readDiffering(t.Context(), tx, stmts, chunk, source, source)
+	require.ErrorIs(t, err, ErrInvariantViolation, "the shadow's rows do not derive the digest handed in for the shadow")
+	assert.ErrorContains(t, err, "(CO-1): shadow rows")
 }

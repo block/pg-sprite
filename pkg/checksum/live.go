@@ -151,7 +151,11 @@ type LiveOptions struct {
 	// Catchup serves as both Confirmed and Flushes.
 	Flushes FlushGate
 	// Attempts is how many fresh rereads a chunk that keeps changing gets
-	// before the pass reports it unsettled.
+	// before the pass reports it unsettled. Each reread reads the whole
+	// chunk and counts once, however many of its keys it judges; a chunk
+	// is read again only while some key of it is still changing, so a
+	// chunk whose keys each hold still across one pair of reads settles
+	// within the bound however much of the chunk is written.
 	Attempts int
 	// SettleWait bounds each wait for the catch-up to confirm past the
 	// position a chunk was read at. It is spent in sleeps of Poll, so it
@@ -246,8 +250,12 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // shadow's only writer, so the shadow either lags the source or has
 // caught up to it, and nothing else moves it.
 //
-// Every differing chunk is settled before the pass decides anything, so
-// one chunk that will not settle does not hide a divergence in another;
+// The sweep holds the rows of a few differing chunks at most: once it
+// holds that many it settles them before it reads on, so the rows a pass
+// holds are bounded by the chunk size, not by the table or by how much of
+// it differs. Every differing chunk is settled before the pass decides
+// anything, so one chunk that will not settle does not hide a divergence
+// in another;
 // the Report counts the unsettled chunks and lists the confirmed
 // divergences. A clean pass — every chunk equal or settled — mints the
 // proofs as Check does, marked as a live pass's. A pass with unsettled
@@ -323,44 +331,94 @@ func (v *Verifier) CheckLive(ctx context.Context, pool *pgxpool.Pool, through co
 	}
 }
 
+// heldChunks is how many differing chunks a live sweep holds the rows of
+// before it settles them and reads on. Every held chunk keeps a key and a
+// hash per row on both sides, and no chunk is longer than the chunker's
+// maximum, so however many chunks of a table differ, the rows a pass holds
+// are bounded by this many chunks. Holding more than one lets the catch-up
+// confirm past the earlier chunks' markers while the sweep reads the later
+// ones, so a held chunk need not wait for the catch-up on its own.
+const heldChunks = 4
+
 // sweepAndSettle runs the live sweep and settles every chunk it found
 // differing, in key order, returning the report with the confirmed
 // divergences as its mismatches and the settled and unsettled chunks
-// counted, and the first unsettled chunk when there was one. A chunk that
-// does not settle is counted and the next is settled; only a failure that
-// says nothing about the data — the context ending, the lock lost, a read
-// refused — stops the settling.
+// counted, and the first unsettled chunk when there was one. The sweep
+// holds the chunks it finds differing until heldChunks of them are held,
+// settles those, and reads on; whatever it holds when it reaches the
+// watermark is settled last. A chunk that does not settle is counted and
+// the next is settled; only a failure that says nothing about the data —
+// the context ending, the lock lost, a read refused — stops the settling.
 func (v *Verifier) sweepAndSettle(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, live LiveOptions) (Report, *UnresolvedError, error) {
 	stmts, err := v.digestStatements(ctx, pool)
 	if err != nil {
 		return Report{}, nil, err
 	}
-	report, differing, err := v.sweep(ctx, pool, stmts, through, true)
+	var (
+		held    []observation
+		settled settledChunks
+	)
+	settleHeld := func(ctx context.Context) error {
+		for _, prior := range held {
+			if err := v.settleInto(ctx, pool, stmts, prior, live, &settled); err != nil {
+				return err
+			}
+		}
+		held = nil
+		return nil
+	}
+	report, err := v.sweep(ctx, pool, stmts, through, func(ctx context.Context, differing observation) error {
+		held = append(held, differing)
+		if len(held) < heldChunks {
+			return nil
+		}
+		return settleHeld(ctx)
+	})
 	if err != nil {
 		return Report{}, nil, err
 	}
-	var first *UnresolvedError
-	for _, prior := range differing {
-		settled, err := v.settle(ctx, pool, stmts, prior, 0, live)
-		var unresolved *UnresolvedError
-		if errors.As(err, &unresolved) {
-			report.Unsettled++
-			if first == nil {
-				first = unresolved
-			}
-			continue
-		}
-		if err != nil {
-			return Report{}, nil, err
-		}
-		if settled.diverged > 0 {
-			report.Mismatches = append(report.Mismatches, settled.last.mismatch())
-			continue
-		}
-		report.Settled++
+	if err := settleHeld(ctx); err != nil {
+		return Report{}, nil, err
 	}
 	if lost := v.lockLost(); lost != nil {
 		return Report{}, nil, lost
 	}
-	return report, first, nil
+	report.Mismatches = settled.mismatches
+	report.Settled = settled.settled
+	report.Unsettled = settled.unsettled
+	return report, settled.first, nil
+}
+
+// settledChunks is what a live pass has concluded about the chunks it has
+// settled so far: the confirmed divergences in key order, how many chunks
+// settled and how many could not, and the first that could not.
+type settledChunks struct {
+	mismatches []Mismatch
+	settled    int
+	unsettled  int
+	first      *UnresolvedError
+}
+
+// settleInto settles one differing chunk and records what it concluded in
+// into. An unsettled chunk is recorded, not returned: only a failure that
+// says nothing about the data is an error here.
+func (v *Verifier) settleInto(ctx context.Context, pool *pgxpool.Pool, stmts statements, prior observation, live LiveOptions, into *settledChunks) error {
+	settled, err := v.settle(ctx, pool, stmts, prior, 0, live)
+	var unresolved *UnresolvedError
+	if errors.As(err, &unresolved) {
+		into.unsettled++
+		if into.first == nil {
+			into.first = unresolved
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if settled.diverged > 0 {
+		into.mismatches = append(into.mismatches, settled.last.mismatch())
+		return nil
+	}
+	into.settled++
+	return nil
 }

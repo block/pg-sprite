@@ -637,8 +637,12 @@ A key settled at one reread is concluded as of that read, and the stream carries
 to it since, so the rereads after the first judge only the keys the one before left hot. Every
 differing chunk is settled, so one chunk that will not settle does not hide a divergence in
 another; the `Report` counts the unsettled chunks (`Report.Unsettled`) beside the settled ones
-and lists the confirmed divergences. The rows of every differing chunk the sweep has not yet
-settled are held in memory, two hashes and a key per row, until the chunk settles.
+and lists the confirmed divergences. The sweep holds the rows of a differing chunk in memory,
+a key and a hash per row on each side, until the chunk settles, and it holds a few such chunks
+at most (`heldChunks`): once it holds that many it settles them before it reads on, so the rows
+a pass holds are bounded by the chunker's largest chunk, never by the table or by how much of it
+differs, and the catch-up still confirms past the earlier held chunks' markers while the sweep
+reads the later ones.
 
 **Outcomes.** A pass whose every chunk is equal or settled mints the proofs as `Check` does,
 and the `VerifiedShadow` records that a live pass minted it (`VerifiedShadow.Live`): the shadow
