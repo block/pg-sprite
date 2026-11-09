@@ -110,6 +110,10 @@ func TestParseDesiredWithRowSecurityRefusesPolicyRelations(t *testing.T) {
 			expr: "USING (EXISTS (SELECT 1 FROM archive.documents))",
 			want: ErrPolicyReadsOwnTable, read: `"archive.documents"`,
 		},
+		"a catalog table": {
+			expr: "USING (EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = 'app'))",
+			want: ErrPolicyReadsCatalog, read: `"pg_catalog.pg_namespace"`,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint);
@@ -117,6 +121,28 @@ func TestParseDesiredWithRowSecurityRefusesPolicyRelations(t *testing.T) {
  CREATE POLICY readers ON documents ` + tc.expr + `;`)
 			require.ErrorIs(t, err, tc.want)
 			assert.ErrorContains(t, err, `policy "readers" reads `+tc.read)
+		})
+	}
+}
+
+// A policy whose query locks the rows it reads is refused, whichever lock
+// strength it names and however deep the query sits, because building it
+// takes ROW SHARE on the table rather than the ACCESS SHARE of a plain read.
+func TestParseDesiredWithRowSecurityRefusesPolicyRowLocks(t *testing.T) {
+	for name, expr := range map[string]string{
+		"FOR SHARE":         "USING (EXISTS (SELECT 1 FROM public.team_members FOR SHARE))",
+		"FOR UPDATE":        "USING (EXISTS (SELECT 1 FROM public.team_members FOR UPDATE))",
+		"FOR NO KEY UPDATE": "USING (EXISTS (SELECT 1 FROM public.team_members FOR NO KEY UPDATE))",
+		"FOR KEY SHARE":     "USING (EXISTS (SELECT 1 FROM public.team_members FOR KEY SHARE))",
+		"nested in WITH CHECK": "WITH CHECK (id IN (SELECT id FROM public.teams WHERE EXISTS " +
+			"(SELECT 1 FROM public.team_members FOR SHARE OF team_members)))",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint);
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents ` + expr + `;`)
+			require.ErrorIs(t, err, ErrPolicyLocksRows)
+			assert.ErrorContains(t, err, `policy "readers" locks the rows it reads`)
 		})
 	}
 }

@@ -198,10 +198,18 @@ takes only an `ACCESS SHARE` lock on it, so writes to that table continue. An
 unqualified table name, a CTE name, or a database-qualified name is refused, and
 so is any table with the policy's own table name: scratch would bind that name to
 the live table rather than to itself, and PostgreSQL rejects a policy that reads
-its own table as infinite recursion when it is queried. The comparison does not
-cover the referenced table's own policies, which apply to the subquery under the
-caller's role, or recursion between two tables whose policies read each other;
-a `SECURITY DEFINER` helper function avoids both. Other
+its own table as infinite recursion when it is queried. A `pg_catalog` table is
+refused because introspection prints it unqualified, so the exported file could
+not be admitted again. A query that locks the rows it reads (`FOR SHARE`,
+`FOR UPDATE`, and their weaker forms) is refused because building the policy
+would take `ROW SHARE` on that table and wait behind a session holding
+`EXCLUSIVE`. The comparison does not cover the referenced table's own policies,
+which apply to the subquery under the caller's role, or recursion between two
+tables whose policies read each other. A `SECURITY DEFINER` helper function
+avoids both only when its owner bypasses row security on the table it reads:
+a role with `BYPASSRLS`, or the table's owner when the table does not force row
+security. Such a helper runs with its owner's access, so it must check the
+caller's authorization itself. Other
 [table export limits](pull.md#refused-table-shapes) still apply.
 
 An unchanged definition produces an empty plan. Any table or RLS difference in

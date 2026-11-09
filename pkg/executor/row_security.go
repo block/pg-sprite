@@ -130,7 +130,7 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	if budgetErr := asBudgetError(err, b); budgetErr != nil {
 		return budgetErr
 	}
-	if errors.Is(err, statement.ErrPolicyRelationDependency) || errors.Is(err, statement.ErrPolicyReadsOwnTable) || errors.Is(err, statement.ErrRowSecurityDeclaration) {
+	if isRowSecurityAdmissionError(err) {
 		return fmt.Errorf("%w: %w", ErrRowSecurityRefused, err)
 	}
 	var pgErr *pgconn.PgError
@@ -279,4 +279,22 @@ func withoutExportOnlyRefusals(live schemadiff.Model) schemadiff.Model {
 		}
 	}
 	return table
+}
+
+// isRowSecurityAdmissionError reports whether err is a desired file's
+// row-security declaration refused at admission: a property of the file, so
+// retrying cannot change it.
+func isRowSecurityAdmissionError(err error) bool {
+	for _, cause := range []error{
+		statement.ErrPolicyRelationDependency,
+		statement.ErrPolicyReadsOwnTable,
+		statement.ErrPolicyReadsCatalog,
+		statement.ErrPolicyLocksRows,
+		statement.ErrRowSecurityDeclaration,
+	} {
+		if errors.Is(err, cause) {
+			return true
+		}
+	}
+	return false
 }

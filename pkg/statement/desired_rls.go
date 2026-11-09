@@ -31,6 +31,18 @@ var ErrPolicyRelationDependency = errors.New("a policy must name every table it 
 // the table lives in, so the name is refused in every schema.
 var ErrPolicyReadsOwnTable = errors.New("a policy cannot read the table it is defined on")
 
+// ErrPolicyReadsCatalog refuses a policy expression that reads a pg_catalog
+// table. pg_catalog is always searched, so introspection prints such a table
+// unqualified, and the file pull would export from the live policy could not
+// be admitted again.
+var ErrPolicyReadsCatalog = errors.New("a policy cannot read a pg_catalog table")
+
+// ErrPolicyLocksRows refuses a policy expression whose query locks the rows it
+// reads (FOR UPDATE, FOR SHARE, and their weaker forms). PostgreSQL takes ROW
+// SHARE on such a table while it builds the policy, which waits behind a
+// session holding EXCLUSIVE, where a plain read takes only ACCESS SHARE.
+var ErrPolicyLocksRows = errors.New("a policy cannot lock the rows it reads, such as with FOR SHARE or FOR UPDATE")
+
 // ErrRowSecurityForeignKey refuses a foreign key in a row-security desired
 // file. The row-security scratch build creates no stand-in for a referenced
 // table, so a foreign key there would bind to the live table and lock it.
@@ -183,22 +195,30 @@ func rowSecurityTarget(rel *pganalyze.RangeVar) (string, error) {
 }
 
 // admitPolicyRelations admits the tables a policy's USING and WITH CHECK
-// expressions read: each must be named schema-qualified, and none may carry the
-// name of the table the policy is defined on (see ErrPolicyRelationDependency and
-// ErrPolicyReadsOwnTable). This is grammar admission only: a scalar SELECT
+// expressions read: each must be named schema-qualified, outside pg_catalog,
+// and none may carry the name of the table the policy is defined on, and no
+// query may lock the rows it reads (see ErrPolicyRelationDependency,
+// ErrPolicyReadsCatalog, ErrPolicyReadsOwnTable, and ErrPolicyLocksRows). This is grammar admission only: a scalar SELECT
 // auth.uid() reads no table and is admitted unchanged. SQL meaning still comes
 // exclusively from execute-and-introspect, where a qualified name binds the live
 // table the applied policy will read.
 func admitPolicyRelations(policy *pganalyze.CreatePolicyStmt, table string) error {
 	var read []*pganalyze.RangeVar
 	for _, expr := range []*pganalyze.Node{policy.GetQual(), policy.GetWithCheck()} {
-		if expr != nil {
-			read = appendRelations(read, expr.ProtoReflect())
+		if expr == nil {
+			continue
 		}
+		if locksRows(expr.ProtoReflect()) {
+			return fmt.Errorf("%w: policy %q locks the rows it reads", ErrPolicyLocksRows, policy.GetPolicyName())
+		}
+		read = appendRelations(read, expr.ProtoReflect())
 	}
 	for _, rel := range read {
 		if rel.GetSchemaname() == "" || rel.GetCatalogname() != "" {
 			return fmt.Errorf("%w: policy %q reads %q", ErrPolicyRelationDependency, policy.GetPolicyName(), relationName(rel))
+		}
+		if rel.GetSchemaname() == "pg_catalog" {
+			return fmt.Errorf("%w: policy %q reads %q", ErrPolicyReadsCatalog, policy.GetPolicyName(), relationName(rel))
 		}
 		if rel.GetRelname() == table {
 			return fmt.Errorf("%w: policy %q reads %q", ErrPolicyReadsOwnTable, policy.GetPolicyName(), relationName(rel))
@@ -215,32 +235,23 @@ func relationName(rel *pganalyze.RangeVar) string {
 
 // appendRelations appends every RangeVar in msg, in tree order.
 func appendRelations(read []*pganalyze.RangeVar, msg protoreflect.Message) []*pganalyze.RangeVar {
-	if rel, ok := msg.Interface().(*pganalyze.RangeVar); ok {
-		return append(read, rel)
-	}
-	msg.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-		if field.Kind() != protoreflect.MessageKind {
-			return true
-		}
-		switch {
-		case field.IsMap():
-			if field.MapValue().Kind() == protoreflect.MessageKind {
-				value.Map().Range(func(_ protoreflect.MapKey, item protoreflect.Value) bool {
-					read = appendRelations(read, item.Message())
-					return true
-				})
-			}
-		case field.IsList():
-			list := value.List()
-			for i := 0; i < list.Len(); i++ {
-				read = appendRelations(read, list.Get(i).Message())
-			}
-		default:
-			read = appendRelations(read, value.Message())
+	walkMessages(msg, func(node protoreflect.Message) bool {
+		if rel, ok := node.Interface().(*pganalyze.RangeVar); ok {
+			read = append(read, rel)
 		}
 		return true
 	})
 	return read
+}
+
+// locksRows reports whether any query in msg carries a locking clause.
+func locksRows(msg protoreflect.Message) bool {
+	found := false
+	walkMessages(msg, func(node protoreflect.Message) bool {
+		_, found = node.Interface().(*pganalyze.LockingClause)
+		return !found
+	})
+	return found
 }
 
 // HasRowSecurityDeclaration reports whether sql declares row security without
