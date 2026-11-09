@@ -131,8 +131,10 @@ The preview exits 0. With `--json` it is the statement list with
 in one transaction, so no session sees the table without its policies. The
 verdict carries `"table_created": true`, its detail reads `table created with
 its row security: all changes committed in one transaction`, and
-`executed_sql` lists the statements above. A second run is already converged,
-and its verdict leaves `table_created` out. The table shapes a new table may take are the
+`executed_sql` lists the statements above. A file run with `--extension-schema`
+also lists those schemas in the verdict's `extension_schemas`, since the create
+ran under them. A second run is already converged, and its verdict leaves
+`table_created` out. The table shapes a new table may take are the
 same as for an ordinary desired file, and a foreign key is still refused. A
 standalone type at the table's name refuses as `create-collision`. The
 [atomic RLS contract](atomic-row-security.md#create-a-missing-table-with-its-row-security)

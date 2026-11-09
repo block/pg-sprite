@@ -68,6 +68,7 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 	if err == nil {
 		if report.TableCreated {
 			v.TableCreated = true
+			v.ExtensionSchemas = report.ExtensionSchemas
 			v.Detail = "table created with its row security: all changes committed in one transaction"
 		}
 		if len(report.Statements) == 0 {
