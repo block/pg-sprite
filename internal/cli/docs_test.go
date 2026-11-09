@@ -112,6 +112,8 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	failedSequence := verdict.Verdict{
 		Outcome:       verdict.OutcomeFailed,
 		Code:          string(executor.CodeExecutionFailed),
+		SQLState:      "23514",
+		ServerError:   `check constraint "users_email_lower" of relation "users" is violated by some row`,
 		FailedStep:    2,
 		FailedStepSQL: `ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_lower"`,
 		Statement:     "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))",

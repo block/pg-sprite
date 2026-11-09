@@ -75,18 +75,12 @@ func (f *Flusher) guard(ctx context.Context, tx pgx.Tx) error {
 // statement would have converted differently. A copy without conversions
 // has nothing to confirm.
 func (f *Flusher) confirmResolution(ctx context.Context, tx pgx.Tx) error {
-	if len(f.shadow.Conversions()) == 0 {
-		return nil
-	}
-	found, err := chunksql.ResolutionFingerprint(ctx, tx, f.shadow.Schema(), f.shadow.Conversions())
-	if err != nil {
-		return err
-	}
+	err := chunksql.ConfirmResolution(ctx, tx, f.shadow.Schema(), f.shadow.SourceTable(), f.shadow.ShadowTable(), f.shadow.Conversions(), f.shadow.ConversionFingerprint())
 	// INV: CO-9
-	if found != f.shadow.ConversionFingerprint() {
-		return fmt.Errorf("%w (CO-9): the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", ErrInvariantViolation, f.shadow.Schema(), f.shadow.SourceTable(), f.shadow.ShadowTable(), found, f.shadow.ConversionFingerprint())
+	if errors.Is(err, ErrConversionDrift) {
+		return fmt.Errorf("%w (CO-9): %w", ErrInvariantViolation, err)
 	}
-	return nil
+	return err
 }
 
 // setFlushSession bounds the transaction, pins the output settings under

@@ -138,18 +138,14 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) erro
 // source side is what catches a chunk such a change reached. A copy
 // without conversions has nothing to confirm.
 func (c *Copier) confirmResolution(ctx context.Context, tx pgx.Tx) error {
-	if len(c.shadow.Conversions()) == 0 {
-		return nil
-	}
-	found, err := chunksql.ResolutionFingerprint(ctx, tx, c.shadow.Schema(), c.shadow.Conversions())
-	if err != nil {
-		return err
-	}
+	err := chunksql.ConfirmResolution(ctx, tx, c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), c.shadow.Conversions(), c.shadow.ConversionFingerprint())
 	// INV: CO-9
-	if found != c.shadow.ConversionFingerprint() {
-		return refuse(CauseConversionDrift, nil, "the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), found, c.shadow.ConversionFingerprint())
+	if errors.Is(err, chunksql.ErrConversionDrift) {
+		// The wrapped error already says what drifted and carries both
+		// fingerprints, so the detail only names the write it refused.
+		return refuse(CauseConversionDrift, []error{err}, "chunk write to %s refused", c.shadow.ShadowTable())
 	}
-	return nil
+	return err
 }
 
 // setCopySession bounds the transaction, pins the output settings a

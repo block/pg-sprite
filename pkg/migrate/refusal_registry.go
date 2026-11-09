@@ -190,21 +190,29 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 }
 
 // desiredShapeSentinels is the closed set of desired-file shapes the
-// planner refuses before it builds anything: a CREATE TABLE that names a
-// live parent. RunDesired maps them to a refusal, since nothing was
-// planned or executed.
+// planner refuses while it builds the desired table on the scratch
+// schema: a CREATE TABLE that names a live parent, refused before the
+// build runs, and one that declares a constraint twice, which the build
+// shows the server kept only once. RunDesired maps them to a refusal,
+// since nothing was planned or executed.
 func desiredShapeSentinels() []error {
 	return []error{
 		schemadiff.ErrDesiredPartitionOf,
 		schemadiff.ErrDesiredInherits,
+		schemadiff.ErrDesiredConstraintMerged,
 	}
 }
 
-// desiredShapeRefusal classifies a desired-file shape refusal. ok is false
-// for an error outside desiredShapeSentinels().
+// desiredShapeRefusal classifies a desired-file shape refusal. A constraint
+// declared twice is a mistake in the file, so it is by design; a live
+// parent is a capability boundary. ok is false for an error outside
+// desiredShapeSentinels().
 func desiredShapeRefusal(err error) (verdict.Refusal, bool) {
 	if !isInSentinelSet(err, desiredShapeSentinels()) {
 		return verdict.Refusal{}, false
+	}
+	if errors.Is(err, schemadiff.ErrDesiredConstraintMerged) {
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 }
@@ -270,12 +278,17 @@ func rowSecurityUnsupportedRefusal() verdict.Refusal {
 // executors, including the creation proofs and create-path admission of a
 // table created with its row security. Operational errors are not refusals.
 // Privilege causes take priority over the general admission sentinel they
-// also wrap.
+// also wrap. The executor builds the declaration on the same scratch schema
+// as RunDesired, so a desired-file shape refusal is classified the same way
+// on both paths.
 func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
 	var privErr *preflight.PrivilegeError
 	if errors.Is(err, executor.ErrRowSecurityPrivileges) || errors.As(err, &privErr) ||
 		errors.Is(err, preflight.ErrCreateOwnerNotFound) {
 		return insufficientPrivilegesRefusal(), true
+	}
+	if refusal, ok := desiredShapeRefusal(err); ok {
+		return refusal, true
 	}
 	if errors.Is(err, executor.ErrRowSecurityRefused) {
 		return rowSecurityUnsupportedRefusal(), true

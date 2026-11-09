@@ -183,7 +183,8 @@ Support differs by front door, so the matrix marks the exceptions:
   is deliberately narrower: a table the model cannot fully describe gets a typed
   refusal rather than a silently lossy description. Today that means tables that are
   partitioned (or are partitions), participate in classic table inheritance, are referenced by foreign keys, are unlogged,
-  carry explicit collations, or take defaults from sequences they do not own.
+  carry explicit collations, take defaults from sequences they do not own, or hold two
+  primary key, unique, or exclusion constraints declared the same way.
 
 A table that owns foreign keys is described by the model, so `diff` plans its
 foreign-key changes, but desired-state execution refuses them and export refuses the

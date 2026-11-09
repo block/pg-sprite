@@ -38,6 +38,38 @@ func TestMigrateDesiredRLSLockTimeoutPreservesState(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 	assert.Equal(t, string(executor.CodeBudgetLockExceeded), v.Code)
+	assert.Equal(t, "55P03", v.SQLState)
+	assert.Equal(t, "canceling statement due to lock timeout", v.ServerError)
+	assert.Empty(t, v.ExecutedSQL)
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}
+
+// A row-security declaration whose CREATE TABLE declares one constraint
+// twice is refused by design, as the same file without row security is:
+// the scratch build shows the server kept only one of them, and nothing
+// runs against the live table.
+func TestMigrateDesiredRLSWithAConstraintDeclaredTwiceIsRefused(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	cmd := desiredCommand(t, url, schema, `CREATE TABLE documents (
+ id int PRIMARY KEY,
+ owner_id int NOT NULL,
+ CONSTRAINT documents_owner_a UNIQUE (owner_id),
+ CONSTRAINT documents_owner_b UNIQUE (owner_id)
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`)
+	var out strings.Builder
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+	assert.Equal(t, verdict.ClassByDesign, v.Class)
+	assert.Contains(t, v.Detail, `constraint "documents_owner_b"`)
+	assert.Empty(t, v.Code)
 	assert.Empty(t, v.ExecutedSQL)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
