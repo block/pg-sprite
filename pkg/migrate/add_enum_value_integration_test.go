@@ -137,6 +137,20 @@ func TestAddEnumValueStopsBeforeExecutingWhatItCannotAdd(t *testing.T) {
 			msg:  "force names a table",
 		},
 		{
+			name: "restart names a table",
+			sql:  "ALTER TYPE %s.mood ADD VALUE 'calm'",
+			opts: func(o *migrate.Options) { o.CopySwap.Restart = schema + ".people" },
+			err:  migrate.ErrEnumValueAcknowledgement,
+			msg:  "never runs through copy-and-swap",
+		},
+		{
+			name: "block-writes names a table",
+			sql:  "ALTER TYPE %s.mood ADD VALUE 'calm'",
+			opts: func(o *migrate.Options) { o.CopySwap.BlockWrites = schema + ".people" },
+			err:  migrate.ErrEnumValueAcknowledgement,
+			msg:  "block-writes names a table to fence",
+		},
+		{
 			name: "allow-destructive names a table",
 			sql:  "ALTER TYPE %s.mood ADD VALUE 'calm'",
 			opts: func(o *migrate.Options) { o.AllowDestructive = schema + ".people" },
