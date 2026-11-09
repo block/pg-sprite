@@ -192,14 +192,16 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 // desiredShapeSentinels is the closed set of desired-file shapes the
 // planner refuses while it builds the desired table on the scratch
 // schema: a CREATE TABLE that names a live parent, refused before the
-// build runs, and one that declares a constraint twice, which the build
-// shows the server kept only once. RunDesired maps them to a refusal,
-// since nothing was planned or executed.
+// build runs; one that declares a constraint twice, which the build shows
+// the server kept only once; and an expression whose printed text never
+// settles. RunDesired maps them to a refusal, since nothing was planned or
+// executed.
 func desiredShapeSentinels() []error {
 	return []error{
 		schemadiff.ErrDesiredPartitionOf,
 		schemadiff.ErrDesiredInherits,
 		schemadiff.ErrDesiredConstraintMerged,
+		schemadiff.ErrExpressionUnsettled,
 	}
 }
 

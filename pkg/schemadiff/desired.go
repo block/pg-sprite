@@ -134,6 +134,9 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err := confirmIndexConstraintsBuilt(ctx, tx, path, statements, m); err != nil {
 		return Model{}, err
 	}
+	if m, err = settleDesired(ctx, tx, scratch, refs.schema, table, path, m); err != nil {
+		return Model{}, err
+	}
 	if err := tx.Rollback(ctx); err != nil {
 		return Model{}, fmt.Errorf("roll back scratch schema: %w", err)
 	}
