@@ -123,6 +123,11 @@ refusal — never a silently wrong or incomplete result:
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
+- **Two key constraints declared the same way** (`PRIMARY KEY`, `UNIQUE`,
+  or `EXCLUDE` on the same columns) cannot be declared in a desired file,
+  because one `CREATE TABLE` keeps only one of them. Export refuses such a
+  table, and a desired file that declares both fails its build instead of
+  planning the second one's live copy away.
 - **A key whose storage parameter cannot be rendered is refused** —
   `ADD PRIMARY KEY` / `ADD UNIQUE` runs as a concurrent index build plus
   `USING INDEX`, carrying the key's `WITH (...)` parameters; a value that
