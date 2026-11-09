@@ -157,10 +157,12 @@ func renderPolicy(b *strings.Builder, target string, p Policy) error {
 }
 
 // ErrOnlyTableDiffers is returned by DiffWithRowSecurity when the row
-// security matches and only the table definition differs. It wraps
-// ErrUnsupportedChange, so a caller that treats every difference as a
-// refusal still refuses; diffplan.PlanWithRowSecurity plans the table
-// definition on its own instead, which leaves the row security unchanged.
+// security matches and only the table definition differs, including when
+// the table change is one the table's own plan refuses; the error then also
+// wraps that refusal. It wraps ErrUnsupportedChange, so a caller that treats
+// every difference as a refusal still refuses; diffplan.PlanWithRowSecurity
+// plans the table definition on its own instead, which leaves the row
+// security unchanged and states the table refusal in its own terms.
 var ErrOnlyTableDiffers = errors.New("the row security matches and only the table definition differs")
 
 // DiffWithRowSecurity checks equality of a complete RLS-scoped declaration.
@@ -178,6 +180,9 @@ func DiffWithRowSecurity(schema string, live, desired Model) ([]Change, error) {
 	live.RowSecurity = RowSecurity{}
 	desired.RowSecurity = RowSecurity{}
 	changes, err := Diff(schema, live, desired)
+	if errors.Is(err, ErrUnsupportedChange) {
+		return nil, fmt.Errorf("%w: %w", ErrOnlyTableDiffers, err)
+	}
 	if err != nil {
 		return nil, err
 	}

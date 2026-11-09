@@ -204,6 +204,15 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 //
 // RunDesired does not close the pool; one pool serves any number of calls.
 func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
+	return runDesired(ctx, pool, req, opts, nil)
+}
+
+// runDesired is RunDesired. When refuseMissing is set, the run only
+// converges a table that exists: a plan that finds the table missing
+// returns refuseMissing's result instead of taking the create path, and
+// nothing runs. The check is on the plan this run derives and executes, so
+// a table dropped after the caller last looked is still never created.
+func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options, refuseMissing func(plan.Report) DesiredResult) (DesiredResult, error) {
 	// The acknowledgements are rejected before the policy is validated, so
 	// a caller that left two set gets the first one's sentinel rather than
 	// the validation error for the pair.
@@ -237,10 +246,14 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			Detail:  "already converged: the live table matches the desired schema; nothing to run",
 		}, nil
 	}
+	tableMissing := report.TableExists != nil && !*report.TableExists
+	if tableMissing && refuseMissing != nil {
+		return refuseMissing(report), nil
+	}
 	if refused, ok := admitPlan(req, report); !ok {
 		return refused, nil
 	}
-	if report.TableExists != nil && !*report.TableExists {
+	if tableMissing {
 		// The table does not exist: the plan is the desired schema itself
 		// and converging it means creating the table. The create path runs
 		// the whole plan through the executor's greenfield sequence — the

@@ -145,7 +145,9 @@ adding a column or an index means editing a file that also declares the
 table's policies. When the live row security matches the file and only the
 table definition differs, the file is planned and run like a file without row
 security. `diff` and `migrate --dry-run` show the ordinary plan, and `--json`
-returns the ordinary [plan report](plan-report.md), fingerprint included.
+returns the ordinary [plan report](plan-report.md), fingerprint included. A
+table change that plan refuses, such as a new `serial` column, is refused with
+the same error a file without row security gets.
 
 `migrate --desired` runs that plan through the desired-state sequence. Its
 JSON is `migrate.DesiredResult` with `plan`, `verdicts`, `outcome`, and
@@ -156,7 +158,9 @@ only when that plan is empty. If another session changed the policies while
 the table plan ran, the run fails, its error says that the row security no
 longer matches the file, and `convergence.status` is `unverifiable`. The table
 statements stay committed. Review the policy change before running again: a
-second run of the same file restores the policies the file declares.
+second run of the same file restores the policies the file declares. A table
+dropped after its row security was compared is refused rather than created
+without its row security, and nothing runs.
 
 A file whose row security differs from the live table is refused when its
 table definition differs too. Converge the two separately: change the row
