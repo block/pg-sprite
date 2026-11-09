@@ -1257,8 +1257,9 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
-`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
+`migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
+`MinPoolConns`; inside the
 shadow build's transaction, `pkg/schemachange`
 `readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
 gives the shadow an identity or sequence-owned column the source does not have

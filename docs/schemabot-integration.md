@@ -369,19 +369,20 @@ the pool besides; an importer running many tables from one process sizes for bot
   `TestSlotLockLeavesThePoolToTheCallback` runs a claim on a pool of one).
 - **From the pool:** `Copier.Workers` connections (default `copier.DefaultWorkers`) while the
   copy runs, one at a time for the capture's flushes and the checkpoint saves, one for the
-  verification pass, and one for the swap transaction. A pool smaller than the copy's workers
-  slows the copy; it does not stall the run. `Runner.Run` admits any pool and reports nothing
-  about its size: a pool of only the workers does not fail the run, it leaves the catch-up's
-  flushes waiting behind the copy while the slot's lag grows, and a source write reaches the
-  shadow only once a worker frees its connection
-  (`TestRunnerCopySwapFlushWaitsBehindTheCopyWhenThePoolHoldsOnlyTheWorkers`). A host that
-  calls `Runner.Run` directly sizes its pool with `migrate.CopySwapMinConns(Copier)` itself;
-  the front doors (`migrate.Run` and `migrate.RunDesired`) refuse a pool below it before the
-  preflight, so nothing is created. The floor is the workers plus two, six with the default
-  workers: one connection beyond the workers keeps the flushes landing while every worker
-  holds its connection (`TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits`), and the
-  second is headroom so the flushes and the checkpoint saves and progress reads do not queue
-  behind one another. The check also runs when a stopped
+  verification pass, and one for the swap transaction. A pool of only the workers would
+  leave the catch-up's flushes waiting behind the copy while the slot's lag grows, so no
+  entry point admits one. The floor is
+  `schemachange.MinPoolConns(Copier)`, which `migrate.CopySwapMinConns(Copier)` returns
+  too, and the sizing rule does not depend on which entry point a host calls: `Runner.Run`
+  refuses a smaller pool before it takes the table lock
+  (`TestRunnerRefusesAPoolBelowTheFloorBeforeCreatingAnything`), and the front doors
+  (`migrate.Run` and `migrate.RunDesired`) refuse it earlier still, before the preflight; in
+  every case nothing is created and the error matches
+  `errors.Is(err, executor.ErrPoolTooSmall)`. The floor is the workers plus two, six with the
+  default workers: one connection beyond the workers keeps the flushes landing while every
+  worker holds its connection (`TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits`),
+  and the second is headroom so the flushes and the checkpoint saves and progress reads do
+  not queue behind one another. The check also runs when a stopped
   run resumes or is restarted, so a run stopped before the pool was shrunk is refused, and
   keeps its slot or fence and its checkpoint row, until the pool is raised again. The floor
   is per run: a host running several copy-and-swap runs at once from one pool sizes it for
