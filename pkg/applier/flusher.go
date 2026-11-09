@@ -38,7 +38,9 @@ var (
 	// server picks one to roll back, and this is the flush picked. The
 	// transaction committed nothing and the shadow is as it was; the stream
 	// owner puts the batch back with Buffer.Requeue and flushes it again on
-	// its next cycle, by when the other writer has committed or rolled back.
+	// its next cycle. A retry that waits on the other writer past the
+	// flush session's lock_timeout fails with the server's lock-timeout
+	// error.
 	ErrBatchDeadlocked = errors.New("batch deadlocked: the server rolled the flush back to break a deadlock")
 )
 
@@ -207,7 +209,9 @@ func NewFlusher(target preflight.CopySwapTarget, shadow copier.Shadow, lock *dbc
 // and is ErrInvariantViolation, with nothing committed. A flush the server
 // rolls back as a deadlock victim, because it and the copier's open chunk
 // each wait on a unique value the other holds, is ErrBatchDeadlocked with
-// the shadow unchanged, for the stream owner to requeue and flush again. The
+// the shadow unchanged, for the stream owner to requeue and flush again on
+// its next cycle; a retry that waits on the other writer past the
+// session's lock_timeout fails with the server's lock-timeout error. The
 // transaction runs under the lock session's Bind context, so losing the
 // table lock cancels the flush and it reports the loss. An empty batch is a
 // no-op.

@@ -34,8 +34,9 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 
 // An interval the clock cannot time, a change bound that would never let
 // a cycle end, a slot lag ceiling that would abort every slot, or a
-// deadlock bound that would end the catch-up before its first retry is
-// refused rather than defaulted; the ceiling cannot be switched off.
+// deadlock bound below one, which counts no cycles at all, is refused
+// rather than defaulted; the ceiling cannot be switched off. Zero takes
+// the default deadlock bound, and one, the least, is accepted.
 func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
 	cases := map[string]CatchupOptions{
 		"interval below a millisecond": {Interval: 500 * time.Microsecond},
@@ -48,6 +49,14 @@ func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
 			require.ErrorIs(t, opts.withDefaults().validate(), ErrInvalidCatchupOptions)
 		})
 	}
+}
+
+// A deadlock bound of one is accepted: the catch-up ends on the first
+// flush the server rolls back as the deadlock victim, without a retry.
+func TestCatchupOptionsAcceptOneDeadlockAttempt(t *testing.T) {
+	opts := CatchupOptions{DeadlockAttempts: 1}.withDefaults()
+	require.NoError(t, opts.validate())
+	assert.Equal(t, 1, opts.DeadlockAttempts)
 }
 
 // A catch-up without its stream, its flusher, or the copier's position is a

@@ -73,10 +73,12 @@ type CatchupOptions struct {
 	// DeadlockAttempts is how many cycles in a row the server may roll the
 	// flush back as a deadlock victim (ErrBatchDeadlocked) before Run ends
 	// with that error. A deadlocked batch is requeued whole and flushed
-	// again on the next cycle, by when the copier's pass it deadlocked
-	// with has committed or rolled back; a flush that commits, or is
-	// refused by a constraint instead, resets the count. Each attempt
-	// waits up to the server's deadlock_timeout to be chosen as the victim.
+	// again on the catch-up's next cycle, with no wait beyond the cycle's
+	// own; a retry that waits on the other writer past the flush session's
+	// lock_timeout ends Run with the server's lock-timeout error. A flush
+	// that commits, or is refused by a constraint instead, resets the
+	// count. Each attempt waits up to the server's deadlock_timeout to be
+	// chosen as the victim.
 	DeadlockAttempts int
 }
 
@@ -434,6 +436,9 @@ func (c *Catchup) apply(ctx context.Context, pool *pgxpool.Pool) (cycleOutcome, 
 		}
 		outcome.deferred = true
 	case errors.Is(err, ErrBatchDeadlocked):
+		// INV: CO-4 — the rolled-back flush committed nothing, so the
+		// whole batch goes back to the buffer and the confirmation stays
+		// below it.
 		if err := c.deadlockVictim(err); err != nil {
 			return cycleOutcome{}, err
 		}
@@ -459,13 +464,18 @@ func (c *Catchup) apply(ctx context.Context, pool *pgxpool.Pool) (cycleOutcome, 
 // once that has happened DeadlockAttempts cycles in a row: the flush is
 // losing every round against the other shadow writer, and another cycle
 // would hold the slot's WAL for nothing. Below the bound it returns nil
-// and the batch is the next cycle's to flush again.
+// and the batch is the next cycle's to flush again. The error says what
+// to do: every rolled-back flush committed nothing, and the confirmed
+// position never passed the requeued batch, so a run started again
+// reopens the stream below it and flushes the same changes.
 func (c *Catchup) deadlockVictim(err error) error {
 	c.deadlocks++
 	if c.deadlocks < c.opts.DeadlockAttempts {
 		return nil
 	}
-	return fmt.Errorf("catch-up on %s.%s: the flush was rolled back as the deadlock victim %d cycles in a row: %w", c.flusher.target.Schema(), c.flusher.target.Table(), c.deadlocks, err)
+	return fmt.Errorf("catch-up on %s.%s ended: the copy and the catch-up kept writing the same unique values into the shadow at once, and the server rolled the catch-up's flush back to break the deadlock %d cycles in a row; "+
+		"the rolled-back flushes left the shadow unchanged, and running the schema change again resumes it: %w",
+		c.flusher.target.Schema(), c.flusher.target.Table(), c.deadlocks, err)
 }
 
 // snapshot takes the source's snapshot on pool for this cycle's drain, and
