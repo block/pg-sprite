@@ -16,6 +16,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -119,13 +120,13 @@ func TestAddEnumValueStopsBeforeExecutingWhatItCannotAdd(t *testing.T) {
 		{
 			name: "the type does not exist",
 			sql:  "ALTER TYPE %s.missing ADD VALUE 'calm'",
-			err:  migrate.ErrEnumTypeNotFound,
+			err:  preflight.ErrEnumTypeNotFound,
 			msg:  "no type",
 		},
 		{
 			name: "the type is a table's row type",
 			sql:  "ALTER TYPE %s.people ADD VALUE 'calm'",
-			err:  migrate.ErrEnumTypeNotFound,
+			err:  preflight.ErrEnumTypeNotFound,
 			msg:  ".people is not an enum type",
 		},
 		{

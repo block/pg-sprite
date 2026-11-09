@@ -75,7 +75,7 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 - **Domain types make illegal states unrepresentable.** Validating passages return proof types
   with package-private constructors (`statement.Statement`, `statement.DesiredSchema`,
   `preflight.PreflightedTable`, `preflight.AbsentTarget`, `preflight.CreationRole`,
-  `preflight.PrivilegedRole`, `preflight.CopySwapShape`, `preflight.CopySwapTarget`,
+  `preflight.PrivilegedRole`, `preflight.EnumTarget`, `preflight.CopySwapShape`, `preflight.CopySwapTarget`,
   `dbconn.TableLock`, `checksum.VerifiedShadow`, and `checksum.CleanWatermark`); dangerous
   APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.

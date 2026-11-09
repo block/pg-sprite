@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -23,17 +24,17 @@ var ErrEnumTypeDrift = errors.New("the ADD VALUE reached a type other than the e
 // bounded by retry. The statement locks only the type, never a table that
 // uses it, and waits only on another session altering the same type.
 //
-// The statement names a type, not a table, so the ST-7 binding is checked
-// in the catalog against typ, the OID of the enum type in schema the
-// engine resolved and checked the role's ownership of. Each attempt pins
-// its search_path to schema alone, so a bare name resolves only there.
-// The type's lock does not hold its name still, since ALTER TYPE ...
-// RENAME does not wait for it, so after the statement runs, and before the
-// commit, the attempt confirms that every enum label the transaction wrote
-// belongs to typ, that typ carries the label, and, when the statement wrote
-// nothing, that the name still resolves to typ, and rolls back with
-// ErrEnumTypeDrift otherwise.
-func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, typ uint32, b Budget, retry RetryPolicy) error {
+// It accepts only an EnumTarget minted for the type name the statement
+// spells, and pins each attempt's search_path to the target's schema
+// alone, so a bare name resolves only there. The statement names a type,
+// not a table, so the ST-7 binding is checked in the catalog against the
+// target's OID. The type's lock does not hold its name still, since ALTER
+// TYPE ... RENAME does not wait for it, so after the statement runs, and
+// before the commit, the attempt confirms that every enum label the
+// transaction wrote belongs to the target, that the target carries the
+// label, and, when the statement wrote nothing, that the name still
+// resolves to the target, and rolls back with ErrEnumTypeDrift otherwise.
+func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, et preflight.EnumTarget, st statement.Statement, b Budget, retry RetryPolicy) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -43,13 +44,17 @@ func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, st statement.S
 	if st.Kind() != statement.KindAddEnumValue {
 		return fmt.Errorf("%w: ExecuteEnumValueAdd runs ALTER TYPE ... ADD VALUE, got %s", ErrInvariantViolation, st.Kind())
 	}
+	// INV: ST-7 — the proof was minted for the name this statement spells.
+	if et.OID() == 0 || et.Ref() != st.EnumType() {
+		return fmt.Errorf("%w: the enum target was not checked for the type %s names", ErrInvariantViolation, st.SQL())
+	}
 	return executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
 		// INV: ST-7 — the label is added only to the enum type the engine
 		// checked, confirmed by identity before the commit.
 		after := func(ctx context.Context, tx pgx.Tx) error {
-			return refuseEnumTypeDrift(ctx, tx, st, typ)
+			return refuseEnumTypeDrift(ctx, tx, st, et.OID())
 		}
-		return executeBoundedAttemptAs(ctx, pool, st, b, []string{schema}, "", nil, after)
+		return executeBoundedAttemptAs(ctx, pool, st, b, []string{et.Schema()}, "", nil, after)
 	}, sleepContext)
 }
 

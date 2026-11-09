@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // The engine resolves the enum type an ADD VALUE names, checks it, and only
@@ -62,9 +63,12 @@ func TestExecuteEnumValueAddRefusesANameMovedToAnotherType(t *testing.T) {
 				CREATE TYPE %[1]s.mood AS ENUM (%[2]s);
 				CREATE TYPE %[1]s.weather AS ENUM (%[3]s)`, schema, enumList(tc.checked), enumList(tc.other)))
 			require.NoError(t, err)
-			var checked, other uint32
-			require.NoError(t, pool.QueryRow(t.Context(), `SELECT to_regtype($1)::oid, to_regtype($2)::oid`,
-				schema+".mood", schema+".weather").Scan(&checked, &other))
+			st := mustParse(t, fmt.Sprintf(tc.statement, schema))
+			et, err := preflight.CheckEnumTarget(t.Context(), pool, st.EnumType())
+			require.NoError(t, err)
+			checked := et.OID()
+			var other uint32
+			require.NoError(t, pool.QueryRow(t.Context(), `SELECT to_regtype($1)::oid`, schema+".weather").Scan(&other))
 
 			_, err = pool.Exec(t.Context(), fmt.Sprintf(`
 				ALTER TYPE %[1]s.mood RENAME TO mood_old;
@@ -73,14 +77,38 @@ func TestExecuteEnumValueAddRefusesANameMovedToAnotherType(t *testing.T) {
 
 			budget := executor.Budget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
 			retry := executor.RetryPolicy{MaxAttempts: 1, InitialBackoff: 100 * time.Millisecond, MaxBackoff: time.Second}
-			err = executor.ExecuteEnumValueAdd(t.Context(), pool, mustParse(t, fmt.Sprintf(tc.statement, schema)),
-				schema, checked, budget, retry)
+			err = executor.ExecuteEnumValueAdd(t.Context(), pool, et, st, budget, retry)
 			require.ErrorIs(t, err, executor.ErrEnumTypeDrift)
 			assert.Equal(t, executor.CodeEnumTypeDrift, executor.OutcomeCode(err))
 			assert.Equal(t, tc.checked, labelsOf(t, pool, checked), "the checked type is unchanged")
 			assert.Equal(t, tc.other, labelsOf(t, pool, other), "the other type is unchanged")
 		})
 	}
+}
+
+// The executor takes only an enum target checked for the name its
+// statement spells. A target checked for another type, or one no check
+// minted, is an invariant violation before anything runs.
+func TestExecuteEnumValueAddRefusesATargetCheckedForAnotherName(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TYPE %[1]s.mood AS ENUM ('happy', 'sad');
+		CREATE TYPE %[1]s.weather AS ENUM ('sunny')`, schema))
+	require.NoError(t, err)
+	weather, err := preflight.CheckEnumTarget(t.Context(), pool, mustParse(t, fmt.Sprintf("ALTER TYPE %s.weather ADD VALUE 'calm'", schema)).EnumType())
+	require.NoError(t, err)
+	st := mustParse(t, fmt.Sprintf("ALTER TYPE %s.mood ADD VALUE 'calm'", schema))
+	budget := executor.Budget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
+	retry := executor.RetryPolicy{MaxAttempts: 1, InitialBackoff: 100 * time.Millisecond, MaxBackoff: time.Second}
+
+	for name, et := range map[string]preflight.EnumTarget{"another type": weather, "no check": {}} {
+		err := executor.ExecuteEnumValueAdd(t.Context(), pool, et, st, budget, retry)
+		assert.ErrorIs(t, err, executor.ErrInvariantViolation, name)
+	}
+	mood, err := preflight.CheckEnumTarget(t.Context(), pool, st.EnumType())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"happy", "sad"}, labelsOf(t, pool, mood.OID()), "nothing was added")
+	assert.Equal(t, []string{"sunny"}, labelsOf(t, pool, weather.OID()), "nothing was added")
 }
 
 // enumList spells labels as the value list of CREATE TYPE ... AS ENUM.
