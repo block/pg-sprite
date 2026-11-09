@@ -185,7 +185,10 @@ refusal — never a silently wrong or incomplete result:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
-  which covers one ordinary table plus its indexes per file.
+  which covers one ordinary table plus its indexes per file. A table may
+  use them: the file names an object outside the table's schema and
+  `public` qualified, or names it bare when `--extension-schema` lists
+  the schema it lives in. The object's own definition is never managed.
 - **Dropping a table** is never planned or executed. pg-sprite converges
   one declared table at a time, so a live table with no desired file is
   the whole-schema owner's to enumerate and resolve — see

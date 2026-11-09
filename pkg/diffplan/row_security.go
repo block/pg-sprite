@@ -47,7 +47,7 @@ func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string,
 	exists := true
 	report.TableExists = &exists
 	report.Disposition = router.DispositionExecute
-	report.Fingerprint = plan.Fingerprint(report.Statements)
+	report.Fingerprint = report.ComputeFingerprint()
 	report.ServerVersion, err = dbconn.ServerVersion(ctx, pool)
 	if err != nil {
 		return plan.Report{}, err

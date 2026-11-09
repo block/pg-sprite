@@ -50,11 +50,17 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
+		if err := refuseExtensionSchemasWithRowSecurity(c.ExtensionSchema); err != nil {
+			return err
+		}
 		return c.runDesiredRowSecurity(ctx, out, rowSecurity)
 	}
 	desired, ok := file.Schema()
 	if !ok {
 		return fmt.Errorf("desired schema %s admitted no planner input", c.Desired)
+	}
+	if desired, err = desired.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
+		return fmt.Errorf("--extension-schema: %w", err)
 	}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
@@ -69,7 +75,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		// Preview uses desired-state admission: a routed native step can still
 		// discard live structure, which RunDesired refuses before execution.
 		plan.RefuseDestructive(&report)
-		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
+		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, ExtensionSchema: c.ExtensionSchema, JSON: c.JSON}
 		return diff.writeDiffReport(out, report)
 	}
 	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))
