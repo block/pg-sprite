@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
@@ -115,6 +116,49 @@ func TestRunnerResumeOverUnresolvedConversionDriftIsRefusedAsDrift(t *testing.T)
 	require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
 	assert.Equal(t, schemachange.CauseCopyConversionDrift, schemachange.RefusalCauseOf(err))
 	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the refused resume wrote nothing")
+
+	f.exec(t, `DROP OPERATOR %s.* (integer, integer)`)
+	f.exec(t, `DROP FUNCTION %s.times_zero(integer, integer)`)
+	result, err := f.run(t, "orders", alter, schemachange.RunOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
+}
+
+// The same catalog change planted once the copy has saved verifying is
+// noticed by the verifier's guarded read, not by a chunk, and Run reads it
+// as the same environmental drift (CO-9): copy-conversion-drift under
+// ErrInvariantViolation, wrapping the one drift sentinel every guarded
+// transaction shares, whichever of the copier, the verifier, and the
+// flusher noticed it. The refusal is not a data fault, so the row stays at
+// verifying; undoing the change lets the same run verify and complete.
+func TestRunnerRefusesConversionDriftDuringVerifyWithTheCopyCause(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `
+		ALTER TABLE %s.orders
+			DROP COLUMN note,
+			ALTER COLUMN qty TYPE bigint USING (qty * 1)::bigint`
+	var once sync.Once
+	plant := func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase != checkpoint.PhaseVerifying {
+			return nil
+		}
+		once.Do(func() {
+			f.exec(t, `
+				CREATE FUNCTION %s.times_zero(integer, integer) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					AS 'SELECT 0'`)
+			f.exec(t, `CREATE OPERATOR %s.* (LEFTARG = integer, RIGHTARG = integer, FUNCTION = %s.times_zero)`)
+		})
+		return nil
+	}
+	_, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: plant})
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseCopyConversionDrift, schemachange.RefusalCauseOf(err))
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.ErrorIs(t, err, checksum.ErrConversionDrift)
+	assert.Equal(t, copier.RefusalCause(""), copier.RefusalCauseOf(err), "the copier saw no drift: every chunk ran before the change")
+	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t, "orders").Phase, "the refusal is not a data fault; the row stays for a resume")
 
 	f.exec(t, `DROP OPERATOR %s.* (integer, integer)`)
 	f.exec(t, `DROP FUNCTION %s.times_zero(integer, integer)`)

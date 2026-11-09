@@ -319,8 +319,10 @@ func classifyCopySwapPreflight(err error) (verdict.Refusal, string, error) {
 
 // copySwapRunVerdict folds an error out of the Runner into Run's contract.
 // A shadow refusal is a refused verdict carrying the shadow's own cause: the
-// run never started, or stopped at a fact about the table that a retry
-// cannot change. Every other error is a failure with the error alongside,
+// run never started, or stopped at a fact about the table or its catalog
+// that the cause names and a plain retry does not change; when a
+// blocked-writes run's fence still stands, the verdict says so. Every other
+// error is a failure with the error alongside,
 // and the detail says what a rerun does: for a run the Runner abandoned on
 // a data fault, nothing remains and the rerun starts from the beginning,
 // which the verdict's Abandoned field says for automation; for every other
@@ -334,7 +336,15 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 			return verdict.Verdict{}, fmt.Errorf("%w: shadow refusal carries unclassified cause %q",
 				executor.ErrInvariantViolation, cause)
 		}
-		return refusedVerdict(st, r, err.Error()), nil
+		v := refusedVerdict(st, r, err.Error())
+		if hold == holdFence {
+			// A refusal raised after the row was saved leaves the run's
+			// fence standing (fenceAfterStop read the row), so the table
+			// still refuses writes until the cause is acted on.
+			v.WritesBlocked = true
+			v.Detail += "; the checkpoint row remains and the source stays fenced against writes until the run is resumed or started over, as the cause says"
+		}
+		return v, nil
 	}
 	return verdict.Verdict{
 		Outcome:       verdict.OutcomeFailed,

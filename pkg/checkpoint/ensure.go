@@ -27,18 +27,33 @@ const createSchemaSQL = `CREATE SCHEMA "` + SchemaName + `"`
 // rest of the transaction, so two engines reaching the same database for
 // the first time at once serialize their creates instead of racing them
 // into a duplicate-key failure in the catalog, and so the owner read below
-// cannot interleave with another engine's create.
-const ensureLockSQL = "SELECT pg_advisory_xact_lock($1, hashtext(quote_ident($2) || '.' || quote_ident($3)))"
+// cannot interleave with another engine's create. The store runs on
+// whatever pool the caller passes, so every function and operator is
+// pg_catalog-qualified (CO-9): a lookalike hashtext on the session's path
+// would otherwise derive a key the table lock never takes.
+const ensureLockSQL = `
+SELECT pg_catalog.pg_advisory_xact_lock(
+	$1,
+	pg_catalog.hashtext(pg_catalog.quote_ident($2) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($3))
+)`
 
 // ownersSQL reads who owns the engine schema and whatever wears the
 // checkpoint table's name inside it, alongside the role this session runs
 // as. No row means no schema; a NULL relation means the schema exists and
-// the table does not.
+// the table does not. Every relation, function, type, and operator is
+// pg_catalog-qualified (CO-9): a lookalike pg_get_userbyid on the
+// session's path would otherwise name an owner that is not this role and
+// turn the engine's own table into a foreign one.
 const ownersSQL = `
-SELECT current_user, pg_get_userbyid(n.nspowner), c.relkind::text, pg_get_userbyid(c.relowner)
-FROM pg_namespace n
-LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = $2
-WHERE n.nspname = $1`
+SELECT current_user,
+       pg_catalog.pg_get_userbyid(n.nspowner),
+       c.relkind::pg_catalog.text,
+       pg_catalog.pg_get_userbyid(c.relowner)
+FROM pg_catalog.pg_namespace n
+LEFT JOIN pg_catalog.pg_class c
+       ON c.relnamespace OPERATOR(pg_catalog.=) n.oid
+      AND c.relname OPERATOR(pg_catalog.=) $2
+WHERE n.nspname OPERATOR(pg_catalog.=) $1`
 
 // relkindOrdinaryTable is pg_class.relkind for a plain table.
 const relkindOrdinaryTable = "r"

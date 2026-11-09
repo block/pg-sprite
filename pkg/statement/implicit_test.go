@@ -187,3 +187,39 @@ func TestImplicitRelationNamesRefusesMultipleStatements(t *testing.T) {
 	_, err := statement.ImplicitRelationNames("CREATE TABLE t (id int); CREATE TABLE u (id int)")
 	require.ErrorIs(t, err, statement.ErrNotOneStatement)
 }
+
+// IndexConstraints lists every index constraint a statement declares, in
+// definition order, whether it is declared on the table or inline on a
+// column, with "" for one the server names.
+func TestIndexConstraints(t *testing.T) {
+	declared, err := statement.IndexConstraints(`CREATE TABLE t (
+		a int CONSTRAINT a_key UNIQUE,
+		b int UNIQUE,
+		c int CONSTRAINT c_pos CHECK (c > 0),
+		CONSTRAINT t_pk PRIMARY KEY (a),
+		UNIQUE (b),
+		CONSTRAINT t_excl EXCLUDE USING btree (c WITH =)
+	)`)
+	require.NoError(t, err)
+	assert.Equal(t, statement.DeclaredIndexConstraints{Names: []string{"a_key", "", "t_pk", "", "t_excl"}}, declared)
+
+	declared, err = statement.IndexConstraints(`CREATE TABLE t (
+		LIKE other INCLUDING ALL,
+		LIKE s.indexed INCLUDING INDEXES,
+		LIKE plain,
+		LIKE excluded EXCLUDING INDEXES,
+		LIKE everything_but INCLUDING ALL EXCLUDING INDEXES,
+		CONSTRAINT t_pk PRIMARY KEY (a)
+	)`)
+	require.NoError(t, err)
+	assert.Equal(t, statement.DeclaredIndexConstraints{
+		Names: []string{"t_pk"},
+		IndexesCopiedFrom: []statement.QualifiedName{
+			{Name: "other"},
+			{Schema: "s", Name: "indexed"},
+		},
+	}, declared, "only the LIKE clauses that include indexes copy constraints the statement does not declare")
+
+	_, err = statement.IndexConstraints("CREATE INDEX i ON t (a)")
+	require.ErrorIs(t, err, statement.ErrNotCreateTable)
+}

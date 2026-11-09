@@ -90,6 +90,69 @@ func ImplicitRelationNames(sql string) ([]string, error) {
 	return names, nil
 }
 
+// DeclaredIndexConstraints are the PRIMARY KEY, UNIQUE, and EXCLUDE
+// constraints a CREATE TABLE declares.
+type DeclaredIndexConstraints struct {
+	// Names holds one entry per constraint, table-level and column-inline,
+	// in definition order: the name the statement states, or "" when the
+	// server chooses one.
+	Names []string
+	// IndexesCopiedFrom names, in definition order, the table each LIKE
+	// clause that includes indexes copies from. The server creates the
+	// copies after the table, so they are kept beside the declared
+	// constraints rather than merged with them, and the table built holds
+	// the declared constraints plus every PRIMARY KEY, UNIQUE, and EXCLUDE
+	// constraint these tables hold. A LIKE clause that excludes indexes
+	// copies none and is not listed.
+	IndexesCopiedFrom []QualifiedName
+}
+
+// likeIncludingIndexes is the bit a LIKE clause's options set when the
+// clause includes indexes, CREATE_TABLE_LIKE_INDEXES in PostgreSQL's
+// parsenodes.h. INCLUDING ALL sets it, and EXCLUDING INDEXES clears it.
+const likeIncludingIndexes = 1 << 6
+
+// IndexConstraints returns the PRIMARY KEY, UNIQUE, and EXCLUDE constraints
+// a CREATE TABLE declares.
+func IndexConstraints(sql string) (DeclaredIndexConstraints, error) {
+	tree, err := pgquery.Parse(sql)
+	if err != nil {
+		return DeclaredIndexConstraints{}, fmt.Errorf("parse statement: %w", err)
+	}
+	if n := len(tree.GetStmts()); n != 1 {
+		return DeclaredIndexConstraints{}, fmt.Errorf("%w: got %d", ErrNotOneStatement, n)
+	}
+	create := tree.GetStmts()[0].GetStmt().GetCreateStmt()
+	if create == nil {
+		return DeclaredIndexConstraints{}, ErrNotCreateTable
+	}
+	var declared DeclaredIndexConstraints
+	add := func(con *pganalyze.Constraint) {
+		if constraintBuildsIndex(con) {
+			declared.Names = append(declared.Names, con.GetConname())
+		}
+	}
+	for _, elt := range create.GetTableElts() {
+		if like := elt.GetTableLikeClause(); like != nil {
+			if like.GetOptions()&likeIncludingIndexes != 0 {
+				rel := like.GetRelation()
+				declared.IndexesCopiedFrom = append(declared.IndexesCopiedFrom, QualifiedName{Schema: rel.GetSchemaname(), Name: rel.GetRelname()})
+			}
+			continue
+		}
+		if con := elt.GetConstraint(); con != nil {
+			add(con)
+			continue
+		}
+		for _, c := range elt.GetColumnDef().GetConstraints() {
+			if con := c.GetConstraint(); con != nil {
+				add(con)
+			}
+		}
+	}
+	return declared, nil
+}
+
 // columnSequenceName returns the name of the sequence the column definition
 // creates in the table's schema, or ok=false when the column owns no
 // sequence there. A serial column and an identity column without options
