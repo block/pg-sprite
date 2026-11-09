@@ -157,7 +157,8 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			}
 		}
 	}
-	report.Fingerprint = plan.Fingerprint(report.Statements)
+	report.ExtensionSchemas = ds.ExtensionSchemas()
+	report.Fingerprint = plan.Fingerprint(report.Statements, report.ExtensionSchemas...)
 	return report, nil
 }
 

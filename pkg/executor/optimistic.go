@@ -286,7 +286,7 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		}
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-		return executeBoundedAttemptAs(ctx, pool, st, b, attemptSearchPath(pt.Schema(), nil), "", before, nil)
+		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, nil)
 	}, sleepContext, func(attempt int) {
 		if tracker != nil {
 			tracker.SetAttempt(attempt)
@@ -294,11 +294,11 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	})
 }
 
-// attemptSearchPath is the search_path an attempt on a table in schema runs
+// AttemptSearchPath is the search_path an attempt on a table in schema runs
 // under: the schema, then public, where extension types live, then each
 // extension schema the desired file resolves names against that the path
 // does not already list (see statement.DesiredSchema.WithExtensionSchemas).
-func attemptSearchPath(schema string, extensions []string) []string {
+func AttemptSearchPath(schema string, extensions []string) []string {
 	path := []string{schema, "public"}
 	for _, ext := range extensions {
 		if !slices.Contains(path, ext) {
@@ -310,7 +310,7 @@ func attemptSearchPath(schema string, extensions []string) []string {
 
 // executeBoundedAttemptAs is the shared transactional attempt behind the
 // optimistic and create paths. When searchPath is set, the transaction's
-// search_path is pinned to it (see attemptSearchPath) — the same policy
+// search_path is pinned to it (see AttemptSearchPath) — the same policy
 // the diff resolved names under — so a statement's unqualified references
 // (a column's type, an expression's function) resolve exactly as the diff
 // resolved them, never via the session's ambient search_path.

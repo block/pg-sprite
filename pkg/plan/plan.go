@@ -49,7 +49,7 @@ import (
 // Version 18 added the dependent-trigger, dependent-generated-column, and
 // partition-key planner reasons and the dependent_triggers,
 // dependent_generated_columns, and partition_key_tables decision fields.
-const FormatVersion = 18
+const FormatVersion = 19
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -194,6 +194,13 @@ type Report struct {
 	// reviewer approves is the plan that executes" is enforced across
 	// storage and forwarding.
 	Fingerprint string `json:"fingerprint"`
+	// ExtensionSchemas are the schemas the desired file's unqualified names
+	// also resolved against (statement.DesiredSchema.WithExtensionSchemas),
+	// in the order they were searched. A table that does not exist yet is
+	// created from the file's own statements under that search path, so the
+	// fingerprint covers them: the same SQL resolved against other schemas
+	// can bind other types and functions. Empty when the file named none.
+	ExtensionSchemas []string `json:"extension_schemas,omitempty"`
 	// Statements is the ordered plan; empty means there is nothing to do.
 	Statements []Statement `json:"statements"`
 	// Advisories are the typed observations the diff made about the live
@@ -444,7 +451,11 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 // serialization is part of the contract (docs/plan-report.md) and changes
 // only with a format_version bump. This is a plan identity, not a schema
 // fingerprint: it never participates in schema-state comparison.
-func Fingerprint(statements []Statement) string {
+//
+// extensionSchemas are the report's ExtensionSchemas. When there are any,
+// a group separator and each schema follow the statements, so a plan
+// derived without them keeps the identity it always had.
+func Fingerprint(statements []Statement, extensionSchemas ...string) string {
 	h := sha256.New()
 	for _, st := range statements {
 		writeField(h, st.SQL)
@@ -455,6 +466,12 @@ func Fingerprint(statements []Statement) string {
 			writeField(h, sql)
 		}
 		h.Write([]byte{0x1e}) // record separator: one per statement
+	}
+	if len(extensionSchemas) > 0 {
+		h.Write([]byte{0x1d}) // group separator: the search path follows
+		for _, schema := range extensionSchemas {
+			writeField(h, schema)
+		}
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
 }

@@ -72,7 +72,7 @@ func ExecuteIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pr
 		after := func(ctx context.Context, tx pgx.Tx) error {
 			return refuseRenamedOtherRelation(ctx, tx, pt, rel, st.RenamedTo(), checked)
 		}
-		return executeBoundedAttemptAs(ctx, pool, st, b, attemptSearchPath(pt.Schema(), nil), "", before, after)
+		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, after)
 	}, sleepContext)
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
@@ -149,6 +150,14 @@ func writePlanText(out io.Writer, report plan.Report) error {
 	if tableMissing(report) {
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(fmt.Sprintf("table %s.%s does not exist; the plan is the full desired schema", report.Schema, report.Table))); err != nil {
 			return fmt.Errorf("write plan: %w", err)
+		}
+		// The create statements are the desired file's own, so their
+		// unqualified names resolve through the extension schemas only
+		// under the search path the create path runs them under.
+		if len(report.ExtensionSchemas) > 0 {
+			if _, err := fmt.Fprintf(out, "%s;\n", dbconn.SessionSearchPath(executor.AttemptSearchPath(report.Schema, report.ExtensionSchemas)...)); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
 		}
 	}
 	for _, ps := range report.Statements {
