@@ -294,8 +294,15 @@ it. The chunk lands when they are gone. A pass the server rolls back with `deadl
 indexes, so two of them can each wait on a value the other holds, and the server breaks the
 cycle by rolling one back. The rolled-back pass committed nothing and leaves the pending keys
 unchanged, so the chunk takes its next pass, on every path including the `DEFERRABLE` rerun
-below. Only the copier's side is retried: when the server picks the flush as the victim, the
-catch-up fails closed. A chunk whose pending keys outlast
+below. Both sides of the cycle are retried: when the server picks the flush as the victim, the
+flush returns `applier.ErrBatchDeadlocked` with the shadow unchanged, the catch-up requeues the
+batch whole and flushes it again on the catch-up's next cycle, with no wait beyond the cycle's
+own, and `Status.BatchesDeadlocked` counts the requeue. A retry that waits on the copier's pass
+past the flush session's `lock_timeout` ends the catch-up with the server's lock-timeout error
+(SQLSTATE `55P03`). A flush rolled back as the victim
+`applier.CatchupOptions.DeadlockAttempts` cycles in a row ends the catch-up with that error,
+since the flush is losing every round and another cycle would hold the slot's WAL for nothing.
+A chunk whose pending keys outlast
 `copier.Options.CollisionAttempts` passes stops the copy with the latest pass's error and no cause
 of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
 as copied and the resume clear removes the rows committed around them. A shadow with a
@@ -532,7 +539,14 @@ acknowledgement's locked-table lookup, qualify every function, relation, type, a
 a planted `oid = regclass` operator on a path that lists the catalog implicitly, and decoy
 `pg_class`, `pg_namespace`, `pg_index`, `to_regclass`, `quote_ident`, `oid = oid`, and `text` on a
 shadowing `<schema>, pg_catalog` path, do not change either answer — the replica identity read
-the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), and `pkg/checksum` (the column-type read, the relation check,
+the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), `pkg/checkpoint` (`Ensure`
+runs on whatever pool the caller passes, so its lock key, owner read, and column read qualify
+every function, relation, type, and operator; a lookalike `pg_get_userbyid` planted on a
+shadowing `<schema>, pg_catalog` path would otherwise name an owner that is not this role and
+refuse the engine's own table as foreign, and an empty `pg_namespace` or `pg_attribute` would
+report the schema absent or every column missing — decoy relations, functions, and operators on
+that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the text is held
+by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -669,9 +683,10 @@ cancellation tests), and `TableLockSession.Confirm` and `LookupTableLockHolder` 
 `pg_locks` scoped to the connection's own database, so a lock the session holds in another
 database of the same server — where it excludes nothing on this database's table — confirms
 as `ErrTableLockNotHeld` and is not reported as the table's holder (same-key-in-another-database
-test); `pkg/schemachange` shadow build, drop, and inspect each require the
-session for the proven table, run under its `Bind` context, and confirm from their own
-transaction that the session's backend holds the lock before the first write (nil-session,
+test), and read only granted rows, so a session queued for the key is never named its holder
+(`TestTableLockConfirmIgnoresASessionWaitingForTheKey`); `pkg/schemachange` shadow build, drop,
+and inspect each require the session for the proven table, run under its `Bind` context, and
+confirm from their own transaction that the session's backend holds the lock before the first write (nil-session,
 wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
 tests); `pkg/copier` `Copier` requires the same session, runs every chunk transaction under
 its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own connection before
@@ -1541,9 +1556,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
-  (`rejectDesiredAcks`, which rejects all five acknowledgements with their sentinels;
-  `TestIrreversibleOperationRegistryIsComplete`), `pkg/planner` (`destructiveOp`, which decides every
-  shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
+  and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/planner`
+  (`destructiveOp`, which decides every shape in `statement.OpKinds()` explicitly and
+  treats an unclassified one as destructive;
   `TestEveryOpKindIsClassifiedForDestructiveness`,
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
   `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
@@ -1589,6 +1604,46 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `table_usage_idle_integration_test.go`; a reset between the read's statistics reads not
   seen, and a role's saved `track_counts = off` unknown, in
   `table_usage_coverage_integration_test.go`. *Source:* [table usage](table-usage.md).
+- <a id="rf-12"></a>**RF-12** — Every operation whose refusal an operator lifts with a typed
+  acknowledgement is listed in one registry with that acknowledgement, and the list is
+  complete: every shape the planner marks destructive, a blocking `DROP INDEX` or `REINDEX`,
+  the submitted form that blocks the table where the planner has no safer sequence, a
+  copy-and-swap restart, and a copy-and-swap that blocks the table's writes. The entries lose
+  structure or data, availability for a bounded window, or a stopped run's progress. On
+  `migrate --alter`, an entry whose acknowledgement is missing is refused with its declared
+  reason, except the restart: without `--restart` a stopped run resumes and nothing is
+  discarded, and a leftover no checkpoint records is refused and left standing. An
+  acknowledgement that names any table but the resolved target is a usage error that executes
+  nothing. Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
+  own sentinel before any database work, and `migrate --desired` rejects each flag. A new
+  string field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a new
+  destructive shape, or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry
+  entry and a desired-state decision. RF-10, RF-5, and AB-1..AB-5 state what each gate does;
+  this invariant states that the set of acknowledgement gates is complete. Irreversible steps
+  the engine takes on its own, with no operator decision to acknowledge, are outside the
+  registry and held by their own invariants: dropping the retained source after a committed
+  swap (unless `KeepOld`; ST-6 holds it to the relation the swap retained), dropping its own
+  shadow under the table lock and the shadow's proof (LK-1), reaping an orphaned slot (ST-3),
+  dropping an index `DropAbandonedIndex` has proven abandoned (`ErrAbandonmentUnproven`
+  otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
+  Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
+  refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
+  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and, for a CLI flag,
+  the `SCHEMA.TABLE` placeholder plus its sentinel and field in
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
+  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
+  `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
+  `ErrBlockWritesNotSupported`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
+  registry's shape and the desired-state rejections;
+  `TestEveryOpKindIsClassifiedForDestructiveness` and
+  `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
+  derives; `TestIrreversibleOperationsAreGated` for each entry's refusal and wrong-target usage
+  error against real PostgreSQL with the table, checkpoint, and write path unchanged, and a
+  restart's unrecorded leftover left standing; and
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for each CLI flag reaching exactly its own
+  field and sentinel.
+  *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
 
 ## Orchestration / control-plane (OC)
 
@@ -1692,4 +1747,5 @@ about **how we write and review the code**.
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | RF-11 | table usage primitive (ahead of any drop path) | per-branch window-edge and partition-aggregation unit tests; recent, lock-holder, version, reset, and partitioned-table integration tests on 14 → 18 |
+| RF-12 | irreversible-operations registry | registry completeness and desired-state rejection unit tests; per-entry refusal and wrong-target integration test; CLI flag-to-entry walk |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

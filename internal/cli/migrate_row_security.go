@@ -48,5 +48,5 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 		return v.WithRefusal(refusal)
 	}
 	v.Code = string(executor.OutcomeCode(err))
-	return v
+	return migrate.WithServerError(v, err)
 }

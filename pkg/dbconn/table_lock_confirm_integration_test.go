@@ -2,9 +2,11 @@ package dbconn_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/stretchr/testify/assert"
@@ -138,6 +140,102 @@ func TestTableLockConfirmWhenTheSameKeyIsHeldInTwoDatabases(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, own.BackendPID(), holder.PID)
+}
+
+// pg_locks also lists a session queued for the key: a plain
+// pg_advisory_lock on a held key waits with granted = false. A waiter is
+// not the holder, even when its backend has the lower PID, so the holder
+// still confirms its lock and a lookup still names it. The waiter is a
+// plain session blocking on the same (classid, objid) pair, as any other
+// client calling pg_advisory_lock on the key would.
+func TestTableLockConfirmIgnoresASessionWaitingForTheKey(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	url := testutil.NewDatabase(t, serverURL)
+	cfg := dbconn.Config{URL: url}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	waiter := openRawSession(t, url)
+	held, err := dbconn.AcquireTableLock(t.Context(), cfg, "app", "orders")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, held.Release(context.WithoutCancel(t.Context())))
+	})
+	// The waiter must sort before the holder in pg_locks' PID order, or a
+	// lookup that counted waiters would still name the holder by luck.
+	// Backend PIDs normally grow, so the session opened first has the lower
+	// one; after a PID wrap, more sessions are opened until one does.
+	const maxWaiterCandidates = 64
+	for opened := 1; waiter.PgConn().PID() >= held.BackendPID(); opened++ {
+		require.Less(t, opened, maxWaiterCandidates, "precondition: no session among %d has a backend PID below the holder's %d", opened, held.BackendPID())
+		waiter = openRawSession(t, url)
+	}
+	waiterPID := waiter.PgConn().PID()
+	require.Less(t, waiterPID, held.BackendPID(), "precondition: the waiter's backend PID is below the holder's")
+
+	key := held.Lock().Key()
+	const waiterDeadline = 30 * time.Second
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), waiterDeadline)
+	var wg sync.WaitGroup
+	var waitErr error
+	wg.Go(func() {
+		_, waitErr = waiter.Exec(waitCtx, `SELECT pg_advisory_lock($1, $2)`, key.ClassID, key.ObjID)
+	})
+	stopWaiter := func() {
+		cancelWait()
+		wg.Wait()
+	}
+	t.Cleanup(stopWaiter)
+
+	const waiterQueuedDeadline = 10 * time.Second
+	require.Eventually(t, func() bool {
+		// pg_locks reports the key's halves as oids, so a negative int32
+		// half appears as its unsigned value.
+		var queued bool
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT EXISTS (
+			  SELECT 1
+			    FROM pg_locks
+			   WHERE locktype = 'advisory'
+			     AND pid = $1
+			     AND NOT granted
+			     AND classid::bigint = $2
+			     AND objid::bigint = $3
+			     AND objsubid = 2)`,
+			waiterPID, uint32(key.ClassID), uint32(key.ObjID)).Scan(&queued))
+		return queued
+	}, waiterQueuedDeadline, 20*time.Millisecond, "the waiter should queue behind the holder in pg_locks")
+
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+	})
+	assert.NoError(t, held.Confirm(t.Context(), tx), "the waiter is not a rival holder")
+	holder, found, err := dbconn.LookupTableLockHolder(t.Context(), pool, "app", "orders")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, held.BackendPID(), holder.PID)
+
+	stopWaiter()
+	assert.ErrorIs(t, waitErr, context.Canceled, "the waiter was still queued when the test stopped it")
+}
+
+// openRawSession opens a plain session to url with no pg-sprite preparation,
+// standing in for a client outside pg-sprite.
+func openRawSession(t *testing.T, url string) *pgx.Conn {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), url)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		if conn.IsClosed() {
+			return
+		}
+		assert.NoError(t, conn.Close(ctx))
+	})
+	return conn
 }
 
 // goneLock acquires the table lock and then terminates the session's

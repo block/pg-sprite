@@ -63,6 +63,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	if v.FailedStep > 0 {
 		fmt.Fprintf(&b, "\n  %s step %d: %s", pal.bold("failed at:"), v.FailedStep, v.FailedStepSQL)
 	}
+	if v.SQLState != "" {
+		fmt.Fprintf(&b, "\n  %s    %s (SQLSTATE %s)", pal.bold("server:"), v.ServerError, v.SQLState)
+	}
 	if len(v.ExecutedSQL) > 0 {
 		if v.Outcome == verdict.OutcomeFailed {
 			fmt.Fprintf(&b, "\n  %s", pal.bold("committed before the failure (their state remains):"))
