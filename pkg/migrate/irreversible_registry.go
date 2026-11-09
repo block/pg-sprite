@@ -43,45 +43,35 @@ func ackKinds() []ackKind {
 	return []ackKind{ackForce, ackAcceptBlocking, ackAllowDestructive, ackRestart, ackBlockWrites}
 }
 
-// value is the acknowledgement as opts carries it; empty means not given.
-// The bool is false only for a kind this switch does not name, which the
+// field is the Options field that carries the acknowledgement: the one
+// place a kind is tied to a field, so reading and clearing it cannot
+// disagree. It is nil only for a kind this switch does not name, which the
 // registry's completeness test rejects.
-func (a ackKind) value(opts Options) (string, bool) {
+func (a ackKind) field(opts *Options) *string {
 	switch a {
 	case ackForce:
-		return opts.Force, true
+		return &opts.Force
 	case ackAcceptBlocking:
-		return opts.AcceptBlocking, true
+		return &opts.AcceptBlocking
 	case ackAllowDestructive:
-		return opts.AllowDestructive, true
+		return &opts.AllowDestructive
 	case ackRestart:
-		return opts.CopySwap.Restart, true
+		return &opts.CopySwap.Restart
 	case ackBlockWrites:
-		return opts.CopySwap.BlockWrites, true
+		return &opts.CopySwap.BlockWrites
 	default:
-		return "", false
+		return nil
 	}
 }
 
-// clear removes the acknowledgement from opts. The bool is false only for a
-// kind this switch does not name, which the registry's completeness test
-// rejects.
-func (a ackKind) clear(opts *Options) bool {
-	switch a {
-	case ackForce:
-		opts.Force = ""
-	case ackAcceptBlocking:
-		opts.AcceptBlocking = ""
-	case ackAllowDestructive:
-		opts.AllowDestructive = ""
-	case ackRestart:
-		opts.CopySwap.Restart = ""
-	case ackBlockWrites:
-		opts.CopySwap.BlockWrites = ""
-	default:
-		return false
+// value is the acknowledgement as opts carries it; empty means not given.
+// The bool is false only for a kind field does not name.
+func (a ackKind) value(opts Options) (string, bool) {
+	f := a.field(&opts)
+	if f == nil {
+		return "", false
 	}
-	return true
+	return *f, true
 }
 
 // WithoutAcknowledgements returns a copy of o with every typed
@@ -90,10 +80,15 @@ func (a ackKind) clear(opts *Options) bool {
 // other field unchanged. It is the desired-state front door's view of a
 // policy: an adapter that builds one Options for both front doors passes
 // [RunDesired] o.WithoutAcknowledgements(), which RunDesired never rejects
-// for an acknowledgement. o itself is not modified.
+// for an acknowledgement. o itself is not modified. The view drops an
+// operator's consent without reporting it: an adapter that maps an operator
+// approval onto an acknowledgement reads it from the operator's input, not
+// from the view, and the desired-state door's own refusals still apply.
 func (o Options) WithoutAcknowledgements() Options {
 	for _, a := range ackKinds() {
-		a.clear(&o)
+		if f := a.field(&o); f != nil {
+			*f = ""
+		}
 	}
 	return o
 }

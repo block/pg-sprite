@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -33,6 +34,68 @@ func withAck(t *testing.T, opts Options, a ackKind, value string) Options {
 		t.Fatalf("acknowledgement %q has no Options field in this test", a)
 	}
 	return opts
+}
+
+// setEveryField sets every field reachable from v to a non-zero value:
+// "app.orders" for a string, true, 7, a new value behind a pointer, a
+// function that returns zero values, and for an interface the value
+// interfaceValues lists for its type. A field of a kind or interface it
+// does not handle fails the test, so a new field is handled here rather
+// than left zero.
+func setEveryField(t *testing.T, v reflect.Value, path string) {
+	t.Helper()
+	interfaceValues := map[reflect.Type]any{
+		reflect.TypeFor[progress.Clock](): progress.WallClock{},
+	}
+	switch v.Kind() {
+	case reflect.Struct:
+		for i := range v.NumField() {
+			f := v.Type().Field(i)
+			require.True(t, f.IsExported(), "%s.%s is unexported and cannot be set", path, f.Name)
+			setEveryField(t, v.Field(i), path+"."+f.Name)
+		}
+	case reflect.String:
+		v.SetString("app.orders")
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.Int, reflect.Int32, reflect.Int64:
+		v.SetInt(7)
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+	case reflect.Func:
+		typ := v.Type()
+		v.Set(reflect.MakeFunc(typ, func([]reflect.Value) []reflect.Value {
+			out := make([]reflect.Value, typ.NumOut())
+			for i := range out {
+				out[i] = reflect.Zero(typ.Out(i))
+			}
+			return out
+		}))
+	case reflect.Interface:
+		iv, ok := interfaceValues[v.Type()]
+		require.True(t, ok, "%s has interface type %s, which setEveryField has no value for", path, v.Type())
+		v.Set(reflect.ValueOf(iv))
+	default:
+		t.Fatalf("%s has kind %s, which setEveryField does not set", path, v.Kind())
+	}
+}
+
+// assertSameFields asserts that every field reachable from got equals the
+// one in want. A function is compared by whether it is set and by its code
+// pointer, since Go defines no equality for set functions.
+func assertSameFields(t *testing.T, want, got reflect.Value, path string) {
+	t.Helper()
+	switch want.Kind() {
+	case reflect.Struct:
+		for i := range want.NumField() {
+			assertSameFields(t, want.Field(i), got.Field(i), path+"."+want.Type().Field(i).Name)
+		}
+	case reflect.Func:
+		assert.Equal(t, want.IsNil(), got.IsNil(), "%s", path)
+		assert.Equal(t, want.Pointer(), got.Pointer(), "%s", path)
+	default:
+		assert.Equal(t, want.Interface(), got.Interface(), "%s", path)
+	}
 }
 
 // The registry lists every irreversible operation with the acknowledgement
@@ -91,26 +154,20 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 	})
 
 	// The desired-state view clears every acknowledgement the registry
-	// walks, so a new acknowledgement without a clear case fails here
-	// rather than reaching an adapter as a run-time rejection.
+	// walks and keeps every other field. Every field of the policy is set
+	// to a non-zero value, including fields added later, so a view that
+	// blanks a policy field such as KeepOld or the copy connection fails
+	// here rather than reaching an adapter as a changed run.
 	t.Run("the desired-state view clears every acknowledgement and nothing else", func(t *testing.T) {
-		for _, a := range acks {
-			cleared := withAck(t, DefaultOptions(), a, "app.orders")
-			require.True(t, a.clear(&cleared), "acknowledgement %q cannot be cleared", a)
-			v, _ := a.value(cleared)
-			assert.Empty(t, v, "acknowledgement %q clears another field than it reads", a)
-		}
-
-		shared := DefaultOptions()
-		shared.CreateOwner = "app_owner"
-		shared.CopySwap.Enabled = true
+		var shared Options
+		setEveryField(t, reflect.ValueOf(&shared).Elem(), "Options")
 		want := shared
 		for _, a := range acks {
-			shared = withAck(t, shared, a, "app.orders")
+			want = withAck(t, want, a, "")
 		}
 
 		view := shared.WithoutAcknowledgements()
-		assert.Equal(t, want, view)
+		assertSameFields(t, reflect.ValueOf(want), reflect.ValueOf(view), "Options")
 		require.NoError(t, rejectDesiredAcks(view))
 		for _, a := range acks {
 			v, _ := a.value(shared)
