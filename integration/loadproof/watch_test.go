@@ -32,11 +32,13 @@ type watched struct {
 	// from one that was there throughout.
 	PeakSlotLagBytes   int64
 	PeakSlotLagByPhase map[checkpoint.Phase]int64
-	// Mark is how many mutations the load had committed at the last poll
-	// that saw the row say the swap had not happened; MarkSet is whether
-	// any poll did.
-	Mark    int
-	MarkSet bool
+	// Mark is the load's progress at the last poll that saw the row say
+	// the swap had not happened, MarkPhase is the phase that poll saw, and
+	// MarkAt is when it read the progress; MarkSet is whether any poll did.
+	Mark      testutil.Progress
+	MarkPhase checkpoint.Phase
+	MarkAt    time.Time
+	MarkSet   bool
 	// Err is the first error the poll met that it could not skip.
 	Err error
 }
@@ -52,11 +54,12 @@ type watch struct {
 // startWatch polls the run's checkpoint row and the slot it names while
 // load writes the table, through the checkpoint store's inspection — the
 // same read a status command makes, so the harness needs no hook into the
-// binary. At every poll it reads how much the load has committed before it
-// reads the row: a mutation counts once its commit returns, so when the
-// row then says the swap has not happened, every counted mutation is in
-// the source the swap will retain. The last such count is the mark the
-// row oracle excludes writes after.
+// binary. At every poll it reads the load's progress before it reads the
+// row: a mutation counts once its commit returns, so when the row then says
+// the swap has not happened, every counted mutation is in the source the
+// swap will retain. The last such progress is the mark: the row oracle
+// excludes the keys touched after its Touched count, and a load failure
+// before its time cannot have been caused by the swap.
 func startWatch(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, load *testutil.LoadGenerator) *watch {
 	t.Helper()
 	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
@@ -75,7 +78,7 @@ func startWatch(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, 
 				return
 			case <-ticker.C:
 			}
-			committed := load.Snapshot().Committed()
+			progress, readAt := load.Progress(), time.Now()
 			cp, err := store.Inspect(ctx, table.Schema, table.Table)
 			if errors.Is(err, checkpoint.ErrNotFound) || errors.Is(err, checkpoint.ErrTableMissing) || errors.Is(err, context.Canceled) {
 				continue
@@ -89,7 +92,7 @@ func startWatch(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, 
 				w.fail(err)
 				return
 			}
-			w.record(cp, committed, lag)
+			w.record(cp, progress, readAt, lag)
 		}
 	})
 	return w
@@ -107,7 +110,7 @@ func beforeSwap(phase checkpoint.Phase) bool {
 	}
 }
 
-func (w *watch) record(cp checkpoint.Checkpoint, committed int, lag int64) {
+func (w *watch) record(cp checkpoint.Checkpoint, progress testutil.Progress, readAt time.Time, lag int64) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if _, ok := w.seen.FirstSeen[cp.Phase]; !ok {
@@ -117,7 +120,7 @@ func (w *watch) record(cp checkpoint.Checkpoint, committed int, lag int64) {
 	w.seen.PeakSlotLagBytes = max(w.seen.PeakSlotLagBytes, lag)
 	w.seen.PeakSlotLagByPhase[cp.Phase] = max(w.seen.PeakSlotLagByPhase[cp.Phase], lag)
 	if beforeSwap(cp.Phase) {
-		w.seen.Mark, w.seen.MarkSet = committed, true
+		w.seen.Mark, w.seen.MarkPhase, w.seen.MarkAt, w.seen.MarkSet = progress, cp.Phase, readAt, true
 	}
 }
 

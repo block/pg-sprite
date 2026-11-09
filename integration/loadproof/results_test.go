@@ -1,6 +1,7 @@
 package loadproof_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,10 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
@@ -33,10 +36,14 @@ type results struct {
 	Phases        []phaseInfo `json:"phases"`
 	// SlotName is the replication slot the run used, so a leftover slot
 	// after a failed run can be found.
-	SlotName         string          `json:"slot_name,omitempty"`
-	PeakSlotLagBytes int64           `json:"peak_slot_lag_bytes"`
-	Verdict          json.RawMessage `json:"verdict,omitempty"`
-	Rows             rowsInfo        `json:"rows"`
+	SlotName         string `json:"slot_name,omitempty"`
+	PeakSlotLagBytes int64  `json:"peak_slot_lag_bytes"`
+	// Verdict is the binary's stdout when it is JSON, as a verdict is;
+	// Stdout holds it as text when it is not, a usage error or a crash,
+	// so the record is written either way.
+	Verdict json.RawMessage `json:"verdict,omitempty"`
+	Stdout  string          `json:"stdout,omitempty"`
+	Rows    rowsInfo        `json:"rows"`
 }
 
 // binaryInfo identifies the binary under proof.
@@ -131,13 +138,13 @@ func (r *results) recordWatch(w watched, started time.Time) {
 // it did and how it failed, and how much of it committed after the binary
 // exited. It is called with a snapshot at exit and again with the final
 // summary, so each call starts from nothing.
-func (r *results) recordLoad(s testutil.Summary, committedAtExit int) {
+func (r *results) recordLoad(s testutil.Summary, atExit testutil.Progress) {
 	r.Load.Inserts = s.Inserts
 	r.Load.Updates = s.Updates
 	r.Load.Deletes = s.Deletes
 	r.Load.Races = s.Races
 	r.Load.MaxLatencyMillis = s.MaxLatency.Milliseconds()
-	r.Load.CommittedAfterSwap = s.Committed() - committedAtExit
+	r.Load.CommittedAfterSwap = s.Committed() - atExit.Committed()
 	r.Load.FailuresByCode = map[string]int{}
 	for _, f := range s.Failures {
 		r.Load.FailuresByCode[failureKey(f)]++
@@ -155,6 +162,18 @@ func failureKey(f testutil.Failure) string {
 		return deadlineCode
 	}
 	return otherCode
+}
+
+// recordOutput keeps the binary's stdout: as the verdict when it is JSON,
+// and as text when it is not, since a raw message that is not JSON cannot
+// be encoded and would lose the whole record.
+func (r *results) recordOutput(output []byte) {
+	trimmed := bytes.TrimSpace(output)
+	if json.Valid(trimmed) {
+		r.Verdict = json.RawMessage(trimmed)
+		return
+	}
+	r.Stdout = string(trimmed)
 }
 
 // write writes the results as indented JSON to path.
@@ -183,4 +202,38 @@ func fileSHA256(t *testing.T, path string) string {
 	_, err = io.Copy(h, f)
 	require.NoError(t, err)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// A binary that prints a usage error instead of a verdict still leaves a
+// record: the text is kept as stdout, and the file is written and reads
+// back with it.
+func TestResultsKeepTheRecordOfARunWhoseStdoutIsNotJSON(t *testing.T) {
+	res := newResults(config{Binary: "bin/pg-sprite", Rows: 10})
+	res.recordOutput([]byte("pg-sprite: error: unknown flag --free-disk\n"))
+	path := filepath.Join(t.TempDir(), "results.json")
+	require.NoError(t, res.write(path))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var back map[string]any
+	require.NoError(t, json.Unmarshal(data, &back))
+	assert.Equal(t, "pg-sprite: error: unknown flag --free-disk", back["stdout"])
+	assert.NotContains(t, back, "verdict")
+}
+
+// A verdict is kept as JSON, so a reader of the record queries its fields
+// rather than parsing a string.
+func TestResultsKeepAVerdictAsJSON(t *testing.T) {
+	res := newResults(config{Binary: "bin/pg-sprite", Rows: 10})
+	res.recordOutput([]byte(`{"outcome":"executed-via-copy-and-swap"}` + "\n"))
+	path := filepath.Join(t.TempDir(), "results.json")
+	require.NoError(t, res.write(path))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var back struct {
+		Verdict map[string]string `json:"verdict"`
+		Stdout  *string           `json:"stdout"`
+	}
+	require.NoError(t, json.Unmarshal(data, &back))
+	assert.Equal(t, map[string]string{"outcome": "executed-via-copy-and-swap"}, back.Verdict)
+	assert.Nil(t, back.Stdout)
 }

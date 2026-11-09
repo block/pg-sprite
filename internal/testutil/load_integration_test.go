@@ -52,8 +52,15 @@ func TestLoadGenerator(t *testing.T) {
 	assert.Subset(t, summary.TouchedIDs, summary.InsertedIDs)
 	assert.Subset(t, summary.TouchedIDs, summary.DeletedIDs)
 	assert.Positive(t, summary.MaxLatency)
-	assert.Less(t, summary.MaxLatency, mutationTimeout, "a committed mutation finished inside its deadline")
+	assert.Less(t, summary.MaxLatency, MutationTimeout, "a committed mutation finished inside its deadline")
 	assert.Empty(t, summary.Failures, "a generator that does not record failures never lists any")
+	assert.Equal(t, Progress{
+		Inserts:     summary.Inserts,
+		Updates:     summary.Updates,
+		Deletes:     summary.Deletes,
+		UniqueMoves: summary.UniqueMoves,
+		Touched:     len(summary.TouchedIDs),
+	}, generator.Progress(), "a stopped load's progress is its summary's counts")
 	var count, distinct int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*),count(DISTINCT uniq) FROM `+table.Qualified()).Scan(&count, &distinct))
 	assert.Equal(t, 200+summary.Inserts-summary.Deletes, count)
@@ -101,6 +108,33 @@ func TestLoadGeneratorRecordsFailures(t *testing.T) {
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "23514", pgErr.Code)
 	assert.Empty(t, summary.Failures, "a generator that does not record failures reports the first from Stop instead")
+}
+
+// A key move rewrites a row's primary key to the sequence's next value, so
+// it writes two keys: the row is gone from the old one and present under
+// the new one. Both are touched, the old before the new, so a test that
+// excludes the keys written after a mark leaves out both sides of the move.
+func TestLoadGeneratorRecordsBothKeysOfAKeyMove(t *testing.T) {
+	dsn := StartPostgres(t)
+	pool, err := pgxpool.New(t.Context(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	table := NewWorkloadTable(t, pool)
+	require.NoError(t, table.SeedRows(t.Context(), 200))
+	generator := StartLoad(t, pool, table, LoadSpec{Seed: 9, Workers: 2, RatePerSecond: 40, Mix: Mix{KeyMove: 1}})
+	runDeadline := time.NewTimer(time.Second)
+	defer runDeadline.Stop()
+	<-runDeadline.C
+	summary, err := generator.Stop()
+	require.NoError(t, err)
+	require.Positive(t, summary.KeyMoves)
+	require.Len(t, summary.TouchedIDs, 2*summary.KeyMoves, "each key move touches its old and its new key")
+	var maxID int64
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT max(id) FROM `+table.Qualified()).Scan(&maxID))
+	assert.Contains(t, summary.TouchedIDs, maxID, "the newest move's new key is the table's highest, and it is touched")
+	for i := 0; i < len(summary.TouchedIDs); i += 2 {
+		assert.Less(t, summary.TouchedIDs[i], summary.TouchedIDs[i+1], "a move's old key precedes the new one drawn from the sequence")
+	}
 }
 
 // A delete-only worker on a two-row table commits exactly twice and then

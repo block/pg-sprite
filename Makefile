@@ -88,14 +88,19 @@ test-aws-boundary:
 
 # Operator-run load proof of the copy-and-swap route (integration/loadproof):
 # the built binary retypes a large table's identity key while a concurrent
-# workload writes it, judged by timing-free oracles. Runs against the compose
-# database by default; point LOAD_PROOF_DSN at any server with
-# wal_level=logical. LOAD_PROOF_ROWS, LOAD_PROOF_WORKERS, LOAD_PROOF_RATE,
-# LOAD_PROOF_HOT, LOAD_PROOF_FREE_DISK and LOAD_PROOF_RESULTS pass through;
-# results.json lands in the package directory.
+# workload writes it, judged by timing-free oracles. LOAD_PROOF_FREE_DISK is
+# required: the free space on the database's data volume. Runs against the
+# compose database, started here, by default; point LOAD_PROOF_DSN at any
+# other server with wal_level=logical (a host other than this machine also
+# needs LOAD_PROOF_ALLOW_REMOTE=1). LOAD_PROOF_ROWS, LOAD_PROOF_WORKERS,
+# LOAD_PROOF_RATE, LOAD_PROOF_HOT and LOAD_PROOF_RESULTS pass through;
+# results.json lands in the package directory. The recipe is not echoed, so
+# the connection string's password stays off the terminal. What a run needs
+# and what it proves: docs/testing.md#the-load-proof.
 LOAD_PROOF_DSN ?= $(PG_DSN_LOCAL)
-load-proof: build db-up
-	LOAD_PROOF=1 LOAD_PROOF_BIN=$(CURDIR)/bin/pg-sprite LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProof$$' -v ./integration/loadproof
+LOAD_PROOF_DB = $(if $(filter file,$(origin LOAD_PROOF_DSN)),db-up)
+load-proof: build $(LOAD_PROOF_DB)
+	@LOAD_PROOF=1 LOAD_PROOF_BIN=$(CURDIR)/bin/pg-sprite LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProof$$' -v ./integration/loadproof
 
 lint:
 	golangci-lint run

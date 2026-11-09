@@ -1,10 +1,14 @@
 // Package loadproof_test is the operator-run load proof of the copy-and-swap
 // route: the built binary carries an identity-key retype over a large table
 // while a concurrent workload writes it through the copy, the catch-up, the
-// drain, and the swap, and the result is judged by oracles that make no
-// timing assumption. It is skipped unless LOAD_PROOF=1; `make load-proof`
-// builds the binary and runs it against the compose database, and the
-// same variables point it at any other server with logical decoding on.
+// verify pass, the drain, and the swap, and the result is judged by oracles
+// that make no timing assumption. The row oracle judges every row except
+// those the load wrote after the last checkpoint poll before the cutover:
+// the writes of the drain and the swap are carried but not compared, and
+// results.json reports how many keys that leaves out. It is skipped unless
+// LOAD_PROOF=1; `make load-proof` builds the binary and runs it against the
+// compose database, and the same variables point it at any other server
+// with logical decoding on (see docs/testing.md).
 package loadproof_test
 
 import (
@@ -19,11 +23,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -44,8 +50,13 @@ type config struct {
 	// table's ten lowest keys.
 	HotRowFraction float64
 	// FreeDisk is the figure handed to --free-disk: the operator's
-	// statement of the free space on the volume the table lives on.
+	// statement of the free space on the volume the table lives on. It has
+	// no default, because the preflight's disk-headroom refusal is only as
+	// good as the figure it is given.
 	FreeDisk string
+	// AllowRemote lets DSN name a host that is not this machine; the
+	// operator sets it to say that server is disposable.
+	AllowRemote bool
 	// Results is where the run's results.json is written.
 	Results string
 }
@@ -63,7 +74,6 @@ const (
 	defaultWorkers        = 8
 	defaultRatePerSecond  = 100
 	defaultHotRowFraction = 0
-	defaultFreeDisk       = "64GiB"
 	defaultResults        = "results.json"
 )
 
@@ -81,13 +91,34 @@ func readConfig(t *testing.T) config {
 		Workers:        envInt(t, "LOAD_PROOF_WORKERS", defaultWorkers),
 		RatePerSecond:  envInt(t, "LOAD_PROOF_RATE", defaultRatePerSecond),
 		HotRowFraction: envFloat(t, "LOAD_PROOF_HOT", defaultHotRowFraction),
-		FreeDisk:       envOr("LOAD_PROOF_FREE_DISK", defaultFreeDisk),
+		FreeDisk:       os.Getenv("LOAD_PROOF_FREE_DISK"),
+		AllowRemote:    os.Getenv("LOAD_PROOF_ALLOW_REMOTE") == "1",
 		Results:        envOr("LOAD_PROOF_RESULTS", defaultResults),
 	}
 	require.NotEmpty(t, c.DSN, "set LOAD_PROOF_DSN to a database with wal_level=logical")
 	require.NotEmpty(t, c.Binary, "set LOAD_PROOF_BIN to a freshly built pg-sprite binary")
 	require.Positive(t, c.Rows, "LOAD_PROOF_ROWS")
+	require.NotEmpty(t, c.FreeDisk, "set LOAD_PROOF_FREE_DISK to the free space on the database's data volume (for example 40GiB); the copy builds a second full table beside the source, and the preflight refuses the run when the figure cannot hold it")
+	target, err := pgconn.ParseConfig(c.DSN)
+	require.NoError(t, err, "LOAD_PROOF_DSN")
+	if !c.AllowRemote {
+		require.True(t, targetIsLocal(target), "LOAD_PROOF_DSN names a host other than this machine, and the proof seeds and copies a table of LOAD_PROOF_ROWS rows on it; set LOAD_PROOF_ALLOW_REMOTE=1 when that server is disposable")
+	}
+	t.Logf("load proof target: host %s, port %d, database %s, user %s", target.Host, target.Port, target.Database, target.User)
 	return c
+}
+
+// requireTimeForTheRun fails the test at its start when go test would end
+// it before runBudget: a test the go test deadline ends is killed without
+// its cleanups, which leaves the binary, its replication slot, and the
+// seeded table behind. `make load-proof` passes a deadline that fits.
+func requireTimeForTheRun(t *testing.T) {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		return
+	}
+	require.Greater(t, time.Until(deadline), runBudget, "go test would stop the proof before the binary's own budget runs out and skip its cleanup; run it with -timeout above %s", runBudget)
 }
 
 func envFloat(t *testing.T, name string, fallback float64) float64 {
@@ -127,10 +158,13 @@ const (
 	// before the binary starts, so the run begins over a table that is
 	// being written.
 	firstCommitDeadline = 30 * time.Second
-	// afterSwapCommitDeadline bounds the wait for a commit after the
+	// afterSwapInsertDeadline bounds the wait for an insert after the
 	// binary exits, proof that the application kept writing the table
-	// through the swap.
-	afterSwapCommitDeadline = 30 * time.Second
+	// through the swap and that the identity sequence handed to the
+	// swapped-in table is past every key it holds: a sequence left behind
+	// makes every insert collide on the primary key, which the load counts
+	// as a race and never commits.
+	afterSwapInsertDeadline = 30 * time.Second
 	// commitPollInterval paces both waits.
 	commitPollInterval = 50 * time.Millisecond
 	// runBudget bounds the binary itself; a run that outlives it is a
@@ -147,28 +181,6 @@ const (
 // insert with the shadow row the flush already landed, so a load that
 // moves keys cannot run through the copy.
 var loadMix = testutil.Mix{Insert: 2, Update: 3, Delete: 1}
-
-// allowedFailureCodes are the SQLSTATEs a load statement may fail with
-// during the run: the swap holds the table's lock briefly and a statement
-// that queues behind it past its lock_timeout fails with 55P03; a
-// statement a connection had prepared before the swap fails once with
-// 0A000 when its result type changed under it, and the driver re-prepares.
-// Any other code is a failure the proof reports as its own.
-var allowedFailureCodes = map[string]bool{
-	"55P03": true,
-	"0A000": true,
-}
-
-// failureAllowed reports whether a recorded load failure is one of the
-// kinds the swap is allowed to cause. A statement that ran out its own
-// client-side deadline while the swap held the lock is allowed on the
-// same grounds as a lock timeout.
-func failureAllowed(f testutil.Failure) bool {
-	if errors.Is(f.Err, context.DeadlineExceeded) {
-		return true
-	}
-	return allowedFailureCodes[f.Code]
-}
 
 // alterTemplate is the change under proof, over the workload table's
 // qualified name: the identity primary key itself widens, so every chunk
@@ -191,6 +203,7 @@ const alterTemplate = `ALTER TABLE %s ALTER COLUMN id TYPE bigint`
 // under the new type and the load keeps writing it.
 func TestLoadProof(t *testing.T) {
 	c := readConfig(t)
+	requireTimeForTheRun(t)
 	ctx := t.Context()
 	res := newResults(c)
 	t.Cleanup(func() {
@@ -203,6 +216,7 @@ func TestLoadProof(t *testing.T) {
 
 	pool := newPool(t, c)
 	require.NoError(t, pool.QueryRow(ctx, `SHOW server_version`).Scan(&res.ServerVersion))
+	t.Logf("load proof server version %s", res.ServerVersion)
 	res.Binary.SHA256 = fileSHA256(t, c.Binary)
 
 	shape := testutil.WorkloadShape{IDType: "integer"}
@@ -220,28 +234,30 @@ func TestLoadProof(t *testing.T) {
 		ToastRewriteFraction: 0.5,
 		RecordFailures:       true,
 	})
-	waitForCommits(t, load, 0, firstCommitDeadline, "the load's first commit before the run starts")
+	waitForLoad(t, load, func(p testutil.Progress) bool { return p.Committed() > 0 },
+		firstCommitDeadline, "the load's first commit before the run starts")
 
 	alter := fmt.Sprintf(alterTemplate, table.Qualified())
 	watch := startWatch(t, pool, table, load)
+	atStart := load.Progress()
 	started := time.Now()
 	res.StartedAt = started
 	output, diagnostic, code := runBinary(t, c, "migrate",
-		"--url", c.DSN,
 		"--copy-and-swap",
 		"--keep-old",
 		"--free-disk", c.FreeDisk,
 		"--json",
 		"--alter", alter)
-	res.RunMillis = time.Since(started).Milliseconds()
+	exited := time.Now()
+	atExit := load.Progress()
+	res.RunMillis = exited.Sub(started).Milliseconds()
 	w := watch.stop()
 	res.recordWatch(w, started)
-	res.Verdict = json.RawMessage(bytes.TrimSpace(output))
+	res.recordOutput(output)
 	// The load is recorded as it stands at exit before any judgement, so a
 	// failed run's record still says what the table was under; the final
 	// summary replaces it once the load has stopped.
-	committedAtExit := load.Snapshot().Committed()
-	res.recordLoad(load.Snapshot(), committedAtExit)
+	res.recordLoad(load.Snapshot(), atExit)
 
 	require.Equal(t, 0, code, "binary stdout: %s; stderr: %s", output, diagnostic)
 	var v verdict.Verdict
@@ -249,20 +265,34 @@ func TestLoadProof(t *testing.T) {
 	require.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome, "%s: %s", v.Reason, v.Detail)
 	require.NoError(t, w.Err, "the checkpoint poll failed")
 	require.True(t, w.MarkSet, "the poll never saw the row before the cutover, so no write is known to have committed before the swap")
+	requireMarkSpansTheStream(t, w, atStart)
 
-	waitForCommits(t, load, committedAtExit, afterSwapCommitDeadline, "a commit after the swap")
+	waitForLoad(t, load, func(p testutil.Progress) bool { return p.Inserts > atExit.Inserts },
+		afterSwapInsertDeadline, "an insert after the swap")
 	summary, err := load.Stop()
 	require.NoError(t, err)
-	res.recordLoad(summary, committedAtExit)
+	res.recordLoad(summary, atExit)
 
 	assertRowsConverged(t, pool, table, summary, w.Mark, res)
 	assertCatalogMatchesNative(t, pool, table, shape)
+	window := swapWindow{opened: w.MarkAt, closed: exited}
 	for _, f := range summary.Failures {
-		assert.True(t, failureAllowed(f), "load failure the swap is not allowed to cause: SQLSTATE %q: %v", f.Code, f.Err)
+		assert.True(t, failureAllowed(f, window), "load failure the swap is not allowed to cause, at %s (mark %s, exit %s): SQLSTATE %q: %v",
+			f.At.Format(time.RFC3339Nano), w.MarkAt.Format(time.RFC3339Nano), exited.Format(time.RFC3339Nano), f.Code, f.Err)
 	}
-	require.Positive(t, summary.Inserts, "the load inserted during the run")
-	require.Positive(t, summary.Updates, "the load updated during the run")
-	require.Positive(t, summary.Deletes, "the load deleted during the run")
+}
+
+// requireMarkSpansTheStream holds the mark to what the row oracle needs to
+// judge the stream rather than only the copy: the last poll before the
+// cutover saw the verify pass, which follows the copy and the catch-up, and
+// between the binary's start and the mark the load committed an insert, an
+// update, and a delete, each of which the oracle then compares.
+func requireMarkSpansTheStream(t *testing.T, w watched, atStart testutil.Progress) {
+	t.Helper()
+	require.Equal(t, checkpoint.PhaseVerifying, w.MarkPhase, "the last poll before the swap saw %s, not the verify pass, so the judged writes may end before the stream carried any", w.MarkPhase)
+	require.Greater(t, w.Mark.Inserts, atStart.Inserts, "the load inserted between the binary's start and the mark")
+	require.Greater(t, w.Mark.Updates, atStart.Updates, "the load updated between the binary's start and the mark")
+	require.Greater(t, w.Mark.Deletes, atStart.Deletes, "the load deleted between the binary's start and the mark")
 }
 
 // harnessConns is how many connections the harness's own reads — the
@@ -287,11 +317,14 @@ func newPool(t *testing.T, c config) *pgxpool.Pool {
 
 // runBinary runs the binary under proof with args and returns its stdout,
 // stderr, and exit code; a binary that cannot be started fails the test.
+// The connection string reaches the binary through PGSPRITE_URL rather than
+// --url, so its password is not on the process's command line.
 func runBinary(t *testing.T, c config, args ...string) (output []byte, diagnostic string, code int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), runBudget)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Binary, args...)
+	cmd.Env = append(os.Environ(), "PGSPRITE_URL="+c.DSN)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -303,12 +336,12 @@ func runBinary(t *testing.T, c config, args ...string) (output []byte, diagnosti
 	return output, stderr.String(), code
 }
 
-// waitForCommits waits until the load has committed more than seen,
-// failing the test with what after the deadline.
-func waitForCommits(t *testing.T, load *testutil.LoadGenerator, seen int, deadline time.Duration, what string) {
+// waitForLoad waits until the load's progress satisfies reached, failing
+// the test with what after the deadline.
+func waitForLoad(t *testing.T, load *testutil.LoadGenerator, reached func(testutil.Progress) bool, deadline time.Duration, what string) {
 	t.Helper()
-	require.Eventually(t, func() bool { return load.Snapshot().Committed() > seen },
-		deadline, commitPollInterval, "waiting for %s; load so far %+v", what, load.Snapshot())
+	require.Eventually(t, func() bool { return reached(load.Progress()) },
+		deadline, commitPollInterval, "waiting for %s; load so far %+v", what, load.Progress())
 }
 
 // assertRowsConverged holds the retained source and the live table to the
@@ -317,9 +350,9 @@ func waitForCommits(t *testing.T, load *testutil.LoadGenerator, seen int, deadli
 // swap had not happened is in both relations, and a later write may be in
 // the live table alone, so those keys are taken out of the comparison on
 // both sides rather than judged.
-func assertRowsConverged(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, summary testutil.Summary, mark int, res *results) {
+func assertRowsConverged(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, summary testutil.Summary, mark testutil.Progress, res *results) {
 	t.Helper()
-	excluded := summary.TouchedIDs[mark:]
+	excluded := summary.TouchedIDs[mark.Touched:]
 	report, err := testutil.Diff(t.Context(), pool,
 		testutil.RelationRef{Schema: table.Schema, Table: schemachange.OldName(table.Schema, table.Table)},
 		testutil.RelationRef{Schema: table.Schema, Table: table.Table},

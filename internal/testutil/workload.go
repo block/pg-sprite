@@ -245,7 +245,7 @@ func (g *LoadGenerator) run(ctx context.Context, pool *pgxpool.Pool, table Workl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), mutationTimeout)
+			mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), MutationTimeout)
 			started := time.Now()
 			err := g.mutate(mutationCtx, pool, table, spec, rng)
 			cancel()
@@ -268,9 +268,9 @@ func (g *LoadGenerator) run(ctx context.Context, pool *pgxpool.Pool, table Workl
 	}
 }
 
-// mutationTimeout is the client-side deadline of one mutation; a mutation
+// MutationTimeout is the client-side deadline of one mutation; a mutation
 // that outlives it fails with context.DeadlineExceeded.
-const mutationTimeout = 2 * time.Second
+const MutationTimeout = 2 * time.Second
 
 func (g *LoadGenerator) mutate(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable, spec LoadSpec, rng *rand.Rand) error {
 	pick := rng.IntN(spec.Mix.total())
@@ -458,6 +458,42 @@ func (g *LoadGenerator) Snapshot() Summary {
 	s.TouchedIDs = slices.Clone(s.TouchedIDs)
 	s.Failures = slices.Clone(s.Failures)
 	return s
+}
+
+// Progress is how much a load has committed so far, without the key and
+// failure histories a Summary carries, so a poll that needs only the counts
+// costs the same however long the load has run.
+type Progress struct {
+	Inserts     int
+	Updates     int
+	Deletes     int
+	UniqueMoves int
+	KeyMoves    int
+	// Touched is how long Summary.TouchedIDs was: the first Touched keys of
+	// the final list are the rows written by mutations that committed
+	// before this progress was read.
+	Touched int
+}
+
+// Committed returns how many mutations of every kind committed.
+func (p Progress) Committed() int {
+	return p.Inserts + p.Updates + p.Deletes + p.UniqueMoves + p.KeyMoves
+}
+
+// Progress returns the counts accumulated so far and leaves the workers
+// running, under one acquisition of the lock the workers record under.
+func (g *LoadGenerator) Progress() Progress {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := &g.summary
+	return Progress{
+		Inserts:     s.Inserts,
+		Updates:     s.Updates,
+		Deletes:     s.Deletes,
+		UniqueMoves: s.UniqueMoves,
+		KeyMoves:    s.KeyMoves,
+		Touched:     len(s.TouchedIDs),
+	}
 }
 
 // Stop promptly cancels workers and waits a bounded time for completion. It

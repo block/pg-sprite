@@ -129,6 +129,16 @@ stop returns, and a statement held past its bound is a recorded failure rather t
 hang. The load generator in `internal/testutil` and the per-package writers follow this
 one convention.
 
+A load spec with `RecordFailures` keeps its workers writing through statements that
+fail for a reason other than an expected race, and lists each with its SQLSTATE and
+time, so a test measures what a swap does to an application's statements.
+`TouchedIDs` lists the key of every row a committed mutation wrote, in commit order
+(both keys of a unique-key swap or a key move), and `Progress` reads the counts and the
+list's length without copying it. The oracle's `ExcludeKeys` leaves keys out of both
+sides and both counts, so a test that marks the touched list at an instant compares
+exactly the rows last written before it. The [load proof](#the-load-proof) is built on
+these three.
+
 Every declarative-diff test proves, against two real databases: the derived
 plan applies cleanly; re-introspect + re-diff yields **empty**; a second
 derivation emits nothing (idempotency). Comparison is **semantic catalog
@@ -168,8 +178,9 @@ CI's `demo` job does this: `make demo-check` runs the demo tour
 database, asserting on `--json` fields and exit codes only, never on prose.
 The operator-run [corpus replay](../replay/README.md) (`make replay`) drives
 the same binary through a real project's schema-change history and is not
-a CI gate. *Binds:* Phase 2 (first executing command). *Source:* pgroll `make
-examples` CI job; pg_repack driving its CLI through `pg_regress`.
+a CI gate; so is the [load proof](#the-load-proof) (`make load-proof`), which
+drives it through a copy-and-swap under a concurrent write load. *Binds:*
+Phase 2 (first executing command). *Source:* pgroll `make examples` CI job; pg_repack driving its CLI through `pg_regress`.
 
 ### TM-9 — The operation must outlive the observer
 
@@ -204,6 +215,7 @@ capability no peer suite has.
 | `make demo-check` | The demo tour in check mode against the built `bin/pg-sprite` and the compose database — CI's artifact smoke test (TM-8). Needs Docker and `jq`. |
 | `make check-capabilities` | Regenerates the generated regions of [capabilities.md](capabilities.md) from `pkg/capabilities/capabilities.yaml` and fails if the committed page differs. CI runs it; no Docker. |
 | `make replay` / `make replay-refresh` / `make replay-down` | Corpus replay ([replay/README.md](../replay/README.md)): drive the built binary through a pinned real-project schema-change history, asserting each statement's typed outcome. Operator-run, not a CI gate. |
+| `make load-proof LOAD_PROOF_FREE_DISK=…` | The [load proof](#the-load-proof): the built binary carries a copy-and-swap over a large table while a concurrent workload writes it, and writes `results.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF=1`, which the target sets. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
 `StartPostgres` returns a connection URL (container, or `PG_DSN` when set)
@@ -242,6 +254,60 @@ The compose database and per-test containers connect as superuser, so
 this only matters when pointing `PG_DSN` at a shared server; tests whose
 requirements go further (replication attributes, extension ownership) skip
 themselves when the server refuses.
+
+### The load proof
+
+`make load-proof LOAD_PROOF_FREE_DISK=<free space>` builds `bin/pg-sprite` and runs
+`TestLoadProof` in [integration/loadproof](../integration/loadproof/loadproof_test.go).
+It seeds a workload table with `LOAD_PROOF_ROWS` rows (default 1,000,000), starts
+`LOAD_PROOF_WORKERS` × `LOAD_PROOF_RATE` mutations a second (default 8 × 100: inserts,
+updates and deletes, half the updates rewriting the out-of-line column, and
+`LOAD_PROOF_HOT` of the updates aimed at ten keys), and runs
+`pg-sprite migrate --copy-and-swap --keep-old --json` with
+`ALTER TABLE … ALTER COLUMN id TYPE bigint` while the load writes. The CLI calls the
+same `migrate.Run` an importer calls, so the proof covers that entry point with the
+options the CLI sets; an importer's own cancellation and resume are not part of it.
+
+A pass proves:
+
+- the binary exits 0 with `executed-via-copy-and-swap`;
+- the retained `_old` table and the live table agree row for row over every key the
+  load did not write after the mark, the last checkpoint poll before the cutover. The
+  mark must fall in the verify pass, after the run inserted, updated and deleted. Writes
+  during the drain and the swap are carried but not compared; `rows.excluded` in
+  `results.json` counts the keys left out;
+- the live table's catalog equals that of a table the statement changed natively;
+- every load failure is one the swap causes, when it can cause it: a lock timeout or a
+  client deadline between the mark and one statement deadline after the binary exits,
+  or a stale prepared statement (`0A000`) after the mark;
+- the load inserts again after the swap, so the identity sequence the swapped-in table
+  took over is past every key it holds.
+
+A run needs a server with `wal_level=logical`, a role that can create replication
+slots and publications, and disk for two full tables (the retained source and the
+live one) plus the WAL the slot retains. The workload row is about 10 KiB with its
+out-of-line column, so the default size is about 10 GiB a table. `LOAD_PROOF_FREE_DISK`
+has no default: it is the operator's statement of the free space on the data volume,
+and the preflight refuses the run when twice the table would not fit. A target other
+than this machine (`localhost`, a loopback address, or a Unix socket) is refused unless
+`LOAD_PROOF_ALLOW_REMOTE=1` says that server is disposable; overriding
+`LOAD_PROOF_DSN` also skips starting the compose database. The test refuses to start
+when `go test`'s `-timeout` would end it before the binary's own two-hour budget,
+because a test the deadline ends skips the cleanup that drops the run's replication
+slot; the target passes `3h`. The record, `results.json` in the package directory
+(`LOAD_PROOF_RESULTS` moves it), is written whether the run passed or failed: phase
+timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
+mutation, and the verdict.
+
+Copy-and-swap under the default load is not supported yet, and the default run ends in
+`execution-failed`. Uniform writes at 8 × 100 a second keep changing the chunks the live
+verify pass rereads, and the pass stops on a chunk that changed on every reread; with
+`LOAD_PROOF_HOT=0.2` the applier falls behind during the verify pass until the slot-lag
+ceiling stops the run. The defaults stay at this load so the engine fixes are proven by
+the same command. A light load passes:
+`make load-proof LOAD_PROOF_ROWS=20000 LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5 LOAD_PROOF_FREE_DISK=10GiB`.
+A load much lighter than that can commit no delete before the mark, and the run then
+fails as one that judged no stream.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
 
