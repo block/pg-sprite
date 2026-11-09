@@ -20,11 +20,12 @@
 // back, and the pass compares again and recopies what that comparison
 // finds, a bounded number of times. CheckLive is
 // the pass for a source written while the catch-up applies the stream to
-// the shadow: a chunk that differs in the sweep is read again once the
-// catch-up has confirmed past the position it was read at, and the two
-// reads are judged together — equal or the shadow at the earlier source
-// state is settled, movement on either side is another reread up to a
-// stated bound, stillness on both sides is the divergence; its repair
+// the shadow: a chunk that differs in the sweep is read row by row on both
+// sides, read again once the catch-up has confirmed past the position it
+// was read at, and the two reads are judged key by key — a key equal on
+// both sides or with the shadow at the earlier source state is settled,
+// movement on either side is another reread of the keys still moving up
+// to a stated bound, stillness on both sides is the divergence; its repair
 // holds the catch-up's flushes off the shadow through the catch-up's own
 // gate while it recopies, with SHARE MODE against any other writer, and
 // settles each repaired chunk the same way. Only a pass that found no

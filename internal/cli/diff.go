@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
@@ -34,11 +36,17 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
+		if err := refuseExtensionSchemasWithRowSecurity(c.ExtensionSchema); err != nil {
+			return err
+		}
 		return c.runRowSecurityDiff(ctx, out, rowSecurity, migrate.DefaultOptions().Budget.Brief)
 	}
 	ds, ok := file.Schema()
 	if !ok {
 		return fmt.Errorf("desired schema %s admitted no planner input", c.Desired)
+	}
+	if ds, err = ds.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
+		return fmt.Errorf("--extension-schema: %w", err)
 	}
 	logger.Debug("desired schema parsed", "table", ds.Table(), "statements", len(ds.Statements()))
 
@@ -58,6 +66,17 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"disposition", string(report.Disposition))
 
 	return c.writeDiffReport(out, report)
+}
+
+// refuseExtensionSchemasWithRowSecurity refuses --extension-schema for a
+// file that declares row security: that path does not resolve names
+// against extension schemas, and ignoring the flag would plan the file as
+// if it had not been passed.
+func refuseExtensionSchemasWithRowSecurity(schemas []string) error {
+	if len(schemas) == 0 {
+		return nil
+	}
+	return errors.New("--extension-schema is not supported for a file that declares row security; qualify extension names in the file instead, such as extensions.citext")
 }
 
 func (c *DiffCmd) writeDiffReport(out io.Writer, report plan.Report) error {
@@ -131,6 +150,14 @@ func writePlanText(out io.Writer, report plan.Report) error {
 	if tableMissing(report) {
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(fmt.Sprintf("table %s.%s does not exist; the plan is the full desired schema", report.Schema, report.Table))); err != nil {
 			return fmt.Errorf("write plan: %w", err)
+		}
+		// The create statements are the desired file's own, so their
+		// unqualified names resolve through the extension schemas only
+		// under the search path the create path runs them under.
+		if len(report.ExtensionSchemas) > 0 {
+			if _, err := fmt.Fprintf(out, "%s;\n", dbconn.SessionSearchPath(executor.AttemptSearchPath(report.Schema, report.ExtensionSchemas)...)); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
 		}
 	}
 	for _, ps := range report.Statements {

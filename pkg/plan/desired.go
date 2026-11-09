@@ -24,5 +24,5 @@ func RefuseDestructive(report *Report) {
 	// precedence as apply, including when routing already refused the report.
 	r := DestructiveChangeRefusal()
 	report.Reason, report.Class, report.Owner = r.Reason(), r.Class(), r.Owner()
-	report.Fingerprint = Fingerprint(report.Statements)
+	report.Fingerprint = report.ComputeFingerprint()
 }

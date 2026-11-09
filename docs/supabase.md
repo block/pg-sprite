@@ -241,6 +241,7 @@ Since Supavisor 2.10, clients over the pooler's connection limit wait about
 | Add an index to that table | Executed as `CREATE INDEX CONCURRENTLY`; RLS remained intact | [RLS preservation](../pkg/migrate/rls_integration_test.go) |
 | Diff desired SQL containing `DEFAULT auth.uid()` | Applied successfully; follow-up diff empty | [Desired schema](../integration/supabase/schema_test.go) |
 | Diff a column using `extensions.citext` | Applied with a schema-qualified type; follow-up diff empty | [Desired schema](../integration/supabase/schema_test.go) |
+| Diff a column written as unqualified `citext`, naming `extensions` as an extension schema | Planned as `ADD COLUMN email extensions.citext`; applied; follow-up diff empty | [Desired schema](../integration/supabase/schema_test.go) |
 | Defaults, nullability, widening `varchar`, and converting `varchar` to `text` | Executed without replacing the table; policies, grants, publication membership, data, and tenant API access preserved | [Native DDL matrix](../integration/supabase/ddl_matrix_test.go) |
 | Check and unique constraints, column removal, and a column rename run with `--force` (refused by default as app-breaking) | Catalog changes verified; tenant API access and existing protections preserved | [Native DDL matrix](../integration/supabase/ddl_matrix_test.go) |
 | Foreign key from an app table to `auth.users` | Statement workflow added and validated the constraint; orphan writes rejected | [Auth foreign key](../integration/supabase/failure_test.go) |
@@ -283,11 +284,15 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 - A new `public` table created from a file without RLS is open to the Data API
   as soon as it exists. Declare its RLS in the same file; see
   [create a new table with its RLS](#create-a-new-table-with-its-rls)
-- Qualify extension types and functions outside `public`, such as
-  `extensions.citext`. When pg-sprite inspects a desired schema file, it
-  uses a separate workspace with its own search path. In policy expressions,
-  qualify external types and functions even in `public`, such as
-  `public.doc_status`; the policy workspace does not search `public`
+- A desired schema file resolves names against the target schema and `public`
+  only. Supabase installs extensions such as `citext`, `uuid-ossp`, and
+  `pg_trgm` in the `extensions` schema, so either qualify them
+  (`extensions.citext`) or pass `--extension-schema extensions` to `diff` and
+  `migrate --desired` (Go: `DesiredSchema.WithExtensionSchemas`). The plan
+  still names each such object qualified. In policy expressions, qualify
+  external types and functions even in `public`, such as `public.doc_status`;
+  the policy workspace does not search `public`, and a file that declares row
+  security does not accept `--extension-schema`
 - Desired schema files plan foreign keys but do not apply them, and refuse
   a reference to another schema such as `auth.users`. Use the supported
   statement workflow where available; see [capabilities.md](capabilities.md)

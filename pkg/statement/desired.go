@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
@@ -37,6 +38,11 @@ var (
 	// ErrWrongIndexTarget is returned when an index targets a table other
 	// than the desired CREATE TABLE.
 	ErrWrongIndexTarget = errors.New("index must target the desired table")
+	// ErrExtensionSchema is returned by [DesiredSchema.WithExtensionSchemas]
+	// for a name that cannot hold extension objects the file resolves: an
+	// empty name, a duplicate, or a system schema PostgreSQL searches on its
+	// own terms.
+	ErrExtensionSchema = errors.New("invalid extension schema")
 )
 
 // DesiredSchema proves a desired-state schema file passed the set-level
@@ -49,10 +55,11 @@ var (
 // grammar), one statement per entry, held in execution order: the CREATE
 // TABLE first, the indexes in input order after it.
 type DesiredSchema struct {
-	table       string
-	foreignKeys bool
-	referenced  []string
-	statements  []Statement
+	table            string
+	foreignKeys      bool
+	referenced       []string
+	statements       []Statement
+	extensionSchemas []string
 }
 
 // Table returns the unqualified name of the single CREATE TABLE target.
@@ -73,6 +80,43 @@ func (ds DesiredSchema) ReferencedTables() []string { return slices.Clone(ds.ref
 // this order verbatim. The slice is a copy: mutating it cannot invalidate
 // the admission proof the value carries.
 func (ds DesiredSchema) Statements() []Statement { return slices.Clone(ds.statements) }
+
+// ExtensionSchemas returns the schemas, in search order, that the file's
+// unqualified type, function, and operator names also resolve against
+// after the target schema and public. It is empty unless
+// [DesiredSchema.WithExtensionSchemas] set it. The slice is a copy.
+func (ds DesiredSchema) ExtensionSchemas() []string { return slices.Clone(ds.extensionSchemas) }
+
+// WithExtensionSchemas returns a copy of ds whose unqualified type,
+// function, and operator names also resolve against schemas, in order,
+// after the target schema and public: `email citext` then finds the type
+// an extension installed in a schema such as extensions. The schemas only
+// widen what the file's names resolve to when pg-sprite builds and creates
+// the table; introspection still prints each such name qualified, so a
+// plan states exactly which object it means. Unqualified names are a
+// choice the caller makes explicitly, because with more schemas searched
+// an unqualified function call can resolve to a different overload.
+//
+// A name must be non-empty, listed once, and not a system schema
+// (pg_catalog, information_schema, or any pg_ name): pg_catalog is
+// searched first regardless, and the others never hold an extension the
+// file should name. An empty schemas clears the list.
+func (ds DesiredSchema) WithExtensionSchemas(schemas ...string) (DesiredSchema, error) {
+	seen := make(map[string]bool, len(schemas))
+	for _, schema := range schemas {
+		switch {
+		case schema == "":
+			return DesiredSchema{}, fmt.Errorf("%w: the name is empty", ErrExtensionSchema)
+		case seen[schema]:
+			return DesiredSchema{}, fmt.Errorf("%w: %q is listed twice", ErrExtensionSchema, schema)
+		case schema == "information_schema" || strings.HasPrefix(schema, "pg_"):
+			return DesiredSchema{}, fmt.Errorf("%w: %q is a system schema", ErrExtensionSchema, schema)
+		}
+		seen[schema] = true
+	}
+	ds.extensionSchemas = slices.Clone(schemas)
+	return ds, nil
+}
 
 // ParseDesired parses a desired-state schema file and admits only what the
 // declarative front door can execute on a scratch schema: one unqualified

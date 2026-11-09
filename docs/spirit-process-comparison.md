@@ -180,21 +180,25 @@ pg-sprite's gate ([verifier.go](../pkg/checksum/verifier.go), [live.go](../pkg/c
  | cut the chunk; digest source range, digest shadow range:     |
  |   count + sha256 over per-row sha256, key order, every       |
  |   column cast to the shadow's type (D7)                      |
- | live pass, chunk differs: write a WAL marker, keep its LSN   |
+ | live pass, chunk differs: read every row's key + hash on     |
+ |   both sides (derived digest must equal the server's, CO-1), |
+ |   write a WAL marker, keep its LSN                           |
  | COMMIT                                                       |
  +--------------------------------------------------------------+
    equal  -> chunk clean
    differ -> Check (offline run): a difference -> policy (CO-3)
           -> CheckLive (live run): wait until the catch-up confirms
-             past the marker, reread in a fresh snapshot, judge:
+             past the marker, reread the rows in a fresh snapshot,
+             judge every key:
                sides equal, or shadow == earlier source -> settled
-               source or shadow moved                    -> reread, up to
-                                                           Attempts, then
-                                                           unresolved (hot)
-               neither moved, still differ               -> divergence ->
-                                                           policy (CO-3)
-               catch-up never passed the marker          -> unresolved
-                                                           (lagging)
+               source or shadow moved                    -> hot
+               neither moved, still differ               -> diverged
+             then the chunk:
+               every key settled    -> settled
+               any key diverged     -> divergence -> policy (CO-3)
+               hot keys only        -> reread those keys, up to
+                                       Attempts, then unresolved (hot)
+               catch-up never passed the marker -> unresolved (lagging)
    clean pass, nothing repaired -> CleanWatermark (CO-2); through the
    complete watermark -> VerifiedShadow, which the cutover gate requires
 ```
@@ -229,12 +233,12 @@ repository under `pkg/checksum`). What transfers to pg-sprite, and what does not
 | Long-lived snapshot transactions pin undo | Same cost class on PostgreSQL (the xmin horizon holds back vacuum), so **short per-chunk snapshots, never a pass-long one**. |
 | Mismatch = observed; retry after the feed flushes; confirmed only after a drain | **Ported**, keyed on LSN rather than binlog flush: the read's own transaction writes a WAL marker (`pg_logical_emit_message`), and the chunk is reread once the catch-up has confirmed past it ([marker.go](../pkg/checksum/marker.go), [settle.go](../pkg/checksum/settle.go)). |
 | Lineage acceptance (target equals a witnessed source signature) | **Ported**: a reread whose shadow equals the earlier read's source is settled. The sole-writer premise holds: only the copier (`DO NOTHING`) and the applier write the shadow, both under the LK-1 session. |
-| Hot-range split toward a small range, bounded attempts | **Bounded attempts ported, split not**: a chunk that keeps moving is reread up to `LiveOptions.Attempts` (default 3) and then reported unresolved, cause `hot`. |
-| Row-level settlement against the stream's full after-image (`binlog_row_image=FULL`) | **Not ported.** pgoutput under `REPLICA IDENTITY DEFAULT` omits unchanged TOAST columns (D6, CO-8), so no full after-image is guaranteed; a chunk that cannot settle fails closed as unresolved. |
+| Hot-range split toward a small range, bounded attempts | **Narrowing and bounded attempts ported, split not**: each reread judges only the keys still moving, so the hot set shrinks on its own without cutting the chunk; a chunk with keys still hot after `LiveOptions.Attempts` rereads is reported unresolved, cause `hot`. |
+| Row-level settlement against the stream's full after-image (`binlog_row_image=FULL`) | **Ported key by key, from pg-sprite's own reads rather than the stream.** pgoutput under `REPLICA IDENTITY DEFAULT` omits unchanged TOAST columns (D6, CO-8), so no full after-image is guaranteed; instead a differing chunk's sweep read also fetches every row's key and hash on both sides (a companion statement to the digest, [rows.go](../pkg/checksum/rows.go)), and the reread judges each key against those earlier rows ([judge.go](../pkg/checksum/judge.go)). A key that neither side moved yet still differs is a divergence; a chunk whose keys cannot all settle fails closed as unresolved. |
 | Repair does not make the pass clean; zero recopies and zero deferred ranges to cut over | **Already** CO-1 / CO-2, enforced in the `CleanWatermark` / `VerifiedShadow` constructors. |
 | Cross-chunk PK-move evasion within one pass | The change event carries the old key, and the applier judges the deletion and the new image against the watermark separately (CO-4); a key moved across a chunk boundary between a chunk's two reads is left to the next pass ([Live verification](copy-and-swap-design.md#live-verification)). |
 | `CRC32` XOR + count digest, collision caveat | pg-sprite's digest is the row count plus a SHA-256 over the key-ordered per-row SHA-256s ([digest.go](../pkg/checksum/digest.go), [D7](copy-and-swap-design.md#d7--checksum-through-the-destination-types)): order-sensitive and collision-resistant. SHA-256 rather than `md5` because an OpenSSL in FIPS mode refuses MD5. |
-| Ten unresolved passes fail closed | **Ported per chunk**: `LiveOptions.Attempts` and `SettleWait` bound each chunk, and an unsettled chunk is a typed `UnresolvedError` (`ErrVerificationUnresolved`, cause `hot` or `lagging`); the caller decides whether to run the pass again ([live.go](../pkg/checksum/live.go)). |
+| Ten unresolved passes fail closed | **Ported per chunk**: `LiveOptions.Attempts` and `SettleWait` bound each chunk, and an unsettled chunk is a typed `UnresolvedError` (`ErrVerificationUnresolved`, cause `hot` or `lagging`, with `Keys` counting the rows still moving at the last reread); the caller decides whether to run the pass again ([live.go](../pkg/checksum/live.go)). |
 
 Net: pg-sprite's checksum was never going to take a write-blocking lock, so "lockless" is the
 starting point, not a destination. What transferred is the *verification protocol under live

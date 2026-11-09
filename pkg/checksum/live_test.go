@@ -69,42 +69,10 @@ func TestLiveOptionsRequireTheFlushGateOnlyForRepair(t *testing.T) {
 	require.NoError(t, with.validate(DivergenceRepair))
 }
 
-// Two reads of a differing chunk, the second taken after the catch-up
-// confirmed past the first, are judged together: agreement or the shadow
-// reaching the first read's source settles the chunk, movement on either
-// side means another read, and stillness on both sides with a difference
-// is the divergence.
-func TestJudgeVerdicts(t *testing.T) {
-	chunk, err := copier.NewChunk(1, 1000)
-	require.NoError(t, err)
-	a := Digest{Rows: 1000, Hash: "a"}
-	b := Digest{Rows: 1000, Hash: "b"}
-	c := Digest{Rows: 999, Hash: "c"}
-	d := Digest{Rows: 1000, Hash: "d"}
-	read := func(source, shadow Digest) observation {
-		return observation{chunk: chunk, source: source, shadow: shadow}
-	}
-	cases := map[string]struct {
-		prior, now observation
-		want       verdict
-	}{
-		"shadow caught up to the moved source":     {read(a, b), read(c, c), verdictEqual},
-		"shadow reached what the sweep saw":        {read(a, b), read(c, a), verdictSettled},
-		"source moved and shadow still behind":     {read(a, b), read(c, b), verdictHot},
-		"source still and shadow moved elsewhere":  {read(a, b), read(a, d), verdictHot},
-		"both moved and still apart":               {read(a, b), read(c, d), verdictHot},
-		"both still across the confirmed position": {read(a, b), read(a, b), verdictDiverged},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, judge(tc.prior, tc.now))
-		})
-	}
-}
-
 // An unsettled chunk unwraps to the sentinel and says why in words an
 // operator can act on: which position the catch-up was short of, or how
-// many rereads the chunk outran, and what to do next in either case.
+// many rereads the chunk outran and how many keys were still moving, and
+// what to do next in either case.
 func TestUnresolvedErrorWording(t *testing.T) {
 	chunk, err := copier.NewChunk(1001, 2000)
 	require.NoError(t, err)
@@ -112,9 +80,12 @@ func TestUnresolvedErrorWording(t *testing.T) {
 	require.ErrorIs(t, lagging, ErrVerificationUnresolved)
 	assert.EqualError(t, lagging, "chunk [1001, 2000] read at 0/1000000 is unsettled: the catch-up has confirmed only 0/800000 after 1 reread; run the pass again once the catch-up has confirmed past the read")
 
-	hot := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 3, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 998}, Captured: 0x1000000}
+	hot := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 3, Keys: 2, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 998}, Captured: 0x1000000}
 	require.ErrorIs(t, hot, ErrVerificationUnresolved)
-	assert.EqualError(t, hot, "chunk [1001, 2000] changed on every one of 3 rereads: source 1000 rows, shadow 998 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
+	assert.EqualError(t, hot, "chunk [1001, 2000] kept changing through 3 rereads: 2 keys still changing, source 1000 rows, shadow 998 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
+
+	one := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 1, Keys: 1, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 1000}, Captured: 0x1000000}
+	assert.EqualError(t, one, "chunk [1001, 2000] kept changing through 1 reread: 1 key still changing, source 1000 rows, shadow 1000 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
 }
 
 // The wall-clock sleep returns early, with the context's error, when the

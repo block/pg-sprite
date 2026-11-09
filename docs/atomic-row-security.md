@@ -64,7 +64,9 @@ privileges report permanent `row-security-refused` outcomes, preserving the unde
 cause. A reviewed SQL mismatch reports permanent `row-security-plan-changed`: no target
 RLS statements ran; preview again and review the new SQL before retrying. This is separate
 from declaration and privilege refusals, which include unresolved policy roles and qualified helper functions during
-scratch inspection. Caller cancellation is kept separate from budget exhaustion.
+scratch inspection, and policies that read a table whose policies read the target
+back, checked under the target lock (see
+[declarative row security](declarative-row-security.md)). Caller cancellation is kept separate from budget exhaustion.
 
 The caller needs table-owner privileges and permission to create the temporary
 scratch schema. Both privileges are checked before locking and checked again under
@@ -77,7 +79,9 @@ administration of those dependencies is not serialized by the table lock.
 
 - **RS-1:** Read the live baseline only after taking the target lock; never accept a
   caller-supplied diff as execution authority. Verify ownership before and after locking.
-  Refuse mixed changes and unsupported table shapes before live DDL.
+  Refuse table changes, including mixed changes, and unsupported table shapes before
+  live DDL. A table change whose row security matches runs through
+  `migrate.RunDesiredWithRowSecurity` instead, which never writes row security.
 - **RS-2:** All policy/settings changes and the final catalog comparison share one
   transaction. Fault injection after live DDL must prove the original state survives.
 - **RS-3:** Bound lock waits, individual statements, and the entire attempt. Cancellation

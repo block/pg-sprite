@@ -130,7 +130,7 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	if budgetErr := asBudgetError(err, b); budgetErr != nil {
 		return budgetErr
 	}
-	if errors.Is(err, statement.ErrPolicyRelationDependency) || errors.Is(err, statement.ErrRowSecurityDeclaration) {
+	if isRowSecurityAdmissionError(err) {
 		return fmt.Errorf("%w: %w", ErrRowSecurityRefused, err)
 	}
 	var pgErr *pgconn.PgError
@@ -195,6 +195,15 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		report.Statements = append(report.Statements, security...)
 
 	}
+	// Checked under the target lock and before the review comparison, so a
+	// preview refuses the same policies an execution would. Creating a table
+	// needs no such check: no existing policy or view can read a table that
+	// does not exist yet.
+	if len(report.Statements) > 0 {
+		if err := refusePolicyRecursion(ctx, tx, schema, desired); err != nil {
+			return RowSecurityReport{}, err
+		}
+	}
 	// INV: RS-5 — compare the complete ordered sequence under lock before target DDL.
 	if mode == rowSecurityReviewed && !slices.Equal(reviewed, report.Statements) {
 		return RowSecurityReport{}, fmt.Errorf("review row security on %s: %w", target, ErrRowSecurityPlanChanged)
@@ -238,15 +247,19 @@ func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 	if err != nil {
 		return err
 	}
-	wanted.RowSecurity = schemadiff.RowSecurity{}
-	changes, err := schemadiff.Diff(schema, table, wanted)
+	definition := wanted
+	definition.RowSecurity = schemadiff.RowSecurity{}
+	changes, err := schemadiff.Diff(schema, table, definition)
 	if err != nil {
 		return err
 	}
-	if len(changes) != 0 {
-		return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
+	if len(changes) == 0 {
+		return nil
 	}
-	return nil
+	if _, err := schemadiff.DiffWithRowSecurity(schema, live, wanted); errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
+		return fmt.Errorf("this executor changes only row security; run the table change with migrate.RunDesiredWithRowSecurity, which leaves the row security as it is: %w", err)
+	}
+	return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
 }
 
 // rowSecurityTableShape returns m without its row security or the facts
@@ -279,4 +292,22 @@ func withoutExportOnlyRefusals(live schemadiff.Model) schemadiff.Model {
 		}
 	}
 	return table
+}
+
+// isRowSecurityAdmissionError reports whether err is a desired file's
+// row-security declaration refused at admission: a property of the file, so
+// retrying cannot change it.
+func isRowSecurityAdmissionError(err error) bool {
+	for _, cause := range []error{
+		statement.ErrPolicyRelationDependency,
+		statement.ErrPolicyReadsOwnTable,
+		statement.ErrPolicyReadsCatalog,
+		statement.ErrPolicyLocksRows,
+		statement.ErrRowSecurityDeclaration,
+	} {
+		if errors.Is(err, cause) {
+			return true
+		}
+	}
+	return false
 }

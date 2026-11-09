@@ -206,12 +206,14 @@ var migrateClaims = map[string]migrateClaim{
 
 // declarativeOnlyClaims are the rows whose migrate door is the desired-state
 // path (migrate --desired), not an imperative statement; their execution is
-// covered by the desired-state integration tests in pkg/migrate.
+// covered by the desired-state integration tests in pkg/migrate,
+// pkg/schemadiff, and internal/cli.
 var declarativeOnlyClaims = []string{
 	"plain-tables-their-indexes",
 	"greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one",
 	"declarative-row-security-library",
 	"declarative-not-valid-constraint",
+	"extension-objects-named-unqualified-in-a-desired-file",
 }
 
 // Every capability row that publishes `front_doors.migrate: supported` must
