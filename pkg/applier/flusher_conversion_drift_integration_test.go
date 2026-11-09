@@ -41,6 +41,7 @@ func TestFlushRefusesWhenAConversionResolvesDifferentlyThanAtTheBuild(t *testing
 	))
 
 	require.ErrorIs(t, err, applier.ErrInvariantViolation)
+	assert.ErrorIs(t, err, applier.ErrConversionDrift, "the breach names itself as drift")
 	assert.Equal(t, applier.Result{}, result, "nothing was written")
 	price5, _ := f.text(t, p.shadow.ShadowTable(), "price", 5)
 	assert.Equal(t, "525", *price5, "the shadow still holds the copied value, not zero cents from the planted operator")

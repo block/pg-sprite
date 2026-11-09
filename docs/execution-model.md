@@ -144,6 +144,7 @@ failed (budget-lock-exceeded)
   statement: ALTER TABLE public.users ALTER COLUMN email SET NOT NULL
   detail:    sequence step 3 of 4 failed; the 2 committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes
   failed at: step 3: ALTER TABLE "public"."users" ALTER COLUMN "email" SET NOT NULL
+  server:    canceling statement due to lock timeout (SQLSTATE 55P03)
   committed before the failure (their state remains):
     1. ALTER TABLE "public"."users" ADD CONSTRAINT "users_email_not_null_check" CHECK ("email" IS NOT NULL) NOT VALID
     2. ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_not_null_check"
@@ -157,6 +158,8 @@ everything after was never attempted:
 {
   "outcome": "failed",
   "code": "budget-lock-exceeded",
+  "sqlstate": "55P03",
+  "server_error": "canceling statement due to lock timeout",
   "failed_step": 3,
   "failed_step_sql": "ALTER TABLE \"public\".\"users\" ALTER COLUMN \"email\" SET NOT NULL",
   "statement": "ALTER TABLE public.users ALTER COLUMN email SET NOT NULL",
@@ -170,7 +173,12 @@ everything after was never attempted:
 ```
 
 Automation branches on `code` — the stable outcome vocabulary — never on
-prose, which is free to change. Reading the three surfaces:
+prose, which is free to change. When PostgreSQL itself rejected the step, the
+verdict also carries its `sqlstate`, which automation can branch on too, and
+`server_error`, the error's primary message for display. A lock budget ends
+in the server's lock timeout, so the verdict above carries `55P03`; a failure
+pg-sprite raised itself, such as a created table whose names do not match,
+carries neither. Reading the three surfaces:
 
 - **Exit codes** separate the cases: an execution failure exits 1 (as here);
   a refusal — where nothing committed, even if an optimistic attempt ran and
