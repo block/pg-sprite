@@ -206,6 +206,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// The acknowledgements are rejected before the policy is validated, so
 	// a caller that left two set gets the first one's sentinel rather than
 	// the validation error for the pair.
+	// INV: RF-12 — desired-state execution takes no acknowledgement.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
