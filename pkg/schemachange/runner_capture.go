@@ -114,10 +114,13 @@ func captureFailed(err error) bool {
 // captureOutcome folds what the fill and the capture's end returned into
 // one error, with the catch-up's failure first when it has one: the fill
 // then stopped on the capture's cancellation, which is not a failure of
-// its own and is not reported as one.
-func captureOutcome(c *capture, fillErr, endErr error) error {
+// its own and is not reported as one. That holds only while the run's own
+// context, ctx, is still live — when ctx ended, the capture stopped on
+// the same stop the fill did, and what the fill was doing when it stopped
+// is what the run reports.
+func captureOutcome(ctx context.Context, c *capture, fillErr, endErr error) error {
 	failure := c.failure()
-	if failure != nil && errors.Is(fillErr, context.Canceled) {
+	if failure != nil && ctx.Err() == nil && errors.Is(fillErr, context.Canceled) {
 		fillErr = nil
 	}
 	return errors.Join(failure, fillErr, endErr)
