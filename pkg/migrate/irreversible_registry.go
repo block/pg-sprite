@@ -16,7 +16,8 @@ import (
 // acknowledgement names the resolved SCHEMA.TABLE, so one left on a script
 // cannot reach another table. Desired-state execution takes none of them:
 // it refuses a plan holding a destructive statement whole, and rejects
-// every acknowledgement before any database work. The destructive operation
+// every acknowledgement before any database work, and
+// Options.WithoutAcknowledgements clears the same set. The destructive operation
 // shapes are not listed here but derived from the planner, the one answer
 // both destructive gates use. TestIrreversibleOperationRegistryIsComplete
 // fails when an acknowledgement, a string field on Options or
@@ -42,24 +43,54 @@ func ackKinds() []ackKind {
 	return []ackKind{ackForce, ackAcceptBlocking, ackAllowDestructive, ackRestart, ackBlockWrites}
 }
 
-// value is the acknowledgement as opts carries it; empty means not given.
-// The bool is false only for a kind this switch does not name, which the
+// field is the Options field that carries the acknowledgement: the one
+// place a kind is tied to a field, so reading and clearing it cannot
+// disagree. It is nil only for a kind this switch does not name, which the
 // registry's completeness test rejects.
-func (a ackKind) value(opts Options) (string, bool) {
+func (a ackKind) field(opts *Options) *string {
 	switch a {
 	case ackForce:
-		return opts.Force, true
+		return &opts.Force
 	case ackAcceptBlocking:
-		return opts.AcceptBlocking, true
+		return &opts.AcceptBlocking
 	case ackAllowDestructive:
-		return opts.AllowDestructive, true
+		return &opts.AllowDestructive
 	case ackRestart:
-		return opts.CopySwap.Restart, true
+		return &opts.CopySwap.Restart
 	case ackBlockWrites:
-		return opts.CopySwap.BlockWrites, true
+		return &opts.CopySwap.BlockWrites
 	default:
+		return nil
+	}
+}
+
+// value is the acknowledgement as opts carries it; empty means not given.
+// The bool is false only for a kind field does not name.
+func (a ackKind) value(opts Options) (string, bool) {
+	f := a.field(&opts)
+	if f == nil {
 		return "", false
 	}
+	return *f, true
+}
+
+// WithoutAcknowledgements returns a copy of o with every typed
+// acknowledgement cleared — Force, AcceptBlocking, AllowDestructive,
+// CopySwap.Restart, CopySwap.BlockWrites, and any added later — and every
+// other field unchanged. It is the desired-state front door's view of a
+// policy: an adapter that builds one Options for both front doors passes
+// [RunDesired] o.WithoutAcknowledgements(), which RunDesired never rejects
+// for an acknowledgement. o itself is not modified. The view drops an
+// operator's consent without reporting it: an adapter that maps an operator
+// approval onto an acknowledgement reads it from the operator's input, not
+// from the view, and the desired-state door's own refusals still apply.
+func (o Options) WithoutAcknowledgements() Options {
+	for _, a := range ackKinds() {
+		if f := a.field(&o); f != nil {
+			*f = ""
+		}
+	}
+	return o
 }
 
 // desiredErr is the sentinel RunDesired returns when the acknowledgement

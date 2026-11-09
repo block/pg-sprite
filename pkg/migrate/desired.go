@@ -197,6 +197,7 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // wrote, and the declarative front door runs statements the plan derived. A
 // destructive, blocking, force-worthy, restarted or offline change belongs
 // on the imperative front door where the operator states it explicitly.
+// [Options.WithoutAcknowledgements] is the policy with all of them cleared.
 //
 // Every planned statement runs back through [Run], so Run's note on the
 // pool's search_path applies to the pool passed here.
