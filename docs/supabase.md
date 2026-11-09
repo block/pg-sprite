@@ -206,8 +206,8 @@ also exercised preview, apply, convergence, and atomic rollback as the owning
 A disposable local `supabase/postgres:17.6.1.136` database (PostgreSQL 17.6)
 was exercised as its non-superuser `postgres` role. This is the actual
 Supabase database image, not an ordinary PostgreSQL image with renamed roles.
-An additional local services test uses PostgREST 14.17, Supavisor 2.9.12
-and Auth 2.196.0. The Realtime test adds Realtime 2.134.10. It is not a
+An additional local services test uses PostgREST 14.18, Supavisor 2.10.0
+and Auth 2.197.0. The Realtime test adds Realtime 2.153.5. It is not a
 hosted-project or complete Supabase stack test.
 
 | Experiment | Result | Test |
@@ -374,7 +374,7 @@ Realtime subscriptions, with tenant isolation intact.
 
 Each run recreates its disposable table and restarts only the fixture's Realtime
 service **before** opening subscriptions. Realtime [caches publication table
-identities](https://github.com/supabase/realtime/blob/v2.134.10/lib/extensions/postgres_cdc_rls/subscription_manager.ex);
+identities](https://github.com/supabase/realtime/blob/v2.153.5/lib/extensions/postgres_cdc_rls/subscription_manager.ex);
 recreating a table between runs otherwise leaves stale subscription state until
 its periodic refresh. Readiness excludes the temporary HTTP server used during
 seeding. There are no service restarts or socket reconnections during the schema

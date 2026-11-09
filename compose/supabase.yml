@@ -18,7 +18,7 @@ services:
       timeout: 5s
       retries: 30
   rest:
-    image: postgrest/postgrest:v14.17@sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c
+    image: postgrest/postgrest:v14.18@sha256:c7cd7e265a85b05248abf53f4473fcec7e327c282d0bd0cf60f1551996d09fcf
     profiles: [services]
     depends_on:
       postgres:
@@ -36,7 +36,7 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
-    image: supabase/supavisor:2.9.12@sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2
+    image: supabase/supavisor:2.10.0@sha256:df3a6acf3b81f261d6e861c5c7ec38767bb2564a47adc6a050286910ea325158
     profiles: [services]
     depends_on:
       postgres:
@@ -72,7 +72,7 @@ services:
       - -c
       - '/app/bin/migrate && /app/bin/supavisor eval "$$(cat /etc/pooler/pooler.exs)" && /app/bin/server'
   auth:
-    image: supabase/gotrue:v2.196.0@sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232
+    image: supabase/gotrue:v2.197.0@sha256:1736a63078f5922b198c4cbe50f80ab9a2d3b54fe8b7b6cfb2e9dc5dbbc12c6b
     profiles: [services]
     depends_on:
       postgres:
@@ -89,7 +89,7 @@ services:
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_DISABLE_SIGNUP: "true"
   realtime:
-    image: supabase/realtime:v2.134.10@sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03
+    image: supabase/realtime:v2.153.5@sha256:4966dd33d9c124ce02665a2d2cc9293caf9632e0dc011874c8c9d87992928ba3
     profiles: [realtime]
     # The image briefly starts an HTTP server while seeding. Mark only the final
     # server phase so the test cannot subscribe to that temporary process.
