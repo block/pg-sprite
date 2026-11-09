@@ -564,8 +564,11 @@ base type, element, and collation; a collation's whole catalog row but its oid a
 locale and ICU rules included in whichever columns the server version keeps them —
 rendered from the catalog alone, never through a deparser. Every guarded transaction of the
 copier, the verifier, and the applier, and the cutover's drain, recomputes it before it reads
-or writes and refuses when it differs (`copy-conversion-drift` from the copier,
-`ErrInvariantViolation` from the others). The check and the statements that evaluate the
+or writes and refuses when it differs: each wraps the one `chunksql.ErrConversionDrift`
+sentinel — the copier as its `copy-conversion-drift`, the verifier and the applier as
+`ErrInvariantViolation` — and `Runner.Run` re-mints all three as the shadow cause
+`copy-conversion-drift`, so a run stopped by a changed catalog reads the same cause whether
+a chunk, a verifying read, or a catch-up flush noticed it. The check and the statements that evaluate the
 expressions are separate statements, so the copier's chunk, the applier's flush, the verifier's
 repair, and the drain recompute it once more after their writes and before they commit. Each
 of those write transactions is `READ COMMITTED` whatever the server or role configures as
@@ -1531,7 +1534,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
   (`rejectDesiredAcks`, which rejects all five acknowledgements with their sentinels;
-  `TestIrreversibleOperationRegistryIsComplete`), `pkg/planner` (`destructiveOp`, which decides every
+  `TestIrreversibleOperationRegistryIsComplete`; `TestIrreversibleOperationsAreGated`, which
+  runs every registry entry against a real server without and with a mismatched
+  acknowledgement; `TestEveryAcknowledgementFlagMapsToARegistryEntry`, which ties each CLI
+  acknowledgement flag to exactly its own field and sentinel), `pkg/planner` (`destructiveOp`, which decides every
   shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
   `TestEveryOpKindIsClassifiedForDestructiveness`,
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
@@ -1597,7 +1603,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestIrreversibleOperationRegistryIsComplete` for the registry's shape and the
   desired-state rejections, `TestIrreversibleOperationsAreGated` for each entry's refusal
   and wrong-target usage error against real PostgreSQL with the table, checkpoint, and write
-  path unchanged, and `TestEveryAcknowledgementFlagMapsToARegistryEntry` for the CLI flags.
+  path unchanged, and a restart's unrecorded leftover left standing, and
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for each CLI flag reaching exactly its
+  own field and sentinel.
   *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
 
 ## Orchestration / control-plane (OC)

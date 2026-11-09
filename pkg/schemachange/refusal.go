@@ -226,9 +226,10 @@ const (
 	// operator, type, or collation under a name an expression spells was
 	// created, replaced, or dropped in a schema on the copy's search_path
 	// after the shadow build. It re-mints the copier's
-	// copy-conversion-drift, and a resume mints it for a row whose proof
-	// differs from the one the inspection re-derives in its conversion
-	// fingerprint alone.
+	// copy-conversion-drift and the drift the verifier's reads and the
+	// flusher's writes refuse on during verification and catch-up, and a
+	// resume mints it for a row whose proof differs from the one the
+	// inspection re-derives in its conversion fingerprint alone.
 	CauseCopyConversionDrift RefusalCause = "copy-conversion-drift"
 	// CauseCopyFrontierBroken means the copier's own accounting of the key
 	// space broke (CO-4): a chunk was cut or claimed out of order, or the

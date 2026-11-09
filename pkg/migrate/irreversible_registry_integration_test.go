@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -34,6 +36,26 @@ type irreversibleScenario struct {
 	// it keeps the subtest on the entry's gate, not on an earlier one that
 	// refuses under the same reason.
 	cause verdict.Cause
+	// mismatch asserts the usage error is the entry's own acknowledgement
+	// check rejecting the other table, not any error from elsewhere.
+	mismatch func(t *testing.T, err error)
+	// leftover marks an entry whose refusal needs a stopped run's leftover
+	// to protect: the scenario plants a shadow no checkpoint records, and
+	// without the acknowledgement the run is refused and leaves it standing.
+	leftover bool
+}
+
+// mismatchIs and mismatchNamed pin a mismatched acknowledgement's usage
+// error to its sentinel, or to the message of an acknowledgement that has
+// none.
+func mismatchIs(want error) func(*testing.T, error) {
+	return func(t *testing.T, err error) { assert.ErrorIs(t, err, want) }
+}
+
+func mismatchNamed(ack string) func(*testing.T, error) {
+	return func(t *testing.T, err error) {
+		assert.ErrorContains(t, err, "the "+ack+" acknowledgement must name the resolved target table")
+	}
 }
 
 // irreversibleScenarios maps every registry key to its scenario. Each SQL
@@ -56,16 +78,19 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 	}
 	return map[string]irreversibleScenario{
 		"shape: " + statement.Op{Kind: statement.OpDropColumn}.Describe(): {
-			sql:     `ALTER TABLE {schema}.orders DROP COLUMN note`,
-			options: allowDestructive,
+			sql:      `ALTER TABLE {schema}.orders DROP COLUMN note`,
+			options:  allowDestructive,
+			mismatch: mismatchIs(ErrAllowDestructiveMismatch),
 		},
 		"shape: " + statement.Op{Kind: statement.OpDropConstraint}.Describe(): {
-			sql:     `ALTER TABLE {schema}.orders DROP CONSTRAINT orders_qty_positive`,
-			options: allowDestructive,
+			sql:      `ALTER TABLE {schema}.orders DROP CONSTRAINT orders_qty_positive`,
+			options:  allowDestructive,
+			mismatch: mismatchIs(ErrAllowDestructiveMismatch),
 		},
 		"shape: " + statement.Op{Kind: statement.OpDropNotNull}.Describe(): {
-			sql:     `ALTER TABLE {schema}.orders ALTER COLUMN note DROP NOT NULL`,
-			options: allowDestructive,
+			sql:      `ALTER TABLE {schema}.orders ALTER COLUMN note DROP NOT NULL`,
+			options:  allowDestructive,
+			mismatch: mismatchIs(ErrAllowDestructiveMismatch),
 		},
 		// The blocking drop is accepted, so only the loss is left to
 		// acknowledge.
@@ -77,6 +102,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.AllowDestructive = ack
 				return opts
 			},
+			mismatch: mismatchIs(ErrAllowDestructiveMismatch),
 		},
 		// The loss is acknowledged, so only the lock is left to accept.
 		"blocking DROP INDEX": {
@@ -87,6 +113,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.AllowDestructive = table
 				return opts
 			},
+			mismatch: mismatchIs(ErrAcceptBlockingMismatch),
 		},
 		"blocking REINDEX": {
 			sql: `REINDEX INDEX {schema}.orders_qty_idx`,
@@ -95,6 +122,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.AcceptBlocking = ack
 				return opts
 			},
+			mismatch: mismatchIs(ErrAcceptBlockingMismatch),
 		},
 		// A column added with an inline UNIQUE builds its index under the
 		// table's lock; the planner has no safer sequence for it.
@@ -105,9 +133,12 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.Force = ack
 				return opts
 			},
+			mismatch: mismatchNamed("force"),
 		},
 		// Writes are blocked, so the server needs no logical decoding and
-		// only the restart is left to acknowledge.
+		// only the restart is left to acknowledge. Without it a run resumes;
+		// with a shadow no checkpoint records, it is refused and the shadow
+		// stays, which is what the acknowledgement would discard.
 		"copy-and-swap restart": {
 			sql: `ALTER TABLE {schema}.orders ALTER COLUMN qty TYPE bigint`,
 			options: func(cfg dbconn.Config, table, ack string) Options {
@@ -116,6 +147,8 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.CopySwap.Restart = ack
 				return opts
 			},
+			mismatch: mismatchNamed("restart"),
+			leftover: true,
 		},
 		// The test server runs with wal_level=replica, so without blocked
 		// writes the route has no way to carry the table's changes, and the
@@ -127,28 +160,27 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.CopySwap.BlockWrites = ack
 				return opts
 			},
-			cause: verdict.Cause(preflight.CopySwapCauseLogicalDecodingUnavailable),
+			cause:    verdict.Cause(preflight.CopySwapCauseLogicalDecodingUnavailable),
+			mismatch: mismatchNamed("block-writes"),
 		},
 	}
 }
 
-// Every irreversible operation is refused, with the registry's reason,
-// when its acknowledgement is missing, and is a usage error when the
-// acknowledgement names another table. Either way nothing executes: the
-// table's columns, constraints, indexes, and index storage are unchanged,
-// the engine wrote no checkpoint, and the table still takes writes. A new
-// registry entry fails here until it has a scenario.
+// Every operation in the acknowledgement registry is refused, with the
+// registry's reason, when its acknowledgement is missing, and is a usage
+// error from its own acknowledgement check when the acknowledgement names
+// another table. Either way nothing executes: the table's columns,
+// constraints, indexes, and index storage are unchanged, the engine wrote
+// no checkpoint, and the table still takes writes. A new registry entry
+// fails here until it has a scenario. The registry covers what a typed
+// acknowledgement lifts on the imperative front door; irreversible engine
+// steps no acknowledgement gates, such as reaping an orphaned slot, are
+// outside it and tested where they live.
 func TestIrreversibleOperationsAreGated(t *testing.T) {
 	// A server of its own pinned to wal_level=replica: the block-writes
 	// entry is refused only where the route cannot stream, and a shared
 	// server (PG_DSN, a hosted fixture) may run with logical decoding on.
 	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=replica")
-	// The pool is sized for the route: a smaller one is refused before any
-	// gate runs, as a failure rather than a verdict.
-	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConnsFloor: CopySwapMinConns(copier.Options{})}
-	pool, err := dbconn.NewPool(t.Context(), cfg)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
 
 	scenarios := irreversibleScenarios()
 	ops := irreversibleOps()
@@ -164,10 +196,11 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 		t.Run(op.key, func(t *testing.T) {
 			sc, ok := scenarios[op.key]
 			require.True(t, ok, "registry entry %q has no behaviour scenario", op.key)
+			assertScenarioHasItsShape(t, op.key, sc.sql)
 
 			if op.refusal != "" {
 				t.Run("refused without the acknowledgement", func(t *testing.T) {
-					schema, before := newIrreversibleFixture(t, pool)
+					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL)
 					table := schema + ".orders"
 					v, err := Run(t.Context(), pool, parseIrreversible(t, sc.sql, schema), sc.options(cfg, table, ""))
 					require.NoError(t, err, "a refusal is a verdict, not an error")
@@ -178,11 +211,32 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 				})
 			}
 
+			if sc.leftover {
+				t.Run("a stopped run's leftover stays without the acknowledgement", func(t *testing.T) {
+					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL)
+					table := schema + ".orders"
+					shadow := pgx.Identifier{schema, schemachange.ShadowName(schema, "orders")}.Sanitize()
+					_, err := pool.Exec(t.Context(), `CREATE TABLE `+shadow+` (id bigint PRIMARY KEY)`)
+					require.NoError(t, err)
+
+					v, err := Run(t.Context(), pool, parseIrreversible(t, sc.sql, schema), sc.options(cfg, table, ""))
+					require.NoError(t, err, "a refusal is a verdict, not an error")
+					assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+					assert.Equal(t, verdict.Cause(schemachange.CauseShadowUnrecorded), v.Cause,
+						"a shadow no checkpoint records is refused, not discarded")
+					var stands bool
+					require.NoError(t, pool.QueryRow(t.Context(), `SELECT to_regclass($1) IS NOT NULL`, shadow).Scan(&stands))
+					assert.True(t, stands, "the leftover shadow is still there")
+					assert.Equal(t, before, tableCatalogState(t, pool, schema), "the table's catalog is unchanged")
+				})
+			}
+
 			t.Run("a usage error when the acknowledgement names another table", func(t *testing.T) {
-				schema, before := newIrreversibleFixture(t, pool)
+				cfg, pool, schema, before := newIrreversibleFixture(t, serverURL)
 				table := schema + ".orders"
 				v, err := Run(t.Context(), pool, parseIrreversible(t, sc.sql, schema), sc.options(cfg, table, schema+".other"))
 				require.Error(t, err)
+				sc.mismatch(t, err)
 				assert.Equal(t, verdict.Verdict{}, v, "an error before a verdict carries a zero verdict")
 				assertNothingExecuted(t, pool, schema, before)
 			})
@@ -190,12 +244,38 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 	}
 }
 
-// newIrreversibleFixture creates the orders table in a schema of its own —
-// a column, a CHECK constraint, a NOT NULL, and an index for each entry to
-// discard, and rows a copy would carry — and returns the schema with the
-// table's catalog state.
-func newIrreversibleFixture(t *testing.T, pool *pgxpool.Pool) (string, string) {
+// assertScenarioHasItsShape requires a scenario filed under a destructive
+// shape to run a statement of that shape, so a statement of another shape,
+// refused under the same reason, cannot stand in as its evidence.
+func assertScenarioHasItsShape(t *testing.T, key, sql string) {
 	t.Helper()
+	shape, ok := strings.CutPrefix(key, "shape: ")
+	if !ok {
+		return
+	}
+	ops, err := statement.ParseOps(strings.ReplaceAll(sql, "{schema}", "app"))
+	require.NoError(t, err)
+	shapes := make([]string, 0, len(ops))
+	for _, op := range ops {
+		shapes = append(shapes, statement.Op{Kind: op.Kind}.Describe())
+	}
+	require.Contains(t, shapes, shape, "scenario %q runs %q", key, sql)
+}
+
+// newIrreversibleFixture creates a database of its own on the server, so a
+// subtest that leaks engine state cannot fail the ones after it, and in it
+// the orders table — a column, a CHECK constraint, a NOT NULL, and an index
+// for each entry to discard, and rows a copy would carry. It returns the
+// connection config, a pool sized for copy-and-swap (a smaller one is
+// refused before any gate runs, as a failure rather than a verdict), the
+// schema, and the table's catalog state.
+func newIrreversibleFixture(t *testing.T, serverURL string) (dbconn.Config, *pgxpool.Pool, string, string) {
+	t.Helper()
+	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConnsFloor: CopySwapMinConns(copier.Options{})}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
 	schema := testutil.NewSchema(t, pool)
 	for _, sql := range []string{`
 		CREATE TABLE {schema}.orders (
@@ -211,7 +291,7 @@ func newIrreversibleFixture(t *testing.T, pool *pgxpool.Pool) (string, string) {
 		_, err := pool.Exec(t.Context(), strings.ReplaceAll(sql, "{schema}", schema))
 		require.NoError(t, err)
 	}
-	return schema, tableCatalogState(t, pool, schema)
+	return cfg, pool, schema, tableCatalogState(t, pool, schema)
 }
 
 func parseIrreversible(t *testing.T, sql, schema string) statement.Statement {

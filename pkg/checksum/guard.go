@@ -88,18 +88,12 @@ func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 // rendering the gated statement never produced. A copy without conversions
 // has nothing to confirm.
 func (v *Verifier) confirmResolution(ctx context.Context, tx pgx.Tx) error {
-	if len(v.shadow.Conversions()) == 0 {
-		return nil
-	}
-	found, err := chunksql.ResolutionFingerprint(ctx, tx, v.shadow.Schema(), v.shadow.Conversions())
-	if err != nil {
-		return err
-	}
+	err := chunksql.ConfirmResolution(ctx, tx, v.shadow.Schema(), v.shadow.SourceTable(), v.shadow.ShadowTable(), v.shadow.Conversions(), v.shadow.ConversionFingerprint())
 	// INV: CO-9
-	if found != v.shadow.ConversionFingerprint() {
-		return fmt.Errorf("%w (CO-9): the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", ErrInvariantViolation, v.shadow.Schema(), v.shadow.SourceTable(), v.shadow.ShadowTable(), found, v.shadow.ConversionFingerprint())
+	if errors.Is(err, ErrConversionDrift) {
+		return fmt.Errorf("%w (CO-9): %w", ErrInvariantViolation, err)
 	}
-	return nil
+	return err
 }
 
 // setVerifySession bounds the transaction, pins the output settings under

@@ -44,14 +44,30 @@ func acknowledgementFlags(t *testing.T) (*MigrateCmd, []*kong.Flag) {
 	return &c.Migrate, flags
 }
 
+// stringFieldsSetTo names the string fields on opts and its copy-and-swap
+// options that hold want.
+func stringFieldsSetTo(opts migrate.Options, want string) []string {
+	var set []string
+	collect := func(v reflect.Value, prefix string) {
+		for i := range v.NumField() {
+			if f := v.Field(i); f.Kind() == reflect.String && f.String() == want {
+				set = append(set, prefix+v.Type().Field(i).Name)
+			}
+		}
+	}
+	collect(reflect.ValueOf(opts), "Options.")
+	collect(reflect.ValueOf(opts.CopySwap), "CopySwapOptions.")
+	return set
+}
+
 // Every acknowledgement flag on migrate reaches its own acknowledgement in
-// the engine's irreversible-operations registry, which desired-state
-// execution rejects with that acknowledgement's sentinel, and the CLI
-// itself rejects the flag with --desired before reading the file. A new
-// acknowledgement flag fails here until it is given its sentinel below and
-// the engine has a registry entry for it; a flag wired to no engine field,
-// or to another flag's field, fails because RunDesired does not return the
-// flag's own sentinel. The registry is unexported, so a registry
+// the engine's irreversible-operations registry, and no other policy field:
+// desired-state execution rejects it with that acknowledgement's sentinel,
+// and the CLI itself rejects the flag with --desired before reading the
+// file. A new acknowledgement flag fails here until it is given its
+// sentinel and field below and the engine has a registry entry for it; a
+// flag wired to no engine field, to another flag's field, or to its own
+// field and another fails. The registry is unexported, so a registry
 // acknowledgement with no CLI flag is not detected here.
 func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 	sentinels := map[string]error{
@@ -61,13 +77,21 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 		"restart":           migrate.ErrRestartNotSupported,
 		"block-writes":      migrate.ErrBlockWritesNotSupported,
 	}
+	fields := map[string]string{
+		"force":             "Options.Force",
+		"accept-blocking":   "Options.AcceptBlocking",
+		"allow-destructive": "Options.AllowDestructive",
+		"restart":           "CopySwapOptions.Restart",
+		"block-writes":      "CopySwapOptions.BlockWrites",
+	}
 	_, flags := acknowledgementFlags(t)
 	names := make([]string, 0, len(flags))
 	for _, f := range flags {
 		names = append(names, f.Name)
 	}
 	require.ElementsMatch(t, slices.Collect(maps.Keys(sentinels)), names,
-		"the walk found the acknowledgements the engine registers")
+		"a SCHEMA.TABLE flag on migrate is a typed acknowledgement: give a new one its "+
+			"sentinel and field in this test and an entry in the engine's irreversible-operations registry")
 
 	desired := filepath.Join(t.TempDir(), "orders.sql")
 	require.NoError(t, os.WriteFile(desired, []byte("CREATE TABLE orders (id bigint PRIMARY KEY);"), 0o600))
@@ -75,6 +99,8 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 		t.Run(f.Name, func(t *testing.T) {
 			c, fresh := acknowledgementFlags(t)
 			fresh[i].Target.SetString("public.orders")
+			assert.Equal(t, []string{fields[f.Name]}, stringFieldsSetTo(c.options(nil), "public.orders"),
+				"--%s must reach its own field and no other", f.Name)
 			_, err := migrate.RunDesired(t.Context(), nil, migrate.DesiredRequest{Schema: "public"}, c.options(nil))
 			require.Error(t, err, "--%s reaches no acknowledgement desired-state execution rejects", f.Name)
 			assert.ErrorIs(t, err, sentinels[f.Name], "--%s must reach its own acknowledgement", f.Name)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -18,6 +19,37 @@ import (
 // fingerprint should read.
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// ErrConversionDrift is the one sentinel every guarded transaction wraps
+// when the catalog the conversion expressions resolve in is no longer the
+// one the shadow build digested (CO-9): the copier's chunk, the verifier's
+// read and repair, the applier's flush, and the cutover's drain all
+// confirm the same fingerprint, and a caller that reads their errors
+// through errors.Is sees the same event whichever of them noticed it.
+var ErrConversionDrift = errors.New("conversion drift")
+
+// ConfirmResolution recomputes the fingerprint of what the conversion
+// expressions resolve to, on q, and compares it with the one the shadow
+// proof carries: nil when they agree or when there are no conversions to
+// confirm, the read's error when the catalog could not be read, and
+// otherwise an error wrapping ErrConversionDrift that names the source
+// and the shadow and carries both fingerprints. The caller decides the
+// refusal shape — a copier cause, the verifier's or the applier's
+// invariant violation — and wraps this error in it.
+func ConfirmResolution(ctx context.Context, q querier, schema, source, shadow string, conversions map[string]string, fingerprint string) error {
+	if len(conversions) == 0 {
+		return nil
+	}
+	found, err := ResolutionFingerprint(ctx, q, schema, conversions)
+	if err != nil {
+		return err
+	}
+	// INV: CO-9
+	if found != fingerprint {
+		return fmt.Errorf("%w: the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", ErrConversionDrift, schema, source, shadow, found, fingerprint)
+	}
+	return nil
 }
 
 // ResolutionFingerprint pins what the conversion expressions resolve to.
