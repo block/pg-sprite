@@ -415,3 +415,33 @@ func TestCreateWithRowSecurityProbesShareTheAttemptDeadline(t *testing.T) {
 	}
 	assert.False(t, relationExists(t, f.pool, f.schema, "notes"))
 }
+
+// A new table's policy may read another table it names schema-qualified,
+// as an existing table's may. The run creates the table with the policy
+// bound to that live table, and the result already matches the file.
+func TestExecuteCreateWithRowSecurityPolicyReadsAnotherTable(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.team_members (member name NOT NULL)", f.schema))
+	require.NoError(t, err)
+	d := desiredRowSecurity(t, fmt.Sprintf(`CREATE TABLE notes (
+     id bigint PRIMARY KEY,
+     body text
+ );
+ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY team_notes ON notes FOR SELECT
+     USING (EXISTS (SELECT 1 FROM %s.team_members m WHERE m.member = current_user));`, f.schema))
+
+	report, err := executor.ExecuteCreateWithRowSecurity(t.Context(), f.pool, f.at, f.cr, d, createWithRowSecurityBudget)
+	require.NoError(t, err)
+	assert.True(t, report.TableCreated)
+
+	live, err := schemadiff.Introspect(t.Context(), f.pool, f.schema, "notes")
+	require.NoError(t, err)
+	require.Len(t, live.RowSecurity.Policies, 1)
+	assert.Equal(t, fmt.Sprintf("(EXISTS ( SELECT 1\n   FROM %s.team_members m\n  WHERE (m.member = CURRENT_USER)))", f.schema),
+		*live.RowSecurity.Policies[0].Using)
+	wanted, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), f.pool, f.schema, d)
+	require.NoError(t, err)
+	_, err = schemadiff.DiffWithRowSecurity(f.schema, live, wanted)
+	assert.NoError(t, err, "the created table must already match the desired file")
+}

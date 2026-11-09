@@ -190,9 +190,37 @@ Qualify every external helper and type in policy expressions, including objects
 in `public`: use `public.doc_status`, not `doc_status`. Policy inspection searches
 only its scratch schema and PostgreSQL built-ins, preventing accidental bindings.
 Qualified helpers such as `auth.uid()` work, including `(SELECT auth.uid())`.
-Policy expressions that directly query a table are refused until dependency
-handling can preserve their identities. Other [table export limits](pull.md#refused-table-shapes)
-still apply.
+A policy may read another table, such as a membership check written as
+`EXISTS (SELECT 1 FROM public.team_members m WHERE m.user_id = auth.uid())`, when
+it names that table schema-qualified. Scratch builds the policy against the live
+table it names, which is the table the applied policy will read; `CREATE POLICY`
+takes only an `ACCESS SHARE` lock on it, so writes to that table continue. An
+unqualified table name, a CTE name, or a database-qualified name is refused, and
+so is any table with the policy's own table name: scratch would bind that name to
+the live table rather than to itself, and PostgreSQL rejects a policy that reads
+its own table as infinite recursion when it is queried. A `pg_catalog` table is
+refused because introspection prints it unqualified, so the exported file could
+not be admitted again. A query that locks the rows it reads (`FOR SHARE`,
+`FOR UPDATE`, and their weaker forms) is refused because building the policy
+would take `ROW SHARE` on that table and wait behind a session holding
+`EXCLUSIVE`. The comparison does not cover the referenced table's own policies,
+which apply to the subquery under the caller's role.
+
+A change to an existing table's policies is refused when a table they read has
+policies that read it back, directly or through other tables and views.
+PostgreSQL accepts such a policy, then fails every query it applies to with
+"infinite recursion detected in policy". The check follows the dependencies
+PostgreSQL records for policies and views, so it does not follow a function
+body that reads a table, and it counts a view whichever role owns it. It reads
+the policies committed when the change takes its lock on the table; a later
+change to another table's policies can still close the loop.
+
+A `SECURITY DEFINER` helper function avoids the referenced table's policies,
+and the recursion, only when its owner bypasses row security on the table it reads:
+a role with `BYPASSRLS`, or the table's owner when the table does not force row
+security. Such a helper runs with its owner's access, so it must check the
+caller's authorization itself. Other
+[table export limits](pull.md#refused-table-shapes) still apply.
 
 An unchanged definition produces an empty plan. Any table or RLS difference in
 this mode is refused. A missing live table is previewed as a
@@ -324,8 +352,8 @@ this table-scoped work.
    diff. Implemented through automatic export and SQL declarations. A table that
    does not exist yet is created together with its row security in one transaction.
 3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
-   and verifies one table's RLS state in one bounded transaction. Mixed changes and
-   policy relation dependencies remain unsupported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
+   and verifies one table's RLS state in one bounded transaction. Mixed changes remain
+   unsupported; a policy that reads another schema-qualified table is supported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
 4. **Prove application behavior.** The local Supabase harness now checks real
    PostgREST requests from two authenticated users and anonymous callers, allowed
    and denied writes, changed visibility, and rollback after a cancelled apply.

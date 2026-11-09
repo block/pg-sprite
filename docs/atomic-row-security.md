@@ -64,7 +64,9 @@ privileges report permanent `row-security-refused` outcomes, preserving the unde
 cause. A reviewed SQL mismatch reports permanent `row-security-plan-changed`: no target
 RLS statements ran; preview again and review the new SQL before retrying. This is separate
 from declaration and privilege refusals, which include unresolved policy roles and qualified helper functions during
-scratch inspection. Caller cancellation is kept separate from budget exhaustion.
+scratch inspection, and policies that read a table whose policies read the target
+back, checked under the target lock (see
+[declarative row security](declarative-row-security.md)). Caller cancellation is kept separate from budget exhaustion.
 
 The caller needs table-owner privileges and permission to create the temporary
 scratch schema. Both privileges are checked before locking and checked again under
