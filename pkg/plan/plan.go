@@ -188,7 +188,7 @@ type Report struct {
 	Class verdict.Class `json:"class,omitempty"`
 	// Owner identifies who owns aggregate work with no online-safety problem.
 	Owner verdict.Owner `json:"owner,omitempty"`
-	// Fingerprint is the plan's stable identity (see Fingerprint). An
+	// Fingerprint is the plan's stable identity (see ComputeFingerprint). An
 	// approver pins it when the plan is reviewed; an executor recomputes it
 	// at apply time and refuses on mismatch — that is how "the plan a
 	// reviewer approves is the plan that executes" is enforced across
@@ -474,6 +474,14 @@ func Fingerprint(statements []Statement, extensionSchemas ...string) string {
 		}
 	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// ComputeFingerprint returns the Fingerprint of everything in r that is
+// part of the plan's identity: its statements and its extension schemas.
+// Every path that builds a report sets r.Fingerprint from this method, so
+// a field added to the identity cannot be left out at one call site.
+func (r Report) ComputeFingerprint() string {
+	return Fingerprint(r.Statements, r.ExtensionSchemas...)
 }
 
 // writeField hashes one field with a trailing unit separator, so adjacent

@@ -3,6 +3,7 @@ package dbconn
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -69,6 +70,23 @@ func unshadowCatalog(ctx context.Context, conn *pgx.Conn) error {
 // that way.
 func LocalSearchPath(schemas ...string) string {
 	return "SET LOCAL search_path = " + searchPathOf(schemas)
+}
+
+// WithExtensionSchemas returns path followed by each of extensions that path
+// does not already list, in order. Extension schemas come last, so they
+// widen what an unqualified name can resolve to without shadowing a schema
+// the path already searches. Planning and execution both build the path a
+// desired file runs under with this function, so a name resolves to the
+// same object in the scratch build that planned a statement and in the
+// transaction that runs it.
+func WithExtensionSchemas(path, extensions []string) []string {
+	widened := slices.Clone(path)
+	for _, schema := range extensions {
+		if !slices.Contains(widened, schema) {
+			widened = append(widened, schema)
+		}
+	}
+	return widened
 }
 
 // SessionSearchPath returns the SET statement that sets the session's

@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"time"
 
@@ -299,13 +298,7 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 // extension schema the desired file resolves names against that the path
 // does not already list (see statement.DesiredSchema.WithExtensionSchemas).
 func AttemptSearchPath(schema string, extensions []string) []string {
-	path := []string{schema, "public"}
-	for _, ext := range extensions {
-		if !slices.Contains(path, ext) {
-			path = append(path, ext)
-		}
-	}
-	return path
+	return dbconn.WithExtensionSchemas([]string{schema, "public"}, extensions)
 }
 
 // executeBoundedAttemptAs is the shared transactional attempt behind the

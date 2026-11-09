@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -53,8 +52,7 @@ var ErrDesiredConstraintMerged = errors.New("a desired constraint repeats anothe
 // createReferencedStandIns).
 //
 // The file's unqualified names also resolve against the desired schema's
-// extension schemas, which the model still prints qualified (see
-// scratchRunPath).
+// extension schemas, which the model still prints qualified.
 func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredSchema) (Model, error) {
 	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()}, desired.ExtensionSchemas())
 }
@@ -105,8 +103,18 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	// installed in public, stay resolvable by the names the live table's
 	// definitions print with. The path is built by dbconn so it upholds
 	// CO-9 like the session's.
+	//
+	// The statements run with the extension schemas appended, so the file's
+	// unqualified names can resolve there. The model is introspected under
+	// path alone, so an object found in an extension schema prints
+	// qualified, exactly as the live table's definition does, and the two
+	// compare equal. A plan for a table that does not exist yet runs the
+	// file's own unqualified statements instead, so the create path runs
+	// them under the same extension schemas and the plan's fingerprint
+	// covers them.
 	path := scratchSearchPath(scratch, refs.schema)
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(scratchRunPath(path, extensions)...)); err != nil {
+	runPath := dbconn.WithExtensionSchemas(path, extensions)
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(runPath...)); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
 	if err := createReferencedStandIns(ctx, tx, scratch, refs.schema, refs.tables); err != nil {
@@ -136,7 +144,7 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
-	if err := confirmIndexConstraintsBuilt(ctx, tx, scratchRunPath(path, extensions), statements, m); err != nil {
+	if err := confirmIndexConstraintsBuilt(ctx, tx, runPath, statements, m); err != nil {
 		return Model{}, err
 	}
 	if m, err = settleDesired(ctx, tx, scratch, refs.schema, table, path, m); err != nil {
@@ -275,23 +283,6 @@ func scratchSearchPath(scratch, target string) []string {
 		return []string{scratch, "public"}
 	}
 	return append([]string{scratch}, searchPathFor(target)...)
-}
-
-// scratchRunPath is the search_path the desired statements run under: the
-// introspection path, then each extension schema it does not already
-// list. The extension schemas widen only what the file's unqualified names
-// resolve to. The model is introspected under path alone, so a type,
-// function, or operator found in an extension schema prints qualified, as
-// the live table's does: both sides compare equal, and every statement a
-// plan renders names the object it resolved to wherever it later runs.
-func scratchRunPath(path, extensions []string) []string {
-	run := slices.Clone(path)
-	for _, schema := range extensions {
-		if !slices.Contains(run, schema) {
-			run = append(run, schema)
-		}
-	}
-	return run
 }
 
 // scratchSchemaName returns a collision-resistant scratch schema name. The
