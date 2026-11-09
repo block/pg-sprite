@@ -42,6 +42,10 @@ func TestInspectSlotMeasuresTheWALTheSlotRetains(t *testing.T) {
 	assert.Greater(t, after.Retained.Bytes, fresh.Retained.Bytes)
 	assert.GreaterOrEqual(t, after.Retained.Bytes, int64(written-after.RestartLSN),
 		"retained bytes span from the restart position to at least the write position the insert reached")
+	require.True(t, after.Unconfirmed.Known)
+	assert.Greater(t, after.Unconfirmed.Bytes, fresh.Unconfirmed.Bytes, "nothing confirmed, so the unread insert is unconfirmed too")
+	assert.LessOrEqual(t, after.Unconfirmed.Bytes, after.Retained.Bytes,
+		"the unconfirmed WAL is the part of the retained WAL from the confirmed position on")
 }
 
 // A slot whose WAL the server has removed is reported with the server's

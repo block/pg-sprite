@@ -65,10 +65,16 @@ type CatchupOptions struct {
 	// copier's tracker would hide the copier's counters, as registering the
 	// copier on this one would hide the catch-up's.
 	Tracker *progress.Tracker
-	// SlotLagCeiling is the most WAL, in bytes, the stream's slot may retain
-	// before Run ends with a *decode.SlotLagExceededError (D11, ST-3). Zero
-	// takes decode.DefaultSlotLagCeiling; a value below one byte is
-	// refused, so the ceiling is always in force.
+	// SlotLagCeiling is the most WAL, in bytes, the stream's slot may hold
+	// before Run ends with a *decode.SlotLagExceededError (D11, ST-3). It
+	// bounds two measures: the WAL the stream has yet to confirm ends the
+	// run on the first cycle that reads it over the ceiling, since that
+	// lag is the stream's own; the WAL the slot retains on the volume,
+	// which the server releases some time after the stream confirms it,
+	// ends the run only once it has stayed over the ceiling for the
+	// server's release interval plus one cycle. Zero takes
+	// decode.DefaultSlotLagCeiling; a value below one byte is refused, so
+	// the ceiling is always in force.
 	SlotLagCeiling int64
 	// DeadlockAttempts is how many cycles in a row the server may roll the
 	// flush back as a deadlock victim (ErrBatchDeadlocked) before Run ends
@@ -212,6 +218,9 @@ type Catchup struct {
 	// flush that ends any other way resets it. Run's goroutine alone
 	// touches it.
 	deadlocks int
+	// slotLag judges each cycle's reading of the slot against the ceiling.
+	// Run's goroutine alone touches it.
+	slotLag *decode.SlotLagWatch
 
 	mu     sync.Mutex
 	status Status
@@ -235,6 +244,14 @@ func NewCatchup(stream *decode.Stream, flusher *Flusher, positions PositionSourc
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
+	// Retained WAL may stand over the ceiling while the server releases
+	// what the stream confirmed: a release waits for the server's next
+	// running-transactions record and then for the cycle that confirms
+	// past it.
+	slotLag, err := decode.NewSlotLagWatch(opts.SlotLagCeiling, decode.RestartReleaseInterval+opts.Interval)
+	if err != nil {
+		return nil, err
+	}
 	return &Catchup{
 		stream:    stream,
 		flusher:   flusher,
@@ -242,6 +259,7 @@ func NewCatchup(stream *decode.Stream, flusher *Flusher, positions PositionSourc
 		buffer:    NewBuffer(),
 		opts:      opts,
 		flushes:   newFlushGate(),
+		slotLag:   slotLag,
 		status:    Status{Delivered: stream.Delivered(), Confirmed: stream.Confirmed()},
 	}, nil
 }
@@ -493,7 +511,7 @@ func (c *Catchup) snapshot(ctx context.Context, pool *pgxpool.Pool) (Snapshot, e
 }
 
 // checkSlot reads the stream's slot from the catalog after the cycle has
-// confirmed and judges it against the ceiling: what the slot retains after
+// confirmed and judges it against the ceiling: what the slot holds after
 // this cycle's confirmation is what the next cycle will have to live with.
 // A slot that is gone is reported as lost, since no stream can be reopened
 // on it.
@@ -508,7 +526,7 @@ func (c *Catchup) checkSlot(ctx context.Context, pool *pgxpool.Pool) error {
 			&decode.SlotLostError{Slot: c.stream.Slot()})
 	}
 	// INV: ST-3 — the ceiling is judged every cycle, fail closed.
-	if err := status.WithinLagCeiling(c.opts.SlotLagCeiling); err != nil {
+	if err := c.slotLag.Judge(status, c.opts.Clock.Now()); err != nil {
 		return fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
 	return nil
