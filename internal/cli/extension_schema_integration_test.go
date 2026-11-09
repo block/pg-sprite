@@ -235,6 +235,77 @@ func TestMigrateDesiredRowSecurityResolvesExtensionSchema(t *testing.T) {
 	assert.Equal(t, before, after, "a refused policy changes nothing")
 }
 
+// A policy that names an extension's operator and type qualified passes
+// the row security path, and keeps that meaning when another extension
+// schema on the table definition's path offers a competing operator of the
+// same name: the policy depends on the extension's operator, a rerun finds
+// nothing to change, and a role the policy applies to sees exactly the
+// rows the case-insensitive comparison admits.
+func TestMigrateDesiredRowSecurityKeepsAQualifiedExtensionOperator(t *testing.T) {
+	url, pool := extensionSchemaDatabase(t)
+	schema := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), `
+		CREATE SCHEMA competing;
+		CREATE FUNCTION competing.always(extensions.citext, extensions.citext) RETURNS boolean
+			LANGUAGE sql IMMUTABLE AS 'SELECT true';
+		CREATE OPERATOR competing.= (LEFTARG = extensions.citext, RIGHTARG = extensions.citext, FUNCTION = competing.always)`)
+	require.NoError(t, err)
+	const file = `CREATE TABLE accounts (
+ id int PRIMARY KEY,
+ email citext NOT NULL
+ );
+ ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON accounts FOR SELECT USING (email OPERATOR(extensions.=) 'alice'::extensions.citext);`
+	run := func() string {
+		cmd := desiredCommand(t, url, schema, file, "--extension-schema", "extensions", "--extension-schema", "competing")
+		var out strings.Builder
+		require.NoError(t, cmd.run(t.Context(), &out))
+		return out.String()
+	}
+
+	var created verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(run()), &created))
+	require.Equal(t, verdict.OutcomeExecuted, created.Outcome, created.Detail)
+	assert.True(t, created.TableCreated)
+	assert.Equal(t, []string{"extensions", "competing"}, created.ExtensionSchemas)
+
+	rows, err := pool.Query(t.Context(), `
+		SELECT n.nspname::pg_catalog.text
+		FROM pg_catalog.pg_policy p
+		JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_policy'::pg_catalog.regclass AND d.objid = p.oid
+		JOIN pg_catalog.pg_operator o ON d.refclassid = 'pg_catalog.pg_operator'::pg_catalog.regclass AND o.oid = d.refobjid
+		JOIN pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+		WHERE p.polrelid = pg_catalog.to_regclass($1)`, pgx.Identifier{schema, "accounts"}.Sanitize())
+	require.NoError(t, err)
+	operators, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	assert.Equal(t, []string{"extensions"}, operators, "the policy depends on the extension's operator, not the competing one")
+
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
+	require.NoError(t, err)
+	run()
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "a rerun changes nothing")
+
+	reader := testutil.NewRole(t, pool, "")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		INSERT INTO %[1]s.accounts VALUES (1, 'ALICE'), (2, 'bob');
+		GRANT USAGE ON SCHEMA %[1]s, extensions TO %[2]s;
+		GRANT SELECT ON %[1]s.accounts TO %[2]s`, pgx.Identifier{schema}.Sanitize(), pgx.Identifier{reader}.Sanitize()))
+	require.NoError(t, err)
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = tx.Exec(t.Context(), "SET LOCAL ROLE "+pgx.Identifier{reader}.Sanitize())
+	require.NoError(t, err)
+	visible, err := tx.Query(t.Context(), fmt.Sprintf("SELECT email::pg_catalog.text FROM %s.accounts ORDER BY id", pgx.Identifier{schema}.Sanitize()))
+	require.NoError(t, err)
+	emails, err := pgx.CollectRows(visible, pgx.RowTo[string])
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ALICE"}, emails, "the extension's case-insensitive comparison decides which rows the policy admits")
+}
+
 // diff --sql for a missing table whose file declares row security sets the
 // extension schemas on the table definition's search path and pg_catalog
 // alone on the row security's. Run as written on a fresh session, it
