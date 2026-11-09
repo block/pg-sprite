@@ -95,6 +95,49 @@ inspect the live state before retrying; do not assume rollback. The whole RLS
 attempt uses `--statement-timeout`, including scratch inspection and lock waits;
 `--lock-timeout` bounds lock acquisition. RLS applies do not automatically retry.
 
+### Create a new table with its row security
+
+When the table does not exist, the same file creates it. `diff` and
+`migrate --dry-run` preview the create from a transaction that rolls back:
+
+```text
+public.documents does not exist. migrate --desired creates it with its row security in one transaction:
+  CREATE TABLE public.documents (id bigint PRIMARY KEY, owner text NOT NULL, body text);
+  ALTER TABLE "public"."documents" ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE "public"."documents" NO FORCE ROW LEVEL SECURITY;
+  CREATE POLICY "owners_read" ON "public"."documents"
+    AS PERMISSIVE FOR SELECT TO PUBLIC
+    USING ((owner = CURRENT_USER));
+```
+
+The preview exits 0. With `--json` it is the statement list with
+`table_exists: false`:
+
+```json
+{
+  "schema": "public",
+  "table": "documents",
+  "statements": [
+    "CREATE TABLE public.documents (id bigint PRIMARY KEY, owner text NOT NULL, body text)",
+    "ALTER TABLE \"public\".\"documents\" ENABLE ROW LEVEL SECURITY",
+    "ALTER TABLE \"public\".\"documents\" NO FORCE ROW LEVEL SECURITY",
+    "CREATE POLICY \"owners_read\" ON \"public\".\"documents\"\n    AS PERMISSIVE FOR SELECT TO PUBLIC\n    USING ((owner = CURRENT_USER))"
+  ],
+  "table_exists": false
+}
+```
+
+`migrate --desired` then commits the table, its indexes, and its row security
+in one transaction, so no session sees the table without its policies. The
+verdict carries `"table_created": true`, its detail reads `table created with
+its row security: all changes committed in one transaction`, and
+`executed_sql` lists the statements above. A second run is already converged,
+and its verdict leaves `table_created` out. The table shapes a new table may take are the
+same as for an ordinary desired file, and a foreign key is still refused. A
+standalone type at the table's name refuses as `create-collision`. The
+[atomic RLS contract](atomic-row-security.md#create-a-missing-table-with-its-row-security)
+lists the steps.
+
 Ordinary files use the existing desired-state sequence instead; their JSON is
 `migrate.DesiredResult` with `plan`, `verdicts`, and overall `outcome`. Earlier
 committed steps stay committed if a later step fails. Mixed table/RLS changes
@@ -152,7 +195,8 @@ handling can preserve their identities. Other [table export limits](pull.md#refu
 still apply.
 
 An unchanged definition produces an empty plan. Any table or RLS difference in
-this mode is refused, including a missing live table. No partial plan is emitted. Admission errors exit 1 with a diagnostic; unsupported
+this mode is refused. A missing live table is previewed as a
+[create with its row security](#create-a-new-table-with-its-row-security). No partial plan is emitted. Admission errors exit 1 with a diagnostic; unsupported
 RLS comparisons exit 2 with a refusal verdict. `--json` returns a verdict with
 `outcome`, `reason`, and `detail` for those refusals; successful comparisons retain
 the normal plan format. `--sql` writes the refusal as a SQL comment.
@@ -224,7 +268,7 @@ If the table comparison is unsupported, `table_comparison_complete` is false and
 `table_comparison_error` explains why; `table_changed: false` then means unknown,
 not unchanged. This review contains no execution SQL or approval fingerprint.
 `--sql` renders it entirely as comments. Unchanged files retain the normal empty
-plan response. Missing live tables remain refusals without review details.
+plan response. A missing live table previews its create instead of a review.
 
 Library callers can inspect `diffplan.RowSecurityReviewRequired` with `errors.As`;
 it still unwraps to `schemadiff.ErrUnsupportedChange`. `ReviewRowSecurity` provides
@@ -277,8 +321,8 @@ this table-scoped work.
    incomplete export. Implemented here; table-only diff behavior stays intact.
 2. **Round-trip the declaration.** Admit and export SQL under explicit RLS scope;
    materialize it in scratch and prove the unchanged definition produces an empty
-   diff. Implemented through automatic export and SQL declarations; greenfield
-   creation remains refused.
+   diff. Implemented through automatic export and SQL declarations. A table that
+   does not exist yet is created together with its row security in one transaction.
 3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
    and verifies one table's RLS state in one bounded transaction. Mixed changes and
    policy relation dependencies remain unsupported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.

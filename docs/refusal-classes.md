@@ -414,12 +414,17 @@ keyed on sites alone would go green with `admissionRefusalVerdict` classified
 EXISTS`.
 
 RLS preview uses the plan registry's `capability-boundary` refusal for review-only
-policy deltas. A missing target uses the shared `RowSecurityMissingTableRefusal`
-in both preview and apply, with class `environmental`. Atomic RLS execution uses `migrate.RowSecurityRefusal`:
-missing owner or database CREATE privileges (including PostgreSQL SQLSTATE 42501)
-carry `insufficient-privileges` / `environmental`; an absent target table carries
-`unsupported-statement` / `environmental`; unsupported declarations or target
-shapes carry `unsupported-statement` / `capability-boundary`. Operational failures
+policy deltas. A missing target is created with its row security, so preview
+and apply refuse it only when the existing-table executor finds the table gone
+under its lock; that case uses the shared `RowSecurityMissingTableRefusal`, with
+class `environmental`. Atomic RLS execution uses `migrate.RowSecurityRefusal`:
+missing owner or database CREATE privileges (including PostgreSQL SQLSTATE 42501),
+missing schema CREATE for a new table, and an unknown create owner carry
+`insufficient-privileges` / `environmental`; an absent target table carries
+`unsupported-statement` / `environmental`; a name the new table claims that the
+catalog already holds carries `create-collision` / `environmental`; a new
+table's shape refusals use the create path's admission classes; unsupported
+declarations or target shapes carry `unsupported-statement` / `capability-boundary`. Operational failures
 remain failures. Typed privilege causes take precedence over the executor's general
 admission sentinel. The registry tests cover these mappings and refusal classes.
 

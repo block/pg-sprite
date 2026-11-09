@@ -327,6 +327,19 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // inside the CREATE's own transaction — is a defect to surface, not to
 // repair. The executor never issues ALTER ... OWNER TO.
 func verifyCreateOwner(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, expected string) error {
+	actual, err := readTableOwner(ctx, pool, at)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrCreateOwnerUnverified, qualifiedName(at.Schema(), at.Table()), err)
+	}
+	if actual != expected {
+		return &CreateOwnerMismatchError{Expected: expected, Actual: actual}
+	}
+	return nil
+}
+
+// readTableOwner reads the catalog owner of the proof's table. db is a pool
+// or the transaction that created the table.
+func readTableOwner(ctx context.Context, db querier, at preflight.AbsentTarget) (string, error) {
 	// INV: CO-9 — every relation and operator is pg_catalog-qualified, so a
 	// decoy on the session's search_path cannot name the expected owner.
 	const q = `
@@ -335,14 +348,11 @@ func verifyCreateOwner(ctx context.Context, pool *pgxpool.Pool, at preflight.Abs
 		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) c.relowner
 		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`
-	var actual string
-	if err := pool.QueryRow(ctx, q, at.Schema(), at.Table()).Scan(&actual); err != nil {
-		return fmt.Errorf("%w: %s: %w", ErrCreateOwnerUnverified, qualifiedName(at.Schema(), at.Table()), err)
+	var owner string
+	if err := db.QueryRow(ctx, q, at.Schema(), at.Table()).Scan(&owner); err != nil {
+		return "", err
 	}
-	if actual != expected {
-		return &CreateOwnerMismatchError{Expected: expected, Actual: actual}
-	}
-	return nil
+	return owner, nil
 }
 
 // admitCreateSteps qualifies every desired statement into the proof's
