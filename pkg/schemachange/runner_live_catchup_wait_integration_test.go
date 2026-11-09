@@ -129,6 +129,7 @@ func TestRunnerCancelledInTheMarkerWaitReportsWhatTheCaptureWaitedOn(t *testing.
 	assert.Equal(t, 1, wait.Status.Buffered)
 	assert.Zero(t, wait.Status.Deferred)
 	assert.Less(t, wait.Status.Confirmed, wait.Marker, "the capture had not confirmed past the marker")
+	assert.Positive(t, wait.ShortOfMarker(), "and the error says how far short of it the capture was")
 
 	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
 	require.NoError(t, err)

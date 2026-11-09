@@ -32,7 +32,34 @@ func TestCatchupWaitErrorReadsAsTheContextErrorItWraps(t *testing.T) {
 	assert.Equal(t, 1, found.Status.Invisible)
 	assert.Equal(t, uint64(0x100), found.Status.Lag(), "the status measures how far the confirmed position trailed the server")
 
+	assert.Equal(t, uint64(0x48), found.ShortOfMarker(), "the error measures how far the confirmed position trailed the marker")
+
 	text := wait.Error()
 	assert.Contains(t, text, "public.orders", "the rendering names the target")
 	assert.Contains(t, text, context.DeadlineExceeded.Error(), "and why the wait ended")
+	assert.Contains(t, text, "72 bytes short of the marker")
+}
+
+// A wait ended before the catch-up's first cycle has measured the server's
+// write position — the stalled-source case the error exists to explain —
+// still reports how far the capture trailed the marker. Status.Lag is zero
+// there, and reporting it would read as caught up.
+func TestCatchupWaitErrorReportsTheDistanceToTheMarkerBeforeAnyCycleHasMeasured(t *testing.T) {
+	wait := &schemachange.CatchupWaitError{
+		Schema: "public", Table: "orders", Marker: 0x16B3748,
+		Status: applier.Status{Confirmed: 0x16B3000, Invisible: 1},
+		Err:    context.Canceled,
+	}
+	require.Zero(t, wait.Status.Lag(), "precondition: no cycle has measured the server's write position")
+
+	assert.Equal(t, uint64(0x748), wait.ShortOfMarker())
+	assert.Contains(t, wait.Error(), "1864 bytes short of the marker")
+	assert.Contains(t, wait.Error(), "1 not yet visible on the source")
+}
+
+// A capture that confirmed past the marker in the moment between the last
+// poll and the wait's end is not short of it.
+func TestCatchupWaitErrorIsNotShortOfAMarkerTheCaptureConfirmedPast(t *testing.T) {
+	wait := &schemachange.CatchupWaitError{Marker: 0x100, Status: applier.Status{Confirmed: 0x180}, Err: context.Canceled}
+	assert.Zero(t, wait.ShortOfMarker())
 }
