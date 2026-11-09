@@ -439,7 +439,11 @@ func ParseOps(sql string) ([]Op, error) {
 		return []Op{renameOp(node.GetRenameStmt())}, nil
 	case node.GetAlterEnumStmt() != nil:
 		enum := node.GetAlterEnumStmt()
-		if enum.GetOldVal() != "" {
+		adds, err := addsEnumValue(sql, enum)
+		if err != nil {
+			return nil, err
+		}
+		if !adds {
 			return []Op{{Kind: OpUnrecognized}}, nil
 		}
 		return []Op{{Kind: OpAddEnumValue, Name: enum.GetNewVal(), IfNotExists: enum.GetSkipIfNewValExists()}}, nil

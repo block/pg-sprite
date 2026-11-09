@@ -44,11 +44,16 @@ func (e enumType) qualified() string { return e.schema + "." + e.name }
 // resolveEnumType reads the enum type the statement names. An unqualified
 // name resolves on the session search_path, exactly as the statement will
 // when it runs on the same pool.
+// A qualified name in a schema the role lacks USAGE on is the
+// *preflight.PrivilegeError that carries the grant.
 func resolveEnumType(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (enumType, error) {
 	ref := st.EnumType()
 	name := pgx.Identifier{ref.Name}
 	if ref.Schema != "" {
 		name = pgx.Identifier{ref.Schema, ref.Name}
+		if err := preflight.CheckTypeSchemaUsage(ctx, pool, ref.Schema); err != nil {
+			return enumType{}, err
+		}
 	}
 	// INV: CO-9 — every function, operator, relation, and type is
 	// pg_catalog-qualified, so a planted overload on the session's
@@ -96,6 +101,10 @@ func addEnumValue(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		return verdict.Verdict{}, err
 	}
 	e, err := resolveEnumType(ctx, pool, st)
+	var privErr *preflight.PrivilegeError
+	if errors.As(err, &privErr) {
+		return privilegeVerdict(st, privErr, false), nil
+	}
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -118,7 +127,6 @@ func addEnumValue(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	}
 
 	err = preflight.CheckTypeOwnership(ctx, pool, e.oid)
-	var privErr *preflight.PrivilegeError
 	if errors.As(err, &privErr) {
 		return privilegeVerdict(st, privErr, false), nil
 	}

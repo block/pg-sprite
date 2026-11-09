@@ -362,14 +362,17 @@ func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tie
 // table or a type, for the ownership transfer the hint offers instead.
 func ownerMembershipRefusal(f accessFacts, object string) *PrivilegeError {
 	const pg16 = 160000
+	// A membership grant hands the role every privilege the owner holds on
+	// any version, so the transfer is offered wherever the grant is.
+	transfer := fmt.Sprintf("if the owner is an administrative role, transfer the %s instead: ALTER %s %s.%s OWNER TO <role>",
+		object, strings.ToUpper(object), pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.table}.Sanitize())
 	if f.versionNum >= pg16 {
 		return &PrivilegeError{
 			Tier:  TierAlterInPlace,
 			Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", f.role, f.owner),
 			Grant: fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE",
 				pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
-			Hint: fmt.Sprintf("if the owner is an administrative role, transfer the %s instead: ALTER %s %s.%s OWNER TO <role>",
-				object, strings.ToUpper(object), pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.table}.Sanitize()),
+			Hint: transfer,
 		}
 	}
 	if !f.roleInherit {
@@ -384,6 +387,7 @@ func ownerMembershipRefusal(f accessFacts, object string) *PrivilegeError {
 		Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", f.role, f.owner),
 		Grant: fmt.Sprintf("GRANT %s TO %s",
 			pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
+		Hint: transfer,
 	}
 }
 

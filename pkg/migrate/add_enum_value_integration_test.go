@@ -157,28 +157,38 @@ func TestAddEnumValueStopsBeforeExecutingWhatItCannotAdd(t *testing.T) {
 	}
 }
 
-// ALTER TYPE needs membership in the type's owning role. A role without it
-// is refused before the statement runs, with the grant that fixes it and a
-// hint that transfers the type instead.
-func TestAddEnumValueRefusesARoleThatDoesNotOwnTheType(t *testing.T) {
-	pool, schema, serverURL := enumFixture(t)
+// enumRole creates a login role that does not own mood and returns a pool
+// connected as it, with USAGE on the fixture's schema when usage is set.
+func enumRole(t *testing.T, pool *pgxpool.Pool, schema, serverURL string, usage bool) (*pgxpool.Pool, string) {
+	t.Helper()
 	const password = "enum-value-password"
 	role := testutil.NewRole(t, pool, "LOGIN PASSWORD '"+password+"'")
-	_, err := pool.Exec(t.Context(), fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", schema, pgx.Identifier{role}.Sanitize()))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, err := pool.Exec(context.WithoutCancel(t.Context()),
-			fmt.Sprintf("REVOKE USAGE ON SCHEMA %s FROM %s", schema, pgx.Identifier{role}.Sanitize()))
-		if err != nil {
-			t.Logf("revoke schema usage from %s: %v", role, err)
-		}
-	})
+	if usage {
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", schema, pgx.Identifier{role}.Sanitize()))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, err := pool.Exec(context.WithoutCancel(t.Context()),
+				fmt.Sprintf("REVOKE USAGE ON SCHEMA %s FROM %s", schema, pgx.Identifier{role}.Sanitize()))
+			if err != nil {
+				t.Logf("revoke schema usage from %s: %v", role, err)
+			}
+		})
+	}
 	u, err := url.Parse(serverURL)
 	require.NoError(t, err)
 	u.User = url.UserPassword(role, password)
 	engine, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: u.String()})
 	require.NoError(t, err)
 	t.Cleanup(engine.Close)
+	return engine, role
+}
+
+// ALTER TYPE needs membership in the type's owning role. A role without it
+// is refused before the statement runs, with the grant that fixes it and a
+// hint that transfers the type instead.
+func TestAddEnumValueRefusesARoleThatDoesNotOwnTheType(t *testing.T) {
+	pool, schema, serverURL := enumFixture(t)
+	engine, role := enumRole(t, pool, schema, serverURL, true)
 
 	v, err := migrate.Run(t.Context(), engine, parseOne(t, fmt.Sprintf("ALTER TYPE %s.mood ADD VALUE 'calm'", schema)), runOptions())
 	require.NoError(t, err, "a missing grant is a refusal, not an error")
@@ -187,6 +197,37 @@ func TestAddEnumValueRefusesARoleThatDoesNotOwnTheType(t *testing.T) {
 	assert.Contains(t, v.Detail, "pg_has_role("+role+", ")
 	assert.Contains(t, v.Detail, fmt.Sprintf("transfer the type instead: ALTER TYPE %q.\"mood\" OWNER TO <role>", schema))
 	assert.Equal(t, []string{"happy", "sad"}, enumLabels(t, pool, schema), "nothing was added")
+}
+
+// A qualified type name resolves only through a schema the role has USAGE
+// on. A role without it is refused before the name is resolved, with the
+// schema grant, rather than failing on the server's permission error.
+func TestAddEnumValueRefusesARoleWithoutUsageOnTheTypesSchema(t *testing.T) {
+	pool, schema, serverURL := enumFixture(t)
+	engine, role := enumRole(t, pool, schema, serverURL, false)
+
+	v, err := migrate.Run(t.Context(), engine, parseOne(t, fmt.Sprintf("ALTER TYPE %s.mood ADD VALUE 'calm'", schema)), runOptions())
+	require.NoError(t, err, "a missing grant is a refusal, not an error")
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
+	assert.Contains(t, v.Detail, fmt.Sprintf("has_schema_privilege(%s, %s, 'USAGE')", role, schema))
+	assert.Contains(t, v.Detail, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{role}.Sanitize()))
+	assert.Equal(t, []string{"happy", "sad"}, enumLabels(t, pool, schema), "nothing was added")
+}
+
+// RENAME VALUE ” parses with the same empty old label ADD VALUE has, and
+// the server would rename the type's empty label. It is refused as a
+// statement the front door does not take, and the type keeps its labels.
+func TestAddEnumValueRefusesARenameOfTheEmptyLabel(t *testing.T) {
+	pool, schema, _ := enumFixture(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("ALTER TYPE %s.mood ADD VALUE ''", schema))
+	require.NoError(t, err)
+
+	v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TYPE %s.mood RENAME VALUE '' TO 'blue'", schema)), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+	assert.Equal(t, []string{"happy", "sad", ""}, enumLabels(t, pool, schema), "nothing was renamed")
 }
 
 // Adding a label waits only for another session altering the same type.

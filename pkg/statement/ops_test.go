@@ -237,6 +237,16 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpUnrecognized},
 		},
 		{
+			name: "alter type renaming the empty label is unrecognized",
+			sql:  "ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+			want: statement.Op{Kind: statement.OpUnrecognized},
+		},
+		{
+			name: "alter type add value next to the empty label is unrecognized",
+			sql:  "ALTER TYPE mood ADD VALUE 'calm' AFTER ''",
+			want: statement.Op{Kind: statement.OpUnrecognized},
+		},
+		{
 			name: "set schema",
 			sql:  "ALTER TABLE t SET SCHEMA s2",
 			want: statement.Op{Kind: statement.OpSetSchema, Name: "s2"},

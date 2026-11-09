@@ -345,10 +345,14 @@ func ParseOne(sql string) (Statement, error) {
 		// ALTER TYPE ... ADD VALUE and ALTER TYPE ... RENAME VALUE both
 		// parse as AlterEnumStmt; only the form that adds a value, named
 		// by at most a schema and a type, is KindAddEnumValue. RENAME
-		// VALUE carries the old value and stays KindOther, as does a
-		// name that also spells the database.
+		// VALUE stays KindOther, as does a name that also spells the
+		// database.
 		enum := node.GetAlterEnumStmt()
-		if enum.GetOldVal() != "" {
+		adds, err := addsEnumValue(sql, enum)
+		if err != nil {
+			return Statement{}, err
+		}
+		if !adds {
 			return st, nil
 		}
 		name, ok := typeName(enum.GetTypeName())

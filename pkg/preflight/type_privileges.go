@@ -13,6 +13,34 @@ import (
 // longer exists: another session dropped it after the engine resolved it.
 var ErrTypeNotFound = errors.New("the type is no longer in the catalog")
 
+// CheckTypeSchemaUsage verifies the connected role has USAGE on schema, the
+// schema a qualified type name spells. Resolving a name in a schema the
+// role cannot use raises a permission error rather than finding no type,
+// so the check runs before the name is resolved, and a missing USAGE is
+// the *PrivilegeError that carries the grant. A schema that does not exist
+// passes: resolving the name then finds no type.
+func CheckTypeSchemaUsage(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+	// INV: CO-9 — pg_catalog-qualified like every privilege probe.
+	const q = `
+		SELECT current_user::pg_catalog.text,
+		       pg_catalog.has_schema_privilege(current_user, n.oid, 'USAGE')
+		FROM pg_catalog.pg_namespace n
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1`
+	var role string
+	var usage bool
+	err := pool.QueryRow(ctx, q, schema).Scan(&role, &usage)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read USAGE on schema %s: %w", schema, err)
+	}
+	if !usage {
+		return schemaUsageRefusal(role, schema)
+	}
+	return nil
+}
+
 // CheckTypeOwnership verifies the connected role may alter the type with
 // OID typ. ALTER TYPE needs membership in the type's owning role, the same
 // rung a table's in-place ALTER TABLE needs, so a missing membership is the

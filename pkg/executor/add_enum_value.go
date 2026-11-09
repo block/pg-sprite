@@ -30,7 +30,8 @@ var ErrEnumTypeDrift = errors.New("the ADD VALUE reached a type other than the e
 // The type's lock does not hold its name still, since ALTER TYPE ...
 // RENAME does not wait for it, so after the statement runs, and before the
 // commit, the attempt confirms that every enum label the transaction wrote
-// belongs to typ and that typ carries the label, and rolls back with
+// belongs to typ, that typ carries the label, and, when the statement wrote
+// nothing, that the name still resolves to typ, and rolls back with
 // ErrEnumTypeDrift otherwise.
 func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, typ uint32, b Budget, retry RetryPolicy) error {
 	if err := b.validate(); err != nil {
@@ -56,26 +57,38 @@ func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, st statement.S
 // refuses unless typ carries the added label and no other type has a label
 // this transaction wrote. A row written by this transaction carries its
 // transaction ID as xmin; pg_current_xact_id adds the epoch above the
-// 32-bit ID that xmin stores, so the comparison drops it. The statement
-// writes no row when IF NOT EXISTS finds the label present, and the type
-// that carries the label is then still typ.
+// 32-bit ID that xmin stores, so the comparison drops it. When IF NOT
+// EXISTS finds the label present the statement writes no row, so no row
+// identifies the type it reached: the name is resolved again, as the
+// statement resolved it, and must still be typ. A rename that lands
+// between the statement and this read refuses a statement that did reach
+// typ, which fails closed with nothing changed.
 //
 // INV: CO-9 — every function, operator, and relation is
 // pg_catalog-qualified, so a planted overload on the search_path cannot
-// change which rows the check reads.
+// change which rows the check reads. to_regtype itself still resolves the
+// bare name on that path, exactly as the statement did.
 func refuseEnumTypeDrift(ctx context.Context, tx pgx.Tx, st statement.Statement, typ uint32) error {
 	const q = `
+		WITH own AS (
+		    SELECT e.enumtypid
+		    FROM pg_catalog.pg_enum e
+		    WHERE e.xmin::pg_catalog.text::pg_catalog.int8 OPERATOR(pg_catalog.=)
+		          (pg_catalog.pg_current_xact_id()::pg_catalog.text::pg_catalog.int8 OPERATOR(pg_catalog.%) 4294967296))
 		SELECT EXISTS (
 		           SELECT FROM pg_catalog.pg_enum e
 		           WHERE e.enumtypid OPERATOR(pg_catalog.=) $1
 		             AND e.enumlabel OPERATOR(pg_catalog.=) $2),
-		       EXISTS (
-		           SELECT FROM pg_catalog.pg_enum e
-		           WHERE e.enumtypid OPERATOR(pg_catalog.<>) $1
-		             AND e.xmin::pg_catalog.text::pg_catalog.int8 OPERATOR(pg_catalog.=)
-		                 (pg_catalog.pg_current_xact_id()::pg_catalog.text::pg_catalog.int8 OPERATOR(pg_catalog.%) 4294967296))`
-	var labeled, otherChanged bool
-	if err := tx.QueryRow(ctx, q, typ, st.AddedEnumValue()).Scan(&labeled, &otherChanged); err != nil {
+		       EXISTS (SELECT FROM own WHERE own.enumtypid OPERATOR(pg_catalog.<>) $1),
+		       EXISTS (SELECT FROM own WHERE own.enumtypid OPERATOR(pg_catalog.=) $1),
+		       COALESCE(pg_catalog.to_regtype($3)::pg_catalog.oid OPERATOR(pg_catalog.=) $1, false)`
+	ref := st.EnumType()
+	name := pgx.Identifier{ref.Name}
+	if ref.Schema != "" {
+		name = pgx.Identifier{ref.Schema, ref.Name}
+	}
+	var labeled, otherChanged, wrote, stillNamed bool
+	if err := tx.QueryRow(ctx, q, typ, st.AddedEnumValue(), name.Sanitize()).Scan(&labeled, &otherChanged, &wrote, &stillNamed); err != nil {
 		return fmt.Errorf("confirm the ADD VALUE changed only enum type OID %d: %w", typ, err)
 	}
 	if otherChanged {
@@ -84,6 +97,10 @@ func refuseEnumTypeDrift(ctx context.Context, tx pgx.Tx, st statement.Statement,
 	}
 	if !labeled {
 		return fmt.Errorf("%w: the checked type does not carry the label after the statement; nothing was added", ErrEnumTypeDrift)
+	}
+	if !wrote && !stillNamed {
+		return fmt.Errorf("%w: the statement wrote nothing, and %s no longer names the checked type, so the type it reached is unproven; nothing was added",
+			ErrEnumTypeDrift, name.Sanitize())
 	}
 	return nil
 }

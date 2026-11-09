@@ -21,8 +21,9 @@ import (
 // identity, before the commit, that the label went to the type it checked,
 // so the attempt rolls back with enum-type-drift and neither type changes:
 // whether the statement wrote the label to the other type, wrote it there
-// while the checked type already carried it, or found it on the other type
-// under IF NOT EXISTS and wrote nothing.
+// while the checked type already carried it, found it on the other type
+// under IF NOT EXISTS and wrote nothing, or found it there while the
+// checked type carried it too.
 func TestExecuteEnumValueAddRefusesANameMovedToAnotherType(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -45,6 +46,12 @@ func TestExecuteEnumValueAddRefusesANameMovedToAnotherType(t *testing.T) {
 		{
 			name:      "IF NOT EXISTS finds the label on the other type",
 			checked:   []string{"happy", "sad"},
+			other:     []string{"sunny", "calm"},
+			statement: "ALTER TYPE %s.mood ADD VALUE IF NOT EXISTS 'calm'",
+		},
+		{
+			name:      "IF NOT EXISTS finds the label on both types",
+			checked:   []string{"happy", "calm"},
 			other:     []string{"sunny", "calm"},
 			statement: "ALTER TYPE %s.mood ADD VALUE IF NOT EXISTS 'calm'",
 		},
