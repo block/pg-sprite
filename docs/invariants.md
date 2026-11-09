@@ -676,9 +676,10 @@ cancellation tests), and `TableLockSession.Confirm` and `LookupTableLockHolder` 
 `pg_locks` scoped to the connection's own database, so a lock the session holds in another
 database of the same server — where it excludes nothing on this database's table — confirms
 as `ErrTableLockNotHeld` and is not reported as the table's holder (same-key-in-another-database
-test); `pkg/schemachange` shadow build, drop, and inspect each require the
-session for the proven table, run under its `Bind` context, and confirm from their own
-transaction that the session's backend holds the lock before the first write (nil-session,
+test), and read only granted rows, so a session queued for the key is never named its holder
+(`TestTableLockConfirmIgnoresASessionWaitingForTheKey`); `pkg/schemachange` shadow build, drop,
+and inspect each require the session for the proven table, run under its `Bind` context, and
+confirm from their own transaction that the session's backend holds the lock before the first write (nil-session,
 wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
 tests); `pkg/copier` `Copier` requires the same session, runs every chunk transaction under
 its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own connection before
