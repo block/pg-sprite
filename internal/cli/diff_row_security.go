@@ -28,6 +28,13 @@ func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, desired
 	}
 	defer pool.Close()
 	report, err := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
+	return c.writeRowSecurityDiff(ctx, out, pool, desired, b, report, err)
+}
+
+// writeRowSecurityDiff emits what diffplan.PlanWithRowSecurity planned: the
+// plan, its refusal, or, for a table that does not exist, a preview of the
+// create.
+func (c *DiffCmd) writeRowSecurityDiff(ctx context.Context, out io.Writer, pool *pgxpool.Pool, desired statement.DesiredWithRowSecurity, b executor.Budget, report plan.Report, err error) error {
 	if errors.Is(err, schemadiff.ErrTableNotFound) {
 		return c.previewCreateWithRowSecurity(ctx, out, pool, desired, b)
 	}
@@ -35,9 +42,14 @@ func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, desired
 }
 
 // writeRowSecurityPlan emits the plan for a table that exists, or the
-// refusal or error its planning returned.
+// refusal or error its planning returned. When the row security matches, a
+// refused table change is the table plan's own error, returned as it is for
+// a file without row security and as migrate --desired returns it.
 func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, report plan.Report, err error) error {
 	if err != nil {
+		if errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
+			return err
+		}
 		if errors.Is(err, schemadiff.ErrUnsupportedChange) {
 			return c.writeRowSecurityRefusal(out, err)
 		}

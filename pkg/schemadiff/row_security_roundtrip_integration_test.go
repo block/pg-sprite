@@ -128,9 +128,15 @@ func TestRowSecurityRemovalOfLastPolicyIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	changes, err := schemadiff.DiffWithRowSecurity(schema, live, model)
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+	assert.NotErrorIs(t, err, schemadiff.ErrOnlyTableDiffers, "the row security differs")
 	assert.Empty(t, changes, "never emit a partially executable plan")
 }
 
+// DiffWithRowSecurity emits only row security changes, so a table change is
+// refused even when the row security matches. The error says that only the
+// table differs, which is how diffplan.PlanWithRowSecurity knows to plan the
+// table definition on its own, and it still wraps ErrUnsupportedChange, so a
+// caller that treats every difference as a refusal keeps refusing.
 func TestRowSecurityTableChangeIsRefusedEvenWithUnchangedPolicies(t *testing.T) {
 	pool, schema := rowSecurityTable(t)
 	desired, err := statement.ParseDesiredWithRowSecurity(`CREATE TABLE documents (
@@ -146,6 +152,7 @@ func TestRowSecurityTableChangeIsRefusedEvenWithUnchangedPolicies(t *testing.T) 
 	require.NoError(t, err)
 	changes, err := schemadiff.DiffWithRowSecurity(schema, live, model)
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+	assert.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
 	assert.Empty(t, changes)
 }
 

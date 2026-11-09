@@ -79,6 +79,12 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		return diff.writeDiffReport(out, report)
 	}
 	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))
+	return c.finishDesired(out, result, runErr)
+}
+
+// finishDesired writes a desired-state result and returns the exit error
+// its outcome maps to.
+func (c *MigrateCmd) finishDesired(out io.Writer, result migrate.DesiredResult, runErr error) error {
 	if result.Outcome == "" {
 		return runErr
 	}
