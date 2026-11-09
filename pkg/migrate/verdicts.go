@@ -178,15 +178,44 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 		if d.Reason == planner.ReasonReplicaIdentity {
 			v.Detail = fmt.Sprintf("%s drops what the table's replica identity index keys on, "+
 				"which makes UPDATE and DELETE fail while a publication publishes them; "+
-				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
+				"point REPLICA IDENTITY at a unique index the drop leaves in place (USING INDEX), at a primary key it leaves in place (DEFAULT), or at the whole row (FULL) first, then re-plan", d.Operation)
 		}
+		v.DependentViews = d.DependentViews
+		v.DependentPolicies = d.DependentPolicies
+		v.DependentTriggers = d.DependentTriggers
+		v.DependentGeneratedColumns = d.DependentGeneratedColumns
 		if d.Reason == planner.ReasonDependentView {
-			v.DependentViews = d.DependentViews
 			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
 				"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", "))
 		}
+		if d.Reason == planner.ReasonDependentPolicy {
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a policy reads it; %s",
+				d.Operation, planner.DependentsPhrase("policy", "policies", d.DependentPolicies), d.DependentFix.Help("policies"))
+		}
+		if d.Reason == planner.ReasonDependentTrigger {
+			v.Detail = fmt.Sprintf("%s changes a column named by %s, and PostgreSQL refuses to retype or drop a column "+
+				"while a trigger's UPDATE OF list or WHEN condition names it; %s",
+				d.Operation, planner.DependentsPhrase("trigger", "triggers", d.DependentTriggers), d.DependentFix.Help("triggers"))
+		}
+		if d.Reason == planner.ReasonDependentGeneratedColumn {
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column "+
+				"while a generated column reads it, except that PostgreSQL 14 drops the generated column along with a dropped column; %s",
+				d.Operation, planner.DependentsPhrase("generated column", "generated columns", d.DependentGeneratedColumns), planner.GeneratedColumnHelp)
+		}
+		if others := d.OtherDependents(); others != "" {
+			v.Detail += "; the change is also blocked by " + others + ", so re-plan after dealing with every blocker"
+		}
+		if d.Reason == planner.ReasonPartitionKey {
+			v.PartitionKeyTables = d.PartitionKeyTables
+			v.Detail = fmt.Sprintf("%s changes a column in the partition key of %s, and PostgreSQL never retypes or drops a partition key column; %s",
+				d.Operation, strings.Join(d.PartitionKeyTables, ", "), planner.PartitionKeyHelp)
+		}
+		if d.Reason == planner.ReasonNotNullWithoutDefault {
+			v.Detail = fmt.Sprintf("%s adds a NOT NULL column with no default to a table that holds rows, "+
+				"and PostgreSQL refuses it because every existing row would hold NULL; %s", d.Operation, planner.NotNullWithoutDefaultHelp)
+		}
 		if d.Reason == planner.ReasonCascadingDrop {
-			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views or other tables' foreign keys, "+
+			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views, row-level security policies, or other tables' foreign keys, "+
 				"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+
 				"and PostgreSQL then refuses the drop if anything still depends on it", d.Operation)
 		}

@@ -54,8 +54,9 @@ the sequencing across transaction boundaries *is* the safety mechanism.
 "Implicit or bounded" above is the mechanical detail behind the contract —
 autocommit-each-step has two shapes in the executor:
 
-- **Brief catalog steps (step kind `brief`) and `VALIDATE CONSTRAINT` (step
-  kind `validate-constraint`)** each run as one short *explicit* transaction:
+- **Brief catalog steps (step kind `brief`) and `VALIDATE CONSTRAINT`, alone or
+  beside operations that take only `SHARE UPDATE EXCLUSIVE` (step kind
+  `validate-constraint`)** each run as one short *explicit* transaction:
   `BEGIN` → `SET LOCAL lock_timeout` / `statement_timeout` → the statement →
   `COMMIT` (`pkg/executor`'s bounded runner). When the preflight proof
   carries a schema, the same `SET LOCAL` pins `search_path` to that schema
@@ -353,13 +354,13 @@ concurrently is.
 | `duplicate-create-name` | yes | The desired set claims the same relation name twice; refused at admission |
 | `partition-of-unsupported` | yes | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
 | `unsupported-create-step` | yes | A desired statement is not a shape the create path can run |
-| `pool-too-small` | yes | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, or a recovery's own session beside those |
-| `replica-identity-drop` | yes | A native drop would remove what a replica identity index is built on, read again under the table's lock after planning; nothing was dropped. Point `REPLICA IDENTITY` at another unique index first, or `DEFAULT` if a usable primary key remains after the drop, then re-plan |
+| `pool-too-small` | yes | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, a recovery's own session beside those, or a copy-and-swap run's copy workers plus one connection for the catch-up's flushes and one for checkpoint saves and progress reads (`migrate.CopySwapMinConns`), refused before the run creates anything |
+| `replica-identity-drop` | yes | A native drop would remove what a replica identity index is built on, read again under the table's lock after planning; nothing was dropped. Point `REPLICA IDENTITY` at a unique index the drop leaves in place (`USING INDEX`), at a primary key it leaves in place (`DEFAULT`), or at the whole row (`FULL`) first, then re-plan |
 | `adopted-index-drift` | yes | The index a planned `ADD CONSTRAINT ... USING INDEX` takes over was dropped, replaced under the same name, or left invalid after planning, read again under the table's lock; nothing was attached. Re-plan against the index as it stands |
 | `validated-constraint-drift` | yes | The constraint a planned `VALIDATE CONSTRAINT` validates was dropped or replaced under the same name after planning, read again under the validation's `SHARE UPDATE EXCLUSIVE` lock; nothing was validated. Re-plan against the constraint as it stands |
 | `renamed-index-drift` | yes | The relation an `ALTER INDEX ... RENAME TO` names is no longer a plain index on the preflighted table, read again under the table's `SHARE UPDATE EXCLUSIVE` lock: it is gone, it is not an index (PostgreSQL's `ALTER INDEX ... RENAME` also renames a table), it belongs to another table, or it now backs a primary-key, unique, or exclusion constraint; or another session gave the name to a different relation between that check and the rename, confirmed before the commit; nothing was renamed. Re-plan against the catalog as it stands |
 | `table-not-found` | yes | The statement's qualified table does not exist |
-| `data-fault` | yes | The server rejected the table's rows as the statement would shape them (SQLSTATE class 22 or 23). The code names the fault, not the cleanup: the copy-and-swap run abandoned itself when the error is a `*schemachange.AbandonedError` (match it with `errors.As`), so correct the data or the statement and run it again from the beginning; otherwise the abandon did not finish, the hold on the source and the checkpoint row stay, and the detail says to correct the data or the statement and start the run over with `--restart SCHEMA.TABLE` |
+| `data-fault` | yes | The server rejected the table's rows as the statement would shape them (SQLSTATE class 22 or 23). The code names the fault, not the cleanup: the copy-and-swap run abandoned itself when the verdict says `abandoned: true` (the error is a `*schemachange.AbandonedError`; match it with `errors.As`), so correct the data or the statement and run it again from the beginning; otherwise the abandon did not finish, the hold on the source and the checkpoint row stay, and the detail says to correct the data or the statement and start the run over with `--restart SCHEMA.TABLE` |
 | `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
 

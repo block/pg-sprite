@@ -7,16 +7,22 @@ import (
 )
 
 // This file is the irreversible-operations registry: every operation
-// pg-sprite can run that cannot be undone, what it loses, and the typed
-// acknowledgement that lifts its refusal on the imperative front door. Each
+// pg-sprite refuses to run, because it cannot be undone, until a typed
+// acknowledgement lifts the refusal on the imperative front door, with what
+// it loses and that acknowledgement. A loss that is the change the operator
+// asked for is not listed: a copy-and-swap without KeepOld drops the
+// retained source once the swap has committed, which ends a rollback window
+// but discards nothing the new table does not carry. Each
 // acknowledgement names the resolved SCHEMA.TABLE, so one left on a script
 // cannot reach another table. Desired-state execution takes none of them:
 // it refuses a plan holding a destructive statement whole, and rejects
 // every acknowledgement before any database work. The destructive operation
 // shapes are not listed here but derived from the planner, the one answer
 // both destructive gates use. TestIrreversibleOperationRegistryIsComplete
-// fails when an acknowledgement or a destructive shape arrives without an
-// entry.
+// fails when an acknowledgement, a string field on Options or
+// CopySwapOptions that could carry one, or a destructive shape arrives
+// without an entry, and when a listed entry names the wrong acknowledgement
+// or refusal.
 
 // ackKind is one typed acknowledgement the imperative front door takes.
 // Its value is the migrate command's flag name.

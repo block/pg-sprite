@@ -331,6 +331,32 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	assert.NotContains(t, s, "attempts")
 	assert.NotContains(t, s, "code")
 	assert.NotContains(t, s, "failed_step")
+	assert.NotContains(t, s, "abandoned")
+}
+
+// Abandoned is the field an adapter branches on to tell an abandoned
+// data-fault run from a held one, so its wire key and its text line are
+// pinned here: present on the abandoned verdict, absent on the held one
+// that differs from it only in the field. The CLI's text renderer is held
+// equal to String by TestVerdictTextColorWrapsLabelsOnly.
+func TestAbandonedVerdictRendersOnlyWhenSet(t *testing.T) {
+	held := Verdict{
+		Outcome:   OutcomeFailed,
+		Code:      "data-fault",
+		Statement: "ALTER TABLE t ALTER COLUMN c TYPE varchar(2)",
+	}
+	abandoned := held
+	abandoned.Abandoned = true
+
+	assert.NotContains(t, held.String(), "abandoned:")
+	assert.Contains(t, abandoned.String(), "\n  abandoned: ")
+
+	heldJSON, err := held.JSON()
+	require.NoError(t, err)
+	assert.NotContains(t, heldJSON, "abandoned")
+	abandonedJSON, err := abandoned.JSON()
+	require.NoError(t, err)
+	assert.Contains(t, abandonedJSON, `"abandoned": true`)
 }
 
 // Reason and Cause values are the machine contract automation switches on:
@@ -340,6 +366,7 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(CauseLockBudget), string(CauseStatementBudget),
 		string(CauseParentBlockingIndexBuild), string(CauseParentConcurrentIndexBuild),
 		string(CauseParentIndexAdoption), string(CauseParentNotValidForeignKey),
+		string(CauseCopyAndSwapNotEnabled),
 	}
 	for _, r := range Reasons() {
 		toks = append(toks, string(r))
@@ -424,4 +451,45 @@ func TestStringIncludesAttemptsWhenSet(t *testing.T) {
 
 	v.Attempts = 0
 	assert.NotContains(t, v.String(), "attempts")
+}
+
+// index_usage is part of the verdict contract an orchestrator reads: a zero
+// scan count is present, not omitted, because 0 is the evidence the
+// operator is asked to confirm, while the times the server did not record
+// are absent rather than a zero time.
+func TestIndexUsageJSONKeepsAZeroCountAndOmitsUnrecordedTimes(t *testing.T) {
+	readAt := time.Date(2026, 10, 28, 9, 30, 0, 0, time.UTC)
+	v := Verdict{
+		Statement:  "DROP INDEX app.orders_created_idx",
+		Table:      "app.orders",
+		IndexUsage: &IndexUsage{ReadAt: readAt, Unique: true, TrackCounts: true},
+	}.WithRefusal(ByDesign(ReasonDestructiveChange))
+
+	js, err := v.JSON()
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(js), &got))
+	assert.Equal(t, map[string]any{
+		"idx_scan":                    float64(0),
+		"read_at":                     "2026-10-28T09:30:00Z",
+		"unique":                      true,
+		"track_counts":                true,
+		"track_counts_off_by_setting": false,
+	}, got["index_usage"])
+
+	lastScan := readAt.Add(-time.Hour)
+	partitions := 2
+	v.IndexUsage.IdxScans = 42
+	v.IndexUsage.LastIdxScan = &lastScan
+	v.IndexUsage.Partitions = &partitions
+	v.IndexUsage.TrackCounts = false
+	v.IndexUsage.TrackCountsOffBySetting = true
+	assert.Contains(t, v.String(),
+		"usage:     42 index scans on this server (replicas not counted) through its partition indexes (2), last 2026-10-28T08:30:00Z, unique, track_counts off, track_counts off for some roles")
+
+	js, err = v.JSON()
+	require.NoError(t, err)
+	got = nil
+	require.NoError(t, json.Unmarshal([]byte(js), &got))
+	assert.Equal(t, float64(2), got["index_usage"].(map[string]any)["partitions"], "a partitioned index's leaf count")
 }

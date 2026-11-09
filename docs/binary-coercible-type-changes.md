@@ -365,12 +365,27 @@ statement rolls back; the time and lock are spent regardless).
   have been a relabel. The view has to be dropped and recreated around the change. The planner
   reads which views and materialized views read the column and refuses the change as
   `dependent-view`, naming them, before the statement reaches the server.
+- **A row-level security policy reading the column blocks the statement outright** —
+  `cannot alter type of a column used in a policy definition` — for the same reason, wherever
+  the policy is defined. The planner refuses the change as `dependent-policy`, naming the
+  policies, before the statement reaches the server.
 - **A stored generated column whose expression references the altered column blocks the
   statement the same way** — `cannot alter type of a column used by a generated column`
   (`ERRCODE_FEATURE_NOT_SUPPORTED`), again regardless of whether the change would have been a
   relabel. `RememberAllDependentForRebuilding` refuses rather than re-plans the generation
   expression. The generated column has to be dropped before the change and re-added after
-  it — and re-adding a `STORED` generated column is itself a full rewrite.
+  it — and re-adding a `STORED` generated column is itself a full rewrite. The planner
+  refuses the change as `dependent-generated-column`, naming the generated columns, before
+  the statement reaches the server.
+- **A trigger whose `UPDATE OF` list or `WHEN` condition names the column blocks the
+  statement the same way** — `cannot alter type of a column used in a trigger definition`.
+  A trigger whose function reads the column does not, because the server records no
+  dependency on it. The planner refuses the change as `dependent-trigger`, naming the
+  triggers, before the statement reaches the server.
+- **A partition key column cannot be retyped at all** — `cannot alter column "…" because it
+  is part of the partition key of relation "…"` (`42P16`), on the partitioned table or on a
+  sub-partition the change reaches. The planner refuses the change as `partition-key`,
+  naming the partitioned tables, before the statement reaches the server.
 - **The column's planner statistics are deleted**, even for a relabel: `ATExecAlterColumnType`
   calls `RemoveStatistics` for the column because the stored histogram and most-common
   values are of the old type. Nothing puts them back until autovacuum's analyze threshold

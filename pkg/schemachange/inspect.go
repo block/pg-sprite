@@ -117,6 +117,16 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err != nil {
 		return BuiltShadow{}, err
 	}
+	// A shadow that owns a sequence the source lacks would resume only to
+	// stop at the swap; it is refused here as the build refuses it, and in
+	// the same order against the handoff check below.
+	owned, err := readSequenceOwnedColumns(ctx, tx, shadowOID)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
+	if err := refuseNewSequenceColumns(target.Schema(), target.Table(), owned); err != nil {
+		return BuiltShadow{}, err
+	}
 	// Only the identity columns the change kept on the shadow carry a
 	// handoff; one the change dropped has no default to verify, and the
 	// fingerprint comparison the caller makes is what tells a dropped

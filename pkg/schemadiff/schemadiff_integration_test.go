@@ -193,6 +193,58 @@ func TestDiffSerialTableConverges(t *testing.T) {
 	assert.Empty(t, changes)
 }
 
+// A plain unique index stays in the model when a foreign key references
+// it, whether the key is on another table or on the table itself: the
+// server records the referenced index as the foreign key's conindid, but
+// the index belongs to no key constraint of the table, so it is introspected
+// as an index. A desired file that declares the table as it stands plans no
+// change. The self-referencing key needs the index before it, which a
+// desired CREATE TABLE cannot declare, so that case checks the live model.
+func TestDiffKeepsAUniqueIndexAForeignKeyReferences(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	const accounts = `CREATE TABLE accounts (id bigint PRIMARY KEY, code text NOT NULL, parent_code text);
+CREATE UNIQUE INDEX accounts_code_key ON accounts (code);`
+	for name, tc := range map[string]struct{ setup, desired string }{
+		"referenced from another table": {
+			setup: accounts + `
+CREATE TABLE invoices (id bigint PRIMARY KEY, account_code text REFERENCES accounts (code));`,
+			desired: accounts,
+		},
+		"referenced from the table itself": {
+			setup: accounts + `
+ALTER TABLE accounts ADD CONSTRAINT accounts_parent_fk FOREIGN KEY (parent_code) REFERENCES accounts (code);`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema := testutil.NewSchema(t, pool)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf("SET search_path = %s; %s", pgx.Identifier{schema}.Sanitize(), tc.setup))
+			require.NoError(t, err)
+
+			live, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
+			require.NoError(t, err)
+			var indexes []string
+			for _, ix := range live.Indexes {
+				indexes = append(indexes, ix.Name)
+			}
+			assert.Equal(t, []string{"accounts_code_key"}, indexes)
+			if tc.desired == "" {
+				return
+			}
+
+			ds, err := statement.ParseDesired(tc.desired)
+			require.NoError(t, err)
+			desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+			require.NoError(t, err)
+			changes, err := schemadiff.Diff(schema, live, desired)
+			require.NoError(t, err)
+			assert.Empty(t, changes)
+		})
+	}
+}
+
 // A serial's sequence declaration is not compared: the serial shorthand
 // cannot state one, so a file that writes it plans no change against a live
 // serial whose sequence was tuned, and the tuning is left as it is.
@@ -389,6 +441,9 @@ CREATE UNIQUE INDEX events_name_key ON events (name);
 	assert.Equal(t, schemadiff.ChangeCreateIndex, changes[0].Kind)
 	assert.False(t, changes[0].Destructive)
 	assert.Equal(t, fmt.Sprintf("CREATE UNIQUE INDEX events_name_key ON %s.events USING btree (name)", schema), changes[0].SQL)
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "events_name_key"},
+	}, schemadiff.Advisories(live, want), "the non-destructive create is accompanied by the advisory that completing it removes the leftover")
 
 	// A baseline pulled from the table renders the leftover like any other
 	// index and materializes it valid, so the round trip diffs to exactly
@@ -431,6 +486,7 @@ CREATE UNIQUE INDEX events_name_key ON events (name);
 	rediff, err := schemadiff.Diff(schema, after, want)
 	require.NoError(t, err)
 	assert.Empty(t, rediff, "a valid index with the desired definition is delivered")
+	assert.Empty(t, schemadiff.Advisories(after, want), "a delivered index leaves nothing to advise")
 }
 
 // Desired may name the leftover of a failed build with a different
@@ -477,6 +533,9 @@ CREATE INDEX events_name_key ON events (name);
 	assert.Equal(t, schemadiff.ChangeCreateIndex, changes[0].Kind)
 	assert.False(t, changes[0].Destructive)
 	assert.Equal(t, fmt.Sprintf("CREATE INDEX events_name_key ON %s.events USING btree (name)", schema), changes[0].SQL)
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "events_name_key"},
+	}, schemadiff.Advisories(live, want), "a redefined leftover is still the rebuild case: desired names it")
 
 	// The duplicate rows stay: they only ever conflicted with the abandoned
 	// unique build, not with the plain index desired now.
@@ -592,6 +651,9 @@ CREATE TABLE events (
 	changes, err = schemadiff.Diff(schema, live, without)
 	require.NoError(t, err)
 	assert.Empty(t, changes, "an in-flight build desired does not name is not dropped from under its builder")
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexUndeclared, Index: "events_name_idx"},
+	}, schemadiff.Advisories(live, without), "the empty plan carries the observation the change list discards")
 
 	// Releasing the snapshot lets the build finish; the same desired state
 	// then diffs to nothing.

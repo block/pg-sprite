@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -27,6 +28,12 @@ type irreversibleScenario struct {
 	// to ack (empty for none); table names the orders table, for the
 	// acknowledgements the statement also needs but the entry is not about.
 	options func(cfg dbconn.Config, table, ack string) Options
+	// cause is the verdict.Cause the refusal carries when ack is missing:
+	// CauseNone for a gate that refuses on the statement alone, and the
+	// gate's own cause where one stands behind the registry reason. Pinning
+	// it keeps the subtest on the entry's gate, not on an earlier one that
+	// refuses under the same reason.
+	cause verdict.Cause
 }
 
 // irreversibleScenarios maps every registry key to its scenario. Each SQL
@@ -38,9 +45,13 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 		opts.AllowDestructive = ack
 		return opts
 	}
+	// The route is opened: closed, every copy-and-swap statement is refused
+	// under ReasonCopyAndSwapRefused with CauseCopyAndSwapNotEnabled before
+	// the entry's own gate runs, and its scenario would pass without
+	// exercising the acknowledgement it pins.
 	copySwap := func(cfg dbconn.Config) Options {
 		opts := DefaultOptions()
-		opts.CopySwap = CopySwapOptions{Connection: cfg, FreeDiskBytes: testutil.UnlimitedDisk}
+		opts.CopySwap = CopySwapOptions{Enabled: true, Connection: cfg, FreeDiskBytes: testutil.UnlimitedDisk}
 		return opts
 	}
 	return map[string]irreversibleScenario{
@@ -107,7 +118,8 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 			},
 		},
 		// The test server runs with wal_level=replica, so without blocked
-		// writes the route has no way to carry the table's changes.
+		// writes the route has no way to carry the table's changes, and the
+		// refusal names the missing logical decoding.
 		"copy-and-swap with the table's writes blocked": {
 			sql: `ALTER TABLE {schema}.orders ALTER COLUMN qty TYPE bigint`,
 			options: func(cfg dbconn.Config, _, ack string) Options {
@@ -115,6 +127,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.CopySwap.BlockWrites = ack
 				return opts
 			},
+			cause: verdict.Cause(preflight.CopySwapCauseLogicalDecodingUnavailable),
 		},
 	}
 }
@@ -130,7 +143,9 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 	// entry is refused only where the route cannot stream, and a shared
 	// server (PG_DSN, a hosted fixture) may run with logical decoding on.
 	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=replica")
-	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL)}
+	// The pool is sized for the route: a smaller one is refused before any
+	// gate runs, as a failure rather than a verdict.
+	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConnsFloor: CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
@@ -158,6 +173,7 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 					require.NoError(t, err, "a refusal is a verdict, not an error")
 					assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 					assert.Equal(t, op.refusal, v.Reason)
+					assert.Equal(t, sc.cause, v.Cause, "the refusal comes from the entry's own gate")
 					assertNothingExecuted(t, pool, schema, before)
 				})
 			}

@@ -56,22 +56,102 @@ func TestTableLockConfirmDistinguishesHolderGoneFromHolderElsewhere(t *testing.T
 	assert.NoError(t, rival.Confirm(t.Context(), tx), "the rival confirms its own lock on the same connection")
 }
 
-// goneLock acquires the table lock and then terminates the session's
-// backend, so the server no longer grants the lock while the session still
-// believes it holds it. The cleanup waits for the keepalive to notice the
-// loss before releasing.
-func goneLock(t *testing.T, cfg dbconn.Config, pool *pgxpool.Pool, schema, table string) *dbconn.TableLockSession {
-	t.Helper()
-	lock, err := dbconn.AcquireTableLock(t.Context(), cfg, schema, table)
+// An advisory lock is per database, but pg_locks lists every database's
+// grants. A lock session dialled into another database of the same server
+// holds the key there, not in the database the working transaction writes
+// to, so Confirm must report the table unheld; a lookup from the working
+// database must not find that session either, while a lookup from the lock's
+// own database does.
+func TestTableLockConfirmIgnoresTheSameKeyHeldInAnotherDatabase(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	lockURL := testutil.NewDatabase(t, serverURL)
+	workURL := testutil.NewDatabase(t, serverURL)
+	workPool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: workURL})
+	require.NoError(t, err)
+	t.Cleanup(workPool.Close)
+	lockPool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: lockURL})
+	require.NoError(t, err)
+	t.Cleanup(lockPool.Close)
+
+	held, err := dbconn.AcquireTableLock(t.Context(), dbconn.Config{URL: lockURL}, "app", "orders")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		const lockLossDeadline = 30 * time.Second
-		select {
-		case <-lock.Done():
-		case <-time.After(lockLossDeadline):
-			t.Errorf("lock session did not report loss within %s", lockLossDeadline)
-		}
-		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())))
+		assert.NoError(t, held.Release(context.WithoutCancel(t.Context())))
+	})
+
+	tx, err := workPool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+	})
+	err = held.Confirm(t.Context(), tx)
+	assert.ErrorIs(t, err, dbconn.ErrTableLockNotHeld, "the lock in another database is not this database's table lock")
+	var heldErr *dbconn.TableLockHeldError
+	assert.NotErrorAs(t, err, &heldErr, "the other database's holder is not a rival for this table")
+
+	_, found, err := dbconn.LookupTableLockHolder(t.Context(), workPool, "app", "orders")
+	require.NoError(t, err)
+	assert.False(t, found, "the working database sees no holder")
+	holder, found, err := dbconn.LookupTableLockHolder(t.Context(), lockPool, "app", "orders")
+	require.NoError(t, err)
+	require.True(t, found, "the lock's own database sees its holder")
+	assert.Equal(t, held.BackendPID(), holder.PID)
+}
+
+// The same table in two databases of one server is locked at once, as when
+// two tenants' databases change app.orders together. Each lock is the
+// table's lock only in its own database: from the working database, its own
+// session confirms, the other database's session is not the holder there,
+// and a lookup names its own session. Without the database predicate the
+// lookup takes the lowest-PID grant across both databases, so whichever
+// session has the higher PID fails one of the two confirmations.
+func TestTableLockConfirmWhenTheSameKeyIsHeldInTwoDatabases(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	otherURL := testutil.NewDatabase(t, serverURL)
+	ownURL := testutil.NewDatabase(t, serverURL)
+	ownPool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: ownURL})
+	require.NoError(t, err)
+	t.Cleanup(ownPool.Close)
+
+	other, err := dbconn.AcquireTableLock(t.Context(), dbconn.Config{URL: otherURL}, "app", "orders")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, other.Release(context.WithoutCancel(t.Context())))
+	})
+	own, err := dbconn.AcquireTableLock(t.Context(), dbconn.Config{URL: ownURL}, "app", "orders")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, own.Release(context.WithoutCancel(t.Context())))
+	})
+
+	tx, err := ownPool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+	})
+	assert.NoError(t, own.Confirm(t.Context(), tx), "the own database's session confirms its lock there")
+	var heldErr *dbconn.TableLockHeldError
+	require.ErrorAs(t, other.Confirm(t.Context(), tx), &heldErr, "the other database's session is not the holder here")
+	assert.Equal(t, own.BackendPID(), heldErr.Holder.PID)
+
+	holder, found, err := dbconn.LookupTableLockHolder(t.Context(), ownPool, "app", "orders")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, own.BackendPID(), holder.PID)
+}
+
+// goneLock acquires the table lock and then terminates the session's
+// backend, so the server no longer grants the lock while the session still
+// believes it holds it. The keepalive is an hour away, so only an
+// in-transaction confirmation can catch the loss during the test. The
+// cleanup releases without waiting for the keepalive to notice;
+// TestTableLockKeepaliveLoss covers that detection.
+func goneLock(t *testing.T, cfg dbconn.Config, pool *pgxpool.Pool, schema, table string) *dbconn.TableLockSession {
+	t.Helper()
+	lock, err := dbconn.AcquireTableLock(t.Context(), cfg, schema, table, dbconn.WithTableLockKeepalive(time.Hour))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())), "releasing a session whose backend is gone fails")
 	})
 	var terminated bool
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT pg_terminate_backend($1)`, lock.BackendPID()).Scan(&terminated))

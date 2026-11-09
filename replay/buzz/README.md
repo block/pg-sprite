@@ -27,7 +27,10 @@ behaviors worth knowing when reading the results:
 - `CREATE INDEX IF NOT EXISTS` is refused by design — a name-only no-op cannot prove
   the existing index is valid or even the requested one.
 - Buzz's unnamed `ADD FOREIGN KEY` executes via the safer `NOT VALID` + `VALIDATE`
-  sequence, under the name the server would have chosen.
+  sequence: the `VALIDATE` step has to name the constraint, so pg-sprite states the
+  name PostgreSQL would choose — `<table>_<columns>_fkey`, truncated to the identifier
+  limit and numbered past a name already taken, as the server does. Here that is
+  `moderation_reports_community_id_action_id_fkey`.
 - Every `DROP COLUMN`, `DROP CONSTRAINT`, and `DROP NOT NULL` is refused by design
   (`destructive-change`): the replay never passes `--allow-destructive`, so it pins
   the refusal and advances the history through psql.

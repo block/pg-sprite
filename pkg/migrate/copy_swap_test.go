@@ -29,12 +29,33 @@ func parseCopySwapStatement(t *testing.T) statement.Statement {
 	return st
 }
 
+// The route is in preview and closed until the policy opens it: a
+// statement that routes to copy-and-swap under the zero CopySwapOptions is
+// refused as a capability boundary, with its own cause, before the route's
+// connection is even looked at — the connection here is unset and the pool
+// nil, and neither is reached. The refusal is a verdict, not an error: the
+// caller wired nothing wrong, the route is simply not open to it.
+func TestCopyAndSwapIsClosedUntilEnabled(t *testing.T) {
+	st := parseCopySwapStatement(t)
+	v, err := copyAndSwap(t.Context(), nil, st, Options{}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
+	assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, v.Cause)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+	assert.Equal(t, "billing.orders", v.Table)
+	assert.Equal(t, st.SQL(), v.Statement)
+	assert.Empty(t, v.Code, "a refusal is not a failure")
+	assert.Contains(t, v.Detail, "nothing was executed")
+}
+
 // The route cannot open its dedicated sessions from a pool alone, so a
-// caller that routes a statement to copy-and-swap without naming the
+// caller that opens the route for a statement without naming the
 // connection stops before any database work, with the zero verdict that
 // means "nothing was executed".
 func TestCopyAndSwapRequiresTheConnection(t *testing.T) {
-	v, err := copyAndSwap(t.Context(), nil, parseCopySwapStatement(t), Options{}, slog.New(slog.DiscardHandler))
+	opts := Options{CopySwap: CopySwapOptions{Enabled: true}}
+	v, err := copyAndSwap(t.Context(), nil, parseCopySwapStatement(t), opts, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, ErrCopySwapConnectionRequired)
 	assert.Zero(t, v)
 }
@@ -113,6 +134,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "drops the replication slot", "a live run's hold is its slot")
 		assert.NotContains(t, v.Detail, "resumes")
 		assert.False(t, v.WritesBlocked, "a live run never took the table offline for writes")
+		assert.False(t, v.Abandoned, "a divergence leaves the run standing for --restart")
 	})
 
 	t.Run("a quiesced divergence names the fence as the hold to release", func(t *testing.T) {
@@ -141,6 +163,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "starts from the beginning")
 		assert.NotContains(t, v.Detail, "--restart")
 		assert.NotContains(t, v.Detail, "resumes")
+		assert.True(t, v.Abandoned, "the verdict says the run was discarded without the consumer reading the detail")
 	})
 
 	t.Run("a constraint the copied rows break is an abandoned run that names the slot as released", func(t *testing.T) {
@@ -153,6 +176,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "the run was abandoned")
 		assert.Contains(t, v.Detail, "its replication slot is dropped", "a live run's hold was its slot")
 		assert.NotContains(t, v.Detail, "--restart")
+		assert.True(t, v.Abandoned)
 	})
 
 	t.Run("a data fault whose abandon did not finish is coded as a data fault with the restart remedy", func(t *testing.T) {
@@ -169,6 +193,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "start the run over")
 		assert.Contains(t, v.Detail, "takes the write fence off the source", "a quiesced run's hold is its fence")
 		assert.NotContains(t, v.Detail, "resumes")
+		assert.False(t, v.Abandoned, "the same code as an abandoned run, told apart by the typed field")
 	})
 
 	t.Run("a server fault outside the data classes is resumed", func(t *testing.T) {

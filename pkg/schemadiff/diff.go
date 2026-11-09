@@ -158,7 +158,9 @@ type ConstraintValidation struct {
 // order for columns, name order for constraints and indexes. schema
 // qualifies the emitted statements' table references. Columns are compared
 // by name only: attribute order carries no semantics in PostgreSQL and is
-// deliberately out of scope for convergence.
+// deliberately out of scope for convergence. An invalid index on a plain
+// table never yields a drop (see indexNeedsDrop); [Advisories] over the same
+// models reports each such entry so the observation is not lost.
 // RowSecurity is observational only: table-only desired files do not claim
 // ownership of access control, so missing policies never produce policy drops.
 func Diff(schema string, live, desired Model) ([]Change, error) {
@@ -241,9 +243,14 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	// Columns to drop. A rename is indistinguishable from drop+add at the
 	// catalog level, so it surfaces as exactly that — and the drop is
-	// flagged destructive for the caller to gate.
-	for _, col := range live.Columns {
-		if _, ok := desiredCols[col.Name]; !ok {
+	// flagged destructive for the caller to gate. Generated columns go
+	// first: PostgreSQL refuses to drop a column a generated column still
+	// reads, and a generated column never reads another.
+	for _, generated := range []bool{true, false} {
+		for _, col := range live.Columns {
+			if _, ok := desiredCols[col.Name]; ok || col.IsGenerated() != generated {
+				continue
+			}
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP COLUMN " + pgx.Identifier{col.Name}.Sanitize(),
 				Kind:        ChangeDropColumn,

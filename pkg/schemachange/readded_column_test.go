@@ -27,9 +27,11 @@ func newReaddFixture(readded string) readdFixture {
 	return readdFixture{source: source, shadow: append(shadow, columnPosition{name: readded, attnum: 4})}
 }
 
-// A re-added column the copy can leave to its default is not refused:
+// A re-added column the copy can leave to its default is not refused here:
 // nullable, with a default, generated, or an identity of its own replacing a
 // plain column. Each is a new column the copy omits and the server fills.
+// The identity case is refused by the build's new-sequence check instead,
+// which runs after this one.
 func TestRefuseUnfillableReaddsAdmitsAColumnTheServerFills(t *testing.T) {
 	for name, column := range map[string]schemadiff.Column{
 		"nullable":            {Name: "note", Type: "text"},
