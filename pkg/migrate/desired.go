@@ -206,6 +206,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// The acknowledgements are rejected before the policy is validated, so
 	// a caller that left two set gets the first one's sentinel rather than
 	// the validation error for the pair.
+	// INV: RF-12 — desired-state execution takes no acknowledgement.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
@@ -436,7 +437,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		FailedStepSQL: stepErr.SQL,
 		Detail:        createFailureDetail(execErr),
 	}
-	result.Verdicts = append(result.Verdicts, failed)
+	result.Verdicts = append(result.Verdicts, WithServerError(failed, execErr))
 	result.Outcome = verdict.OutcomeFailed
 	result.Detail = committedPrefixDetail(stepErr.Step-1, len(report.Statements), failedWhat(failed.Code))
 	return result, fmt.Errorf("planned statement %d: %w", stepErr.Step, execErr)

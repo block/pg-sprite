@@ -60,7 +60,7 @@ func (r *Runner) swapLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	}
 	ready, report, fillErr := r.fillLive(liveCtx, pool, lock, target, state, fill, cap)
 	endErr := cap.end(ctx, pool, r.opts.sleep())
-	if err := captureOutcome(cap, fillErr, endErr); err != nil {
+	if err := captureOutcome(ctx, cap, fillErr, endErr); err != nil {
 		return report, err
 	}
 	// INV: ST-4 — the position the drain reopens from is the one the
@@ -162,7 +162,9 @@ func (r *Runner) fillLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 // is then in the shadow — and leaves the row in PhaseVerifying at the
 // confirmed position. The wait is bounded by ctx alone: a source written
 // faster than the capture applies is a run that has not caught up, and
-// the capture's own lag ceiling is what ends it.
+// the capture's own lag ceiling is what ends it. A wait that ctx ends is
+// reported as a *CatchupWaitError carrying the catch-up's status at that
+// moment, so the caller reads what the capture was waiting on.
 func (r *Runner) awaitCaughtUp(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, state *runState, cap *capture) error {
 	marker, err := markWAL(ctx, pool)
 	if err != nil {
@@ -171,7 +173,7 @@ func (r *Runner) awaitCaughtUp(ctx context.Context, pool *pgxpool.Pool, lock *db
 	sleep := r.opts.sleep()
 	for cap.catchup.Confirmed() < marker {
 		if err := sleep(ctx, r.opts.livePoll()); err != nil {
-			return fmt.Errorf("catch up %s.%s to %s: %w", state.cp.Schema, state.cp.Table, marker, err)
+			return &CatchupWaitError{Schema: state.cp.Schema, Table: state.cp.Table, Marker: marker, Status: cap.catchup.Status(), Err: err}
 		}
 	}
 	state.cp.LastAppliedLSN = max(state.cp.LastAppliedLSN, cap.catchup.Confirmed())

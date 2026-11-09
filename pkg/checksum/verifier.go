@@ -23,6 +23,12 @@ var (
 	// ErrInvariantViolation marks a fail-closed refusal; the wrapped message
 	// names the invariant.
 	ErrInvariantViolation = dbconn.ErrInvariantViolation
+	// ErrConversionDrift aliases the one sentinel every guarded transaction
+	// wraps when the catalog the conversion expressions resolve in has
+	// changed since the shadow build (CO-9); the verifier's drift wraps it
+	// together with ErrInvariantViolation, so a caller can tell this breach
+	// from any other.
+	ErrConversionDrift = chunksql.ErrConversionDrift
 	// ErrInvalidOptions reports verifier options that cannot bound a pass: a
 	// timeout below PostgreSQL's one-millisecond resolution, which the server
 	// would read as no timeout at all.

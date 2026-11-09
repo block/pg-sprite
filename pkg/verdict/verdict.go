@@ -517,6 +517,18 @@ type Verdict struct {
 	// package does not depend on the executor. Empty unless Outcome is
 	// OutcomeFailed.
 	Code string `json:"code,omitempty"`
+	// SQLState is the SQLSTATE of the server error that failed the
+	// statement, when the server rejected it; empty when the failure
+	// was not a server error. Automation can branch on it, as on Code,
+	// to tell a constraint the rows break (23514) from an object that
+	// does not exist (42883). Empty unless Outcome is OutcomeFailed.
+	SQLState string `json:"sqlstate,omitempty"`
+	// ServerError is that server error's primary message, for display.
+	// It leaves out the server's DETAIL line, but the primary message of
+	// a data fault (SQLSTATE class 22) can still name a row's value, as
+	// in `invalid input syntax for type integer: "abc"`. Empty exactly
+	// when SQLState is.
+	ServerError string `json:"server_error,omitempty"`
 	// FailedStep is the 1-based position of the sequence step that failed,
 	// matching the numbering the planner's partial-failure contracts use;
 	// zero when the failure was not a mid-sequence one (a single-statement
@@ -540,14 +552,15 @@ type Verdict struct {
 	Table string `json:"table,omitempty"`
 	// Detail is the human explanation: why refused, or what committed.
 	Detail string `json:"detail,omitempty"`
-	// WritesBlocked is true on an executed or failed copy-and-swap verdict
-	// whose run blocked the table's writes (offline mode, --block-writes):
-	// the write fence went on, and every write that reached it was refused
-	// with SQLSTATE 55006. On a failed verdict it is set only when the fence
-	// went on, and Detail says whether it still stands; a blocked-writes run
-	// that stopped before its fence went on reports false, since the table
-	// kept taking writes. False for every other verdict, including a live
-	// run's.
+	// WritesBlocked is true on an executed, failed, or refused copy-and-swap
+	// verdict whose run blocked the table's writes (offline mode,
+	// --block-writes): the write fence went on, and every write that reached
+	// it was refused with SQLSTATE 55006. On a failed verdict it is set only
+	// when the fence went on, and Detail says whether it still stands; on a
+	// refused verdict it is set only when the stopped run's fence still
+	// stands. A blocked-writes run that stopped before its fence went on
+	// reports false, since the table kept taking writes. False for every
+	// other verdict, including a live run's.
 	WritesBlocked bool `json:"writes_blocked,omitempty"`
 	// Abandoned is true on a failed copy-and-swap verdict whose run the
 	// engine abandoned on a data fault: the shadow is dropped, the hold on
@@ -784,6 +797,9 @@ func (v Verdict) String() string {
 	}
 	if v.FailedStep > 0 {
 		fmt.Fprintf(&b, "\n  failed at: step %d: %s", v.FailedStep, v.FailedStepSQL)
+	}
+	if v.SQLState != "" {
+		fmt.Fprintf(&b, "\n  server:    %s (SQLSTATE %s)", v.ServerError, v.SQLState)
 	}
 	if len(v.ExecutedSQL) > 0 {
 		if v.Outcome == OutcomeFailed {

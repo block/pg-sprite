@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 )
 
 // copierCause is the shadow refusal cause the Runner re-mints a copier
@@ -53,6 +54,25 @@ func copyRefusal(err error, schema, table string) error {
 		return err
 	}
 	return refuse(cause, []error{err}, "copy of %s.%s refused", schema, table)
+}
+
+// driftRefusal re-mints conversion drift the verifier or the flusher
+// noticed — a bare invariant violation wrapping chunksql.ErrConversionDrift
+// — as the Runner's copy-conversion-drift, so a run that stops on a changed
+// catalog during verification or catch-up reads the same cause as one the
+// copier stopped (CO-9). The original is wrapped, so errors.Is against the
+// sentinel and against ErrInvariantViolation keeps working. An error that
+// already carries a refusal cause — the copier's re-minted drift among
+// them — and every error that is not drift are returned unchanged.
+func driftRefusal(err error, schema, table string) error {
+	if RefusalCauseOf(err) != "" {
+		return err
+	}
+	if !errors.Is(err, chunksql.ErrConversionDrift) {
+		return err
+	}
+	// INV: CO-9
+	return refuse(CauseCopyConversionDrift, []error{err}, "the catalog the conversion expressions of %s.%s resolve in has changed since the shadow was built", schema, table)
 }
 
 // copyStopped is the error of a copy whose periodic save failed. The save's
