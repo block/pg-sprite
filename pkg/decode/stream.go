@@ -70,10 +70,14 @@ type Delivery struct {
 // stream while the owner is away from Next — in a flush, waiting on a
 // pool. The heartbeat and the owner's Next, Confirm, and Close take turns
 // on the connection under one mutex; Next holds it for its whole wait and
-// answers keepalives itself. The server's fast shutdown waits for the
-// stream to confirm everything it was sent, so the caller confirms
-// Delivered whenever it holds nothing unapplied, and closes a stream that
-// can neither confirm nor make progress rather than keep it open.
+// answers keepalives itself. The heartbeat answers for the owner whatever
+// the owner is doing, so the server does not end a stream its owner
+// neither reads nor closes: the stream keeps its connection, its
+// walsender, and its hold on the slot until Close. The server's fast
+// shutdown waits for the stream to confirm everything it was sent, so the
+// caller confirms Delivered whenever it holds nothing unapplied, and
+// closes a stream that can neither confirm nor make progress rather than
+// keep it open.
 type Stream struct {
 	// mu serializes every use of conn — Next's receive and its reports,
 	// Confirm's report, the heartbeat's report, and Close — and guards
@@ -95,10 +99,11 @@ type Stream struct {
 	// replication started before the first.
 	lastReport time.Time
 	// heartbeat owns the heartbeat's goroutine; stopHeartbeat, closed once
-	// through stopOnce, stops it. Both are unset on a stream that never
-	// started one.
+	// through stopOnce, stops it, and heartbeatDone closes when it has
+	// returned. The channels are unset on a stream that never started one.
 	heartbeat     sync.WaitGroup
 	stopHeartbeat chan struct{}
+	heartbeatDone chan struct{}
 	stopOnce      sync.Once
 	// serverWALEnd is the walsender's send position from its last
 	// keepalive; a change does not move it, since a change's XLogData
@@ -128,7 +133,8 @@ type Stream struct {
 // transaction that committed above the slot's confirmed position, so a
 // resume sees again what it applied but never confirmed. The exported
 // snapshot of a Slot is unaffected, since the slot's own connection is not
-// used.
+// used. The caller closes the stream on every path: until Close, its
+// heartbeat keeps the connection answered and the slot held.
 func OpenStream(ctx context.Context, cfg dbconn.Config, catalog dbconn.RowQuerier, target preflight.CopySwapTarget, from LSN) (*Stream, error) {
 	if target.Table() == "" {
 		return nil, fmt.Errorf("%w: ST-3: zero copy-and-swap target", ErrInvariantViolation)
@@ -538,13 +544,17 @@ func (s *Stream) fail(err error) error {
 }
 
 // Close stops the heartbeat and ends the replication connection. The slot
-// persists with the position last confirmed.
+// persists with the position last confirmed. A heartbeat report held in
+// its write by a server that has stopped reading holds Close until ctx
+// ends; Close then closes the connection's socket under the write and
+// returns ctx's cause together with whatever the close itself returned,
+// so a Close with a deadline returns by it.
 func (s *Stream) Close(ctx context.Context) error {
-	s.endHeartbeat()
+	stopErr := s.endHeartbeat(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.conn.Close(ctx); err != nil {
-		return fmt.Errorf("close stream from slot %s: %w", s.slotName, err)
+		return errors.Join(stopErr, fmt.Errorf("close stream from slot %s: %w", s.slotName, err))
 	}
-	return nil
+	return stopErr
 }

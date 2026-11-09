@@ -2,6 +2,7 @@ package decode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -15,7 +16,9 @@ const (
 	// walsender asks for a reply at half the timeout and ends the stream at
 	// the full timeout, counted from the last message it received; a report
 	// at a quarter, checked at an eighth, reaches it within three eighths of
-	// the timeout of the one before.
+	// the timeout of the one before. The timeout is read once, when the
+	// stream opens, so a stream already open keeps the interval it opened
+	// with when a reload changes the setting.
 	heartbeatFraction = 4
 	// defaultHeartbeatInterval is the heartbeat's interval on a server whose
 	// wal_sender_timeout is zero, which never ends a stream for silence: the
@@ -24,7 +27,10 @@ const (
 	defaultHeartbeatInterval = 10 * time.Second
 	// minHeartbeatInterval is the shortest interval the heartbeat runs at,
 	// so a server with a timeout of a few milliseconds does not turn the
-	// heartbeat into a busy loop.
+	// heartbeat into a busy loop. A report then reaches the walsender
+	// within one and a half floors of the one before, so a server whose
+	// timeout is shorter than that can still end a stream its owner is
+	// away from.
 	minHeartbeatInterval = 10 * time.Millisecond
 )
 
@@ -63,10 +69,14 @@ func heartbeatInterval(timeout time.Duration) time.Duration {
 // answered while the caller is away from Next: in a flush, waiting on a
 // pool, or anywhere else the caller does not read the stream. The
 // goroutine is the stream's own; Close stops it, and it stops by itself
-// once the stream has failed.
+// once the stream has failed. heartbeatDone closes when it has returned.
 func (s *Stream) startHeartbeat(ctx context.Context, interval time.Duration) {
 	s.stopHeartbeat = make(chan struct{})
-	s.heartbeat.Go(func() { s.beat(ctx, interval) })
+	s.heartbeatDone = make(chan struct{})
+	s.heartbeat.Go(func() {
+		defer close(s.heartbeatDone)
+		s.beat(ctx, interval)
+	})
 }
 
 // beat checks, at half the interval, whether the stream has gone the
@@ -109,12 +119,31 @@ func (s *Stream) reportIfQuiet(ctx context.Context, interval time.Duration) bool
 	return true
 }
 
-// endHeartbeat stops the heartbeat and waits for its goroutine. It is safe
-// to call more than once and on a stream that never started one.
-func (s *Stream) endHeartbeat() {
+// endHeartbeat stops the heartbeat and waits for its goroutine. A report
+// in its write when the stop comes does not see the stop, and the library
+// writes it without a context, so a server that has stopped reading holds
+// it once the socket's send buffer is full. When ctx ends before the
+// goroutine has returned, endHeartbeat closes the socket under the write,
+// which fails it, waits for the goroutine to return, and returns ctx's
+// cause. It is safe to call more than once and on a stream that never
+// started one.
+func (s *Stream) endHeartbeat(ctx context.Context) error {
 	if s.stopHeartbeat == nil {
-		return
+		return nil
 	}
 	s.stopOnce.Do(func() { close(s.stopHeartbeat) })
-	s.heartbeat.Wait()
+	defer s.heartbeat.Wait()
+	select {
+	case <-s.heartbeatDone:
+		return nil
+	case <-ctx.Done():
+	}
+	// A heartbeat that returned as ctx ended is not one held in its write.
+	select {
+	case <-s.heartbeatDone:
+		return nil
+	default:
+	}
+	closeErr := s.conn.Conn().Close()
+	return errors.Join(fmt.Errorf("stop heartbeat on slot %s: %w", s.slotName, context.Cause(ctx)), closeErr)
 }
