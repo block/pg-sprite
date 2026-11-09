@@ -33,16 +33,17 @@ type Report struct {
 	// delivered everything the sweep saw.
 	Mismatches []Mismatch
 	// Settled is the number of chunks a live pass found differing in its
-	// sweep and then read clean, or read with the shadow at exactly the
-	// state the sweep saw on the source, once the catch-up had confirmed
-	// past the sweep's read. A quiesced pass settles nothing.
+	// sweep and then settled key by key once the catch-up had confirmed
+	// past the sweep's read: every key read equal on both sides, or read
+	// on the shadow at exactly the state an earlier read saw on the source.
+	// A quiesced pass settles nothing.
 	Settled int
 	// Unsettled is the number of chunks a live pass found differing in its
 	// sweep and could settle neither way within its bounds: the catch-up
-	// did not confirm past the read in time, or the chunk changed on every
-	// reread. They are not in Mismatches, since nothing was confirmed about
-	// them, and a report that counts any is not clean. A quiesced pass
-	// leaves nothing unsettled.
+	// did not confirm past the read in time, or some key of the chunk
+	// changed on every reread. They are not in Mismatches, since nothing
+	// was confirmed about them, and a report that counts any is not clean.
+	// A quiesced pass leaves nothing unsettled.
 	Unsettled int
 }
 

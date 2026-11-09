@@ -200,6 +200,32 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Empty(t, res.Verdicts)
 	})
 
+	// An adapter that builds one Options for both front doors carries the
+	// imperative door's acknowledgements; the desired-state view of that
+	// value clears them, so RunDesired runs the plan instead of rejecting
+	// the first acknowledgement.
+	t.Run("runs the desired-state view of a policy that carries every acknowledgement", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+		require.NoError(t, err)
+		target := schema + ".t"
+
+		shared := runOptions()
+		shared.Force = target
+		shared.AcceptBlocking = target
+		shared.AllowDestructive = target
+		shared.CopySwap.Restart = target
+		shared.CopySwap.BlockWrites = target
+		req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}
+		_, err = migrate.RunDesired(t.Context(), pool, req, shared)
+		require.ErrorIs(t, err, migrate.ErrForceNotSupported, "the shared value itself is rejected")
+
+		res, err := migrate.RunDesired(t.Context(), pool, req, shared.WithoutAcknowledgements())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
+	})
+
 	t.Run("creates from an index-first desired file and re-runs as a no-op", func(t *testing.T) {
 		// The index precedes its table in the file. Run 1 must still create
 		// table-first, and run 2 — where the desired file replays on the

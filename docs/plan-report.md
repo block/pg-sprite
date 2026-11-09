@@ -25,14 +25,14 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **18**: version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **19**: version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
 version 3 added the statement-level `cause` field on greenfield statements the create path
 refuses by shape; version 2 added the statement-level `guidance` field on `rewrite-required`
-statements. The fingerprint definition is unchanged from version 1.
+statements. The fingerprint definition is unchanged from version 1 for a plan without `extension_schemas`.
 
 The [lint report](lint-report.md) is a separate contract with its own `format_version`; the
 two version independently. Lint findings embed this contract's Reasons vocabulary — the lint
@@ -66,6 +66,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `class` | string | target-dependent refusal only | Aggregate refusal class (see Classes): how a consumer routes the refusal. Present exactly when `reason` is; a planner-level refusal carries its class on the refused statement instead. |
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the aggregate work pg-sprite has no online-safety reason to run (see Owners). Present exactly when `class` is `no-online-safety-problem`. |
 | `fingerprint` | string | always | The plan's stable identity (see Fingerprint). |
+| `extension_schemas` | array | `diff` source, when the desired file named extension schemas | The schemas the desired file's unqualified names also resolved against, in search order (`--extension-schema` or `WithExtensionSchemas`). A table that does not exist yet is created from the file's own statements under them. Covered by the fingerprint (see Fingerprint). |
 | `statements` | array | always | The ordered plan; `[]` (never `null`) means nothing to do. |
 | `advisories` | array | `diff` source, existing table, when non-empty | Typed observations the diff made about the live table that produced no statement (see Advisory fields): the invalid indexes it saw and declined to drop. Advisory only — the statements and the `destructive` gate are unaffected, and nothing in it executes. Read it alongside `statements`: an empty plan with an advisory present means there is nothing to run **and** the table is not clean. Absent when there is nothing to report. Also absent for a desired file that declares row security: that review path collects no advisories, so there an absent field does not mean the table has no invalid index. Explanatory: excluded from the fingerprint. |
 
@@ -321,6 +322,12 @@ change identity, but a rerouted, resequenced, or rewritten plan does. An empty p
 defined identity (the digest of no input) — with or without advisories, since nothing in
 an advisory executes.
 
+When the report carries `extension_schemas`, a group separator (`0x1D`) follows the last
+statement, then each schema in order, each followed by a unit separator. A plan without
+them hashes exactly as before. A table that does not exist yet is created from the desired
+file's own statements, whose unqualified type and function names resolve through those
+schemas at apply time, so the same SQL resolved against other schemas is a different plan.
+
 For a table that does not exist yet, `exec_sql` is the plain canonical build that the
 greenfield create path runs. It never substitutes `CONCURRENTLY` for an index on a table
 born in that run, and the fingerprint therefore commits to the plain build.
@@ -349,7 +356,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -392,7 +399,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -459,7 +466,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

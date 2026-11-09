@@ -562,6 +562,12 @@ type Verdict struct {
 	// reports false, since the table kept taking writes. False for every
 	// other verdict, including a live run's.
 	WritesBlocked bool `json:"writes_blocked,omitempty"`
+	// TableCreated is true on an executed verdict whose run created the
+	// table, committing it in the same transaction as its row security, so
+	// automation can tell a create from a run that converged a table that
+	// already existed. Detail says the same for a reader. False for every
+	// other verdict.
+	TableCreated bool `json:"table_created,omitempty"`
 	// Abandoned is true on a failed copy-and-swap verdict whose run the
 	// engine abandoned on a data fault: the shadow is dropped, the hold on
 	// the source — write fence or replication slot — is released, and the

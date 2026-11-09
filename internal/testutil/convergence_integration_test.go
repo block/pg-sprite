@@ -40,6 +40,18 @@ func TestConvergenceOracle(t *testing.T) {
 	assert.False(t, report.Converged())
 	assert.Equal(t, []DirectionDiff{{Direction: "source-minus-shadow", Keys: []int64{7}}, {Direction: "shadow-minus-source", Keys: []int64{7}}}, report.Differences)
 
+	// Excluding the differing row's key takes it out of both sides, counts
+	// included; excluding an unrelated key changes nothing about row 7.
+	report, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"updated_at"}, ExcludeKeys: []int64{7, 999}})
+	require.NoError(t, err)
+	assert.True(t, report.Converged())
+	assert.Equal(t, int64(29), report.SourceCount)
+	assert.Equal(t, int64(29), report.ShadowCount)
+	report, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"updated_at"}, ExcludeKeys: []int64{8}})
+	require.NoError(t, err)
+	assert.False(t, report.Converged())
+	assert.Equal(t, int64(29), report.SourceCount)
+
 	_, err = pool.Exec(t.Context(), `UPDATE `+qualified(shadow)+` SET label=`+pgx.Identifier{"s"}.Sanitize()+`.label FROM `+qualified(source)+` s WHERE `+qualified(shadow)+`.id=s.id`)
 	require.NoError(t, err)
 	report, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"updated_at"}})

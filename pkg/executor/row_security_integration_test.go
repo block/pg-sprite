@@ -357,3 +357,57 @@ func TestExecuteRowSecurityPreservesHelperResolution(t *testing.T) {
 	require.NoError(t, tx.QueryRow(t.Context(), "SELECT array_agg(id ORDER BY id) FROM "+pgx.Identifier{schema, "documents"}.Sanitize()).Scan(&ids))
 	assert.Equal(t, []int64{1}, ids)
 }
+
+// A policy may read another table when it names it schema-qualified, the
+// way a team-membership check does. The policy lands as written, filters
+// rows for a real non-owner role through the table it reads, and a second
+// run against the converged table does no live DDL.
+func TestExecuteRowSecurityPolicyReadsAnotherTable(t *testing.T) {
+	pool, schema := rlsFixture(t)
+	role := schema + "_reader"
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+ CREATE TABLE %s.team_members (
+     owner_id bigint NOT NULL,
+     member name NOT NULL
+ );
+ INSERT INTO %s.team_members VALUES (9, '%s');
+ INSERT INTO %s.documents VALUES (1, 9), (2, 7);`, schema, schema, role, schema))
+	require.NoError(t, err)
+	sql := fmt.Sprintf(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner_id bigint NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT
+     USING (EXISTS (SELECT 1 FROM %s.team_members m
+                    WHERE m.owner_id = documents.owner_id AND m.member = current_user));`, schema)
+	report, err := applyRLS(t, pool, schema, sql)
+	require.NoError(t, err)
+	assert.NotEmpty(t, report.Statements)
+	actual, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	require.Len(t, actual.RowSecurity.Policies, 1)
+	assert.Equal(t, fmt.Sprintf("(EXISTS ( SELECT 1\n   FROM %s.team_members m\n  WHERE ((m.owner_id = documents.owner_id) AND (m.member = CURRENT_USER))))", schema),
+		*actual.RowSecurity.Policies[0].Using)
+	again, err := applyRLS(t, pool, schema, sql)
+	require.NoError(t, err)
+	assert.Empty(t, again.Statements, "a converged retry must do no live DDL")
+
+	quoted := pgx.Identifier{role}.Sanitize()
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE ROLE %s;
+ GRANT USAGE ON SCHEMA %s TO %s;
+ GRANT SELECT ON %s.documents, %s.team_members TO %s;`, quoted, schema, quoted, schema, schema, quoted))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP OWNED BY "+quoted+"; DROP ROLE "+quoted)
+		require.NoError(t, err)
+	})
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+	_, err = tx.Exec(t.Context(), "SET LOCAL ROLE "+quoted)
+	require.NoError(t, err)
+	var ids []int64
+	require.NoError(t, tx.QueryRow(t.Context(), "SELECT array_agg(id ORDER BY id) FROM "+pgx.Identifier{schema, "documents"}.Sanitize()).Scan(&ids))
+	assert.Equal(t, []int64{1}, ids)
+}

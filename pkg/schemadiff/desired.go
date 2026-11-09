@@ -50,8 +50,11 @@ var ErrDesiredConstraintMerged = errors.New("a desired constraint repeats anothe
 // empty copy of each one, so no foreign key ever binds to a live table, and
 // planning takes only the ACCESS SHARE lock a plain SELECT takes on it (see
 // createReferencedStandIns).
+//
+// The file's unqualified names also resolve against the desired schema's
+// extension schemas, which the model still prints qualified.
 func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredSchema) (Model, error) {
-	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()})
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()}, desired.ExtensionSchemas())
 }
 
 // referencedFrom names the live tables the scratch schema copies before the
@@ -62,17 +65,17 @@ type referencedFrom struct {
 	tables []string
 }
 
-func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
+func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement, refs referencedFrom, extensions []string) (Model, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return Model{}, fmt.Errorf("begin scratch transaction: %w", err)
 	}
-	return introspectDesiredTransaction(ctx, tx, table, statements, refs)
+	return introspectDesiredTransaction(ctx, tx, table, statements, refs, extensions)
 }
 
 // introspectDesiredTransaction owns tx, which may be a savepoint. Every exit
 // rolls it back, leaving its parent's live target and settings untouched.
-func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
+func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement, refs referencedFrom, extensions []string) (Model, error) {
 	// The scratch transaction is never committed: rollback is the cleanup
 	// path for success and failure alike, so the redundant-closer exception
 	// does not apply — this rollback is load-bearing and its error is
@@ -100,8 +103,18 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	// installed in public, stay resolvable by the names the live table's
 	// definitions print with. The path is built by dbconn so it upholds
 	// CO-9 like the session's.
+	//
+	// The statements run with the extension schemas appended, so the file's
+	// unqualified names can resolve there. The model is introspected under
+	// path alone, so an object found in an extension schema prints
+	// qualified, exactly as the live table's definition does, and the two
+	// compare equal. A plan for a table that does not exist yet runs the
+	// file's own unqualified statements instead, so the create path runs
+	// them under the same extension schemas and the plan's fingerprint
+	// covers them.
 	path := scratchSearchPath(scratch, refs.schema)
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
+	runPath := dbconn.WithExtensionSchemas(path, extensions)
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(runPath...)); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
 	if err := createReferencedStandIns(ctx, tx, scratch, refs.schema, refs.tables); err != nil {
@@ -131,7 +144,10 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
-	if err := confirmIndexConstraintsBuilt(ctx, tx, path, statements, m); err != nil {
+	if err := confirmIndexConstraintsBuilt(ctx, tx, runPath, statements, m); err != nil {
+		return Model{}, err
+	}
+	if m, err = settleDesired(ctx, tx, scratch, refs.schema, table, path, m); err != nil {
 		return Model{}, err
 	}
 	if err := tx.Rollback(ctx); err != nil {

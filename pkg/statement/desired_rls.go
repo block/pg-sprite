@@ -17,9 +17,31 @@ var ErrRowSecurityDeclaration = errors.New("desired row security requires one ex
 // ErrRowSecurityTableDefinitionRequired identifies a missing table definition in an RLS file.
 var ErrRowSecurityTableDefinitionRequired = errors.New("desired row security requires a CREATE TABLE definition")
 
-// ErrPolicyRelationDependency refuses policy subqueries that read relations until
-// desired-state materialization can preserve their dependency identities.
-var ErrPolicyRelationDependency = errors.New("policy relation dependencies are not supported in desired row security")
+// ErrPolicyRelationDependency refuses a policy expression that reads a table it
+// does not name schema-qualified. Policy expressions resolve against nothing but
+// the scratch schema and PostgreSQL's built-ins, so an unqualified name either
+// fails to resolve or binds an object nobody meant. A CTE name is refused the
+// same way, because the grammar cannot tell it from a table name.
+var ErrPolicyRelationDependency = errors.New("a policy must name every table it reads schema-qualified, such as public.team_members")
+
+// ErrPolicyReadsOwnTable refuses a policy expression that reads a relation with
+// its own table's name. The scratch build would bind the name to the live table
+// rather than to the desired one, and PostgreSQL reports infinite recursion for
+// a policy that reads the table it protects. The file does not say which schema
+// the table lives in, so the name is refused in every schema.
+var ErrPolicyReadsOwnTable = errors.New("a policy cannot read the table it is defined on")
+
+// ErrPolicyReadsCatalog refuses a policy expression that reads a pg_catalog
+// table. pg_catalog is always searched, so introspection prints such a table
+// unqualified, and the file pull would export from the live policy could not
+// be admitted again.
+var ErrPolicyReadsCatalog = errors.New("a policy cannot read a pg_catalog table")
+
+// ErrPolicyLocksRows refuses a policy expression whose query locks the rows it
+// reads (FOR UPDATE, FOR SHARE, and their weaker forms). PostgreSQL takes ROW
+// SHARE on such a table while it builds the policy, which waits behind a
+// session holding EXCLUSIVE, where a plain read takes only ACCESS SHARE.
+var ErrPolicyLocksRows = errors.New("a policy cannot lock the rows it reads, such as with FOR SHARE or FOR UPDATE")
 
 // ErrRowSecurityForeignKey refuses a foreign key in a row-security desired
 // file. The row-security scratch build creates no stand-in for a referenced
@@ -32,20 +54,34 @@ var ErrRowSecurityForeignKey = errors.New("foreign keys are not supported in des
 // The explicit parse entry point owns the complete table-local RLS definition,
 // including an empty policy set. Only ParseDesiredWithRowSecurity constructs it.
 type DesiredWithRowSecurity struct {
-	table      string
-	statements []Statement
+	table       string
+	definition  DesiredSchema
+	statements  []Statement
+	policyReads []QualifiedName
 }
 
 // Table returns the declaration's unqualified table name.
 func (d DesiredWithRowSecurity) Table() string { return d.table }
 
+// TableDefinition returns the CREATE TABLE and its indexes without the row
+// security that follows them. Running it on its own creates a table without
+// its row security, so only the executor that creates the table and its row
+// security in one transaction consumes it.
+func (d DesiredWithRowSecurity) TableDefinition() DesiredSchema { return d.definition }
+
 // Statements returns a defensive copy in scratch execution order.
 func (d DesiredWithRowSecurity) Statements() []Statement { return slices.Clone(d.statements) }
+
+// PolicyReads returns the tables the policies' expressions read, each
+// schema-qualified as the file names it, sorted and without duplicates. The
+// slice is a copy.
+func (d DesiredWithRowSecurity) PolicyReads() []QualifiedName { return slices.Clone(d.policyReads) }
 
 // ParseDesiredWithRowSecurity admits table/index definitions followed by RLS
 // settings, policies, and policy comments. It requires explicit ENABLE/DISABLE;
 // FORCE/NO FORCE is optional and cannot be declared twice. Other ALTER commands,
-// qualified targets, and policy queries reading relations are refused.
+// qualified targets, and policy queries reading a table unqualified or reading
+// their own table are refused.
 func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
@@ -85,14 +121,15 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 	if table.HasForeignKeys() {
 		return DesiredWithRowSecurity{}, fmt.Errorf("%w: table %q", ErrRowSecurityForeignKey, table.Table())
 	}
-	d := DesiredWithRowSecurity{table: table.Table(), statements: table.Statements()}
+	d := DesiredWithRowSecurity{table: table.Table(), definition: table, statements: table.Statements()}
 	enabled, forced := 0, 0
 	var comments []Statement
 	for _, node := range security {
-		target, err := admitRowSecurity(node, &enabled, &forced)
+		target, reads, err := admitRowSecurity(node, &enabled, &forced)
 		if err != nil {
 			return DesiredWithRowSecurity{}, err
 		}
+		d.policyReads = append(d.policyReads, reads...)
 		if target != d.table {
 			return DesiredWithRowSecurity{}, ErrRowSecurityDeclaration
 		}
@@ -111,15 +148,19 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 		return DesiredWithRowSecurity{}, ErrRowSecurityDeclaration
 	}
 	d.statements = append(d.statements, comments...)
+	slices.SortFunc(d.policyReads, compareQualifiedNames)
+	d.policyReads = slices.Compact(d.policyReads)
 	return d, nil
 }
 
-func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, error) {
+// admitRowSecurity admits one row-security statement and returns the table it
+// targets and, for a policy, the tables its expressions read.
+func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []QualifiedName, error) {
 	switch {
 	case node.GetAlterTableStmt() != nil:
 		alter := node.GetAlterTableStmt()
 		if alter.GetMissingOk() || alter.GetObjtype() != pganalyze.ObjectType_OBJECT_TABLE {
-			return "", ErrDisallowedStatement
+			return "", nil, ErrDisallowedStatement
 		}
 		for _, cmd := range alter.GetCmds() {
 			switch cmd.GetAlterTableCmd().GetSubtype() {
@@ -128,28 +169,34 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, error
 			case pganalyze.AlterTableType_AT_ForceRowSecurity, pganalyze.AlterTableType_AT_NoForceRowSecurity:
 				*forced += 1
 			default:
-				return "", ErrDisallowedStatement
+				return "", nil, ErrDisallowedStatement
 			}
 		}
-		return rowSecurityTarget(alter.GetRelation())
+		target, err := rowSecurityTarget(alter.GetRelation())
+		return target, nil, err
 	case node.GetCreatePolicyStmt() != nil:
 		policy := node.GetCreatePolicyStmt()
-		if policyReadsRelation(policy.GetQual()) || policyReadsRelation(policy.GetWithCheck()) {
-			return "", ErrPolicyRelationDependency
+		target, err := rowSecurityTarget(policy.GetTable())
+		if err != nil {
+			return "", nil, err
 		}
-		return rowSecurityTarget(policy.GetTable())
+		reads, err := admitPolicyRelations(policy, target)
+		if err != nil {
+			return "", nil, err
+		}
+		return target, reads, nil
 	case node.GetCommentStmt() != nil:
 		comment := node.GetCommentStmt()
 		if comment.GetObjtype() != pganalyze.ObjectType_OBJECT_POLICY {
-			return "", ErrDisallowedStatement
+			return "", nil, ErrDisallowedStatement
 		}
 		names := comment.GetObject().GetList().GetItems()
 		if len(names) != 2 {
-			return "", ErrQualifiedName
+			return "", nil, ErrQualifiedName
 		}
-		return names[0].GetString_().GetSval(), nil
+		return names[0].GetString_().GetSval(), nil, nil
 	default:
-		return "", ErrDisallowedStatement
+		return "", nil, ErrDisallowedStatement
 	}
 }
 
@@ -160,44 +207,63 @@ func rowSecurityTarget(rel *pganalyze.RangeVar) (string, error) {
 	return rel.GetRelname(), nil
 }
 
-// This is grammar admission only: reject RangeVar nodes in expressions. A
-// scalar SELECT auth.uid() has none and remains admissible; SELECT FROM does
-// not. SQL meaning still comes exclusively from execute-and-introspect.
-func policyReadsRelation(node *pganalyze.Node) bool {
-	if node == nil {
-		return false
+// admitPolicyRelations admits the tables a policy's USING and WITH CHECK
+// expressions read and returns them: each must be named schema-qualified, outside pg_catalog,
+// and none may carry the name of the table the policy is defined on, and no
+// query may lock the rows it reads (see ErrPolicyRelationDependency,
+// ErrPolicyReadsCatalog, ErrPolicyReadsOwnTable, and ErrPolicyLocksRows). This is grammar admission only: a scalar SELECT
+// auth.uid() reads no table and is admitted unchanged. SQL meaning still comes
+// exclusively from execute-and-introspect, where a qualified name binds the live
+// table the applied policy will read.
+func admitPolicyRelations(policy *pganalyze.CreatePolicyStmt, table string) ([]QualifiedName, error) {
+	var read []*pganalyze.RangeVar
+	for _, expr := range []*pganalyze.Node{policy.GetQual(), policy.GetWithCheck()} {
+		if expr == nil {
+			continue
+		}
+		if locksRows(expr.ProtoReflect()) {
+			return nil, fmt.Errorf("%w: policy %q locks the rows it reads", ErrPolicyLocksRows, policy.GetPolicyName())
+		}
+		read = appendRelations(read, expr.ProtoReflect())
 	}
-	return messageReadsRelation(node.ProtoReflect())
+	reads := make([]QualifiedName, 0, len(read))
+	for _, rel := range read {
+		if rel.GetSchemaname() == "" || rel.GetCatalogname() != "" {
+			return nil, fmt.Errorf("%w: policy %q reads %q", ErrPolicyRelationDependency, policy.GetPolicyName(), relationName(rel))
+		}
+		if rel.GetSchemaname() == "pg_catalog" {
+			return nil, fmt.Errorf("%w: policy %q reads %q", ErrPolicyReadsCatalog, policy.GetPolicyName(), relationName(rel))
+		}
+		if rel.GetRelname() == table {
+			return nil, fmt.Errorf("%w: policy %q reads %q", ErrPolicyReadsOwnTable, policy.GetPolicyName(), relationName(rel))
+		}
+		reads = append(reads, QualifiedName{Schema: rel.GetSchemaname(), Name: rel.GetRelname()})
+	}
+	return reads, nil
 }
 
-func messageReadsRelation(msg protoreflect.Message) bool {
-	if _, ok := msg.Interface().(*pganalyze.RangeVar); ok {
+// relationName prints a RangeVar the way the file wrote it, for an error.
+func relationName(rel *pganalyze.RangeVar) string {
+	parts := []string{rel.GetCatalogname(), rel.GetSchemaname(), rel.GetRelname()}
+	return strings.Join(slices.DeleteFunc(parts, func(part string) bool { return part == "" }), ".")
+}
+
+// appendRelations appends every RangeVar in msg, in tree order.
+func appendRelations(read []*pganalyze.RangeVar, msg protoreflect.Message) []*pganalyze.RangeVar {
+	walkMessages(msg, func(node protoreflect.Message) bool {
+		if rel, ok := node.Interface().(*pganalyze.RangeVar); ok {
+			read = append(read, rel)
+		}
 		return true
-	}
+	})
+	return read
+}
+
+// locksRows reports whether any query in msg carries a locking clause.
+func locksRows(msg protoreflect.Message) bool {
 	found := false
-	msg.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-		if field.Kind() != protoreflect.MessageKind {
-			return true
-		}
-		switch {
-		case field.IsMap():
-			if field.MapValue().Kind() == protoreflect.MessageKind {
-				value.Map().Range(func(_ protoreflect.MapKey, item protoreflect.Value) bool {
-					found = messageReadsRelation(item.Message())
-					return !found
-				})
-			}
-		case field.IsList():
-			list := value.List()
-			for i := 0; i < list.Len(); i++ {
-				if messageReadsRelation(list.Get(i).Message()) {
-					found = true
-					break
-				}
-			}
-		default:
-			found = messageReadsRelation(value.Message())
-		}
+	walkMessages(msg, func(node protoreflect.Message) bool {
+		_, found = node.Interface().(*pganalyze.LockingClause)
 		return !found
 	})
 	return found

@@ -18,7 +18,7 @@ import (
 // settle clean. The repairs it returns are the ones that committed: none
 // when the recopy failed, all of them with any error the settling raises.
 func (v *Verifier) repairLive(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch, live LiveOptions) ([]Repair, error) {
-	sourceSQL, shadowSQL, err := v.digestStatements(ctx, pool)
+	stmts, err := v.digestStatements(ctx, pool)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +27,7 @@ func (v *Verifier) repairLive(ctx context.Context, pool *pgxpool.Pool, mismatche
 		return nil, err
 	}
 	for _, repair := range repairs {
-		if err := v.settleRepair(ctx, pool, sourceSQL, shadowSQL, repair, recopied, live); err != nil {
+		if err := v.settleRepair(ctx, pool, stmts, repair, recopied, live); err != nil {
 			return repairs, err
 		}
 	}
@@ -88,13 +88,13 @@ func (v *Verifier) recopyFenced(ctx context.Context, pool *pgxpool.Pool, mismatc
 }
 
 // settleRepair reads a repaired chunk once the catch-up has confirmed past
-// the recopy and, when the two sides still differ, settles it as the sweep
-// settles a differing chunk. A chunk that settles clean is repaired; one
-// that is a confirmed divergence after its repair is a RepairError (CO-2),
-// and one that cannot be settled is an UnresolvedError.
-func (v *Verifier) settleRepair(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, repair Repair, recopied decode.LSN, live LiveOptions) error {
+// the recopy and, when the two sides still differ, settles it key by key
+// as the sweep settles a differing chunk. A chunk that settles clean is
+// repaired; one with a key confirmed divergent after its repair is a
+// RepairError (CO-2), and one that cannot be settled is an UnresolvedError.
+func (v *Verifier) settleRepair(ctx context.Context, pool *pgxpool.Pool, stmts statements, repair Repair, recopied decode.LSN, live LiveOptions) error {
 	chunk := repair.Mismatch.Chunk
-	// The recopy left no digest to compare the first reread with, so the
+	// The recopy left no rows to compare the first reread with, so the
 	// wait is for the recopy's own position and the first reread stands on
 	// its own: equal is repaired, anything else is settled from there, with
 	// that reread counted among the chunk's attempts.
@@ -102,28 +102,24 @@ func (v *Verifier) settleRepair(ctx context.Context, pool *pgxpool.Pool, sourceS
 	if err := v.awaitConfirmed(ctx, prior, 0, live); err != nil {
 		return err
 	}
-	now, err := v.observe(ctx, pool, sourceSQL, shadowSQL, chunk)
+	now, err := v.observe(ctx, pool, stmts, chunk)
 	if err != nil {
 		return err
 	}
 	v.countReread()
 	const rereads = 1
-	if now.source == now.shadow {
+	if source, shadow := now.digests(); source == shadow {
 		return nil
 	}
-	result, last, err := v.settle(ctx, pool, sourceSQL, shadowSQL, now, rereads, live)
+	settled, err := v.settle(ctx, pool, stmts, now, rereads, live)
 	if err != nil {
 		return err
 	}
-	switch result {
-	case verdictEqual, verdictSettled:
-		return nil
-	case verdictDiverged:
+	if settled.diverged > 0 {
 		// INV: CO-2
-		return &RepairError{Repair: repair, After: Mismatch{Chunk: chunk, Source: last.source, Shadow: last.shadow}}
-	default:
-		return fmt.Errorf("%w (CO-2): settle returned verdict %d after repair", ErrInvariantViolation, result)
+		return &RepairError{Repair: repair, After: settled.last.mismatch()}
 	}
+	return nil
 }
 
 // fenceSQL is the one statement a live repair runs before its deletes: a

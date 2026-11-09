@@ -129,7 +129,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			}
 		}
 	}
-	report.Fingerprint = plan.Fingerprint(report.Statements)
+	report.Fingerprint = report.ComputeFingerprint()
 
 	if c.JSON {
 		if err := writeJSON(out, report); err != nil {

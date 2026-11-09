@@ -35,7 +35,7 @@ type Repair struct {
 func (v *Verifier) repairAll(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch) ([]Repair, error) {
 	ctx, unbind := v.lock.Bind(ctx)
 	defer unbind()
-	sourceSQL, shadowSQL, err := v.digestStatements(ctx, pool)
+	stmts, err := v.digestStatements(ctx, pool)
 	if err != nil {
 		return nil, v.lostOr(err)
 	}
@@ -44,7 +44,7 @@ func (v *Verifier) repairAll(ctx context.Context, pool *pgxpool.Pool, mismatches
 		return nil, v.lostOr(err)
 	}
 	for _, repair := range repairs {
-		if err := v.reread(ctx, pool, sourceSQL, shadowSQL, repair); err != nil {
+		if err := v.reread(ctx, pool, stmts, repair); err != nil {
 			return repairs, v.lostOr(err)
 		}
 	}
@@ -139,9 +139,9 @@ func (v *Verifier) recopyIn(ctx context.Context, tx pgx.Tx, mismatches []Mismatc
 // reread digests the repaired chunk in a fresh snapshot and refuses a chunk
 // that still differs. The reread is counted when its digest has committed,
 // whatever it found: a chunk that still differs was reread all the same.
-func (v *Verifier) reread(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, repair Repair) error {
+func (v *Verifier) reread(ctx context.Context, pool *pgxpool.Pool, stmts statements, repair Repair) error {
 	chunk := repair.Mismatch.Chunk
-	source, shadow, err := v.digestChunk(ctx, pool, sourceSQL, shadowSQL, chunk.Lower(), chunk.Upper())
+	source, shadow, err := v.digestChunk(ctx, pool, stmts, chunk.Lower(), chunk.Upper())
 	if err != nil {
 		return err
 	}

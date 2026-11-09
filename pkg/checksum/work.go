@@ -27,9 +27,10 @@ import (
 //     snapshot after the comparison: under Check the repaired chunks reread
 //     after the recopy, so it climbs towards chunks_repaired and the repair
 //     phase's remaining work is chunks_repaired − chunks_reread; under
-//     CheckLive every settling reread of a differing or repaired chunk, so
-//     it can pass chunks_mismatched while the pass waits on a chunk that
-//     keeps changing.
+//     CheckLive every settling reread of a differing or repaired chunk —
+//     a reread of every row of the chunk on both sides, judged key by
+//     key — so it can pass chunks_mismatched while the pass waits on a
+//     chunk some key of which keeps changing.
 //
 // The counters are the pass's, not the step's: once the pass returns the
 // tracker no longer asks the verifier, and the pass's final figures are the

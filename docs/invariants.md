@@ -49,9 +49,12 @@ repairs-mint-nothing tests). `pkg/schemachange.GateCutover` accepts only a `Veri
 and only one minted for the relations it is gating: the proof carries the source and shadow
 OIDs the pass compared, and a shadow dropped and rebuilt under the same derived name is a new
 relation the pass never read, so the gate refuses it (`cutover-unverified`). A pass that runs
-while the stream writes the shadow (`CheckLive`) counts a chunk clean only when the stream has
-provably delivered what the pass's read saw on the source; anything it cannot prove is
-unsettled, never clean, and mints nothing. The proof such a pass mints says so
+while the stream writes the shadow (`CheckLive`) counts a chunk clean only when, for every key
+of it, the stream has provably delivered what the pass's read saw on the source; anything it
+cannot prove is unsettled, never clean, and mints nothing. The rows it judges the keys from are
+read with the digest's companion statement in the digest's own snapshot, and the chunk digest
+derived from them must equal the one the server aggregated, or the pass fails closed before it
+judges anything from them. The proof such a pass mints says so
 (`VerifiedShadow.Live`), and the swap refuses it without a drain to apply the stream's changes
 since under the swap lock (`cutover-undrained`); the mechanism is in
 [copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The `Runner` on a
@@ -978,6 +981,7 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 | RS-3 | Bound lock waits, statements, and the whole attempt | `ExecuteRowSecurity`; lock contention and deadline cancellation |
 | RS-4 | Run only admitted, qualified RLS DDL; keep scratch disposable | `RenderRowSecurity` from the scratch catalog and executor readback; qualified-helper, quoted-name, and scratch-cleanup tests |
 | RS-5 | Reviewed RLS execution compares the full ordered generated SQL under the target lock before target DDL; a mismatch refuses without target changes | `ExecuteReviewedRowSecurity`; `TestReviewedRowSecurityRechecksAfterLockWait`, `TestReviewedRowSecurityRefusesDifferentSequences` |
+| RS-6 | A table created with row security commits together with its RLS or not at all | `ExecuteCreateWithRowSecurity`; `TestExecuteCreateWithRowSecurityNeverExposesTheTableWithoutItsPolicies`, `TestExecuteCreateWithRowSecurityRollsBackTheTableWhenAPolicyFails`, `TestExecuteCreateWithRowSecurityRollsBackANameTakenAfterTheProbe` |
 
 ## State, checkpoint, and resume (ST)
 
@@ -1454,9 +1458,12 @@ when that plan is empty; otherwise the result is failed with `ErrNotConverged`, 
 statement it ran keeps its executed verdict, and the result's typed convergence status carries
 the plan a rerun would execute. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
 the create-name checks), because deriving a plan needs `CREATE` on the database.
-*Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`). Tests:
-`TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
-`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`.
+*Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`; for a file that declares row
+security, `RunDesiredWithRowSecurity` → `verifyRowSecurityConverged`, whose fresh plan
+includes the row security). Tests: `TestRunDesired`,
+`TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
+`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`,
+`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`.
 *Source:* review of desired-state outcome reporting.
 
 ## Refusals and preflight (RF)

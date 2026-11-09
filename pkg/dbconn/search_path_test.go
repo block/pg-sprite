@@ -68,6 +68,16 @@ func TestSessionSearchPath(t *testing.T) {
 		"a catalog entry another schema precedes is dropped")
 }
 
+// Extension schemas follow the path, so they never shadow a schema it
+// already searches, and one the path already lists keeps its position.
+func TestWithExtensionSchemas(t *testing.T) {
+	path := []string{"app", "public"}
+	assert.Equal(t, []string{"app", "public"}, WithExtensionSchemas(path, nil))
+	assert.Equal(t, []string{"app", "public", "extensions", "contrib"}, WithExtensionSchemas(path, []string{"extensions", "contrib"}))
+	assert.Equal(t, []string{"app", "public", "extensions"}, WithExtensionSchemas(path, []string{"public", "extensions", "app"}))
+	assert.Equal(t, []string{"app", "public"}, path, "the caller's path is not modified")
+}
+
 func TestRestoreSessionSearchPath(t *testing.T) {
 	sql, path := RestoreSessionSearchPath(`"$user", public`)
 	assert.Equal(t, "SELECT pg_catalog.set_config('search_path', $1, false)", sql)

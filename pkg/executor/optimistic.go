@@ -285,7 +285,7 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		}
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-		return executeBoundedAttemptAs(ctx, pool, st, b, pt.Schema(), "", before, nil)
+		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, nil)
 	}, sleepContext, func(attempt int) {
 		if tracker != nil {
 			tracker.SetAttempt(attempt)
@@ -293,13 +293,20 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	})
 }
 
+// AttemptSearchPath is the search_path an attempt on a table in schema runs
+// under: the schema, then public, where extension types live, then each
+// extension schema the desired file resolves names against that the path
+// does not already list (see statement.DesiredSchema.WithExtensionSchemas).
+func AttemptSearchPath(schema string, extensions []string) []string {
+	return dbconn.WithExtensionSchemas([]string{schema, "public"}, extensions)
+}
+
 // executeBoundedAttemptAs is the shared transactional attempt behind the
-// optimistic and create paths. When searchPathSchema is set, the
-// transaction's search_path is pinned to that schema then public — the
-// same policy the introspection read path sets — so a statement's
-// unqualified references (a column's type, an expression's function)
-// resolve exactly as the diff resolved them, never via the session's
-// ambient search_path.
+// optimistic and create paths. When searchPath is set, the transaction's
+// search_path is pinned to it (see AttemptSearchPath) — the same policy
+// the diff resolved names under — so a statement's unqualified references
+// (a column's type, an expression's function) resolve exactly as the diff
+// resolved them, never via the session's ambient search_path.
 //
 // It runs as role when one is set, and runs before, when set, inside the
 // attempt's transaction under its budgets and ahead of the statement. An
@@ -307,7 +314,7 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 // failure like the statement's own. It runs after, when set, in the same
 // transaction once the statement has run and before the commit, so an
 // error from after rolls the statement back.
-func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string, before, after func(context.Context, pgx.Tx) error) error {
+func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPath []string, role string, before, after func(context.Context, pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin optimistic attempt: %w", err)
@@ -327,8 +334,8 @@ func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st stateme
 	// search_path is built by dbconn so it upholds CO-9 like the session's.
 	setBudgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(b.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(b.StatementTimeout.Milliseconds(), 10)
-	if searchPathSchema != "" {
-		setBudgets += "; " + dbconn.LocalSearchPath(searchPathSchema, "public")
+	if len(searchPath) > 0 {
+		setBudgets += "; " + dbconn.LocalSearchPath(searchPath...)
 	}
 	if _, err := tx.Exec(ctx, setBudgets); err != nil {
 		return fmt.Errorf("set attempt budgets: %w", err)
