@@ -1124,17 +1124,25 @@ may confirm while that change is unapplied; `Confirm` is the only standby-status
 a position, sets write, flush, and apply to it explicitly, refuses a regression or a position
 beyond `Delivered`, and records nothing the server was not told; a keepalive reply carries the
 confirmed position alone, and a wait that runs out in `Next` sends the same report, so the stream
-is never silent for longer than the caller's wait and the slot does not move; a warning the
-server sends in copy-both mode — the walsender saying it will withhold changes, as from a
-publication it skipped loading — stops the stream fail-closed before a keepalive can deliver a
-position past them, and the replication connection asks for warnings itself — `SET
-client_min_messages = warning` on the open session, after every startup parameter and login
-event trigger, through any pooler — so no role, database, or server setting, login event
-trigger, URL parameter, or connection pooler can keep them from it; the server ending
+is never silent for longer than the caller's wait and the slot does not move; while the caller
+is away from `Next` — in a flush, waiting on a pool — the stream's own heartbeat sends that same
+report whenever none has left for a quarter of the server's `wal_sender_timeout`, so the server
+does not end the stream for silence, and it reports the confirmed position alone, never
+`Delivered` or anything the caller did not confirm; it takes the same lock as `Next`,
+`Confirm`, and `Close`, so one report or receive is on the connection at a time, and it stops
+with `Close` or once the stream has failed; a warning the server sends in copy-both mode — the
+walsender saying it will withhold changes, as from a publication it skipped loading — stops the
+stream fail-closed before a keepalive can deliver a position past them, and the replication
+connection asks for warnings itself — `SET client_min_messages = warning` on the open session,
+after every startup parameter and login event trigger, through any pooler — so no role,
+database, or server setting, login event trigger, URL parameter, or connection pooler can keep
+them from it; the server ending
 replication with the slot intact is `ErrStreamEnded`, distinct from a fail-closed violation, so
 a resume tells a clean restart from slot loss; a reopened stream replays every transaction that
 committed above the confirmed position (confirm-moves-the-slot, keepalive-replies-leave-it,
 next-reports-when-the-wait-runs-out, next-report-keeps-the-confirmed-position,
+heartbeat-keeps-a-stream-the-caller-is-away-from-without-moving-the-slot,
+runs-copy-swap-keeps-its-stream-while-the-catchup-waits-on-the-pool,
 next-stops-when-the-report-cannot-be-sent, refuse-beyond-delivered,
 reopen-replays-from-confirmed, interleaved-transaction-below-the-confirmed-position,
 confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails,

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pglogrepl"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // ErrUnsupportedChange is returned when the stream decodes a change to the
@@ -60,13 +62,25 @@ type Delivery struct {
 // transaction is sent whole when it commits, so a change's own LSN can lie
 // below either of them.
 //
-// A Stream is used from one goroutine, which must call Next often enough to
-// answer the server's keepalives within wal_sender_timeout. The server's
-// fast shutdown waits for the stream to confirm everything it was sent, so
-// the caller confirms Delivered whenever it holds nothing unapplied, and
-// closes a stream that can neither confirm nor make progress rather than
-// keep it open.
+// A Stream's methods are called from one goroutine, its owner. The stream
+// also runs a heartbeat of its own, from OpenStream until Close or until
+// the stream fails: whenever no report has left the stream for a fraction
+// of the server's wal_sender_timeout, it sends the confirmed position, the
+// same report a keepalive reply carries, so the server does not end the
+// stream while the owner is away from Next — in a flush, waiting on a
+// pool. The heartbeat and the owner's Next, Confirm, and Close take turns
+// on the connection under one mutex; Next holds it for its whole wait and
+// answers keepalives itself. The server's fast shutdown waits for the
+// stream to confirm everything it was sent, so the caller confirms
+// Delivered whenever it holds nothing unapplied, and closes a stream that
+// can neither confirm nor make progress rather than keep it open.
 type Stream struct {
+	// mu serializes every use of conn — Next's receive and its reports,
+	// Confirm's report, the heartbeat's report, and Close — and guards
+	// confirmed, failed, and lastReport, which the heartbeat reads or
+	// writes. The owner's own reads of confirmed need no lock, since only
+	// the owner writes it.
+	mu       sync.Mutex
 	conn     *pgconn.PgConn
 	slotName string
 	target   preflight.CopySwapTarget
@@ -75,6 +89,17 @@ type Stream struct {
 	start     LSN
 	delivered LSN
 	confirmed LSN
+	// clock times the reports for the heartbeat.
+	clock progress.Clock
+	// lastReport is when the last report left the stream, or when
+	// replication started before the first.
+	lastReport time.Time
+	// heartbeat owns the heartbeat's goroutine; stopHeartbeat, closed once
+	// through stopOnce, stops it. Both are unset on a stream that never
+	// started one.
+	heartbeat     sync.WaitGroup
+	stopHeartbeat chan struct{}
+	stopOnce      sync.Once
 	// serverWALEnd is the walsender's send position from its last
 	// keepalive; a change does not move it, since a change's XLogData
 	// carries only the change's own position.
@@ -135,6 +160,11 @@ func OpenStream(ctx context.Context, cfg dbconn.Config, catalog dbconn.RowQuerie
 			ErrInvariantViolation, identity.database, target.Database()), conn.Close(ctx))
 	}
 
+	senderTimeout, err := readSenderTimeout(ctx, conn)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("open stream from slot %s: %w", name, err), conn.Close(ctx))
+	}
+
 	err = pglogrepl.StartReplication(ctx, conn, name, pglogrepl.LSN(from), pglogrepl.StartReplicationOptions{
 		Mode: pglogrepl.LogicalReplication,
 		PluginArgs: []string{
@@ -145,7 +175,10 @@ func OpenStream(ctx context.Context, cfg dbconn.Config, catalog dbconn.RowQuerie
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("start replication from slot %s at %s: %w", name, from, err), conn.Close(ctx))
 	}
-	return &Stream{conn: conn, slotName: name, target: target, start: from, delivered: from}, nil
+	clock := progress.WallClock{}
+	s := &Stream{conn: conn, slotName: name, target: target, start: from, delivered: from, clock: clock, lastReport: clock.Now()}
+	s.startHeartbeat(context.WithoutCancel(ctx), heartbeatInterval(senderTimeout))
+	return s, nil
 }
 
 // quoteLiteral renders s as a SQL string literal for a replication command,
@@ -206,6 +239,8 @@ func (s *Stream) ServerWALEnd() LSN { return max(s.serverWALEnd, s.delivered) }
 // wait nor ctx: a peer that has stopped reading can hold the call until the
 // socket's send buffer is full and then fails.
 func (s *Stream) Next(ctx context.Context, wait time.Duration) (Delivery, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.failed != nil {
 		return Delivery{}, s.failed
 	}
@@ -502,9 +537,12 @@ func (s *Stream) fail(err error) error {
 	return err
 }
 
-// Close ends the replication connection. The slot persists with the
-// position last confirmed.
+// Close stops the heartbeat and ends the replication connection. The slot
+// persists with the position last confirmed.
 func (s *Stream) Close(ctx context.Context) error {
+	s.endHeartbeat()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.conn.Close(ctx); err != nil {
 		return fmt.Errorf("close stream from slot %s: %w", s.slotName, err)
 	}
