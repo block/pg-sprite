@@ -299,7 +299,9 @@ func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
 	if r, ok := createAdmissionRefusal(err); ok {
 		return r, true
 	}
-	if errors.Is(err, executor.ErrTableNotFound) {
+	// A table in a schema that does not exist is missing as surely as one
+	// absent from a schema that does: the create path cannot run there.
+	if errors.Is(err, executor.ErrTableNotFound) || errors.Is(err, preflight.ErrSchemaNotFound) {
 		return plan.RowSecurityMissingTableRefusal(), true
 	}
 	return verdict.Refusal{}, false

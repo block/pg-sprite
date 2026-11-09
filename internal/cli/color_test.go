@@ -190,6 +190,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		AllowedDestructive:        true,
 		BlockingPassthrough:       true,
 		WritesBlocked:             true,
+		TableCreated:              true,
 		Abandoned:                 true,
 		LockTimeout:               "3s",
 		StatementTimeout:          "10m",

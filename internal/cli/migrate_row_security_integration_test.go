@@ -105,7 +105,7 @@ func TestMigrateDesiredRLSCreatesMissingTable(t *testing.T) {
 	var v verdict.Verdict
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
-	assert.Equal(t, "table created with its row security: all changes committed in one transaction", v.Detail)
+	assert.True(t, v.TableCreated, "the verdict says the run created the table")
 	assert.Equal(t, preview.Statements, v.ExecutedSQL)
 	assert.Contains(t, v.ExecutedSQL[0], "CREATE TABLE "+schema+".documents")
 	assert.Contains(t, v.ExecutedSQL[3], `CREATE POLICY "readers"`)
@@ -121,7 +121,7 @@ func TestMigrateDesiredRLSCreatesMissingTable(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
 	assert.Empty(t, v.ExecutedSQL)
-	assert.Equal(t, "already converged: row security matches; nothing to run", v.Detail)
+	assert.False(t, v.TableCreated, "a second run converges the table the first one created")
 }
 
 // A standalone type holding the table's name refuses as a create collision,
@@ -147,6 +147,33 @@ func TestMigrateDesiredRLSRefusesTypeAtTheTableName(t *testing.T) {
 	}
 	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.ErrorIs(t, err, schemadiff.ErrTableNotFound)
+}
+
+// A schema that does not exist, as a mistyped --schema names, is refused as
+// a missing table the environment must supply, on the dry run and the run
+// alike, and nothing is created.
+func TestMigrateDesiredRLSRefusesAMissingSchema(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	missing := schema + "_missing"
+	cmd := desiredCommand(t, url, missing, `CREATE TABLE documents (
+ id int PRIMARY KEY
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`)
+	for _, dryRun := range []bool{true, false} {
+		cmd.DryRun = dryRun
+		var out strings.Builder
+		require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+		assert.Contains(t, v.Detail, "schema "+missing+" does not exist")
+		assert.Empty(t, v.ExecutedSQL)
+	}
+	var exists bool
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT EXISTS (SELECT FROM pg_namespace WHERE nspname = $1)", missing).Scan(&exists))
+	assert.False(t, exists)
 }
 
 func TestMigrateDesiredRLSRemovesLastPolicy(t *testing.T) {

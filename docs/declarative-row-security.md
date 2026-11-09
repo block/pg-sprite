@@ -129,9 +129,10 @@ The preview exits 0. With `--json` it is the statement list with
 
 `migrate --desired` then commits the table, its indexes, and its row security
 in one transaction, so no session sees the table without its policies. The
-verdict's detail reads `table created with its row security: all changes
-committed in one transaction`, and `executed_sql` lists the statements above. A
-second run is already converged. The table shapes a new table may take are the
+verdict carries `"table_created": true`, its detail reads `table created with
+its row security: all changes committed in one transaction`, and
+`executed_sql` lists the statements above. A second run is already converged,
+and its verdict leaves `table_created` out. The table shapes a new table may take are the
 same as for an ordinary desired file, and a foreign key is still refused. A
 standalone type at the table's name refuses as `create-collision`. The
 [atomic RLS contract](atomic-row-security.md#create-a-missing-table-with-its-row-security)
@@ -320,8 +321,8 @@ this table-scoped work.
    incomplete export. Implemented here; table-only diff behavior stays intact.
 2. **Round-trip the declaration.** Admit and export SQL under explicit RLS scope;
    materialize it in scratch and prove the unchanged definition produces an empty
-   diff. Implemented through automatic export and SQL declarations; greenfield
-   creation remains refused.
+   diff. Implemented through automatic export and SQL declarations. A table that
+   does not exist yet is created together with its row security in one transaction.
 3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
    and verifies one table's RLS state in one bounded transaction. Mixed changes and
    policy relation dependencies remain unsupported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.

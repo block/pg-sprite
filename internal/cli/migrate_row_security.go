@@ -37,6 +37,7 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 		Detail: "row security converged: all changes committed in one transaction"}
 	if err == nil {
 		if report.TableCreated {
+			v.TableCreated = true
 			v.Detail = "table created with its row security: all changes committed in one transaction"
 		}
 		if len(report.Statements) == 0 {
