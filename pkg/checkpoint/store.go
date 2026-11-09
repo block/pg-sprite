@@ -100,16 +100,20 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Store persists one Checkpoint per target in the target database (D3). It
-// runs over a pkg/dbconn pool, so every statement it issues is already
-// under the session's lock_timeout and statement_timeout.
+// Store persists one Checkpoint per target in the target database (D3). Its
+// statements are bounded by the pool's session lock_timeout and
+// statement_timeout, which a pkg/dbconn pool sets.
 type Store struct {
 	pool *pgxpool.Pool
 	opts Options
 }
 
 // NewStore prepares a store over pool. It refuses options that cannot bound
-// a read.
+// a read. Any pool is accepted, and the catalog reads Ensure makes resolve
+// to pg_catalog whatever the pool's search_path. The session timeouts, the
+// session-affinity proof, and the removal of a pg_catalog entry listed after
+// a user schema are what dbconn.NewPool adds; a pool built another way
+// supplies its own timeouts.
 func NewStore(pool *pgxpool.Pool, opts Options) (*Store, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("%w: pool is nil", ErrInvalidOptions)

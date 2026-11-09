@@ -532,7 +532,14 @@ acknowledgement's locked-table lookup, qualify every function, relation, type, a
 a planted `oid = regclass` operator on a path that lists the catalog implicitly, and decoy
 `pg_class`, `pg_namespace`, `pg_index`, `to_regclass`, `quote_ident`, `oid = oid`, and `text` on a
 shadowing `<schema>, pg_catalog` path, do not change either answer — the replica identity read
-the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), and `pkg/checksum` (the column-type read, the relation check,
+the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), `pkg/checkpoint` (`Ensure`
+runs on whatever pool the caller passes, so its lock key, owner read, and column read qualify
+every function, relation, type, and operator; a lookalike `pg_get_userbyid` planted on a
+shadowing `<schema>, pg_catalog` path would otherwise name an owner that is not this role and
+refuse the engine's own table as foreign, and an empty `pg_namespace` or `pg_attribute` would
+report the schema absent or every column missing — decoy relations, functions, and operators on
+that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the text is held
+by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,

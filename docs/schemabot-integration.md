@@ -388,6 +388,13 @@ the pool besides; an importer running many tables from one process sizes for bot
   all of them. A host that builds its pool with
   `pkg/dbconn` sizes it with `dbconn.Config.MaxConnsFloor`, which raises only the default
   size and keeps a `pool_max_conns` the URL sets.
+- **Which pool:** build it with `dbconn.NewPool`. That pool bounds every session's
+  `lock_timeout` and `statement_timeout`, proves session affinity, and drops a `pg_catalog`
+  entry that `search_path` lists after a user schema, so no lookalike catalog name can answer
+  the engine's reads. `checkpoint.NewStore` accepts any `*pgxpool.Pool`, and `Store.Ensure`'s
+  catalog reads resolve to `pg_catalog` whatever its `search_path`; the slot lock's and the
+  reaper's reads qualify their relations and functions but not their comparisons, and a pool
+  built another way brings its own timeouts or runs without them.
 
 ### What `Runner.Run` returns
 
