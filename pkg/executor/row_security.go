@@ -255,15 +255,19 @@ func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 	if err != nil {
 		return err
 	}
-	wanted.RowSecurity = schemadiff.RowSecurity{}
-	changes, err := schemadiff.Diff(schema, table, wanted)
+	definition := wanted
+	definition.RowSecurity = schemadiff.RowSecurity{}
+	changes, err := schemadiff.Diff(schema, table, definition)
 	if err != nil {
 		return err
 	}
-	if len(changes) != 0 {
-		return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
+	if len(changes) == 0 {
+		return nil
 	}
-	return nil
+	if _, err := schemadiff.DiffWithRowSecurity(schema, live, wanted); errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
+		return fmt.Errorf("this executor changes only row security; run the table change with migrate.RunDesiredWithRowSecurity, which leaves the row security as it is: %w", err)
+	}
+	return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
 }
 
 // rowSecurityTableShape returns m without its row security or the facts

@@ -354,6 +354,26 @@ CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, sche
 	err = cmd.run(t.Context(), &out)
 	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
 	assert.ErrorContains(t, err, tableErr.Error())
+	assert.NotErrorIs(t, err, verdict.ErrRefused, "no row security refusal verdict")
+	assert.Empty(t, out.String())
+
+	// The preview refuses it the same way, as diff and migrate --dry-run do
+	// for a file without row security.
+	cmd.DryRun = true
+	out.Reset()
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
+	assert.ErrorContains(t, err, tableErr.Error())
+	assert.NotErrorIs(t, err, verdict.ErrRefused, "no row security refusal verdict")
+	assert.Empty(t, out.String())
+	diff := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: cmd.Desired, JSON: true}
+	out.Reset()
+	err = diff.run(t.Context(), &out)
+	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
+	assert.ErrorContains(t, err, tableErr.Error())
+	assert.NotErrorIs(t, err, verdict.ErrRefused, "no row security refusal verdict")
+	assert.Empty(t, out.String())
+
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "nothing ran")
