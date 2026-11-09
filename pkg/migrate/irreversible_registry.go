@@ -140,8 +140,8 @@ type irreversibleOp struct {
 // shape, derived from the planner, followed by the operations no shape
 // classifies.
 func irreversibleOps() []irreversibleOp {
-	// INV: RF-12 — every irreversible operation is listed with the
-	// acknowledgement that lifts its refusal.
+	// INV: RF-12 — every operation a typed acknowledgement lifts is listed
+	// with that acknowledgement.
 	var ops []irreversibleOp
 	for _, k := range planner.DestructiveOpKinds() {
 		ops = append(ops, irreversibleOp{

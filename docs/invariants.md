@@ -1533,12 +1533,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
-  (`rejectDesiredAcks`, which rejects all five acknowledgements with their sentinels;
-  `TestIrreversibleOperationRegistryIsComplete`; `TestIrreversibleOperationsAreGated`, which
-  runs every registry entry against a real server without and with a mismatched
-  acknowledgement; `TestEveryAcknowledgementFlagMapsToARegistryEntry`, which ties each CLI
-  acknowledgement flag to exactly its own field and sentinel), `pkg/planner` (`destructiveOp`, which decides every
-  shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
+  and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/planner`
+  (`destructiveOp`, which decides every shape in `statement.OpKinds()` explicitly and
+  treats an unclassified one as destructive;
   `TestEveryOpKindIsClassifiedForDestructiveness`,
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
   `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
@@ -1584,28 +1581,45 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `table_usage_idle_integration_test.go`; a reset between the read's statistics reads not
   seen, and a role's saved `track_counts = off` unknown, in
   `table_usage_coverage_integration_test.go`. *Source:* [table usage](table-usage.md).
-- **RF-12** — Every operation pg-sprite can run that cannot be undone is listed in one
-  registry with the typed acknowledgement that lifts its refusal, and the list is complete:
-  every shape the planner marks destructive, a blocking `DROP INDEX` or `REINDEX`, the
-  submitted blocking form, a copy-and-swap restart, and a copy-and-swap that blocks the
-  table's writes. On `migrate --alter`, each is refused with its declared reason when its
-  acknowledgement is missing, and is a usage error that executes nothing when the
-  acknowledgement names any table but the resolved target. Desired-state execution takes no
-  acknowledgement: `RunDesired` rejects each with its own sentinel before any database work,
-  and `migrate --desired` rejects each flag. A new acknowledgement, a new destructive shape,
-  or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry entry and a
-  desired-state decision. RF-10, RF-5, and AB-1..AB-5 state what each gate does; this
-  invariant states that the set of gates is complete. *Enforced:* `pkg/migrate`
+- <a id="rf-12"></a>**RF-12** — Every operation whose refusal an operator lifts with a typed
+  acknowledgement is listed in one registry with that acknowledgement, and the list is
+  complete: every shape the planner marks destructive, a blocking `DROP INDEX` or `REINDEX`,
+  the submitted form that blocks the table where the planner has no safer sequence, a
+  copy-and-swap restart, and a copy-and-swap that blocks the table's writes. The entries lose
+  structure or data, availability for a bounded window, or a stopped run's progress. On
+  `migrate --alter`, an entry whose acknowledgement is missing is refused with its declared
+  reason, except the restart: without `--restart` a stopped run resumes and nothing is
+  discarded, and a leftover no checkpoint records is refused and left standing. An
+  acknowledgement that names any table but the resolved target is a usage error that executes
+  nothing. Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
+  own sentinel before any database work, and `migrate --desired` rejects each flag. A new
+  string field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a new
+  destructive shape, or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry
+  entry and a desired-state decision. RF-10, RF-5, and AB-1..AB-5 state what each gate does;
+  this invariant states that the set of acknowledgement gates is complete. Irreversible steps
+  the engine takes on its own, with no operator decision to acknowledge, are outside the
+  registry and held by their own invariants: dropping the retained source after a committed
+  swap (unless `KeepOld`; ST-6 holds it to the relation the swap retained), dropping its own
+  shadow under the table lock and the shadow's proof (LK-1), reaping an orphaned slot (ST-3),
+  dropping an index `DropAbandonedIndex` has proven abandoned (`ErrAbandonmentUnproven`
+  otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
+  Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
+  refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
+  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and, for a CLI flag,
+  the `SCHEMA.TABLE` placeholder plus its sentinel and field in
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
   (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
-  `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`,
-  `ErrRestartNotSupported`, `ErrBlockWritesNotSupported`), `pkg/planner`
-  (`DestructiveOpKinds`), `internal/cli` (`validateInput`). *Test obligation:*
-  `TestIrreversibleOperationRegistryIsComplete` for the registry's shape and the
-  desired-state rejections, `TestIrreversibleOperationsAreGated` for each entry's refusal
-  and wrong-target usage error against real PostgreSQL with the table, checkpoint, and write
-  path unchanged, and a restart's unrecorded leftover left standing, and
-  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for each CLI flag reaching exactly its
-  own field and sentinel.
+  `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
+  `ErrBlockWritesNotSupported`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
+  registry's shape and the desired-state rejections;
+  `TestEveryOpKindIsClassifiedForDestructiveness` and
+  `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
+  derives; `TestIrreversibleOperationsAreGated` for each entry's refusal and wrong-target usage
+  error against real PostgreSQL with the table, checkpoint, and write path unchanged, and a
+  restart's unrecorded leftover left standing; and
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for each CLI flag reaching exactly its own
+  field and sentinel.
   *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
 
 ## Orchestration / control-plane (OC)
