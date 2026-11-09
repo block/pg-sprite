@@ -8,10 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
@@ -323,4 +325,36 @@ CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, sche
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &again))
 	assert.Equal(t, verdict.OutcomeExecuted, again.Outcome)
 	assert.Empty(t, again.ExecutedSQL, "a rerun finds nothing to do")
+}
+
+// A table change that the table's own plan refuses, here a serial column,
+// is refused through the table path when the row security matches, so the
+// operator sees the table definition's refusal and nothing runs.
+func TestMigrateDesiredRLSRefusesATableChangeTheTablePlanRefuses(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, schema))
+	require.NoError(t, err)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	const file = `CREATE TABLE documents (
+ id int PRIMARY KEY,
+ owner_id int NOT NULL,
+ seq serial
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 7);`
+	cmd := desiredCommand(t, url, schema, file)
+	desired, err := statement.ParseDesiredWithRowSecurity(file)
+	require.NoError(t, err)
+	_, tableErr := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: desired.TableDefinition()})
+	require.ErrorIs(t, tableErr, schemadiff.ErrUnsupportedChange)
+
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
+	assert.ErrorContains(t, err, tableErr.Error())
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "nothing ran")
 }

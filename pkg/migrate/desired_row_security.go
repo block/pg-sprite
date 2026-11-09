@@ -47,7 +47,11 @@ type RowSecurityRequest struct {
 // last commit, is empty. Another session can change the policies while the
 // table plan runs; the run then reports that the row security no longer
 // matches rather than claiming convergence, and every table statement stays
-// committed.
+// committed. The comparison is made again even when the delegated run found
+// nothing to do, since the table can change between the two plans. The
+// delegated run only converges a table that exists: if the table is dropped
+// before it plans, it is refused, so it is never created without its row
+// security.
 //
 // The result-and-error contract is RunDesired's.
 func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowSecurityRequest, opts Options) (DesiredResult, error) {
@@ -72,26 +76,43 @@ func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowS
 			Detail:  "already converged: the live table and its row security match the desired file; nothing to run",
 		}, nil
 	}
-	result, err := RunDesired(ctx, pool, DesiredRequest{
+	result, err := runDesired(ctx, pool, DesiredRequest{
 		Schema: req.Schema, Desired: req.Desired.TableDefinition(), ExpectedFingerprint: req.ExpectedFingerprint,
-	}, opts)
+	}, opts, refuseDroppedTable)
 	if err != nil || result.Outcome != verdict.OutcomeExecuted {
 		return result, err
-	}
-	if result.Convergence == nil {
-		// RunDesired found the table already converged and ran nothing,
-		// and the row security matched when this run planned.
-		return result, nil
 	}
 	// INV: ST-12 — executed only when the comparison the next run would
 	// make, row security included, is empty after the last commit.
 	convergence, err := verifyRowSecurityConverged(ctx, pool, req)
+	if len(result.Plan.Statements) == 0 {
+		// The table matched its definition when the delegated run planned,
+		// so nothing ran. Another session changed the table since this run
+		// planned, and may have changed the row security too.
+		if err != nil {
+			result.Outcome = verdict.OutcomeFailed
+			result.Convergence = &convergence
+			result.Detail = fmt.Sprintf("nothing was executed: the table already matches its definition, but the file as a whole does not match: %v", err)
+			return result, err
+		}
+		result.Detail = "already converged: the live table and its row security match the desired file; nothing to run"
+		return result, nil
+	}
 	result.Convergence = &convergence
 	if err != nil {
 		return result.unproven(len(result.Plan.Statements), err)
 	}
 	result.Detail = fmt.Sprintf("converged: all %d planned statements committed, a fresh plan is empty, and the row security still matches the file", len(result.Plan.Statements))
 	return result, nil
+}
+
+// refuseDroppedTable refuses a delegated run whose plan finds the table
+// missing: the table definition on its own would create the table without
+// its row security, so the table is left for the executor that creates it
+// with its row security in one transaction.
+func refuseDroppedTable(report plan.Report) DesiredResult {
+	return DesiredResult{}.refused(plan.RowSecurityMissingTableRefusal(),
+		fmt.Sprintf("%s.%s was dropped after its row security was compared; create it with its row security through executor.ExecuteDesiredRowSecurity; nothing was executed", report.Schema, report.Table))
 }
 
 // rowSecurityPlanRefusal classifies a planning error that refuses the run

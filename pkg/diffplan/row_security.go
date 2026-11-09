@@ -3,6 +3,7 @@ package diffplan
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,9 +19,10 @@ import (
 // the live row security matches the file and only the table definition
 // differs, the report is the plan Plan derives for the file's table
 // definition: it changes the table and never its row security, and
-// migrate.RunDesiredWithRowSecurity runs it. A row security delta, alone or
-// with table changes, returns RowSecurityReviewRequired, wrapping
-// ErrUnsupportedChange. A missing table returns schemadiff.ErrTableNotFound;
+// migrate.RunDesiredWithRowSecurity runs it; a table change that plan
+// refuses returns its error marked with schemadiff.ErrOnlyTableDiffers. A
+// row security delta, alone or with table changes, returns
+// RowSecurityReviewRequired, wrapping ErrUnsupportedChange. A missing table returns schemadiff.ErrTableNotFound;
 // preview its creation with
 // executor.PreviewDesiredCreateWithRowSecurity. The distinct parsed
 // type cannot be passed to RunDesired or ExecuteCreate. Inspection still needs
@@ -42,7 +44,7 @@ func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string,
 	}
 	if _, err := schemadiff.DiffWithRowSecurity(schema, live, model); err != nil {
 		if errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
-			return Plan(ctx, pool, Request{Schema: schema, Desired: desired.TableDefinition()})
+			return planTableDefinition(ctx, pool, schema, desired)
 		}
 		review, reviewErr := schemadiff.ReviewRowSecurity(schema, live, model)
 		if reviewErr != nil {
@@ -59,6 +61,28 @@ func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string,
 	report.ServerVersion, err = dbconn.ServerVersion(ctx, pool)
 	if err != nil {
 		return plan.Report{}, err
+	}
+	return report, nil
+}
+
+// planTableDefinition plans a row-security file's table definition on its
+// own, once the row security was found to match. Planning reads the table
+// again, so another session can drop it in between, and the plan would then
+// create the table without its row security. That plan is refused as a
+// missing table, which the caller previews and creates with its row
+// security instead. A table change the plan refuses keeps its own error,
+// marked with schemadiff.ErrOnlyTableDiffers so the caller knows the row
+// security matched.
+func planTableDefinition(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) (plan.Report, error) {
+	report, err := Plan(ctx, pool, Request{Schema: schema, Desired: desired.TableDefinition()})
+	if errors.Is(err, schemadiff.ErrUnsupportedChange) {
+		return plan.Report{}, fmt.Errorf("%w: %w", schemadiff.ErrOnlyTableDiffers, err)
+	}
+	if err != nil {
+		return plan.Report{}, err
+	}
+	if report.TableExists != nil && !*report.TableExists {
+		return plan.Report{}, fmt.Errorf("%s.%s was dropped while its table definition was planned: %w", schema, desired.Table(), schemadiff.ErrTableNotFound)
 	}
 	return report, nil
 }

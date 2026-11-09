@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -23,18 +24,18 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 	defer pool.Close()
 	report, planErr := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
 	diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
-	if changesOnlyTheTable(report, planErr) {
-		if c.DryRun {
+	if c.DryRun {
+		if changesOnlyTheTable(report, planErr) {
 			// Preview uses desired-state admission, as for a file without
 			// row security: RunDesired refuses a destructive plan whole.
 			plan.RefuseDestructive(&report)
 			return diff.writeDiffReport(out, report)
 		}
+		return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
+	}
+	if runsTheTablePlan(report, planErr) {
 		result, runErr := migrate.RunDesiredWithRowSecurity(ctx, pool, migrate.RowSecurityRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))
 		return c.finishDesired(out, result, runErr)
-	}
-	if c.DryRun {
-		return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
 	}
 	runReport, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, b)
 	v := rowSecurityVerdict(c.Schema+"."+desired.Table(), runReport, runErr)
@@ -49,6 +50,14 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 // atomic row security executor, which derives it again under its lock.
 func changesOnlyTheTable(report plan.Report, planErr error) bool {
 	return planErr == nil && len(report.Statements) > 0
+}
+
+// runsTheTablePlan reports whether the row security matched, so
+// RunDesiredWithRowSecurity runs the file: the table definition has a plan,
+// or its plan refused the table change, which that path reports in the
+// terms a file without row security gets.
+func runsTheTablePlan(report plan.Report, planErr error) bool {
+	return changesOnlyTheTable(report, planErr) || errors.Is(planErr, schemadiff.ErrOnlyTableDiffers)
 }
 
 // A failed commit is not evidence of rollback. Preserve its distinct code and

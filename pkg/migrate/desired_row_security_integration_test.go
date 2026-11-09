@@ -132,6 +132,33 @@ func TestRunDesiredWithRowSecurityRefusesWhatItDoesNotChange(t *testing.T) {
 	}
 }
 
+// A table change the table's own plan refuses, here a serial column, is
+// refused in the terms a file without row security gets, not reported as a
+// row security difference: the row security matches, so the error names the
+// column, and nothing runs.
+func TestRunDesiredWithRowSecurityReportsTheTablesOwnRefusal(t *testing.T) {
+	pool, schema := rowSecurityTable(t)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	desired := parseRowSecurity(t, fmt.Sprintf(documentsWithRowSecurity, ",\n  seq serial", ""))
+
+	_, err = diffplan.PlanWithRowSecurity(t.Context(), pool, schema, desired)
+	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
+	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+	var review *diffplan.RowSecurityReviewRequired
+	assert.NotErrorAs(t, err, &review, "the row security matches")
+	_, tableErr := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: desired.TableDefinition()})
+	require.Error(t, tableErr)
+	assert.ErrorContains(t, err, tableErr.Error(), "the error is the table definition's own refusal")
+
+	_, err = migrate.RunDesiredWithRowSecurity(t.Context(), pool, migrate.RowSecurityRequest{Schema: schema, Desired: desired}, runOptions())
+	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
+	assert.ErrorContains(t, err, tableErr.Error())
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "nothing ran")
+}
+
 // Another session can change the policies while the table plan runs. Here an
 // event trigger replaces the policy once the run's ADD COLUMN commits. The
 // run does not claim convergence: it fails with ErrNotConverged, says the row
