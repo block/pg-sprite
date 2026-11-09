@@ -14,6 +14,7 @@ it does not fold, and what the approach requires from the database.
 - [How pg-sprite avoids reimplementing the rules](#how-pg-sprite-avoids-reimplementing-the-rules)
   - [Compared with Spirit](#compared-with-spirit)
 - [What the catalog does not fold](#what-the-catalog-does-not-fold)
+  - [Text that changes each time it is parsed](#text-that-changes-each-time-it-is-parsed)
   - [Why `--desired` and `--alter` treat the drop differently](#why---desired-and---alter-treat-the-drop-differently)
 - [What the approach requires](#what-the-approach-requires)
 
@@ -222,6 +223,37 @@ ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email);
 The same table written with `int8`, `TEXT`, `TIMESTAMP WITH TIME ZONE`, `current_timestamp`,
 `DEFAULT (2)`, table-level `PRIMARY KEY (id)` and `UNIQUE (email)`, and `COLLATE "default"`
 reports no changes against the live table: those differences the catalog does fold.
+
+### Text that changes each time it is parsed
+
+The text the server prints for an expression does not always parse back into the
+same expression tree. A nested row comparison expands one row level each time
+it is parsed. Given this check:
+
+```sql
+CONSTRAINT ck CHECK (((a, b), c) IS DISTINCT FROM ((1, 2), 3))
+```
+
+a table created from it prints `ROW(a, b) IS DISTINCT FROM ROW(1, 2)` for the inner
+row. A table recreated from that printed text expands the inner row as well, into
+`a IS DISTINCT FROM 1 OR b IS DISTINCT FROM 2`. A second recreation prints the same text again.
+All three texts are the same check. So `diff` replays the desired expressions
+on the scratch table until their text stops changing, and takes a live text
+that matches any of those replays as matching the desired file. The chain
+runs the other way too: a desired file written by `pull` holds the live text,
+and building it prints the next text. A live text that is not on the chain is
+replayed once on the scratch table, and it matches when it prints a text that
+is. A real change to the expression is still planned, with the text the first
+build printed. An expression still changing after the replays the build allows is refused
+with `ErrExpressionUnsettled`, naming the definition; write it without nested
+row comparisons.
+
+The replayed expressions are check constraints, column defaults, the
+predicates and expressions of indexes that no constraint owns, and stored
+generation expressions from PostgreSQL 17, the first release that can replace
+one in place. Virtual generated columns, generation expressions before
+PostgreSQL 17, and the `WHERE` predicate of an `EXCLUDE` constraint are not
+replayed, so a nested row comparison in one of them still plans a change.
 
 ### Why `--desired` and `--alter` treat the drop differently
 
