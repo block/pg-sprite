@@ -33,8 +33,12 @@ func (r RowSecurityReport) plan() RowSecurityPlan {
 	return RowSecurityPlan{Schema: r.Schema, Table: r.Table, Statements: r.Statements}
 }
 
-// RowSecurityPlan contains generated RLS statements in execution order. Preview
-// rolls back without target DDL; a plan is not an execution permission.
+// RowSecurityPlan contains generated RLS statements in execution order. A
+// preview of an existing table runs no target DDL. A preview of a table that
+// does not exist yet runs the whole create transaction on the target,
+// readback included, and rolls it back: no catalog change survives, but
+// what a rollback does not undo does, such as a sequence an event trigger
+// on that DDL advances. A plan is not an execution permission.
 type RowSecurityPlan struct {
 	Schema     string   `json:"schema"`
 	Table      string   `json:"table"`

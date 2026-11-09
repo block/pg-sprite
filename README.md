@@ -86,9 +86,10 @@ refusal — never a silently wrong or incomplete result:
   transaction-mode pooler, but passing them does not make it supported
   ([connections and poolers](docs/limitations.md#connections-and-poolers)).
 - **Row security** is included in exports when present, with reviewable before/after differences. The
-  [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
-  through `migrate --desired` or the Go API. Only the Go API supports binding execution to
-  an ordered SQL review; mixed table/policy changes remain unsupported. See the workflow and roadmap in
+  [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables,
+  and creates a missing table together with its row security in one transaction, through
+  `migrate --desired` or the Go API. Only the Go API supports binding execution to an ordered
+  SQL review, and only for an existing table; mixed table/policy changes remain unsupported. See the workflow and roadmap in
   [declarative-row-security.md](docs/declarative-row-security.md).
 - **Foreign keys** are planned but not executed declaratively: a desired
   file may declare them, `diff` shows an added or dropped foreign key with

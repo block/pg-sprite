@@ -48,7 +48,9 @@ func ExecuteCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 // PreviewCreateWithRowSecurity runs everything ExecuteCreateWithRowSecurity
 // runs, including the readback that proves the table and its row security
 // converge, and then rolls back. The statements are the ones execution would
-// run. Nothing is visible to other sessions at any point.
+// run. Nothing is visible to other sessions at any point. The target DDL
+// does run, so what a rollback does not undo survives the preview, such as
+// a sequence an event trigger on that DDL advances.
 func PreviewCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityPlan, error) {
 	report, err := runCreateWithRowSecurity(ctx, pool, at, cr, desired, b, true)
 	if err != nil {

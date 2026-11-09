@@ -134,9 +134,15 @@ the probes included. The create:
 A failure at any step before the commit leaves nothing behind.
 `executor.PreviewDesiredCreateWithRowSecurity` runs the same transaction and
 rolls it back, so `diff` and `migrate --dry-run` list exactly the statements a
-run would commit, and `diff --sql` wraps them in `BEGIN` and `COMMIT`. A run
-does not execute a saved preview: it re-derives the statements, and there is no
-reviewed variant of the create path.
+run would commit. Because the preview runs the target DDL, no catalog change
+survives it, but what a rollback does not undo does: an event trigger on that
+DDL runs, and a sequence it advances keeps the value it reached. `diff --sql`
+wraps the statements in `BEGIN` and `COMMIT`, with the `SET LOCAL search_path`
+each part runs under: the table's statements under the schema and then
+`public`, and the row security under `pg_catalog` alone. A table that appears
+between planning and the preview is previewed as the existing table it now
+is. A run does not execute a saved preview: it re-derives the statements, and
+there is no reviewed variant of the create path.
 
 A standalone type at the table's name refuses as `create-collision`. So does a
 table that appears at the name between the probe and the `CREATE TABLE`: the

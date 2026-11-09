@@ -226,6 +226,36 @@ func TestPreviewCreateWithRowSecurityMatchesTheRunAndLeavesNothing(t *testing.T)
 	assert.Equal(t, preview.Statements, report.Statements)
 }
 
+// A preview of a missing table runs the create transaction on the target
+// and rolls it back. No catalog change survives, but what a rollback cannot
+// undo does: here an event trigger on the CREATE TABLE advances a sequence,
+// and the sequence keeps the value it reached while the table stays absent.
+func TestPreviewCreateWithRowSecurityRunsTheTargetDDL(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	audit := pgx.Identifier{f.schema, "ddl_audit"}.Sanitize()
+	_, err := f.pool.Exec(t.Context(), "CREATE SEQUENCE "+audit)
+	require.NoError(t, err)
+	testutil.InstallEventTrigger(t, f.pool, testutil.DDLCommandEnd, f.schema, "audit_create", fmt.Sprintf(`
+     IF EXISTS (
+         SELECT 1 FROM pg_event_trigger_ddl_commands() d
+         JOIN pg_class c ON d.classid = 'pg_class'::regclass AND d.objid = c.oid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = '%s' AND c.relname = 'notes' AND d.command_tag = 'CREATE TABLE'
+     ) THEN
+         PERFORM nextval(format('%%I.ddl_audit', '%s'));
+     END IF;`, f.schema, f.schema))
+
+	_, err = executor.PreviewCreateWithRowSecurity(t.Context(), f.pool, f.at, f.cr,
+		desiredRowSecurity(t, notesWithRowSecurity), createWithRowSecurityBudget)
+	require.NoError(t, err)
+	assert.False(t, relationExists(t, f.pool, f.schema, "notes"))
+	var last int64
+	var called bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT last_value, is_called FROM "+audit).Scan(&last, &called))
+	assert.True(t, called, "the trigger ran on the preview's CREATE TABLE")
+	assert.Equal(t, int64(1), last, "the sequence keeps the value the rolled-back preview advanced it to")
+}
+
 // With a create owner in the proof, the table, its relations, and its
 // policies are all created as that role.
 func TestExecuteCreateWithRowSecurityCreatesAsTheOwner(t *testing.T) {
