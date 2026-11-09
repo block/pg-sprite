@@ -16,6 +16,7 @@ func TestCheckCleanScriptHasNoFindings(t *testing.T) {
 		CREATE TABLE t (id bigint PRIMARY KEY);
 		ALTER TABLE t ADD COLUMN age int DEFAULT 0;
 		CREATE INDEX CONCURRENTLY t_age_idx ON t (age);
+		ALTER TYPE mood ADD VALUE 'calm' AFTER 'happy';
 	`)
 	require.NoError(t, err)
 	assert.Equal(t, lint.FormatVersion, report.FormatVersion)

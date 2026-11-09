@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -31,8 +32,9 @@ const (
 	// masquerades as "table not found".
 	TierConnect Tier = iota
 	// TierAlterInPlace covers owner-gated in-place ALTER TABLE (the
-	// instant and fast native paths): inheritable membership in the
-	// owning role.
+	// instant and fast native paths), ALTER INDEX ... RENAME TO, and
+	// ALTER TYPE ... ADD VALUE: inheritable membership in the role that
+	// owns the table, or the type.
 	TierAlterInPlace
 	// TierIndexBuild covers CREATE INDEX [CONCURRENTLY]: CREATE on the
 	// target schema on top of owning-role membership.
@@ -56,7 +58,7 @@ func (t Tier) String() string {
 	case TierConnect:
 		return "connect and resolve the target"
 	case TierAlterInPlace:
-		return "in-place ALTER TABLE"
+		return "in-place changes that need ownership"
 	case TierIndexBuild:
 		return "index builds"
 	case TierCopyAndSwap:
@@ -326,7 +328,7 @@ func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tie
 		return nil
 	}
 	if !f.ownerUsage {
-		return ownerMembershipRefusal(f)
+		return ownerMembershipRefusal(f, "table")
 	}
 	if tier < TierIndexBuild {
 		return nil
@@ -356,8 +358,9 @@ func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tie
 // be altered first, then (a re-run refuses again if needed) granted
 // membership. On 16+ inheritance is a membership option, and GRANT ...
 // WITH INHERIT TRUE both creates a missing membership and updates an
-// existing non-inheriting one.
-func ownerMembershipRefusal(f accessFacts) *PrivilegeError {
+// existing non-inheriting one. object names what the role would alter, a
+// table or a type, for the ownership transfer the hint offers instead.
+func ownerMembershipRefusal(f accessFacts, object string) *PrivilegeError {
 	const pg16 = 160000
 	if f.versionNum >= pg16 {
 		return &PrivilegeError{
@@ -365,8 +368,8 @@ func ownerMembershipRefusal(f accessFacts) *PrivilegeError {
 			Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", f.role, f.owner),
 			Grant: fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE",
 				pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
-			Hint: fmt.Sprintf("if the owner is an administrative role, transfer the table instead: ALTER TABLE %s.%s OWNER TO <role>",
-				pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.table}.Sanitize()),
+			Hint: fmt.Sprintf("if the owner is an administrative role, transfer the %s instead: ALTER %s %s.%s OWNER TO <role>",
+				object, strings.ToUpper(object), pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.table}.Sanitize()),
 		}
 	}
 	if !f.roleInherit {

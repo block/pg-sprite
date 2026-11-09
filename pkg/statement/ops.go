@@ -41,6 +41,7 @@ const (
 	OpCreateIndex
 	OpDropIndex
 	OpReindex
+	OpAddEnumValue
 )
 
 // OpKinds returns the closed set of operation shapes, OpUnrecognized first.
@@ -72,6 +73,7 @@ func OpKinds() []OpKind {
 		OpCreateIndex,
 		OpDropIndex,
 		OpReindex,
+		OpAddEnumValue,
 	}
 }
 
@@ -292,6 +294,8 @@ func (o Op) Describe() string {
 		return strings.TrimSpace("DROP INDEX " + o.Name)
 	case OpReindex:
 		return strings.TrimSpace("REINDEX " + o.Name)
+	case OpAddEnumValue:
+		return "ADD VALUE " + o.Name
 	default:
 		return "unrecognized operation"
 	}
@@ -433,6 +437,12 @@ func ParseOps(sql string) ([]Op, error) {
 		}}, nil
 	case node.GetRenameStmt() != nil:
 		return []Op{renameOp(node.GetRenameStmt())}, nil
+	case node.GetAlterEnumStmt() != nil:
+		enum := node.GetAlterEnumStmt()
+		if enum.GetOldVal() != "" {
+			return []Op{{Kind: OpUnrecognized}}, nil
+		}
+		return []Op{{Kind: OpAddEnumValue, Name: enum.GetNewVal(), IfNotExists: enum.GetSkipIfNewValExists()}}, nil
 	case node.GetAlterObjectSchemaStmt() != nil:
 		alter := node.GetAlterObjectSchemaStmt()
 		if alter.GetObjectType() != pganalyze.ObjectType_OBJECT_TABLE {

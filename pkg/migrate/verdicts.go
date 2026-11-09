@@ -40,7 +40,7 @@ func Gate(st statement.Statement) (verdict.Verdict, bool) {
 		v.Detail = "migrate changes an existing table; to converge a table onto a desired-state CREATE TABLE, " +
 			"use the declarative front door — diff the desired schema against the live database"
 	default:
-		v.Detail = "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
+		v.Detail = "only ALTER TABLE, CREATE INDEX, ALTER INDEX ... RENAME TO, and ALTER TYPE ... ADD VALUE statements are supported by the imperative front door"
 	}
 	return v, true
 }

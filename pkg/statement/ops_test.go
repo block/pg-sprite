@@ -222,6 +222,21 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpRenameIndex, Name: "i2"},
 		},
 		{
+			name: "alter type add value",
+			sql:  "ALTER TYPE mood ADD VALUE 'calm' BEFORE 'sad'",
+			want: statement.Op{Kind: statement.OpAddEnumValue, Name: "calm"},
+		},
+		{
+			name: "alter type add value if not exists",
+			sql:  "ALTER TYPE mood ADD VALUE IF NOT EXISTS 'calm'",
+			want: statement.Op{Kind: statement.OpAddEnumValue, Name: "calm", IfNotExists: true},
+		},
+		{
+			name: "alter type rename value is unrecognized",
+			sql:  "ALTER TYPE mood RENAME VALUE 'sad' TO 'blue'",
+			want: statement.Op{Kind: statement.OpUnrecognized},
+		},
+		{
 			name: "set schema",
 			sql:  "ALTER TABLE t SET SCHEMA s2",
 			want: statement.Op{Kind: statement.OpSetSchema, Name: "s2"},

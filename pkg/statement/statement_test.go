@@ -86,6 +86,28 @@ func TestParseOneKinds(t *testing.T) {
 				indexRelation: IndexRelation{Schema: "app", Name: "users_email_idx", Kind: IndexRelationIndex}, renamedTo: "users_email_key"},
 		},
 		{
+			// An enum value add names a type, not a table: no table
+			// target, and the type and the label it adds.
+			name: "alter type add value names the type, not a table",
+			sql:  "ALTER TYPE mood ADD VALUE 'calm' AFTER 'happy'",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Name: "mood"}, enumValue: "calm"},
+		},
+		{
+			name: "alter type add value schema-qualified keeps the type's schema",
+			sql:  "ALTER TYPE app.mood ADD VALUE IF NOT EXISTS 'calm'",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Schema: "app", Name: "mood"}, enumValue: "calm"},
+		},
+		{
+			name: "alter type rename value is not an enum value add",
+			sql:  "ALTER TYPE mood RENAME VALUE 'sad' TO 'blue'",
+			want: Statement{kind: KindOther},
+		},
+		{
+			name: "alter type add value naming the database is not an enum value add",
+			sql:  "ALTER TYPE db.app.mood ADD VALUE 'calm'",
+			want: Statement{kind: KindOther},
+		},
+		{
 			name: "alter sequence set schema is not a table target",
 			sql:  "ALTER SEQUENCE s SET SCHEMA archive",
 			want: Statement{kind: KindOther},

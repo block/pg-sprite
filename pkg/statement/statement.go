@@ -40,6 +40,10 @@ const (
 	// a table, so it carries the index as its IndexRelation and no table
 	// target.
 	KindRenameIndex
+	// KindAddEnumValue is ALTER TYPE ... ADD VALUE. It names an enum type,
+	// not a table, so it carries the type as its EnumType and no table
+	// target.
+	KindAddEnumValue
 )
 
 // Kinds returns the closed set of statement kinds, KindOther first. The
@@ -57,6 +61,7 @@ func Kinds() []Kind {
 		KindProvisioning,
 		KindCatalogWork,
 		KindRenameIndex,
+		KindAddEnumValue,
 	}
 }
 
@@ -81,6 +86,8 @@ func (k Kind) String() string {
 		return "catalog work"
 	case KindRenameIndex:
 		return "ALTER INDEX RENAME"
+	case KindAddEnumValue:
+		return "ALTER TYPE ADD VALUE"
 	default:
 		return "other"
 	}
@@ -99,6 +106,8 @@ type Statement struct {
 	indexTarget   IndexTarget
 	indexRelation IndexRelation
 	renamedTo     string
+	enumType      TypeName
+	enumValue     string
 	cascades      bool
 	buildsIndex   bool
 }
@@ -205,6 +214,22 @@ func (s Statement) IndexRelation() IndexRelation { return s.indexRelation }
 // index keeps its schema, so the name is never qualified.
 func (s Statement) RenamedTo() string { return s.renamedTo }
 
+// TypeName is a type a statement names: its schema as written, empty when
+// the name is unqualified and resolves on the session search_path, and the
+// type's own name.
+type TypeName struct {
+	Schema string
+	Name   string
+}
+
+// EnumType returns the enum type an ALTER TYPE ... ADD VALUE adds a value
+// to; the zero value for every other statement.
+func (s Statement) EnumType() TypeName { return s.enumType }
+
+// AddedEnumValue returns the label an ALTER TYPE ... ADD VALUE adds, as the
+// grammar spelled it; empty for every other statement.
+func (s Statement) AddedEnumValue() string { return s.enumValue }
+
 // Cascades reports whether a DROP INDEX used CASCADE, which also drops the
 // objects that depend on the index. It is always false for other statements.
 func (s Statement) Cascades() bool { return s.cascades }
@@ -239,6 +264,20 @@ func Canonical(sql string) (string, error) {
 		return "", err
 	}
 	return deparseOne(node)
+}
+
+// typeName reads a type name the grammar spelled as a list of name parts:
+// the type alone, or its schema and the type. ok is false for any other
+// shape, such as a name that also spells the database.
+func typeName(parts []*pganalyze.Node) (TypeName, bool) {
+	switch len(parts) {
+	case 1:
+		return TypeName{Name: parts[0].GetString_().GetSval()}, true
+	case 2:
+		return TypeName{Schema: parts[0].GetString_().GetSval(), Name: parts[1].GetString_().GetSval()}, true
+	default:
+		return TypeName{}, false
+	}
 }
 
 // ParseOne parses sql with the PostgreSQL grammar and requires exactly one
@@ -302,6 +341,23 @@ func ParseOne(sql string) (Statement, error) {
 		st.kind = KindAlterTable
 		st.schema = ren.GetRelation().GetSchemaname()
 		st.table = ren.GetRelation().GetRelname()
+	case node.GetAlterEnumStmt() != nil:
+		// ALTER TYPE ... ADD VALUE and ALTER TYPE ... RENAME VALUE both
+		// parse as AlterEnumStmt; only the form that adds a value, named
+		// by at most a schema and a type, is KindAddEnumValue. RENAME
+		// VALUE carries the old value and stays KindOther, as does a
+		// name that also spells the database.
+		enum := node.GetAlterEnumStmt()
+		if enum.GetOldVal() != "" {
+			return st, nil
+		}
+		name, ok := typeName(enum.GetTypeName())
+		if !ok {
+			return st, nil
+		}
+		st.kind = KindAddEnumValue
+		st.enumType = name
+		st.enumValue = enum.GetNewVal()
 	case node.GetAlterObjectSchemaStmt() != nil:
 		// ALTER TABLE ... SET SCHEMA parses as AlterObjectSchemaStmt; only
 		// the table-targeted form is KindAlterTable.
