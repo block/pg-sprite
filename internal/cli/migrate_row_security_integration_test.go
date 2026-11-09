@@ -38,6 +38,8 @@ func TestMigrateDesiredRLSLockTimeoutPreservesState(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 	assert.Equal(t, string(executor.CodeBudgetLockExceeded), v.Code)
+	assert.Equal(t, "55P03", v.SQLState)
+	assert.Equal(t, "canceling statement due to lock timeout", v.ServerError)
 	assert.Empty(t, v.ExecutedSQL)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
