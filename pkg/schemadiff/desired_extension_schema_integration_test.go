@@ -125,3 +125,29 @@ func TestIntrospectDesiredExtensionSchemasDoNotShadowTheTarget(t *testing.T) {
 		}
 	}
 }
+
+// The constraints a LIKE clause copies are counted from the table the
+// clause copied, resolved on the path the file ran under, so a source the
+// file finds only through an extension schema still counts.
+func TestIntrospectDesiredCountsConstraintsCopiedFromAnExtensionSchema(t *testing.T) {
+	pool := extensionDatabase(t)
+	schema := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), "CREATE TABLE extensions.template (b int UNIQUE)")
+	require.NoError(t, err)
+
+	ds, err := statement.ParseDesired(`
+		CREATE TABLE t (
+		  LIKE template INCLUDING INDEXES,
+		  a int UNIQUE
+		);`)
+	require.NoError(t, err)
+	widened, err := ds.WithExtensionSchemas("extensions")
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, widened)
+	require.NoError(t, err)
+	defs := make(map[string]string)
+	for _, con := range desired.Constraints {
+		defs[con.Name] = con.Def
+	}
+	assert.Equal(t, map[string]string{"t_a_key": "UNIQUE (a)", "t_b_key": "UNIQUE (b)"}, defs)
+}
