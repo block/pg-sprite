@@ -1531,7 +1531,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
   (`rejectDesiredAcks`, which rejects all five acknowledgements with their sentinels;
-  `TestIrreversibleOperationRegistryIsComplete`), `pkg/planner` (`destructiveOp`, which decides every
+  `TestIrreversibleOperationRegistryIsComplete`; `TestIrreversibleOperationsAreGated`, which
+  runs every registry entry against a real server without and with a mismatched
+  acknowledgement; `TestEveryAcknowledgementFlagMapsToARegistryEntry`, which ties each CLI
+  acknowledgement flag to exactly its own field and sentinel), `pkg/planner` (`destructiveOp`, which decides every
   shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
   `TestEveryOpKindIsClassifiedForDestructiveness`,
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
