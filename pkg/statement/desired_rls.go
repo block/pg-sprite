@@ -43,11 +43,18 @@ var ErrRowSecurityForeignKey = errors.New("foreign keys are not supported in des
 // including an empty policy set. Only ParseDesiredWithRowSecurity constructs it.
 type DesiredWithRowSecurity struct {
 	table      string
+	definition DesiredSchema
 	statements []Statement
 }
 
 // Table returns the declaration's unqualified table name.
 func (d DesiredWithRowSecurity) Table() string { return d.table }
+
+// TableDefinition returns the CREATE TABLE and its indexes without the row
+// security that follows them. Running it on its own creates a table without
+// its row security, so only the executor that creates the table and its row
+// security in one transaction consumes it.
+func (d DesiredWithRowSecurity) TableDefinition() DesiredSchema { return d.definition }
 
 // Statements returns a defensive copy in scratch execution order.
 func (d DesiredWithRowSecurity) Statements() []Statement { return slices.Clone(d.statements) }
@@ -96,7 +103,7 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 	if table.HasForeignKeys() {
 		return DesiredWithRowSecurity{}, fmt.Errorf("%w: table %q", ErrRowSecurityForeignKey, table.Table())
 	}
-	d := DesiredWithRowSecurity{table: table.Table(), statements: table.Statements()}
+	d := DesiredWithRowSecurity{table: table.Table(), definition: table, statements: table.Statements()}
 	enabled, forced := 0, 0
 	var comments []Statement
 	for _, node := range security {

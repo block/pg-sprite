@@ -294,8 +294,15 @@ it. The chunk lands when they are gone. A pass the server rolls back with `deadl
 indexes, so two of them can each wait on a value the other holds, and the server breaks the
 cycle by rolling one back. The rolled-back pass committed nothing and leaves the pending keys
 unchanged, so the chunk takes its next pass, on every path including the `DEFERRABLE` rerun
-below. Only the copier's side is retried: when the server picks the flush as the victim, the
-catch-up fails closed. A chunk whose pending keys outlast
+below. Both sides of the cycle are retried: when the server picks the flush as the victim, the
+flush returns `applier.ErrBatchDeadlocked` with the shadow unchanged, the catch-up requeues the
+batch whole and flushes it again on the catch-up's next cycle, with no wait beyond the cycle's
+own, and `Status.BatchesDeadlocked` counts the requeue. A retry that waits on the copier's pass
+past the flush session's `lock_timeout` ends the catch-up with the server's lock-timeout error
+(SQLSTATE `55P03`). A flush rolled back as the victim
+`applier.CatchupOptions.DeadlockAttempts` cycles in a row ends the catch-up with that error,
+since the flush is losing every round and another cycle would hold the slot's WAL for nothing.
+A chunk whose pending keys outlast
 `copier.Options.CollisionAttempts` passes stops the copy with the latest pass's error and no cause
 of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
 as copied and the resume clear removes the rows committed around them. A shadow with a
@@ -676,9 +683,10 @@ cancellation tests), and `TableLockSession.Confirm` and `LookupTableLockHolder` 
 `pg_locks` scoped to the connection's own database, so a lock the session holds in another
 database of the same server — where it excludes nothing on this database's table — confirms
 as `ErrTableLockNotHeld` and is not reported as the table's holder (same-key-in-another-database
-test); `pkg/schemachange` shadow build, drop, and inspect each require the
-session for the proven table, run under its `Bind` context, and confirm from their own
-transaction that the session's backend holds the lock before the first write (nil-session,
+test), and read only granted rows, so a session queued for the key is never named its holder
+(`TestTableLockConfirmIgnoresASessionWaitingForTheKey`); `pkg/schemachange` shadow build, drop,
+and inspect each require the session for the proven table, run under its `Bind` context, and
+confirm from their own transaction that the session's backend holds the lock before the first write (nil-session,
 wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
 tests); `pkg/copier` `Copier` requires the same session, runs every chunk transaction under
 its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own connection before
@@ -970,6 +978,7 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 | RS-3 | Bound lock waits, statements, and the whole attempt | `ExecuteRowSecurity`; lock contention and deadline cancellation |
 | RS-4 | Run only admitted, qualified RLS DDL; keep scratch disposable | `RenderRowSecurity` from the scratch catalog and executor readback; qualified-helper, quoted-name, and scratch-cleanup tests |
 | RS-5 | Reviewed RLS execution compares the full ordered generated SQL under the target lock before target DDL; a mismatch refuses without target changes | `ExecuteReviewedRowSecurity`; `TestReviewedRowSecurityRechecksAfterLockWait`, `TestReviewedRowSecurityRefusesDifferentSequences` |
+| RS-6 | A table created with row security commits together with its RLS or not at all | `ExecuteCreateWithRowSecurity`; `TestExecuteCreateWithRowSecurityNeverExposesTheTableWithoutItsPolicies`, `TestExecuteCreateWithRowSecurityRollsBackTheTableWhenAPolicyFails`, `TestExecuteCreateWithRowSecurityRollsBackANameTakenAfterTheProbe` |
 
 ## State, checkpoint, and resume (ST)
 

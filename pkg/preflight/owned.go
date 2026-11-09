@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // OwnedRelationNames contains the relation names a table owns: the indexes
@@ -27,8 +26,10 @@ type OwnedRelationNames struct {
 // search_path target. The read excludes standalone indexes, whose own create
 // steps report duplicate-name SQLSTATEs; the table itself, whose name is
 // covered by the caller's absence proof; and the indexes a foreign key
-// borrows from its referenced table, which belong to that table.
-func LookupOwnedRelationNames(ctx context.Context, pool *pgxpool.Pool, schema, table string) (OwnedRelationNames, error) {
+// borrows from its referenced table, which belong to that table. db is a
+// pool or a transaction; a transaction's read sees the table it created
+// before that table commits.
+func LookupOwnedRelationNames(ctx context.Context, db rowQuerier, schema, table string) (OwnedRelationNames, error) {
 	if schema == "" {
 		return OwnedRelationNames{}, fmt.Errorf("look up owned relation names for %s: empty schema", table)
 	}
@@ -74,7 +75,7 @@ func LookupOwnedRelationNames(ctx context.Context, pool *pgxpool.Pool, schema, t
 		FROM target t`
 	var relkind string
 	var names OwnedRelationNames
-	err := pool.QueryRow(ctx, q, schema, table).Scan(&relkind, &names.ConstraintIndexes, &names.Sequences)
+	err := db.QueryRow(ctx, q, schema, table).Scan(&relkind, &names.ConstraintIndexes, &names.Sequences)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OwnedRelationNames{}, fmt.Errorf("%w: %s", ErrTableNotFound, qualifiedName(schema, table))
 	}
