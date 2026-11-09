@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -91,11 +93,18 @@ func TestDiffRowSecurityPreviewsCreateOfMissingTable(t *testing.T) {
 	out.Reset()
 	cmd = &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, SQL: true}
 	require.NoError(t, cmd.run(t.Context(), &out))
-	assert.Contains(t, out.String(), "-- "+schema+".documents does not exist; pg-sprite migrate --desired creates it with its row security in one transaction")
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	assert.Equal(t, "BEGIN;", lines[1], "the script must create the table and its RLS in one transaction")
-	assert.Equal(t, "COMMIT;", lines[len(lines)-1])
-	assert.Contains(t, out.String(), preview.Statements[1]+";")
+	script := out.String()
+	assert.Equal(t, []string{
+		"-- " + schema + ".documents does not exist; pg-sprite migrate --desired creates it with its row security in one transaction",
+		"BEGIN;",
+		fmt.Sprintf(`SET LOCAL search_path = "%s", "public";`, schema),
+		preview.Statements[0] + ";",
+		`SET LOCAL search_path = "pg_catalog";`,
+		preview.Statements[1] + ";",
+		preview.Statements[2] + ";",
+		"COMMIT;",
+	}, strings.Split(strings.TrimSpace(script), "\n"),
+		"the script creates the table and its RLS in one transaction, each under the search_path migrate --desired uses")
 
 	out.Reset()
 	cmd = &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file}
@@ -105,6 +114,82 @@ func TestDiffRowSecurityPreviewsCreateOfMissingTable(t *testing.T) {
 
 	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.ErrorIs(t, err, schemadiff.ErrTableNotFound)
+
+	_, err = pool.Exec(t.Context(), script)
+	require.NoError(t, err, "the script runs as written")
+	created, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.True(t, created.RowSecurity.Enabled)
+}
+
+// The --sql script for a missing table names the target schema's own types
+// as the desired file does, unqualified. It sets the search_path
+// migrate --desired creates the table under, so an operator who runs it from
+// a session whose path does not include that schema creates the same table.
+func TestDiffRowSecuritySQLScriptResolvesTheTargetSchemasTypes(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE DOMAIN %s.document_owner AS text CHECK (VALUE <> '')", schema))
+	require.NoError(t, err)
+	file := filepath.Join(t.TempDir(), "documents.sql")
+	require.NoError(t, os.WriteFile(file, []byte(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner document_owner NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`), 0600))
+
+	var out strings.Builder
+	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, SQL: true}
+	require.NoError(t, cmd.run(t.Context(), &out))
+	_, err = pool.Exec(t.Context(), out.String())
+	require.NoError(t, err, "the script resolves document_owner without the session's search_path")
+	created, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	types := make(map[string]string)
+	for _, col := range created.Columns {
+		types[col.Name] = col.Type
+	}
+	assert.Equal(t, map[string]string{"id": "bigint", "owner": "document_owner"}, types)
+	assert.True(t, created.RowSecurity.Enabled)
+}
+
+// A table created after diff found it missing, but before the create
+// preview ran, is previewed as the existing table it now is. Calling the
+// create preview on a table that already exists is that race, without its
+// timing: it prints what diff prints for the existing table, here the
+// review refusal for the row security it lacks.
+func TestDiffRowSecurityPreviewsATableCreatedAfterPlanning(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.documents (id bigint PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	sql := `CREATE TABLE documents (
+     id bigint PRIMARY KEY
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`
+	file := filepath.Join(t.TempDir(), "documents.sql")
+	require.NoError(t, os.WriteFile(file, []byte(sql), 0600))
+	desired, err := statement.ParseDesiredWithRowSecurity(sql)
+	require.NoError(t, err)
+
+	var existing strings.Builder
+	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, JSON: true}
+	existingErr := cmd.run(t.Context(), &existing)
+	require.ErrorIs(t, existingErr, verdict.ErrRefused)
+
+	var raced strings.Builder
+	racedErr := cmd.previewCreateWithRowSecurity(t.Context(), &raced, pool, desired,
+		executor.Budget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second})
+	require.ErrorIs(t, racedErr, verdict.ErrRefused)
+	assert.Equal(t, existingErr.Error(), racedErr.Error())
+	assert.JSONEq(t, existing.String(), raced.String())
+	assert.Contains(t, raced.String(), `"kind": "enabled"`, "the review names the row security the existing table lacks")
 }
 
 func TestDiffRowSecurityRefusesDisableWithoutChangingLiveState(t *testing.T) {

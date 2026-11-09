@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -30,6 +31,12 @@ func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, desired
 	if errors.Is(err, schemadiff.ErrTableNotFound) {
 		return c.previewCreateWithRowSecurity(ctx, out, pool, desired, b)
 	}
+	return c.writeRowSecurityPlan(out, report, err)
+}
+
+// writeRowSecurityPlan emits the plan for a table that exists, or the
+// refusal or error its planning returned.
+func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, report plan.Report, err error) error {
 	if err != nil {
 		if errors.Is(err, schemadiff.ErrUnsupportedChange) {
 			return c.writeRowSecurityRefusal(out, err)
@@ -89,6 +96,12 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 // including its readback, and rolls it back.
 func (c *DiffCmd) previewCreateWithRowSecurity(ctx context.Context, out io.Writer, pool *pgxpool.Pool, desired statement.DesiredWithRowSecurity, b executor.Budget) error {
 	preview, err := executor.PreviewDesiredCreateWithRowSecurity(ctx, pool, c.Schema, "", desired, b)
+	if errors.Is(err, preflight.ErrRelationExists) {
+		// The table was created after planning found it missing, so it is
+		// previewed as the existing table it now is.
+		report, err := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
+		return c.writeRowSecurityPlan(out, report, err)
+	}
 	if err != nil {
 		refusal, ok := migrate.RowSecurityRefusal(err)
 		if !ok {
@@ -110,11 +123,24 @@ func (c *DiffCmd) previewCreateWithRowSecurity(ctx context.Context, out io.Write
 	case c.SQL:
 		// The script runs in one transaction, as migrate --desired does, so
 		// running it never leaves the table visible without its row security.
+		// It sets the search_path each part of that transaction runs under:
+		// the table definition's statements under the schema and then
+		// public, so an unqualified type or default resolves as it did in
+		// the preview, and the row security under pg_catalog alone (RS-4).
+		// The create runs the definition's statements first, one step each.
+		tableSteps := len(desired.TableDefinition().Statements())
+		if tableSteps > len(preview.Statements) {
+			return fmt.Errorf("write create with row security preview: the preview holds %d statements, fewer than the table definition's %d",
+				len(preview.Statements), tableSteps)
+		}
 		header := sqlDiagnosticComment(fmt.Sprintf("%s.%s does not exist; pg-sprite migrate --desired creates it with its row security in one transaction",
 			preview.Schema, preview.Table))
-		lines := append([]string{header, "BEGIN;"}, preview.Statements...)
-		for i := 2; i < len(lines); i++ {
-			lines[i] += ";"
+		lines := []string{header, "BEGIN;", dbconn.LocalSearchPath(preview.Schema, "public") + ";"}
+		for i, sql := range preview.Statements {
+			if i == tableSteps {
+				lines = append(lines, dbconn.LocalSearchPath("pg_catalog")+";")
+			}
+			lines = append(lines, sql+";")
 		}
 		lines = append(lines, "COMMIT;")
 		for _, line := range lines {
