@@ -18,6 +18,10 @@ services:
       timeout: 5s
       retries: 30
   rest:
+    # PostgREST follows the major line Supabase's own stack ships, not the
+    # newest PostgREST major; move it only when Supabase does. Supavisor and
+    # Realtime track their latest stable releases, which can run ahead of
+    # Supabase's self-hosted compose pins.
     image: postgrest/postgrest:v14.18@sha256:c7cd7e265a85b05248abf53f4473fcec7e327c282d0bd0cf60f1551996d09fcf
     profiles: [services]
     depends_on:
@@ -89,7 +93,7 @@ services:
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_DISABLE_SIGNUP: "true"
   realtime:
-    image: supabase/realtime:v2.153.5@sha256:4966dd33d9c124ce02665a2d2cc9293caf9632e0dc011874c8c9d87992928ba3
+    image: supabase/realtime:v2.153.6@sha256:4edfd6a2f976fbf9e46c084493e220fe6989bb19e898881f56339ffc29c2c2e7
     profiles: [realtime]
     # The image briefly starts an HTTP server while seeding. Mark only the final
     # server phase so the test cannot subscribe to that temporary process.
