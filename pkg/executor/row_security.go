@@ -195,6 +195,15 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		report.Statements = append(report.Statements, security...)
 
 	}
+	// Checked under the target lock and before the review comparison, so a
+	// preview refuses the same policies an execution would. Creating a table
+	// needs no such check: no existing policy or view can read a table that
+	// does not exist yet.
+	if len(report.Statements) > 0 {
+		if err := refusePolicyRecursion(ctx, tx, schema, desired); err != nil {
+			return RowSecurityReport{}, err
+		}
+	}
 	// INV: RS-5 — compare the complete ordered sequence under lock before target DDL.
 	if mode == rowSecurityReviewed && !slices.Equal(reviewed, report.Statements) {
 		return RowSecurityReport{}, fmt.Errorf("review row security on %s: %w", target, ErrRowSecurityPlanChanged)

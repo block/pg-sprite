@@ -64,7 +64,8 @@ func TestParseDesiredWithRowSecurityRejectsUnrelatedAlter(t *testing.T) {
 
 // A policy may read another table when it names it schema-qualified, in a
 // subquery, a join, or WITH CHECK alike; the statement keeps the qualified
-// name, which is what live introspection prints.
+// name, which is what live introspection prints, and the declaration lists
+// every table its policies read.
 func TestParseDesiredWithRowSecurityAdmitsQualifiedPolicyRelations(t *testing.T) {
 	ds, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint, team_id bigint);
  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
@@ -78,6 +79,8 @@ func TestParseDesiredWithRowSecurityAdmitsQualifiedPolicyRelations(t *testing.T)
 	require.Len(t, statements, 4)
 	assert.Contains(t, statements[2].SQL(), "FROM public.team_members m JOIN public.teams t")
 	assert.Contains(t, statements[3].SQL(), "FROM public.team_members WHERE")
+	assert.Equal(t, []QualifiedName{{Schema: "public", Name: "team_members"}, {Schema: "public", Name: "teams"}}, ds.PolicyReads(),
+		"each table the policies read is listed once, in order")
 }
 
 func TestParseDesiredWithRowSecurityRefusesPolicyRelations(t *testing.T) {

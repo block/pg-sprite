@@ -204,9 +204,19 @@ not be admitted again. A query that locks the rows it reads (`FOR SHARE`,
 `FOR UPDATE`, and their weaker forms) is refused because building the policy
 would take `ROW SHARE` on that table and wait behind a session holding
 `EXCLUSIVE`. The comparison does not cover the referenced table's own policies,
-which apply to the subquery under the caller's role, or recursion between two
-tables whose policies read each other. A `SECURITY DEFINER` helper function
-avoids both only when its owner bypasses row security on the table it reads:
+which apply to the subquery under the caller's role.
+
+A change to an existing table's policies is refused when a table they read has
+policies that read it back, directly or through other tables and views.
+PostgreSQL accepts such a policy, then fails every query it applies to with
+"infinite recursion detected in policy". The check follows the dependencies
+PostgreSQL records for policies and views, so it does not follow a function
+body that reads a table, and it counts a view whichever role owns it. It reads
+the policies committed when the change takes its lock on the table; a later
+change to another table's policies can still close the loop.
+
+A `SECURITY DEFINER` helper function avoids the referenced table's policies,
+and the recursion, only when its owner bypasses row security on the table it reads:
 a role with `BYPASSRLS`, or the table's owner when the table does not force row
 security. Such a helper runs with its owner's access, so it must check the
 caller's authorization itself. Other
