@@ -496,15 +496,14 @@ rows:
   - id: enum-typed-columns-on-plain-tables
     area: "types_and_non_table_objects"
     operation: "Enum-typed columns on plain tables"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
     online_safety_problem: true
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: unsupported-statement
-    reason_notes: "Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified)"
+      migrate: supported
+      diff: supported
+    reason_notes: "An enum column is an ordinary column to both front doors: adding one (with a constant default it is catalog-only), changing its default, and indexing it run natively, and a desired file can create a table with one. A desired file names an enum in the table's schema or `public` bare; introspection renders the live column through `format_type`, so the file and the live table compare equal and a rerun plans nothing. The enum type itself is not managed: create it with owner tooling, and add values with `ALTER TYPE ... ADD VALUE`. Retyping a column to or from an enum rewrites the table and runs on copy-and-swap"
   - id: alter-type-add-value
     area: "types_and_non_table_objects"
     operation: "`ALTER TYPE ... ADD VALUE`"
