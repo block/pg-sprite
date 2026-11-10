@@ -634,9 +634,9 @@ read whose comparisons admit no overload is held to its qualification by a sourc
 
 ## Locking and concurrency (LK)
 
-### LK-1 — At most one migration runs per table
+### LK-1 — At most one schema change runs per table
 
-Migrations serialize per table via a **session-scoped advisory lock** — the analog of Spirit's
+Schema changes serialize per table via a **session-scoped advisory lock** — the analog of Spirit's
 `GET_LOCK` `MetadataLock` — with Spirit's hard-won connection rules carried over:
 
 - The key is the two-argument form `pg_try_advisory_lock(classid, objid)`: `classid` is the
@@ -1677,9 +1677,9 @@ Storage uncertainty, engine-state uncertainty, ownership ambiguity, or in-flight
 confirm the checksum state or the slot position, `status` reports the uncertainty and `cutover`
 refuses — it never rounds up to "ready". *Source:* SchemaBot AGENTS.md ("safety gates first").
 
-### OC-2 — Started migrations remain authoritative
+### OC-2 — Started schema changes remain authoritative
 
-Once a migration has **started** (shadow/slot/triggers exist), a later change of intent — the PR
+Once a schema change has **started** (shadow/slot/triggers exist), a later change of intent — the PR
 updated, the desired-state file reverted, a new plan — must not silently mark it succeeded or
 clean it up. The started operation blocks until an operator verb (`cancel`, `cutover`) resolves
 it and the target is reconciled. Cleanup alone never declares success. *Source:* SchemaBot

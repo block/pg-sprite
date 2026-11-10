@@ -70,7 +70,7 @@ connection's next statement lands on a different backend, the state is not there
 | Session state | What pg-sprite uses it for | Invariant |
 |---|---|---|
 | `lock_timeout` and `statement_timeout`, sent as startup parameters, set again with `SET` on every new connection, and read back by `NewPool` | Bound every lock wait and every statement, so a queued `ALTER` can never sit at the head of the lock queue and block every reader and writer of the table | [LK-2](invariants.md#lk-2--exactly-one-access-exclusive-window-and-every-strong-lock-is-bounded) |
-| A session-level advisory lock on a dedicated connection (`pg_try_advisory_lock(0x70677370, hashtext(…))`) | Make sure at most one pg-sprite run works on a table at a time | [LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table) |
+| A session-level advisory lock on a dedicated connection (`pg_try_advisory_lock(0x70677370, hashtext(…))`) | Make sure at most one pg-sprite run works on a table at a time | [LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table) |
 | A catalog-first `search_path`, set once per physical connection | Stop a user schema from shadowing `pg_class`, `hashtext` and other catalog names in the engine's unqualified reads | [CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog) |
 
 `SET LOCAL` work inside a transaction (the role switch and guards in a chunk copy, for
@@ -218,5 +218,5 @@ direct or session-mode endpoint.
   `ErrSessionSettingsDiscarded`, and the remedy text.
 - [`pkg/dbconn/table_lock.go`](../pkg/dbconn/table_lock.go): `AcquireTableLock` proves
   affinity on the lock session before attempting the lock.
-- [invariants.md, LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table) and
+- [invariants.md, LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table) and
   [LK-2](invariants.md#lk-2--exactly-one-access-exclusive-window-and-every-strong-lock-is-bounded).
