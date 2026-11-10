@@ -92,7 +92,7 @@ findings without a database.
 implementation of the planner's classifier, but the classifier decides when it is used:
 
 - **Bounded optimistic attempt.** No schema model behind it — a cheap **statement-type gate**
-  (`ALTER TABLE`, `CREATE INDEX`, and `ALTER INDEX ... RENAME TO` proceed; `DROP INDEX` and
+  (`ALTER TABLE`, `CREATE INDEX`, `ALTER INDEX ... RENAME TO`, and `ALTER TYPE ... ADD VALUE` proceed; `DROP INDEX` and
   `REINDEX` are refused with the concurrent-idiom pointer rather than run as risky literals) and
   a **table-size guard**, then **attempt the change directly** under a tight lock/time budget.
   If it completes within budget it was effectively an instant / in-place change and we are done;
