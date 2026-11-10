@@ -142,8 +142,7 @@ func rowSecurityPlanRefusal(err error) (DesiredResult, bool) {
 // the live row security still matches the file.
 func verifyRowSecurityConverged(ctx context.Context, pool *pgxpool.Pool, req RowSecurityRequest) (Convergence, error) {
 	again, err := diffplan.PlanWithRowSecurity(ctx, pool, req.Schema, req.Desired)
-	var review *diffplan.RowSecurityReviewRequired
-	if errors.As(err, &review) {
+	if _, ok := errors.AsType[*diffplan.RowSecurityReviewRequired](err); ok {
 		return Convergence{Status: ConvergenceUnverifiable},
 			fmt.Errorf("%w: the row security on %s.%s no longer matches the file: %w", ErrNotConverged, req.Schema, req.Desired.Table(), err)
 	}

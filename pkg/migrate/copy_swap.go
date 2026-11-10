@@ -301,8 +301,7 @@ func copySwapPreflightVerdict(st statement.Statement, err error) (verdict.Verdic
 // class the cause declares. Both front doors fold the same classification,
 // one into a verdict and one into a whole-plan refusal.
 func classifyCopySwapPreflight(err error) (verdict.Refusal, string, error) {
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		return insufficientPrivilegesRefusal(), privErr.Error(), nil
 	}
 	cause := preflight.CopySwapRefusalCauseOf(err)
@@ -404,8 +403,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		return "the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, " + released + ", and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
 	}
 	startOver := "correct the data or the statement, then start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release + ", deletes the checkpoint row, and runs the change from the start"
-	var divergence *checksum.DivergenceError
-	if errors.As(err, &divergence) {
+	if _, ok := errors.AsType[*checksum.DivergenceError](err); ok {
 		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + startOver
 	}
 	if schemachange.IsDataFault(err) {

@@ -137,8 +137,7 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 		// counted.
 		v := failureVerdict(st, err, executor.SequenceReport{}, false)
 		v.Table = table
-		var unknownErr *executor.BlockingOutcomeUnknownError
-		if errors.As(err, &unknownErr) {
+		if _, ok := errors.AsType[*executor.BlockingOutcomeUnknownError](err); ok {
 			// The client lost the transaction at or after submission, so the
 			// verdict cannot claim the rollback a failed attempt normally
 			// gets: the statement may have committed.

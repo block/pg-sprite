@@ -45,8 +45,7 @@ func confirmTableLock(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSess
 	if errors.Is(err, dbconn.ErrTableLockNotHeld) {
 		return refuse(CauseLockUnconfirmed, []error{err}, "confirming the table lock from the working transaction")
 	}
-	var heldElsewhere *dbconn.TableLockHeldError
-	if errors.As(err, &heldElsewhere) {
+	if _, ok := errors.AsType[*dbconn.TableLockHeldError](err); ok {
 		return refuse(CauseLockHeldElsewhere, []error{err}, "the working transaction sees the table lock held by another backend, not the lock session's backend %d", lock.BackendPID())
 	}
 	return err
