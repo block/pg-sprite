@@ -51,7 +51,15 @@ OIDs the pass compared, and a shadow dropped and rebuilt under the same derived 
 relation the pass never read, so the gate refuses it (`cutover-unverified`). A pass that runs
 while the stream writes the shadow (`CheckLive`) counts a chunk clean only when, for every key
 of it, the stream has provably delivered what the pass's read saw on the source; anything it
-cannot prove is unsettled, never clean, and mints nothing. The rows it judges the keys from are
+cannot prove is unsettled, never clean, and mints nothing. The one exception is stated by the
+caller and by the proof: a pass told it may leave keys for the swap (`LiveOptions.CarryKeys`),
+that ran through the complete watermark, confirmed no divergence, left no chunk lagging, and
+left no more keys changing than it may, mints a `VerifiedShadow` that names those keys
+(`VerifiedShadow.Carried`) and no `CleanWatermark`. That proof says nothing about a named key;
+comparing each is the swap's, under its lock and after its drain, where no key can change.
+`GateCutover` refuses a proof that names any (`cutover-unverified`), since the swap compares
+none (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
+`TestGateCutoverRefusesAProofThatLeavesKeysForTheSwap`). The rows it judges the keys from are
 read with the digest's companion statement in the digest's own snapshot, and the chunk digest
 derived from them must equal the one the server aggregated, or the pass fails closed before it
 judges anything from them. The proof such a pass mints says so

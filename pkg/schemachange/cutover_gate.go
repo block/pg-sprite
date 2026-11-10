@@ -175,11 +175,12 @@ func gateCutoverTx(ctx context.Context, tx pgx.Tx, built BuiltShadow, verified c
 
 // checkCutoverProofs refuses proofs that cannot describe one verified copy:
 // an empty built shadow, an empty verified shadow, two proofs naming
-// different relations by name or by OID, or a verification that stopped
-// short of the whole key space and so proves only a prefix. The OIDs
-// matter because the shadow's name is derived from the source's: a shadow
-// dropped and rebuilt after the pass wears the same name and holds no rows
-// the pass compared.
+// different relations by name or by OID, a verification that stopped
+// short of the whole key space and so proves only a prefix, or a
+// verification that left keys for the swap to compare, which this swap
+// does not do. The OIDs matter because the shadow's name is derived from
+// the source's: a shadow dropped and rebuilt after the pass wears the same
+// name and holds no rows the pass compared.
 func checkCutoverProofs(built BuiltShadow, verified checksum.VerifiedShadow) error {
 	// INV: CO-1
 	if built.ShadowTable() == "" {
@@ -198,6 +199,9 @@ func checkCutoverProofs(built BuiltShadow, verified checksum.VerifiedShadow) err
 	}
 	if !verified.Watermark().Complete() {
 		return refuse(CauseCutoverUnverified, nil, "verified shadow proof covers the key space only through %d", verified.Watermark().Value())
+	}
+	if carried := verified.Carried(); len(carried) > 0 {
+		return refuse(CauseCutoverUnverified, nil, "verified shadow proof leaves %d keys the pass could not compare, and the swap does not compare them", len(carried))
 	}
 	return nil
 }

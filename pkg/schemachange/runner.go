@@ -47,7 +47,8 @@ type RunOptions struct {
 	// still carrying changes for. Its Confirmed source is the run's own
 	// catch-up and must be left nil. So must Flushes: the run's pass
 	// recopies nothing (a divergence aborts it), and the flush gate a
-	// repair needs is the run's own catch-up too.
+	// repair needs is the run's own catch-up too. CarryKeys must be left
+	// zero: the run's swap compares no key the pass leaves it.
 	Live checksum.LiveOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
@@ -127,6 +128,9 @@ func (o RunOptions) validate() error {
 	}
 	if o.Live.Flushes != nil {
 		return fmt.Errorf("%w: the live verification pass holds the run's own catch-up's flushes; leave Live.Flushes nil", ErrInvalidOptions)
+	}
+	if o.Live.CarryKeys != 0 {
+		return fmt.Errorf("%w: the run's swap compares no key the live verification pass leaves it; leave Live.CarryKeys zero", ErrInvalidOptions)
 	}
 	return nil
 }

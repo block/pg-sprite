@@ -11,7 +11,9 @@ import (
 
 // Outcome is one pass run under a divergence policy: what it compared and
 // found, what it repaired, and — only when it found nothing and repaired
-// nothing — the proofs the cutover and the checkpoint demand. A pass that
+// nothing — the proofs the cutover and the checkpoint demand. The two are
+// minted together by every pass but one: a live pass that left keys for
+// the swap to compare mints the cutover's proof alone. A pass that
 // repaired a chunk has read that chunk clean afterwards, but it mints no
 // proof: the proof comes from the next pass, which reads every chunk
 // fresh (CO-2). Check returns an Outcome with its error too, so what a
@@ -52,7 +54,9 @@ func (o Outcome) CleanWatermark() (CleanWatermark, bool) {
 // VerifiedShadow returns the proof that the whole shadow equals its source,
 // and whether the pass minted one: a clean pass through the complete
 // watermark does; a clean pass through a partial watermark proves only
-// its prefix and does not.
+// its prefix and does not. A live pass allowed to leave keys for the swap
+// mints one without being clean: the proof names the keys it could not
+// judge (VerifiedShadow.Carried) and covers every other.
 func (o Outcome) VerifiedShadow() (VerifiedShadow, bool) {
 	return o.verified, o.verified.Table() != ""
 }

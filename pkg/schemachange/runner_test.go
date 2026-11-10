@@ -26,7 +26,9 @@ func TestNewRunnerRefusesANilStore(t *testing.T) {
 // cannot build a shadow and then stop at its first save or its swap over
 // a value it could have refused up front. The live pass reads the run's
 // own catch-up, so a confirmed source or a flush gate handed in is refused
-// too.
+// too, and its swap compares no key the pass leaves it, so a pass told it
+// may leave some is refused rather than stopped at the gate after the
+// whole copy.
 func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 	store := &checkpoint.Store{}
 	for name, opts := range map[string]schemachange.RunOptions{
@@ -35,6 +37,7 @@ func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 		"negative cutover lock attempts":          {Cutover: schemachange.CutoverOptions{LockAttempts: -1}},
 		"a confirmed source for the live pass":    {Live: checksum.LiveOptions{Confirmed: (*applier.Catchup)(nil)}},
 		"a flush gate for the live pass":          {Live: checksum.LiveOptions{Flushes: (*applier.Catchup)(nil)}},
+		"keys left for the swap by the live pass": {Live: checksum.LiveOptions{CarryKeys: 1}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := schemachange.NewRunner(dbconn.Config{}, store, opts)

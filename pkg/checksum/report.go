@@ -45,6 +45,13 @@ type Report struct {
 	// was confirmed about them, and a report that counts any is not clean.
 	// A quiesced pass leaves nothing unsettled.
 	Unsettled int
+	// Carried is the number of keys a live pass left for the swap to
+	// compare: the keys still changing in the chunks it counts unsettled,
+	// when the pass was allowed to leave that many (LiveOptions.CarryKeys)
+	// and minted a proof naming them. The chunks stay counted in Unsettled
+	// and the report is still not clean. It is zero for every pass that
+	// mints no such proof.
+	Carried int
 }
 
 // Clean reports whether every compared chunk matched or settled, with none

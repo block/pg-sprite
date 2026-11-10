@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"slices"
 	"time"
 
 	"github.com/block/pg-sprite/pkg/copier"
@@ -15,7 +16,11 @@ import (
 // swap: a quiesced proof is the shadow equal to the source as it stands,
 // and a live proof is the shadow equal to the source as of the position
 // the pass settled against, with every change since in the stream, which
-// the swap must drain under its lock before it renames. It names the two
+// the swap must drain under its lock before it renames. A live proof may
+// also name keys the pass could not judge because they never held still
+// (Carried): it proves every other key, and the swap must compare the
+// named ones itself once its lock and its drain have stilled them, and
+// refuse the proof if it cannot. It names the two
 // relations by OID as well as by name: the shadow's name is derived from
 // the source's, so a shadow rebuilt after this proof was minted wears the
 // same name while holding none of the rows the pass compared.
@@ -25,6 +30,7 @@ type VerifiedShadow struct {
 	watermark             copier.Watermark
 	verifiedAt            time.Time
 	live                  bool
+	carried               []int64
 }
 
 func newVerifiedShadow(shadow copier.Shadow, watermark copier.Watermark, verifiedAt time.Time, live bool) VerifiedShadow {
@@ -67,6 +73,15 @@ func (v VerifiedShadow) VerifiedAt() time.Time { return v.verifiedAt }
 // must drain the stream's remaining changes under its lock before it
 // renames, and the cutover refuses a live proof with no drain.
 func (v VerifiedShadow) Live() bool { return v.live }
+
+// Carried returns the keys the pass left for the swap to compare, in
+// ascending order: keys of the source that changed on every reread, so the
+// pass could conclude nothing about them. It is empty for a quiesced proof
+// and for a live proof whose every chunk settled. The proof says nothing
+// about a carried key: the swap that acts on it must read each one on
+// both sides under its lock, after the drain, and refuse on any that
+// differ. The slice is the caller's to keep.
+func (v VerifiedShadow) Carried() []int64 { return slices.Clone(v.carried) }
 
 // CleanWatermark proves every chunk through its watermark was clean on a fresh
 // read and that the pass repaired nothing. Its zero value is forgeable;
