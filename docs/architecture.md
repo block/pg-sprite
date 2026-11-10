@@ -207,7 +207,7 @@ different levels of commitment:
 | `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling | Phase 6 |
 | `pkg/schemachange` | Orchestrator: lifecycle, cutover swap + fidelity gate, resume read and slot-loss reconcile (exist), checkpoint-driven resume | Phase 7–8 |
 | `pkg/checkpoint` | Durable resume state: one row per `(schema, table)` in the target database; the orphan-slot reaper, since the row is what makes a slot owned | Phase 8 |
-| `pkg/throttler` | Chunk-time targeting; replica-lag throttling deferred (the hard slot-lag ceiling is judged by `pkg/decode` and enforced by `pkg/applier`'s catch-up loop) | Phase 8 |
+| `pkg/throttler` | Chunk-time targeting; replica-lag throttling deferred (a live copy is paced by slot lag in `pkg/copier`'s `Pace`, which `pkg/schemachange` sets; the hard slot-lag ceiling is judged by `pkg/decode` and enforced by `pkg/applier`'s catch-up loop) | Phase 8 |
 
 ## The copy-and-swap lifecycle
 

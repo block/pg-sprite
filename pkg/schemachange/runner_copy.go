@@ -58,6 +58,7 @@ func (r *Runner) runCopy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.T
 	runErr := c.Run(runCtx, pool)
 	stop(nil)
 	wg.Wait()
+	state.copyPaced = c.Paced()
 
 	if saver.err != nil {
 		return copyStopped(runErr, saver.err, state.cp.Schema, state.cp.Table)

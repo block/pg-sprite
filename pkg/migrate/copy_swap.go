@@ -110,8 +110,9 @@ type CopySwapOptions struct {
 	// transaction, and the progress tracker the copier reports to while it
 	// runs. Zero values take the copier's defaults. A value the copier
 	// would refuse is a wiring error refused before the preflight, like a
-	// negative CheckpointInterval. The workers set the pool size the route
-	// admits: CopySwapMinConns(Copier).
+	// negative CheckpointInterval; so is a Copier.Pace, which a live run
+	// sets itself from its stream's lag. The workers set the pool size the
+	// route admits: CopySwapMinConns(Copier).
 	//
 	// Copier.Tracker is the one source of rows copied; OnCheckpoint
 	// carries a key position, not a count. The host builds the tracker and

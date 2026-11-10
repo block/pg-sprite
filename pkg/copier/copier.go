@@ -24,7 +24,8 @@ var (
 	// ErrInvalidOptions reports copier options that cannot bound the copy: a
 	// negative worker count, a timeout below PostgreSQL's one-millisecond
 	// resolution, which the server would read as no timeout at all, a
-	// collision attempt count below one, or a negative collision backoff.
+	// collision attempt count below one, a negative collision backoff, or a
+	// pace that names a mark with no backlog to judge it by or the reverse.
 	ErrInvalidOptions = errors.New("invalid copier options")
 	// ErrAlreadyRun reports a second Run on the same Copier; a Copier drives
 	// one copy and is then only a record of where it stopped.
@@ -34,7 +35,7 @@ var (
 // Options bounds the copy. Zero values take the defaults: DefaultWorkers
 // workers, the dbconn session timeouts for every chunk transaction, the
 // ChunkerOptions defaults, DefaultCollisionAttempts attempts spaced by
-// DefaultCollisionBackoff, and the wall clock.
+// DefaultCollisionBackoff, the wall clock, and no pacing.
 type Options struct {
 	// Workers is the number of chunk transactions in flight at once. The
 	// pool's connection limit bounds it from above.
@@ -66,6 +67,9 @@ type Options struct {
 	// Clock times each chunk for the chunker's chunk-time throttling
 	// feedback (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
 	Clock progress.Clock
+	// Pace holds the workers back before a chunk while a backlog the
+	// caller measures is over a mark; the zero Pace paces nothing.
+	Pace Pace
 	// Tracker, when set, is told the copy's work for the lifetime of Run: the
 	// copier is its progress.WorkSource from before the first chunk until
 	// just before Run returns. The caller owns the tracker's steps; the
@@ -92,6 +96,7 @@ func (o Options) withDefaults() Options {
 	if o.Clock == nil {
 		o.Clock = progress.WallClock{}
 	}
+	o.Pace = o.Pace.withDefaults()
 	return o
 }
 
@@ -128,7 +133,7 @@ func (o Options) validate() error {
 	if o.CollisionBackoff < 0 {
 		return fmt.Errorf("%w: collision backoff %s is negative; use zero for the default", ErrInvalidOptions, o.CollisionBackoff)
 	}
-	return nil
+	return o.Pace.validate()
 }
 
 // Copier copies a proven source table into its built shadow, chunk by chunk,
@@ -171,6 +176,11 @@ type Copier struct {
 	// collisions counts chunk attempts the server refused on a unique index
 	// or an exclusion constraint; Collisions reads it from any goroutine.
 	collisions atomic.Int64
+	// paceWaits, paceExpired, and paceWaited count what Options.Pace held
+	// back, the last in nanoseconds; Paced reads them from any goroutine.
+	paceWaits   atomic.Int64
+	paceExpired atomic.Int64
+	paceWaited  atomic.Int64
 }
 
 // NewCopier prepares a copy of target into shadow that resumes after from
@@ -380,7 +390,8 @@ func (c *Copier) finish(cause error) error {
 	return nil
 }
 
-// work is one worker's loop: claim a chunk, copy it in its own transaction
+// work is one worker's loop: wait while Options.Pace holds the copy back,
+// claim a chunk, copy it in its own transaction
 // (in further passes, around and then after a wait for the rows whose
 // values collided with shadow rows the applier has yet to clear), land it,
 // and tell the chunker how long the pass that committed the range took. It
@@ -390,6 +401,9 @@ func (c *Copier) finish(cause error) error {
 // is left in flight: it did not land, so its keys must not read as landed.
 func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 	for ctx.Err() == nil {
+		if err := c.awaitPace(ctx); err != nil {
+			return err
+		}
 		chunk, ok, err := c.claim(ctx, pool)
 		if err != nil {
 			return err

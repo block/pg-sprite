@@ -693,7 +693,7 @@ pkg/schemachange/     -> orchestrator + runner + cutover
 pkg/applier/          -> captured-change apply
 
 Planned:
-pkg/throttler/        -> chunk-time throttle (slot-lag ceiling lives in decode + applier; replica lag deferred, D12)
+pkg/throttler/        -> chunk-time throttle (slot-lag copy pacing lives in copier + schemachange, the slot-lag ceiling in decode + applier; replica lag deferred, D12)
 Executor              -> Plan/Execute/Status/Abort backend interface
 ```
 
