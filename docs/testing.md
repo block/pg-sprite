@@ -55,7 +55,7 @@ When a new DDL route affects Supabase tables, extend this suite in the same PR.
 Verify the resulting schema and data, access policies and grants, and the app's
 API or Realtime behavior where relevant. Refusals must assert a typed reason and
 unchanged durable state; execution failures must assert any committed leftovers.
-When copy-and-swap becomes available, replace the corresponding refusal
+When copy-and-swap can run on a Supabase table, replace the corresponding refusal
 expectation with successful execution and preservation checks—do not simply
 remove it. Keep the guide's support claims aligned with that evidence.
 
@@ -70,9 +70,9 @@ this covers *how*). Each rule binds from the phase noted.
 Every executor/schema-change integration test drives the **full lifecycle
 through one shared fixture** — start → assert → abort → assert → restart →
 complete → assert — so interrupted-and-retried is the default tested path,
-not a special case. Once checkpointing exists, kill → resume joins the
-lifecycle. *Binds:* Phase 3 (native executor) onward. *Source:* pgroll
-`ExecuteTests` (`pkg/migrations/op_common_test.go`).
+not a special case. Where a run checkpoints (the copy-and-swap `Runner`),
+kill → resume is part of the lifecycle. *Binds:* Phase 3 (native executor)
+onward. *Source:* pgroll `ExecuteTests` (`pkg/migrations/op_common_test.go`).
 
 ### TM-2 — Two oracles for safety-encoding SQL
 
@@ -108,6 +108,22 @@ corpus is shared across phases and **never shrinks to make a phase land**.
 
 ### TM-5 — Convergence is the diff oracle
 
+Every declarative-diff test proves, against two real databases: the derived
+plan applies cleanly; re-introspect + re-diff yields **empty**; a second
+derivation emits nothing (idempotency). Comparison is **semantic catalog
+state** (normalized), with SQL snapshots as the secondary oracle; failures
+print the residual diff and the original plan. *Binds:* Phase 2 declarative diff onward.
+*Source:* pg-delta `tests/integration/roundtrip.ts`.
+
+`testutil.ReadTableCatalog` is the catalog-state side. It reads a table's
+columns (attribute options included), owned sequences, constraints, indexes,
+and table settings (persistence, access method, tablespace, storage
+parameters, replica identity, row security) with direct catalog queries, never through `pkg/schemadiff`, so a property the diff model
+ignores on both sides still fails the comparison. A re-diff alone would come
+back empty for that property. `TestRunDesiredRoundTrip` in `pkg/migrate` holds
+`RunDesired` to it: each case converges a live table to a desired file and
+compares the result with the same table built directly from that file.
+
 #### Test harness
 
 `internal/testutil` provides a workload table with identity and unique keys,
@@ -138,22 +154,6 @@ list's length without copying it. The oracle's `ExcludeKeys` leaves keys out of 
 sides and both counts, so a test that marks the touched list at an instant compares
 exactly the rows last written before it. The [load proof](#the-load-proof) is built on
 these three.
-
-Every declarative-diff test proves, against two real databases: the derived
-plan applies cleanly; re-introspect + re-diff yields **empty**; a second
-derivation emits nothing (idempotency). Comparison is **semantic catalog
-state** (normalized), with SQL snapshots as the secondary oracle; failures
-print the residual diff and the original plan. *Binds:* Phase 2 declarative diff onward.
-*Source:* pg-delta `tests/integration/roundtrip.ts`.
-
-`testutil.ReadTableCatalog` is the catalog-state side. It reads a table's
-columns (attribute options included), owned sequences, constraints, indexes,
-and table settings (persistence, access method, tablespace, storage
-parameters, replica identity, row security) with direct catalog queries, never through `pkg/schemadiff`, so a property the diff model
-ignores on both sides still fails the comparison. A re-diff alone would come
-back empty for that property. `TestRunDesiredRoundTrip` in `pkg/migrate` holds
-`RunDesired` to it: each case converges a live table to a desired file and
-compares the result with the same table built directly from that file.
 
 ### TM-6 — Every mutation direction per property
 
@@ -373,11 +373,9 @@ password. Each subtest pins one AWS seam:
   discovery → `dbconn` connect → PG-major assertion → DDL smoke;
 - **control-plane error contract** — unknown identifiers and duplicate
   creations surface as the AWS SDK's typed RDS faults, matched with
-  `errors.As` — exactly the match production code uses. (An earlier
-  emulator divergence — a `Fault` suffix on the duplicate-instance wire
-  code that real AWS omits — was fixed upstream in Ministack v1.4.14 at
-  pg-sprite's request; the pinned image carries the fix, so no divergence
-  workaround remains);
+  `errors.As` — exactly the match an AWS-facing caller makes. The pinned image
+  reports the duplicate-instance fault under the wire code real AWS uses,
+  so the test carries no divergence workaround;
 - **password rotation** — RDS-managed password generation, rotation, and
   Secrets Manager resolution, plus what a rotation does to a running schema
   change (see below) and pg-sprite's contract that the resulting auth failure
@@ -494,6 +492,14 @@ same package cover the rest of it.
 | `pull`: per-table export, refuse-don't-guess shapes, create-only file writes, and the managed-table catalog query | [CLI pull](../internal/cli/pull_integration_test.go), [pkg/schemadiff](../pkg/schemadiff/managed_tables_integration_test.go) |
 | Capability matrix: YAML validity, tier rules, rendered page agreement, `capabilities --json` contract | [pkg/capabilities](../pkg/capabilities/capabilities_test.go), [CLI](../internal/cli/capabilities_test.go) |
 | Progress snapshots, the observer seam, and `CancelBuild` | [pkg/progress](../pkg/progress/progress_test.go) |
+| Copy-and-swap preflight: privilege, shape, and environment refusals | [pkg/preflight](../pkg/preflight/copy_swap_check_integration_test.go) |
+| Chunked copy: keyset chunks, the guarded never-overwriting chunk insert, the in-flight ledger, resume from the watermark | [pkg/copier](../pkg/copier/copier_integration_test.go), [chunker](../pkg/copier/chunker_test.go) |
+| Logical decoding and the slot lifecycle | [pkg/decode](../pkg/decode/stream_integration_test.go), [slots](../pkg/decode/slot_integration_test.go) |
+| Catch-up apply: buffer, flusher, and the stream consumer loop | [pkg/applier](../pkg/applier/catchup_integration_test.go), [flusher](../pkg/applier/flusher_integration_test.go) |
+| Checksum gate: divergence policies, repair and recopy, the live pass under the stream | [pkg/checksum](../pkg/checksum/check_integration_test.go), [live](../pkg/checksum/live_integration_test.go) |
+| Checkpoint store and orphan-slot reaper | [pkg/checkpoint](../pkg/checkpoint/store_integration_test.go), [reaper](../pkg/checkpoint/reap_integration_test.go) |
+| Shadow build, cutover gate and swap, slot-loss reconcile, and the `Runner` end to end, kill/resume included | [shadow](../pkg/schemachange/shadow_integration_test.go), [cutover](../pkg/schemachange/cutover_integration_test.go), [reconcile](../pkg/schemachange/reconcile_integration_test.go), [Runner](../pkg/schemachange/runner_integration_test.go), [live Runner](../pkg/schemachange/runner_live_integration_test.go), [crash](../pkg/schemachange/runner_crash_integration_test.go) |
+| Copy-and-swap through `migrate.Run`: write-blocking and live runs, refusals, restart | [pkg/migrate](../pkg/migrate/copy_swap_integration_test.go), [block writes](../pkg/migrate/copy_swap_block_writes_integration_test.go), [live](../pkg/migrate/copy_swap_live_integration_test.go), [restart](../pkg/migrate/copy_swap_restart_integration_test.go) |
 | Supabase compatibility: pooler connections through `pkg/dbconn`, and the DDL, RLS, realtime, and failure matrix against pinned Supabase services | [pkg/dbconn](../pkg/dbconn/supabase_integration_test.go), [integration/supabase](../integration/supabase/README.md) |
 
 ## Landed and deferred test obligations
@@ -508,10 +514,8 @@ points.
 | --- | --- |
 | Done — Phases 2.1–2.5 | Parse-based operation descriptors and classification, refusal contracts, declarative desired-state → ordered `ALTER` derivation, routing, the versioned plan report, offline lint and suggest, and convergence testing against real PostgreSQL. |
 | Done — Phase 3 native executor | Each native idiom (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default, `USING INDEX`) exercised against all supported majors; bounded lock behavior under contention with the lock-timeout retry; invalid-index detection and the proven recovery; the greenfield create path; the accepted-blocking primitive. |
-| Remaining — later copy-and-swap phases | Shadow table, CDC, checksum-gate, cutover, checkpoint/resume, and fault-injection obligations land with their implementations. |
-
-Copy-and-swap obligations include checksum-gate and checkpoint/resume
-fault-injection tests.
+| Done — copy-and-swap engine | Shadow build, chunked copy, logical decoding and catch-up, the checksum gate under every divergence policy and under the stream, the cutover fidelity gate and swap, checkpoint/resume, slot-loss reconcile, and kill/resume fault injection, each against real PostgreSQL. |
+| Remaining — continuous checker | The checker that runs `CheckLive` on a loop lands with its tests. |
 
 ## Topology obligations from peer-tool CIs
 
@@ -535,6 +539,6 @@ implementation makes them meaningful:
 | TLS-required server, verify-full + untrusted-CA rejection (pg-delta) | **Done** — `StartPostgresTLS` + [tls_integration_test.go](../pkg/dbconn/tls_integration_test.go); `StartPostgresTLSOrPlaintext` proves a CA bundle never falls back to plaintext. |
 | Non-`public` schema placement (pgroll matrix dimension) | Structural — every test already runs in a throwaway non-`public` schema; Phase 1 classifier tests must keep qualifying objects. |
 | Partitioned tables (pg_repack regression, pg-schema-diff acceptance) | Phases 1–2 — classifier and native-executor cases for partitioned parents/partitions (`DETACH PARTITION CONCURRENTLY` is PG 14+). |
-| Tablespaces, including quoted names (pg_repack) | Phases 4–7 — shadow-table placement must preserve tablespace. |
-| `wal_level=logical` server + publication interaction (pg_repack, pg-delta) | Phases 4–7 — CDC tests run against logical-decoding-enabled servers; add `wal_level=logical` to the harness/compose when Phase 4 starts. |
+| Tablespaces, including quoted names (pg_repack) | **Done** — the shadow is built in the source's tablespace (`TestBuildShadowKeepsTheSourceTablespace`). |
+| `wal_level=logical` server + publication interaction (pg_repack, pg-delta) | **Done** — the compose database runs `wal_level=logical`, and `StartPostgresWithSettings` starts a server of its own with it for the decoding tests; a publication other than the engine's own is a preflight refusal (`copy-and-swap-publication-member`). |
 | Pinned minor versions in the matrix (pgroll, SchemaHero) vs floating major tags | Deliberate choice: we track floating major tags (`postgres:14` … `postgres:18`) so CI follows each major's latest minor automatically. Revisit if a minor-specific regression ever matters. |

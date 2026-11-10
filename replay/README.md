@@ -168,7 +168,9 @@ replaying.
 ## What this is not
 
 - Not part of `make test` or CI — the Go suite remains the correctness oracle; this
-  is an assessment tool run deliberately.
+  is an assessment tool run deliberately. The Go suite runs only
+  [replay_test.go](replay_test.go), which checks the scripts' pre-flight guarantees
+  and divergence reporting with fakes in place of pg-sprite, the harness, and docker.
 - Not a second demo — [demo/](../demo/) tours the CLI; this replays someone else's
   history.
 - Not a vendored copy of any project — each `corpus/` is gitignored and re-fetched;

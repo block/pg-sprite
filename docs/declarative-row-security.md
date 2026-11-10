@@ -46,7 +46,7 @@ optional and defaults to `NO FORCE`.
 Files without RLS declarations keep their table-only behavior: `diff` leaves
 access control separately managed. Export preserves policies even when RLS is
 disabled, and preserves enabled RLS even when there are no policies (default deny).
-`fmt` and `lint` do not accept the expanded format yet.
+`fmt` and `lint` do not accept the expanded format.
 
 ## Apply the declaration
 
@@ -165,7 +165,7 @@ without its row security, and nothing runs.
 The JSON a run prints depends on what it finds, not on the command. A run
 that changes the table prints `migrate.DesiredResult`. A run that finds the
 file already matching, such as a rerun after the table change, goes to the
-row security executor and prints a single verdict: `outcome` is `executed`
+row security executor and prints a single verdict: `outcome` is `executed-natively`
 and `executed_sql` is absent. A script that reruns the same command reads
 the top-level `outcome` from either.
 
@@ -392,11 +392,11 @@ this table-scoped work.
    materialize it in scratch and prove the unchanged definition produces an empty
    diff. Implemented through automatic export and SQL declarations. A table that
    does not exist yet is created together with its row security in one transaction.
-3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
+3. **Execute transitions atomically.** The Go executor locks, derives, applies,
    and verifies one table's RLS state in one bounded transaction. A table change
    runs on its own when the row security already matches; a change to both
    remains unsupported. A policy that reads another schema-qualified table is supported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
-4. **Prove application behavior.** The local Supabase harness now checks real
+4. **Prove application behavior.** The local Supabase harness checks real
    PostgREST requests from two authenticated users and anonymous callers, allowed
    and denied writes, changed visibility, and rollback after a cancelled apply.
    The [hosted suite](../integration/supabase/hosted/README.md) also exercised

@@ -258,7 +258,8 @@ reached the build?", and the answer falls into four classes:
 
 Check order is part of the contract. The second row matches both the sentinel and the context
 error, so a consumer that already classifies `context.DeadlineExceeded` as "possibly sent"
-must test for the sentinel first, or it silently keeps today's over-recording:
+must test for the sentinel first, or it records a cancel that was never sent as possibly
+delivered:
 
 ```go
 switch {
@@ -365,7 +366,7 @@ pins it):
 ```
 
 A poll during step 3 of a 4-step copy-and-swap, mid checksum pass under the `repair` policy —
-three chunks compared, two found differing and recopied, one of the two reread so far
+four chunks compared, two found differing and recopied, one of the two reread so far
 (`TestSnapshotJSONShapeForAChecksumStep` pins it):
 
 ```json
