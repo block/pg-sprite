@@ -177,10 +177,12 @@ func gateCutoverTx(ctx context.Context, tx pgx.Tx, built BuiltShadow, verified c
 // an empty built shadow, an empty verified shadow, two proofs naming
 // different relations by name or by OID, a verification that stopped
 // short of the whole key space and so proves only a prefix, or a
-// verification that left keys for the swap to compare, which this swap
-// does not do. The OIDs matter because the shadow's name is derived from
-// the source's: a shadow dropped and rebuilt after the pass wears the same
-// name and holds no rows the pass compared.
+// verification that left more keys for the swap to compare than a pass
+// may leave. A proof that leaves keys within that bound passes: the swap
+// compares them under its lock (compareCarried). The OIDs matter because
+// the shadow's name is derived from the source's: a shadow dropped and
+// rebuilt after the pass wears the same name and holds no rows the pass
+// compared.
 func checkCutoverProofs(built BuiltShadow, verified checksum.VerifiedShadow) error {
 	// INV: CO-1
 	if built.ShadowTable() == "" {
@@ -200,8 +202,8 @@ func checkCutoverProofs(built BuiltShadow, verified checksum.VerifiedShadow) err
 	if !verified.Watermark().Complete() {
 		return refuse(CauseCutoverUnverified, nil, "verified shadow proof covers the key space only through %d", verified.Watermark().Value())
 	}
-	if carried := verified.Carried(); len(carried) > 0 {
-		return refuse(CauseCutoverUnverified, nil, "verified shadow proof leaves %d keys the pass could not compare, and the swap does not compare them", len(carried))
+	if carried := len(verified.Carried()); carried > checksum.MaxCarryKeys {
+		return refuse(CauseCutoverUnverified, nil, "verified shadow proof leaves %d keys for the swap to compare, more than the %d a pass may leave", carried, checksum.MaxCarryKeys)
 	}
 	return nil
 }

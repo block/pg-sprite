@@ -151,7 +151,9 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // deadlock, rolls back and tries again after a bounded backoff — the
 // engine never queues behind readers (LK-2). Under the lock it runs the
 // caller's drain, re-runs the ST-5 checklist so the pairing it renames by
-// is as fresh as the lock, renames the source and its dependents to their
+// is as fresh as the lock, compares on both sides every key a live
+// verification pass left for the swap and refuses the swap if any differs
+// (cutover-carried-diverged), renames the source and its dependents to their
 // derived _old names and the shadow and its paired dependents to the names
 // the source held (D8), hands every sequence and identity to the live table
 // (D5), re-reads the catalog to confirm each rename and handoff took, and

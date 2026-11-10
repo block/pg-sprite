@@ -299,14 +299,18 @@ slot; the target passes `3h`. The record, `results.json` in the package director
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
 mutation, and the verdict.
 
-Copy-and-swap under the default load is not supported yet, and the default run ends in
-`execution-failed`. Uniform writes at 8 × 100 a second keep changing the chunks the live
-verify pass rereads, and the pass stops on a chunk that changed on every reread; with
-`LOAD_PROOF_HOT=0.2` the applier falls behind during the verify pass until the slot-lag
-ceiling stops the run. The defaults stay at this load so the engine fixes are proven by
-the same command. A light load passes:
-`make load-proof LOAD_PROOF_ROWS=20000 LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5 LOAD_PROOF_FREE_DISK=10GiB`.
-A load much lighter than that can commit no delete before the mark, and the run then
+Copy-and-swap at the default table size is not supported yet, and the default run ends in
+`execution-failed`. The table size stops it, not the writes: by the time the copy of a
+table of about 1 GiB ends (`LOAD_PROOF_ROWS=100000` is enough) the slot retains more WAL
+than the slot-lag ceiling allows, and the catch-up stops the run, with or without
+`LOAD_PROOF_HOT`. The defaults stay at this size so the engine fixes are proven by the
+same command. Half that size passes at the default 8 × 100 writes a second, uniform or
+with a fifth of the updates on ten keys:
+`make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_HOT=0.2 LOAD_PROOF_FREE_DISK=10GiB`.
+The hottest of those keys change at every reread of the live verify pass, which leaves
+them for the swap to compare under its lock.
+A load much lighter than `LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5` can commit no delete
+before the mark, and the run then
 fails as one that judged no stream.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
