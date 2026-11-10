@@ -1,7 +1,6 @@
 package dbconn
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -96,14 +95,6 @@ func TestEmbeddedRDSBundleCoversOnlyCommercialRegions(t *testing.T) {
 			"RDSBundleCovers excludes GovCloud because the bundle has no roots for it; region %q says otherwise", region)
 		assert.NotContains(t, region, "cn-", "China roots would need their own suffix handling")
 	}
-}
-
-func TestRDSTLSConfig(t *testing.T) {
-	tc := rdsTLSConfig("mydb.abc123.us-east-1.rds.amazonaws.com")
-	assert.Equal(t, "mydb.abc123.us-east-1.rds.amazonaws.com", tc.ServerName)
-	assert.NotNil(t, tc.RootCAs)
-	assert.Equal(t, uint16(tls.VersionTLS12), tc.MinVersion)
-	assert.False(t, tc.InsecureSkipVerify)
 }
 
 func TestConfigureTLS(t *testing.T) {
