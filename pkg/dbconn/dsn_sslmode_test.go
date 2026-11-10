@@ -117,31 +117,7 @@ func TestKeywordDSNSettingAgreesWithPGX(t *testing.T) {
 // exactly those three apart.
 func TestDSNSSLModeAgreesWithPGX(t *testing.T) {
 	clearSSLEnv(t)
-	for _, dsn := range []string{
-		"host=db.example",
-		"host=db.example sslmode=disable",
-		"host=db.example sslmode='require'",
-		"sslmode=disable host=db.example sslmode=''",
-		`host=db.example password=x\ sslmode=disable`,
-		`host=db.example password='x\' sslmode=disable'`,
-		`host=db.example sslmode=dis\able`,
-		`host=db.example sslmode=require\`,
-		`host=db.example sslmode=require password=a\`,
-		"postgres://user@db.example/app",
-		"postgres://user@db.example/app?sslmode=disable",
-		"postgres://user@db.example/app?sslmode=disable&sslmode=",
-		"postgres://user@db.example/app?sslmode=&sslmode=disable",
-		"postgres://user@db.example/app?sslmode=  disable",
-		"postgres://user@db.example/app?ssl=true",
-		"postgres://user@db.example/app?ssl=true&sslmode=disable",
-		"postgres://user@db.example/app?sslmode=disable&ssl=true",
-		"postgres://user@db.example/app?ssl=true&ssl=false",
-		"postgres://user@db.example/app?application_name=a#&sslmode=disable",
-		"postgres://user@db.example/app?application_name=a+b&sslmode=disable",
-		"postgres://db.example?application_name=a@b&sslmode=disable",
-		"postgres://us%65r@db.example:5432/app?ss%6Cmode=disable",
-		"postgresql://user@db.example/?sslmode=require",
-	} {
+	for _, dsn := range pgxAcceptedDSNs {
 		t.Run(dsn, func(t *testing.T) {
 			cfg, err := pgconn.ParseConfig(dsn)
 			require.NoError(t, err)
@@ -160,29 +136,7 @@ func TestDSNSSLModeAgreesWithPGX(t *testing.T) {
 // keep a selected mode in place of the verified one configureTLS chooses.
 func TestDSNSSLModeRejectedByPGX(t *testing.T) {
 	clearSSLEnv(t)
-	for _, dsn := range []string{
-		"host=db.example password='oops sslmode=disable",
-		`host=db.example sslmode=disable password='oops\`,
-		"host=db.example pass word=x sslmode=disable",
-		"=x sslmode=disable",
-		"host=db.example sslmode=disable\x00",
-		"host=db.example sslmode=disable password",
-		"postgres://user@db.example/app?sslmode",
-		"postgres://user@db.example/app?sslmode=disable&application_name",
-		"postgres://user@db.example/app?sslmode=disable=x",
-		"postgres://user@db.example/app?sslmode=disable&application_name=%zz",
-		"postgres://user@db.example/app?sslmode=disable&application_name=%0",
-		"postgres://user@db.example/app?sslmode=disable&application_name=%00",
-		"postgres://user@db.example/app?sslmode=disable&application_name=a b",
-		"postgres://user@db.example/app?sslmode=disable\x00",
-		"postgres://us%zzer@db.example/app?sslmode=disable",
-		"postgres://user@db.example/a%zzpp?sslmode=disable",
-		"postgres://user@db.example:54%zz32/app?sslmode=disable",
-		"postgres://db1 ,db2/app?sslmode=disable",
-		"postgres://[]/app?sslmode=disable",
-		"postgres://[::1/app?sslmode=disable",
-		"postgres://[::1]x/app?sslmode=disable",
-	} {
+	for _, dsn := range pgxRejectedDSNs {
 		t.Run(dsn, func(t *testing.T) {
 			_, err := pgconn.ParseConfig(dsn)
 			require.Error(t, err)
@@ -193,7 +147,7 @@ func TestDSNSSLModeRejectedByPGX(t *testing.T) {
 
 // clearSSLEnv empties the environment variables pgx reads TLS settings from,
 // so the connection string alone decides the mode.
-func clearSSLEnv(t *testing.T) {
+func clearSSLEnv(t testing.TB) {
 	t.Helper()
 	for _, name := range []string{"PGSSLMODE", "PGSSLROOTCERT", "PGSSLNEGOTIATION", "PGSSLCERT", "PGSSLKEY"} {
 		t.Setenv(name, "")
@@ -220,4 +174,61 @@ func pgxSSLMode(t *testing.T, cfg *pgconn.Config) string {
 		require.Nil(t, tc.VerifyPeerCertificate, "require without sslrootcert verifies no chain")
 		return "require"
 	}
+}
+
+// pgxAcceptedDSNs are strings pgx parses, each naming (or leaving out)
+// sslmode in a way the scanners must read as pgx does. They also seed
+// FuzzDSNSSLModeAgreesWithPGX.
+var pgxAcceptedDSNs = []string{
+	"host=db.example",
+	"host=db.example\fsslmode=disable",
+	"host=db.example sslmode=disable",
+	"host=db.example sslmode='require'",
+	"sslmode=disable host=db.example sslmode=''",
+	`host=db.example password=x\ sslmode=disable`,
+	`host=db.example password='x\' sslmode=disable'`,
+	`host=db.example sslmode=dis\able`,
+	`host=db.example sslmode=require\`,
+	`host=db.example sslmode=require password=a\`,
+	"postgres://user@db.example/app",
+	"postgres://user@db.example/app?sslmode=disable",
+	"postgres://user@db.example/app?sslmode=disable&sslmode=",
+	"postgres://user@db.example/app?sslmode=&sslmode=disable",
+	"postgres://user@db.example/app?sslmode=  disable",
+	"postgres://user@db.example/app?ssl=true",
+	"postgres://user@db.example/app?ssl=true&sslmode=disable",
+	"postgres://user@db.example/app?sslmode=disable&ssl=true",
+	"postgres://user@db.example/app?ssl=true&ssl=false",
+	"postgres://user@db.example/app?application_name=a#&sslmode=disable",
+	"postgres://user@db.example/app?application_name=a+b&sslmode=disable",
+	"postgres://db.example?application_name=a@b&sslmode=disable",
+	"postgres://us%65r@db.example:5432/app?ss%6Cmode=disable",
+	"postgresql://user@db.example/?sslmode=require",
+}
+
+// pgxRejectedDSNs are strings pgx refuses to parse, several of them hiding
+// an sslmode the scanners must not read. They also seed
+// FuzzDSNSSLModeAgreesWithPGX.
+var pgxRejectedDSNs = []string{
+	"host=db.example password='oops sslmode=disable",
+	`host=db.example sslmode=disable password='oops\`,
+	"host=db.example pass word=x sslmode=disable",
+	"=x sslmode=disable",
+	"host=db.example sslmode=disable\x00",
+	"host=db.example sslmode=disable password",
+	"postgres://user@db.example/app?sslmode",
+	"postgres://user@db.example/app?sslmode=disable&application_name",
+	"postgres://user@db.example/app?sslmode=disable=x",
+	"postgres://user@db.example/app?sslmode=disable&application_name=%zz",
+	"postgres://user@db.example/app?sslmode=disable&application_name=%0",
+	"postgres://user@db.example/app?sslmode=disable&application_name=%00",
+	"postgres://user@db.example/app?sslmode=disable&application_name=a b",
+	"postgres://user@db.example/app?sslmode=disable\x00",
+	"postgres://us%zzer@db.example/app?sslmode=disable",
+	"postgres://user@db.example/a%zzpp?sslmode=disable",
+	"postgres://user@db.example:54%zz32/app?sslmode=disable",
+	"postgres://db1 ,db2/app?sslmode=disable",
+	"postgres://[]/app?sslmode=disable",
+	"postgres://[::1/app?sslmode=disable",
+	"postgres://[::1]x/app?sslmode=disable",
 }
