@@ -7,8 +7,6 @@
 > and the CLI surface may all change between releases. Do **not** run this
 > against any database you care about.
 
-> Working name — see the naming task in the research build tracker.
-
 An online schema-change engine for **PostgreSQL** (community, RDS, and
 Aurora; 14+): a decoupled **planner → router → executor** design where the
 planner classifies each change, the router picks a strategy, and
