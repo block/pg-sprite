@@ -64,6 +64,9 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	if st.Kind() == statement.KindRenameIndex {
 		return renamedIndexFacts(ctx, pool, st)
 	}
+	if st.Kind() == statement.KindAddEnumValue {
+		return enumTypeFacts(ctx, pool, st)
+	}
 	if st.Table() == "" {
 		return Facts{Schema: st.Schema()}, nil
 	}

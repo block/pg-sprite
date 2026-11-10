@@ -1327,7 +1327,10 @@ A proof for one table can never smuggle SQL against another, and a multi-stateme
 never reach the database through the executor (pgx's simple protocol would happily run all of
 it). *Enforced:* `pkg/executor` (`ExecuteNative`; `RunSequence` admission re-proves every step's
 target against the preflight proof before the first step executes; `ExecuteCreate` re-proves
-every desired statement's target against the absence proof the same way), `pkg/statement`
+every desired statement's target against the absence proof the same way; `ExecuteIndexRename`
+and `ExecuteEnumValueAdd`, whose statements name an index or a type rather than a table,
+confirm in the catalog before the commit that the statement reached the object the engine
+checked), `pkg/statement`
 (proof construction), `pkg/schemachange` (`BuildShadow` accepts only an `ALTER TABLE`
 `statement.Statement` naming the proven table, retargets it onto the shadow through the
 deparser, and refuses before executing unless the retargeted form re-parses to the same

@@ -197,7 +197,7 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**62 operations: 19 supported today, 24 planned behind a typed refusal, 14 out of scope
+**62 operations: 20 supported today, 23 planned behind a typed refusal, 14 out of scope
 by design, and 5 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
@@ -291,8 +291,8 @@ or the only online form is a direct statement the operator runs).
 | Object / operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | Enum-typed columns on plain tables | 🟡 | native, planned flow | Yes | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified) |
-| `ALTER TYPE ... ADD VALUE` | 🟡 | native, planned flow | Yes | Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it |
-| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since it takes only `ALTER TABLE` and `CREATE INDEX`, and `DROP VALUE` does not parse |
+| `ALTER TYPE ... ADD VALUE` | ✅ | native, as-is | Yes | Metadata-only: the statement writes one `pg_enum` row under a lock on the type alone, so no table that uses the type is locked, scanned, or rewritten, and reads and writes on those tables carry on while it runs. It waits only for another session altering the same type, under the brief budgets with lock-timeout retry. `BEFORE`, `AFTER`, and `IF NOT EXISTS` run as written; a position next to the empty label is refused as `unsupported-statement`, since the parse tree cannot carry it. `migrate` resolves the type on the session `search_path`, checks that it is an enum, that the role has `USAGE` on a schema the name spells, and that the role is a member of the type's owning role (else `insufficient-privileges`), pins the attempt's `search_path` to the type's schema, and confirms before the commit that every label the transaction wrote belongs to that type, or, when `IF NOT EXISTS` wrote nothing, that the name still resolves to it, since `ALTER TYPE ... RENAME` does not wait for the lock and another session can move the name meanwhile (else the permanent `enum-type-drift` code, nothing added). Sessions can use the new value once it commits. `--force`, `--allow-destructive`, and the copy-and-swap acknowledgements do not apply. A desired file does not model enum types |
+| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since the only `ALTER TYPE` form it takes is `ADD VALUE`, and `DROP VALUE` does not parse |
 | Enum/domain type creation and drop | ⚪ | — | No — owner tooling (psql, shipped with the code change) | Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code |
 | Views, materialized views (create and replace) | ⚪ | — | No — owner tooling | Transactional catalog work, but `CREATE OR REPLACE VIEW` takes a brief `ACCESS EXCLUSIVE` on the view and queues behind in-flight readers — run it under a `lock_timeout` |
 | `REFRESH MATERIALIZED VIEW` | 🔵 | — | No — data jobs / owner tooling | A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs |
