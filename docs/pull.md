@@ -105,8 +105,10 @@ without losing meaning. Current refusals include:
 - partitioned parents (partition children are not independently exported);
 - either side of classic `INHERITS` relationships;
 - either side of a foreign-key relationship;
-- policies that directly query tables (qualified scalar helpers such as `auth.uid()` are supported);
-- unlogged tables and columns with explicit collations; and
+- policies that read a table unqualified, or read their own table (qualified helpers such as `auth.uid()` and schema-qualified tables such as `public.team_members` are supported);
+- unlogged tables and columns with explicit collations;
+- two `PRIMARY KEY`, `UNIQUE`, or `EXCLUDE` constraints declared the same way,
+  which one `CREATE TABLE` would build as one; and
 - sequence-backed defaults that cannot be rendered as an owned `serial` form,
   including a serial whose sequence is declared away from the defaults.
 

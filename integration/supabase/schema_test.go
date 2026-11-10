@@ -91,6 +91,38 @@ func TestDesiredExtensionType(t *testing.T) {
 	assert.Equal(t, "citext", typ)
 }
 
+// An app whose role searches Supabase's extensions schema writes `citext`
+// unqualified. Naming that schema lets the desired file plan, and the
+// planned ADD COLUMN names the type qualified, so it runs and converges
+// under pg-sprite's own search path.
+func TestDesiredUnqualifiedExtensionType(t *testing.T) {
+	pool := fixture(t)
+	execSQL(t, pool, "CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions")
+	name := "pgsprite_desired_unqualified_extension_type"
+	newTable(t, pool, name)
+	ds, err := statement.ParseDesired(fmt.Sprintf(`CREATE TABLE %s (
+		id int PRIMARY KEY,
+		owner_id uuid NOT NULL,
+		body text NOT NULL,
+		email citext
+	)`, name))
+	require.NoError(t, err)
+	ds, err = ds.WithExtensionSchemas("extensions")
+	require.NoError(t, err)
+	request := diffplan.Request{Schema: "public", Desired: ds}
+	report, err := diffplan.Plan(t.Context(), pool, request)
+	require.NoError(t, err)
+	require.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE public.%s ADD COLUMN email extensions.citext", name), report.Statements[0].SQL)
+	result, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: "public", Desired: ds, ExpectedFingerprint: report.Fingerprint}, migrate.DefaultOptions())
+	require.NoError(t, err)
+	require.Equal(t, verdict.OutcomeExecuted, result.Outcome)
+	again, err := diffplan.Plan(t.Context(), pool, request)
+	require.NoError(t, err)
+	assert.Empty(t, again.Statements, "applying the desired file must converge")
+}
+
 // A text-to-integer rewrite routes to the live copy-and-swap backend; with
 // no reported disk headroom its preflight refuses and the column keeps its
 // type and value.

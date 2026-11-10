@@ -88,9 +88,11 @@ refusal — never a silently wrong or incomplete result:
   transaction-mode pooler, but passing them does not make it supported
   ([connections and poolers](docs/limitations.md#connections-and-poolers)).
 - **Row security** is included in exports when present, with reviewable before/after differences. The
-  [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
-  through `migrate --desired` or the Go API. Only the Go API supports binding execution to
-  an ordered SQL review; mixed table/policy changes remain unsupported. See the workflow and roadmap in
+  [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables,
+  and creates a missing table together with its row security in one transaction, through
+  `migrate --desired` or the Go API. Only the Go API supports binding execution to an ordered
+  SQL review, and only for an existing table. A table change in a file whose row security already
+  matches runs as an ordinary desired run; a change to both remains unsupported. See the workflow and roadmap in
   [declarative-row-security.md](docs/declarative-row-security.md).
 - **Foreign keys** are planned but not executed declaratively: a desired
   file may declare them, `diff` shows an added or dropped foreign key with
@@ -125,6 +127,11 @@ refusal — never a silently wrong or incomplete result:
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
+- **Two key constraints declared the same way** (`PRIMARY KEY`, `UNIQUE`,
+  or `EXCLUDE` on the same columns) cannot be declared in a desired file,
+  because one `CREATE TABLE` keeps only one of them. Export refuses such a
+  table, and a desired file that declares both fails its build instead of
+  planning the second one's live copy away.
 - **A key whose storage parameter cannot be rendered is refused** —
   `ADD PRIMARY KEY` / `ADD UNIQUE` runs as a concurrent index build plus
   `USING INDEX`, carrying the key's `WITH (...)` parameters; a value that
@@ -181,7 +188,10 @@ refusal — never a silently wrong or incomplete result:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
-  which covers one ordinary table plus its indexes per file.
+  which covers one ordinary table plus its indexes per file. A table may
+  use them: the file names an object outside the table's schema and
+  `public` qualified, or names it bare when `--extension-schema` lists
+  the schema it lives in. The object's own definition is never managed.
 - **Dropping a table** is never planned or executed. pg-sprite converges
   one declared table at a time, so a live table with no desired file is
   the whole-schema owner's to enumerate and resolve — see

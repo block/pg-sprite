@@ -170,6 +170,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if desired.RowSecurity.present() {
 		return nil, fmt.Errorf("desired row security is not managed: %w", ErrUnsupportedChange)
 	}
+	desired = adoptReplayedText(live, desired)
 	// Partitioning is table identity, not an alterable attribute: no ALTER
 	// can add, remove, or change a partition key or a partition attachment
 	// in place, so a mismatch fails closed instead of diffing to silence.

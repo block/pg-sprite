@@ -62,12 +62,92 @@ func TestParseDesiredWithRowSecurityRejectsUnrelatedAlter(t *testing.T) {
 	require.ErrorIs(t, err, ErrDisallowedStatement)
 }
 
-func TestParseDesiredWithRowSecurityRejectsPolicyRelationDependency(t *testing.T) {
-	_, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint);
+// A policy may read another table when it names it schema-qualified, in a
+// subquery, a join, or WITH CHECK alike; the statement keeps the qualified
+// name, which is what live introspection prints, and the declaration lists
+// every table its policies read.
+func TestParseDesiredWithRowSecurityAdmitsQualifiedPolicyRelations(t *testing.T) {
+	ds, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint, team_id bigint);
  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
- CREATE POLICY readers ON documents FOR SELECT
-     USING (EXISTS (SELECT 1 FROM public.memberships WHERE active));`)
-	require.ErrorIs(t, err, ErrPolicyRelationDependency)
+ CREATE POLICY members ON documents FOR SELECT
+     USING (EXISTS (SELECT 1 FROM public.team_members m JOIN public.teams t ON t.id = m.team_id
+                    WHERE m.team_id = documents.team_id AND m.user_id = (SELECT auth.uid())));
+ CREATE POLICY writers ON documents FOR INSERT
+     WITH CHECK (team_id IN (SELECT team_id FROM public.team_members WHERE user_id = (SELECT auth.uid())));`)
+	require.NoError(t, err)
+	statements := ds.Statements()
+	require.Len(t, statements, 4)
+	assert.Contains(t, statements[2].SQL(), "FROM public.team_members m JOIN public.teams t")
+	assert.Contains(t, statements[3].SQL(), "FROM public.team_members WHERE")
+	assert.Equal(t, []QualifiedName{{Schema: "public", Name: "team_members"}, {Schema: "public", Name: "teams"}}, ds.PolicyReads(),
+		"each table the policies read is listed once, in order")
+}
+
+func TestParseDesiredWithRowSecurityRefusesPolicyRelations(t *testing.T) {
+	for name, tc := range map[string]struct {
+		expr string
+		want error
+		read string
+	}{
+		"unqualified table": {
+			expr: "USING (EXISTS (SELECT 1 FROM memberships WHERE active))",
+			want: ErrPolicyRelationDependency, read: `"memberships"`,
+		},
+		"unqualified table in WITH CHECK": {
+			expr: "WITH CHECK (EXISTS (SELECT 1 FROM public.teams JOIN memberships USING (id)))",
+			want: ErrPolicyRelationDependency, read: `"memberships"`,
+		},
+		"CTE name": {
+			expr: "USING (EXISTS (WITH m AS (SELECT 1 FROM public.memberships) SELECT 1 FROM m))",
+			want: ErrPolicyRelationDependency, read: `"m"`,
+		},
+		"database-qualified table": {
+			expr: "USING (EXISTS (SELECT 1 FROM app.public.memberships))",
+			want: ErrPolicyRelationDependency, read: `"app.public.memberships"`,
+		},
+		"its own table": {
+			expr: "USING (EXISTS (SELECT 1 FROM public.documents d WHERE d.id = documents.id))",
+			want: ErrPolicyReadsOwnTable, read: `"public.documents"`,
+		},
+		"its own name in another schema": {
+			expr: "USING (EXISTS (SELECT 1 FROM archive.documents))",
+			want: ErrPolicyReadsOwnTable, read: `"archive.documents"`,
+		},
+		"a catalog table": {
+			expr: "USING (EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = 'app'))",
+			want: ErrPolicyReadsCatalog, read: `"pg_catalog.pg_namespace"`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint);
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents ` + tc.expr + `;`)
+			require.ErrorIs(t, err, tc.want)
+			assert.ErrorContains(t, err, `policy "readers" reads `+tc.read)
+		})
+	}
+}
+
+// A policy whose query locks the rows it reads is refused, whichever lock
+// strength it names and however deep the query sits, because building it
+// takes ROW SHARE on the table rather than the ACCESS SHARE of a plain read.
+func TestParseDesiredWithRowSecurityRefusesPolicyRowLocks(t *testing.T) {
+	for name, expr := range map[string]string{
+		"FOR SHARE":         "USING (EXISTS (SELECT 1 FROM public.team_members FOR SHARE))",
+		"FOR UPDATE":        "USING (EXISTS (SELECT 1 FROM public.team_members FOR UPDATE))",
+		"FOR NO KEY UPDATE": "USING (EXISTS (SELECT 1 FROM public.team_members FOR NO KEY UPDATE))",
+		"FOR KEY SHARE":     "USING (EXISTS (SELECT 1 FROM public.team_members FOR KEY SHARE))",
+		"nested in WITH CHECK": "WITH CHECK (id IN (SELECT id FROM public.teams WHERE EXISTS " +
+			"(SELECT 1 FROM public.team_members FOR SHARE OF team_members)))",
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseDesiredWithRowSecurity(`CREATE TABLE documents (id bigint);
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents ` + expr + `;`)
+			require.ErrorIs(t, err, ErrPolicyLocksRows)
+			assert.ErrorContains(t, err, `policy "readers" locks the rows it reads`)
+		})
+	}
 }
 
 func TestParseDesiredWithRowSecurityRetainsExplicitDisabledScope(t *testing.T) {
@@ -109,7 +189,7 @@ func TestHasRowSecurityDeclarationUsesGrammar(t *testing.T) {
 func TestRelationWalkHandlesMessageMaps(t *testing.T) {
 	value, err := structpb.NewStruct(map[string]any{"nested": map[string]any{"value": "no relation"}})
 	require.NoError(t, err)
-	assert.False(t, messageReadsRelation(value.ProtoReflect()))
+	assert.Empty(t, appendRelations(nil, value.ProtoReflect()))
 }
 
 func TestDesiredRowSecurityRequiresTableDefinition(t *testing.T) {

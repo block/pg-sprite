@@ -18,6 +18,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -199,6 +200,32 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Empty(t, res.Verdicts)
 	})
 
+	// An adapter that builds one Options for both front doors carries the
+	// imperative door's acknowledgements; the desired-state view of that
+	// value clears them, so RunDesired runs the plan instead of rejecting
+	// the first acknowledgement.
+	t.Run("runs the desired-state view of a policy that carries every acknowledgement", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+		require.NoError(t, err)
+		target := schema + ".t"
+
+		shared := runOptions()
+		shared.Force = target
+		shared.AcceptBlocking = target
+		shared.AllowDestructive = target
+		shared.CopySwap.Restart = target
+		shared.CopySwap.BlockWrites = target
+		req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}
+		_, err = migrate.RunDesired(t.Context(), pool, req, shared)
+		require.ErrorIs(t, err, migrate.ErrForceNotSupported, "the shared value itself is rejected")
+
+		res, err := migrate.RunDesired(t.Context(), pool, req, shared.WithoutAcknowledgements())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
+	})
+
 	t.Run("creates from an index-first desired file and re-runs as a no-op", func(t *testing.T) {
 		// The index precedes its table in the file. Run 1 must still create
 		// table-first, and run 2 — where the desired file replays on the
@@ -225,6 +252,35 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements, "the created table plans no statements")
 		assert.Empty(t, res.Verdicts)
+	})
+
+	t.Run("refuses a desired file that declares one constraint twice", func(t *testing.T) {
+		// One CREATE TABLE keeps only one of two identical UNIQUE
+		// constraints, so the desired build would lack t_v_b. The run
+		// refuses before planning anything rather than dropping the live
+		// copy of the constraint the server left out.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.t (id int PRIMARY KEY, v text);
+			ALTER TABLE %[1]s.t ADD CONSTRAINT t_v_a UNIQUE (v);
+			ALTER TABLE %[1]s.t ADD CONSTRAINT t_v_b UNIQUE (v);`, schema))
+		require.NoError(t, err)
+		before, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+		require.NoError(t, err)
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t,
+			`CREATE TABLE t (id int PRIMARY KEY, v text, CONSTRAINT t_v_a UNIQUE (v), CONSTRAINT t_v_b UNIQUE (v));`)}, runOptions())
+		require.NoError(t, err, "a constraint declared twice is a refusal, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+		assert.Equal(t, verdict.ClassByDesign, res.Class)
+		assert.Contains(t, res.Detail, `table "t", constraint "t_v_b"`)
+		assert.Empty(t, res.Plan.Statements, "nothing was planned")
+		assert.Empty(t, res.Verdicts, "nothing was attempted")
+
+		after, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+		require.NoError(t, err)
+		assert.Equal(t, before, after, "the live table, both constraints included, is unchanged")
 	})
 
 	t.Run("refuses a create when a standalone type occupies the name", func(t *testing.T) {
@@ -402,6 +458,8 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, string(executor.CodeExecutionFailed), res.Verdicts[1].Code)
 		assert.Contains(t, res.Verdicts[1].Statement, "t_missing_idx",
 			"the failed verdict names the plan statement that failed, not the one before it")
+		assert.Equal(t, "42703", res.Verdicts[1].SQLState, "the verdict carries the server's SQLSTATE")
+		assert.Equal(t, `column "missing" does not exist`, res.Verdicts[1].ServerError)
 		assert.Contains(t, res.Detail, "planned statement 2 of 2 failed",
 			"the disclosure counts the committed prefix")
 
@@ -410,6 +468,31 @@ CREATE INDEX t_v_idx ON t (v);`
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
 			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
 		assert.True(t, exists, "the committed CREATE TABLE stays committed")
+	})
+
+	t.Run("a check the rows break fails validation and names the server error", func(t *testing.T) {
+		// The planner adds the check NOT VALID and validates it in a second
+		// step, so the server rejects the rows at VALIDATE, after the add
+		// committed. The failed verdict carries the server's SQLSTATE and
+		// message, so a reader of the verdict alone learns why it failed.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(
+			"CREATE TABLE %[1]s.t (id int PRIMARY KEY, v int NOT NULL); INSERT INTO %[1]s.t VALUES (1, 5)", schema))
+		require.NoError(t, err)
+		res, err := migrate.RunDesired(t.Context(), pool,
+			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t,
+				`CREATE TABLE t (id int PRIMARY KEY, v int NOT NULL CONSTRAINT t_v_check CHECK (v > 6));`)}, runOptions())
+		require.Error(t, err)
+		assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+		require.Len(t, res.Verdicts, 1)
+		v := res.Verdicts[0]
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+		assert.Equal(t, 2, v.FailedStep, "the add committed and the validation failed")
+		assert.Contains(t, v.FailedStepSQL, "VALIDATE CONSTRAINT")
+		assert.Equal(t, "23514", v.SQLState)
+		assert.Equal(t, `check constraint "t_v_check" of relation "t" is violated by some row`, v.ServerError)
+		assert.NotContains(t, v.ServerError, "Failing row", "the server's DETAIL line quotes row values and stays out of the verdict")
 	})
 
 	t.Run("a first-choice name taken inside the probe window fails step 1 and leaves the table", func(t *testing.T) {
@@ -435,6 +518,8 @@ CREATE INDEX t_v_idx ON t (v);`
 		require.Len(t, res.Verdicts, 1, "the failed create is the only verdict; nothing before it committed")
 		assert.Equal(t, verdict.OutcomeFailed, res.Verdicts[0].Outcome)
 		assert.Equal(t, string(executor.CodeCreateNameMismatch), res.Verdicts[0].Code)
+		assert.Empty(t, res.Verdicts[0].SQLState, "the server accepted the CREATE TABLE; pg-sprite's own check failed it")
+		assert.Empty(t, res.Verdicts[0].ServerError)
 		assert.Contains(t, res.Verdicts[0].Statement, "CREATE TABLE")
 		assert.Equal(t, 1, res.Verdicts[0].FailedStep, "a sequence stopped at its first step, not a run that never started one")
 		assert.Contains(t, res.Verdicts[0].FailedStepSQL, "CREATE TABLE")

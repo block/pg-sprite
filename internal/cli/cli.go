@@ -114,6 +114,7 @@ type MigrateCmd struct {
 	Alter             string        `help:"Imperative ALTER statement to run." name:"alter"`
 	Desired           string        `help:"Converge one table from a desired SQL file; mutually exclusive with --alter." type:"existingfile"`
 	Schema            string        `help:"Target schema for --desired." default:"public"`
+	ExtensionSchema   []string      `help:"Schema whose extension types, functions, and operators the desired file names unqualified, such as extensions for a column typed citext; repeat or comma-separate for several, searched in order after --schema and public. Plans still print each such name qualified. Not supported for a file that declares row security. Requires --desired." name:"extension-schema" placeholder:"SCHEMA"`
 	MaxTableSize      byteSize      `help:"Size threshold above which the optimistic attempt is skipped, measured as the table's full on-disk footprint: heap, indexes, and TOAST, all partitions (binary units: B, KiB, MiB, GiB, TiB). Planner-proven online steps (concurrent index builds, constraint validation) are not size-guarded." default:"1GiB"`
 	IndexBuildTimeout time.Duration `help:"Overall bound (statement_timeout) for one concurrent index build step; expect large tables to need a generous value." default:"30m"`
 	ValidateTimeout   time.Duration `help:"Overall bound (statement_timeout) for one VALIDATE CONSTRAINT step; expect large tables to need a generous value." default:"30m"`
@@ -160,6 +161,9 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	}
 	if c.Desired == "" && flagSupplied(kctx, "schema") {
 		return errors.New("--schema requires --desired; qualify the table in --alter instead")
+	}
+	if c.Desired == "" && len(c.ExtensionSchema) > 0 {
+		return errors.New("--extension-schema requires --desired; qualify extension names in --alter instead")
 	}
 	if c.DryRun && c.Force != "" {
 		return errors.New("--force cannot be combined with --dry-run: the dry run reports the unforced plan")
@@ -225,10 +229,11 @@ type DiffCmd struct {
 	DBFlags     `embed:""`
 	OutputFlags `embed:""`
 
-	Desired string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
-	Schema  string `help:"Schema containing the live table." default:"public"`
-	JSON    bool   `help:"Emit the plan as JSON."`
-	SQL     bool   `help:"Print the plan as an executable SQL script instead of the diagnostic report."`
+	Desired         string   `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
+	Schema          string   `help:"Schema containing the live table." default:"public"`
+	ExtensionSchema []string `help:"Schema whose extension types, functions, and operators the desired file names unqualified, such as extensions for a column typed citext; repeat or comma-separate for several, searched in order after --schema and public. Plans still print each such name qualified. Not supported for a file that declares row security." name:"extension-schema" placeholder:"SCHEMA"`
+	JSON            bool     `help:"Emit the plan as JSON."`
+	SQL             bool     `help:"Print the plan as an executable SQL script instead of the diagnostic report."`
 }
 
 // Validate rejects flag combinations with no coherent meaning: --json and

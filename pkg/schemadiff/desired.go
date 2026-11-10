@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,6 +30,13 @@ var ErrDesiredPartitionOf = errors.New("a desired CREATE TABLE ... PARTITION OF 
 // back, so the file is refused before anything runs.
 var ErrDesiredInherits = errors.New("a desired CREATE TABLE ... INHERITS cannot be planned: building it would lock the live parent and add an inheritance edge to it")
 
+// ErrDesiredConstraintMerged is returned when the desired CREATE TABLE
+// names a PRIMARY KEY, UNIQUE, or EXCLUDE constraint that repeats an
+// earlier one exactly, so the server kept only one of them (see
+// confirmIndexConstraintsBuilt). Two such constraints enforce the same
+// rule; the remedy is to declare it once.
+var ErrDesiredConstraintMerged = errors.New("a desired constraint repeats another one on the same columns, and one CREATE TABLE keeps only one of them; declare it once")
+
 // IntrospectDesired materializes a desired-state schema on a scratch schema
 // and introspects it into the canonical model: execute-and-introspect, the
 // decided way the engine understands DDL semantics. The scratch schema is
@@ -42,8 +50,11 @@ var ErrDesiredInherits = errors.New("a desired CREATE TABLE ... INHERITS cannot 
 // empty copy of each one, so no foreign key ever binds to a live table, and
 // planning takes only the ACCESS SHARE lock a plain SELECT takes on it (see
 // createReferencedStandIns).
+//
+// The file's unqualified names also resolve against the desired schema's
+// extension schemas, which the model still prints qualified.
 func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredSchema) (Model, error) {
-	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()})
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()}, desired.ExtensionSchemas())
 }
 
 // referencedFrom names the live tables the scratch schema copies before the
@@ -54,17 +65,17 @@ type referencedFrom struct {
 	tables []string
 }
 
-func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
+func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement, refs referencedFrom, extensions []string) (Model, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return Model{}, fmt.Errorf("begin scratch transaction: %w", err)
 	}
-	return introspectDesiredTransaction(ctx, tx, table, statements, refs)
+	return introspectDesiredTransaction(ctx, tx, table, statements, refs, extensions)
 }
 
 // introspectDesiredTransaction owns tx, which may be a savepoint. Every exit
 // rolls it back, leaving its parent's live target and settings untouched.
-func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
+func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement, refs referencedFrom, extensions []string) (Model, error) {
 	// The scratch transaction is never committed: rollback is the cleanup
 	// path for success and failure alike, so the redundant-closer exception
 	// does not apply — this rollback is load-bearing and its error is
@@ -92,8 +103,18 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	// installed in public, stay resolvable by the names the live table's
 	// definitions print with. The path is built by dbconn so it upholds
 	// CO-9 like the session's.
+	//
+	// The statements run with the extension schemas appended, so the file's
+	// unqualified names can resolve there. The model is introspected under
+	// path alone, so an object found in an extension schema prints
+	// qualified, exactly as the live table's definition does, and the two
+	// compare equal. A plan for a table that does not exist yet runs the
+	// file's own unqualified statements instead, so the create path runs
+	// them under the same extension schemas and the plan's fingerprint
+	// covers them.
 	path := scratchSearchPath(scratch, refs.schema)
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
+	runPath := dbconn.WithExtensionSchemas(path, extensions)
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(runPath...)); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
 	if err := createReferencedStandIns(ctx, tx, scratch, refs.schema, refs.tables); err != nil {
@@ -123,10 +144,106 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
+	if err := confirmIndexConstraintsBuilt(ctx, tx, runPath, statements, m); err != nil {
+		return Model{}, err
+	}
+	if m, err = settleDesired(ctx, tx, scratch, refs.schema, table, path, m); err != nil {
+		return Model{}, err
+	}
 	if err := tx.Rollback(ctx); err != nil {
 		return Model{}, fmt.Errorf("roll back scratch schema: %w", err)
 	}
 	return m, nil
+}
+
+// confirmIndexConstraintsBuilt proves the scratch table holds every PRIMARY
+// KEY, UNIQUE, and EXCLUDE constraint the desired CREATE TABLE declares. The
+// server builds one CREATE TABLE's index constraints by dropping any that
+// repeats an earlier one exactly (same columns, INCLUDE list, predicate,
+// operators, and deferrability), keeping the primary key over the others,
+// and raises no error. When the earlier constraint is unnamed it takes the
+// dropped one's name, so a missing name does not catch every merge, and the
+// count of constraints built is compared as well. Diffing the model anyway
+// would plan the dropped constraint's live copy away, and a table created
+// from the file would lack it, so the build fails instead.
+//
+// A LIKE clause that includes indexes adds the constraints its source table
+// holds to the count, and they are never merged with the declared ones.
+// path is the search_path the CREATE TABLE ran under, so each source
+// resolves to the table it copied from.
+func confirmIndexConstraintsBuilt(ctx context.Context, tx pgx.Tx, path []string, statements []statement.Statement, m Model) error {
+	built := constraintsByName(m.Constraints)
+	for _, st := range statements {
+		if st.Kind() != statement.KindCreateTable {
+			continue
+		}
+		declared, err := statement.IndexConstraints(st.SQL())
+		if err != nil {
+			return fmt.Errorf("read the index constraints of desired table %q: %w", m.Table, err)
+		}
+		for _, name := range declared.Names {
+			if _, ok := built[name]; name != "" && !ok {
+				return fmt.Errorf("%w: table %q, constraint %q", ErrDesiredConstraintMerged, m.Table, name)
+			}
+		}
+		copied, err := countCopiedIndexConstraints(ctx, tx, path, declared.IndexesCopiedFrom)
+		if err != nil {
+			return fmt.Errorf("count the constraints desired table %q copies through LIKE: %w", m.Table, err)
+		}
+		n := countIndexConstraints(m.Constraints)
+		if n == len(declared.Names)+copied {
+			continue
+		}
+		if copied == 0 {
+			return fmt.Errorf("%w: table %q declares %d primary key, unique, and exclusion constraints, and building it kept %d",
+				ErrDesiredConstraintMerged, m.Table, len(declared.Names), n)
+		}
+		return fmt.Errorf("%w: table %q declares %d primary key, unique, and exclusion constraints and copies %d through LIKE, and building it kept %d",
+			ErrDesiredConstraintMerged, m.Table, len(declared.Names), copied, n)
+	}
+	return nil
+}
+
+// countCopiedIndexConstraints counts the PRIMARY KEY, UNIQUE, and EXCLUDE
+// constraints the tables in sources hold, resolving each name on path.
+func countCopiedIndexConstraints(ctx context.Context, tx pgx.Tx, path []string, sources []statement.QualifiedName) (int, error) {
+	if len(sources) == 0 {
+		return 0, nil
+	}
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
+		return 0, fmt.Errorf("set the search_path the desired table was built under: %w", err)
+	}
+	total := 0
+	for _, src := range sources {
+		name := pgx.Identifier{src.Name}
+		if src.Schema != "" {
+			name = pgx.Identifier{src.Schema, src.Name}
+		}
+		var n int
+		// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+		err := tx.QueryRow(ctx, `
+			SELECT pg_catalog.count(*)::pg_catalog.int4
+			FROM pg_catalog.pg_constraint
+			WHERE conrelid OPERATOR(pg_catalog.=) $1::pg_catalog.text::pg_catalog.regclass
+			  AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])`, name.Sanitize()).Scan(&n)
+		if err != nil {
+			return 0, fmt.Errorf("count the constraints of %s: %w", src, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// countIndexConstraints counts the PRIMARY KEY, UNIQUE, and EXCLUDE
+// constraints among cons.
+func countIndexConstraints(cons []Constraint) int {
+	n := 0
+	for _, con := range cons {
+		if con.Primary || strings.HasPrefix(con.Def, "UNIQUE ") || strings.HasPrefix(con.Def, "EXCLUDE ") {
+			n++
+		}
+	}
+	return n
 }
 
 // refuseLiveParent refuses a desired CREATE TABLE that names a parent,

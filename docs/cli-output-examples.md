@@ -162,7 +162,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -203,7 +203,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -304,9 +304,12 @@ $ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blockin
 Exit 1 means execution started and PostgreSQL refused a step, or the command
 stopped before anything ran. Here the safer sequence for a `CHECK` constraint
 adds it `NOT VALID`, which commits, and then fails to validate it because a
-row has an upper-case email. The verdict on stdout names the failed step and
-the committed prefix that remains (`executed_sql`); the PostgreSQL error,
-with its SQLSTATE, goes to stderr. The constraint now exists `NOT VALID`, so
+row has an upper-case email. The verdict on stdout names the failed step, the
+committed prefix that remains (`executed_sql`), and the PostgreSQL error that
+stopped it (`sqlstate` and `server_error`, the error's primary message). The
+DETAIL line is left out, but the primary message of a data fault (SQLSTATE
+class 22) can still name a row's value. stderr carries the same error
+with the step it failed. The constraint now exists `NOT VALID`, so
 fix the rows and then run the failed step (`failed_step_sql`) to finish. Do
 not rerun the original `ADD CONSTRAINT`: the constraint already exists, so it
 fails with `duplicate_object` (see the
@@ -317,6 +320,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_lower 
 {
   "outcome": "failed",
   "code": "execution-failed",
+  "sqlstate": "23514",
+  "server_error": "check constraint \"users_email_lower\" of relation \"users\" is violated by some row",
   "failed_step": 2,
   "failed_step_sql": "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_lower\"",
   "statement": "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))",
@@ -391,7 +396,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -433,7 +438,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -496,7 +501,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -533,7 +538,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -598,7 +603,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -725,7 +730,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 18,
+  "format_version": 19,
   "source": "diff",
   "schema": "public",
   "table": "users",

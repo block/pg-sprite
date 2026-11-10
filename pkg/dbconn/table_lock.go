@@ -244,7 +244,10 @@ func lookupTableLockHolder(ctx context.Context, conn AdvisoryLockHolder, key Tab
 	// INV: LK-1 — the database predicate is what makes a confirmation from
 	// a working connection mean "held in the database this transaction
 	// writes to": without it, a lock session dialled into another database
-	// of the same server would confirm the lock it holds there.
+	// of the same server would confirm the lock it holds there. The granted
+	// predicate keeps a session queued in pg_advisory_lock on the key, which
+	// pg_locks lists with granted = false, from being read as the holder
+	// (TestTableLockConfirmIgnoresASessionWaitingForTheKey).
 	const query = `SELECT l.pid, COALESCE(a.application_name, ''), a.backend_start, COALESCE(a.state, '')
 		  FROM pg_catalog.pg_locks l
 		  LEFT JOIN pg_catalog.pg_stat_activity a ON a.pid = l.pid

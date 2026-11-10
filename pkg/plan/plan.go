@@ -49,7 +49,7 @@ import (
 // Version 18 added the dependent-trigger, dependent-generated-column, and
 // partition-key planner reasons and the dependent_triggers,
 // dependent_generated_columns, and partition_key_tables decision fields.
-const FormatVersion = 18
+const FormatVersion = 19
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -188,12 +188,19 @@ type Report struct {
 	Class verdict.Class `json:"class,omitempty"`
 	// Owner identifies who owns aggregate work with no online-safety problem.
 	Owner verdict.Owner `json:"owner,omitempty"`
-	// Fingerprint is the plan's stable identity (see Fingerprint). An
+	// Fingerprint is the plan's stable identity (see ComputeFingerprint). An
 	// approver pins it when the plan is reviewed; an executor recomputes it
 	// at apply time and refuses on mismatch — that is how "the plan a
 	// reviewer approves is the plan that executes" is enforced across
 	// storage and forwarding.
 	Fingerprint string `json:"fingerprint"`
+	// ExtensionSchemas are the schemas the desired file's unqualified names
+	// also resolved against (statement.DesiredSchema.WithExtensionSchemas),
+	// in the order they were searched. A table that does not exist yet is
+	// created from the file's own statements under that search path, so the
+	// fingerprint covers them: the same SQL resolved against other schemas
+	// can bind other types and functions. Empty when the file named none.
+	ExtensionSchemas []string `json:"extension_schemas,omitempty"`
 	// Statements is the ordered plan; empty means there is nothing to do.
 	Statements []Statement `json:"statements"`
 	// Advisories are the typed observations the diff made about the live
@@ -444,7 +451,11 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 // serialization is part of the contract (docs/plan-report.md) and changes
 // only with a format_version bump. This is a plan identity, not a schema
 // fingerprint: it never participates in schema-state comparison.
-func Fingerprint(statements []Statement) string {
+//
+// extensionSchemas are the report's ExtensionSchemas. When there are any,
+// a group separator and each schema follow the statements, so a plan
+// derived without them keeps the identity it always had.
+func Fingerprint(statements []Statement, extensionSchemas ...string) string {
 	h := sha256.New()
 	for _, st := range statements {
 		writeField(h, st.SQL)
@@ -456,7 +467,21 @@ func Fingerprint(statements []Statement) string {
 		}
 		h.Write([]byte{0x1e}) // record separator: one per statement
 	}
+	if len(extensionSchemas) > 0 {
+		h.Write([]byte{0x1d}) // group separator: the search path follows
+		for _, schema := range extensionSchemas {
+			writeField(h, schema)
+		}
+	}
 	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// ComputeFingerprint returns the Fingerprint of everything in r that is
+// part of the plan's identity: its statements and its extension schemas.
+// Every path that builds a report sets r.Fingerprint from this method, so
+// a field added to the identity cannot be left out at one call site.
+func (r Report) ComputeFingerprint() string {
+	return Fingerprint(r.Statements, r.ExtensionSchemas...)
 }
 
 // writeField hashes one field with a trailing unit separator, so adjacent

@@ -120,6 +120,14 @@ type LoadSpec struct {
 	Mix                  Mix
 	HotRowFraction       float64
 	ToastRewriteFraction float64
+	// RecordFailures keeps the workers running through a mutation that
+	// fails for a reason other than an expected race: the failure is
+	// recorded in Summary.Failures and the worker takes its next tick. A
+	// generator that does not record failures stops every worker on the
+	// first one and reports it from Stop. A workload that writes across
+	// a swap records failures, because what the swap does to an
+	// application's statements is part of what it measures.
+	RecordFailures bool
 }
 
 // total returns the summed mutation weight.
@@ -155,6 +163,18 @@ func (s LoadSpec) validate() error {
 // collision, a serialization failure, a deadlock, or a vanished row) and
 // were dropped rather than retried. A run whose Races dwarf its committed
 // counts wrote far less than its spec suggests.
+//
+// TouchedIDs lists, in commit order, the primary key of every row a
+// committed mutation wrote: the inserted, updated, or deleted row, both
+// rows of a unique-key swap, and both the old and the new key of a key
+// move. A test that marks the length of the list at some instant knows
+// that every key before the mark committed before it, and can leave the
+// rows written after it out of a comparison.
+//
+// MaxLatency is the longest a committed mutation took from its first
+// statement to its commit returning. Failures holds every mutation that
+// failed for a reason other than an expected race, when the spec records
+// them.
 type Summary struct {
 	Inserts     int
 	Updates     int
@@ -164,6 +184,18 @@ type Summary struct {
 	Races       int
 	InsertedIDs []int64
 	DeletedIDs  []int64
+	TouchedIDs  []int64
+	MaxLatency  time.Duration
+	Failures    []Failure
+}
+
+// Failure is one mutation that failed for a reason other than an expected
+// race. Code is the server's SQLSTATE, or empty when the failure was not a
+// server error (the mutation's client-side deadline, say).
+type Failure struct {
+	At   time.Time
+	Code string
+	Err  error
 }
 
 // Committed returns how many mutations of every kind committed.
@@ -213,14 +245,20 @@ func (g *LoadGenerator) run(ctx context.Context, pool *pgxpool.Pool, table Workl
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), MutationTimeout)
+			started := time.Now()
 			err := g.mutate(mutationCtx, pool, table, spec, rng)
 			cancel()
 			if err == nil {
+				g.committed(time.Since(started))
 				continue
 			}
 			if expectedRace(err) {
 				g.race()
+				continue
+			}
+			if spec.RecordFailures {
+				g.recordFailure(err)
 				continue
 			}
 			g.fail(err)
@@ -229,6 +267,10 @@ func (g *LoadGenerator) run(ctx context.Context, pool *pgxpool.Pool, table Workl
 		}
 	}
 }
+
+// MutationTimeout is the client-side deadline of one mutation; a mutation
+// that outlives it fails with context.DeadlineExceeded.
+const MutationTimeout = 2 * time.Second
 
 func (g *LoadGenerator) mutate(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable, spec LoadSpec, rng *rand.Rand) error {
 	pick := rng.IntN(spec.Mix.total())
@@ -254,12 +296,26 @@ func (g *LoadGenerator) insert(ctx context.Context, pool *pgxpool.Pool, table Wo
 		g.mu.Lock()
 		g.summary.Inserts++
 		g.summary.InsertedIDs = append(g.summary.InsertedIDs, id)
+		g.summary.TouchedIDs = append(g.summary.TouchedIDs, id)
 		g.mu.Unlock()
 	}
 	return err
 }
+
+// randomPointQuery picks a uniformly random point in the table's key range
+// through the primary key index's two ends; it yields no row on an empty
+// table.
+func randomPointQuery(table WorkloadTable) string {
+	return `SELECT min(id) + floor(random() * (max(id) - min(id) + 1))::bigint FROM ` + table.Qualified()
+}
+
+// randomIDQuery picks the first key at or after a random point in the key
+// range, so a pick costs two index probes however many rows the table
+// holds. Rows that follow a gap in the key space are picked more often
+// than their neighbours; the load does not need uniformity, only a cheap
+// pick that reaches every part of the table.
 func randomIDQuery(table WorkloadTable) string {
-	return `SELECT id FROM ` + table.Qualified() + ` ORDER BY random() LIMIT 1`
+	return `SELECT id FROM ` + table.Qualified() + ` WHERE id >= (` + randomPointQuery(table) + `) ORDER BY id LIMIT 1`
 }
 func (g *LoadGenerator) update(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable, spec LoadSpec, rng *rand.Rand) error {
 	var id int64
@@ -280,17 +336,19 @@ func (g *LoadGenerator) update(ctx context.Context, pool *pgxpool.Pool, table Wo
 	if err == nil && tag.RowsAffected() == 1 {
 		g.mu.Lock()
 		g.summary.Updates++
+		g.summary.TouchedIDs = append(g.summary.TouchedIDs, id)
 		g.mu.Unlock()
 	}
 	return err
 }
 func (g *LoadGenerator) delete(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable) error {
 	var id int64
-	err := pool.QueryRow(ctx, `DELETE FROM `+table.Qualified()+` WHERE id=(SELECT id FROM `+table.Qualified()+` ORDER BY random() LIMIT 1) RETURNING id`).Scan(&id)
+	err := pool.QueryRow(ctx, `DELETE FROM `+table.Qualified()+` WHERE id=(`+randomIDQuery(table)+`) RETURNING id`).Scan(&id)
 	if err == nil {
 		g.mu.Lock()
 		g.summary.Deletes++
 		g.summary.DeletedIDs = append(g.summary.DeletedIDs, id)
+		g.summary.TouchedIDs = append(g.summary.TouchedIDs, id)
 		g.mu.Unlock()
 	}
 	return err
@@ -306,7 +364,7 @@ func (g *LoadGenerator) uniqueMove(ctx context.Context, pool *pgxpool.Pool, tabl
 		return err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	rows, err := tx.Query(ctx, `SELECT id,uniq FROM `+table.Qualified()+` ORDER BY random() LIMIT 2 FOR UPDATE`)
+	rows, err := tx.Query(ctx, `SELECT id,uniq FROM `+table.Qualified()+` WHERE id >= (`+randomPointQuery(table)+`) ORDER BY id LIMIT 2 FOR UPDATE`)
 	if err != nil {
 		return err
 	}
@@ -330,6 +388,7 @@ func (g *LoadGenerator) uniqueMove(ctx context.Context, pool *pgxpool.Pool, tabl
 	if err = tx.Commit(ctx); err == nil {
 		g.mu.Lock()
 		g.summary.UniqueMoves++
+		g.summary.TouchedIDs = append(g.summary.TouchedIDs, values[0].ID, values[1].ID)
 		g.mu.Unlock()
 	}
 	return err
@@ -341,12 +400,13 @@ func (g *LoadGenerator) uniqueMove(ctx context.Context, pool *pgxpool.Pool, tabl
 // together. A worker whose chosen row vanished under it sees the
 // vanished-row race.
 func (g *LoadGenerator) keyMove(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable) error {
-	var id int64
-	q := `UPDATE ` + table.Qualified() + ` SET id=nextval(pg_get_serial_sequence($1,'id')), updated_at=now() WHERE id=(` + randomIDQuery(table) + `) RETURNING id`
-	err := pool.QueryRow(ctx, q, table.Qualified()).Scan(&id)
+	var oldID, newID int64
+	q := `WITH picked AS (` + randomIDQuery(table) + `) UPDATE ` + table.Qualified() + ` t SET id=nextval(pg_get_serial_sequence($1,'id')), updated_at=now() FROM picked WHERE t.id=picked.id RETURNING picked.id, t.id`
+	err := pool.QueryRow(ctx, q, table.Qualified()).Scan(&oldID, &newID)
 	if err == nil {
 		g.mu.Lock()
 		g.summary.KeyMoves++
+		g.summary.TouchedIDs = append(g.summary.TouchedIDs, oldID, newID)
 		g.mu.Unlock()
 	}
 	return err
@@ -362,6 +422,21 @@ func (g *LoadGenerator) race() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.summary.Races++
+}
+func (g *LoadGenerator) committed(latency time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.MaxLatency = max(g.summary.MaxLatency, latency)
+}
+func (g *LoadGenerator) recordFailure(err error) {
+	failure := Failure{At: time.Now(), Err: err}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		failure.Code = pgErr.Code
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.Failures = append(g.summary.Failures, failure)
 }
 func (g *LoadGenerator) fail(err error) {
 	g.mu.Lock()
@@ -380,7 +455,45 @@ func (g *LoadGenerator) Snapshot() Summary {
 	s := g.summary
 	s.InsertedIDs = slices.Clone(s.InsertedIDs)
 	s.DeletedIDs = slices.Clone(s.DeletedIDs)
+	s.TouchedIDs = slices.Clone(s.TouchedIDs)
+	s.Failures = slices.Clone(s.Failures)
 	return s
+}
+
+// Progress is how much a load has committed so far, without the key and
+// failure histories a Summary carries, so a poll that needs only the counts
+// costs the same however long the load has run.
+type Progress struct {
+	Inserts     int
+	Updates     int
+	Deletes     int
+	UniqueMoves int
+	KeyMoves    int
+	// Touched is how long Summary.TouchedIDs was: the first Touched keys of
+	// the final list are the rows written by mutations that committed
+	// before this progress was read.
+	Touched int
+}
+
+// Committed returns how many mutations of every kind committed.
+func (p Progress) Committed() int {
+	return p.Inserts + p.Updates + p.Deletes + p.UniqueMoves + p.KeyMoves
+}
+
+// Progress returns the counts accumulated so far and leaves the workers
+// running, under one acquisition of the lock the workers record under.
+func (g *LoadGenerator) Progress() Progress {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := &g.summary
+	return Progress{
+		Inserts:     s.Inserts,
+		Updates:     s.Updates,
+		Deletes:     s.Deletes,
+		UniqueMoves: s.UniqueMoves,
+		KeyMoves:    s.KeyMoves,
+		Touched:     len(s.TouchedIDs),
+	}
 }
 
 // Stop promptly cancels workers and waits a bounded time for completion. It

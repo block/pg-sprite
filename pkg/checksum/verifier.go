@@ -13,7 +13,6 @@ import (
 
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
-	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
@@ -316,51 +315,56 @@ func (v *Verifier) lostOr(err error) error {
 
 // pass is the quiesced sweep: every differing chunk is a mismatch.
 func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark) (Report, error) {
-	sourceSQL, shadowSQL, err := v.digestStatements(ctx, pool)
+	stmts, err := v.digestStatements(ctx, pool)
 	if err != nil {
 		return Report{}, err
 	}
-	report, _, err := v.sweep(ctx, pool, sourceSQL, shadowSQL, through, false)
-	return report, err
+	return v.sweep(ctx, pool, stmts, through, nil)
 }
 
-// sweep cuts and compares every chunk at or below through. A quiesced sweep
-// reports each differing chunk as a mismatch. A live sweep instead returns
-// each differing chunk as an observation carrying the position of the
-// marker its transaction wrote, for the caller to settle; the report then
-// has no mismatches of its own. Both count a differing chunk as mismatched.
-func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, through copier.Watermark, live bool) (Report, []observation, error) {
+// sweep cuts and compares every chunk at or below through. A quiesced
+// sweep, with a nil differ, reports each differing chunk as a mismatch. A
+// live sweep instead hands each differing chunk to differ as an
+// observation of its rows carrying the position of the marker its
+// transaction wrote, for the caller to settle, before it reads the next
+// chunk; the report then has no mismatches of its own. Both count a
+// differing chunk as mismatched. The time differ takes is not the chunk's,
+// so the chunker's sizing feedback leaves it out.
+func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, stmts statements, through copier.Watermark, differ func(context.Context, observation) error) (Report, error) {
 	chunker, err := copier.NewChunker(v.target, copier.Watermark{}, v.opts.Chunker)
 	if err != nil {
-		return Report{}, nil, err
+		return Report{}, err
 	}
 	report := Report{Through: through}
-	var differing []observation
+	live := differ != nil
 	for {
 		started := v.opts.Clock.Now()
-		next, ok, err := v.compareNext(ctx, pool, chunker, sourceSQL, shadowSQL, through, live)
+		next, ok, err := v.compareNext(ctx, pool, chunker, stmts, through, live)
 		if err != nil {
-			return Report{}, nil, err
+			return Report{}, err
 		}
 		if !ok {
-			return report, differing, nil
+			return report, nil
 		}
+		elapsed := v.opts.Clock.Now().Sub(started)
 		v.countCompared(next.source.Rows)
 		report.Chunks++
 		report.Rows += next.source.Rows
 		if next.source != next.shadow {
 			v.countMismatch()
 			if live {
-				differing = append(differing, observation{chunk: next.compared, source: next.source, shadow: next.shadow, lsn: next.lsn})
+				if err := differ(ctx, next.rows); err != nil {
+					return Report{}, err
+				}
 			} else {
 				report.Mismatches = append(report.Mismatches, Mismatch{Chunk: next.compared, Source: next.source, Shadow: next.shadow})
 			}
 		}
 		if next.compared.Upper() == through.Value() {
-			return report, differing, nil
+			return report, nil
 		}
-		if err := chunker.Feedback(next.cut, v.opts.Clock.Now().Sub(started)); err != nil {
-			return Report{}, nil, err
+		if err := chunker.Feedback(next.cut, elapsed); err != nil {
+			return Report{}, err
 		}
 	}
 }
@@ -368,41 +372,14 @@ func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, sourceSQL, sha
 // comparison is one chunk of a pass: the chunk the chunker cut, the closed
 // range the pass compared — that chunk capped at the pass's watermark — the
 // two digests of that range, and, for a differing chunk of a live sweep,
-// the position of the marker written in the same transaction.
+// the rows of that range on both sides with the position of the marker
+// written in the same transaction.
 type comparison struct {
 	cut      copier.Chunk
 	compared copier.Chunk
 	source   Digest
 	shadow   Digest
-	lsn      decode.LSN
-}
-
-// digestStatements freezes the two digest statements for this pass from the
-// shadow's column types, read in a guarded transaction so the shadow whose
-// types they name is the shadow the proof describes. The source statement
-// carries the statement's USING expressions, the shadow statement none: the
-// shadow already holds the converted values.
-func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (sourceSQL, shadowSQL string, err error) {
-	tx, err := v.begin(ctx, pool, snapshotRead())
-	if err != nil {
-		return "", "", err
-	}
-	defer func() {
-		// Redundant safety closer: after a successful Commit this returns
-		// the guaranteed ErrTxClosed; on a failure path the server aborts
-		// the transaction with its session either way.
-		_ = tx.Rollback(context.WithoutCancel(ctx))
-	}()
-	types, err := shadowColumnTypes(ctx, tx, v.shadow)
-	if err != nil {
-		return "", "", err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", "", fmt.Errorf("commit column-type read of %s.%s: %w", v.shadow.Schema(), v.shadow.ShadowTable(), err)
-	}
-	return digestSQL(v.target, v.shadow.Schema(), v.shadow.SourceTable(), types, v.shadow.Conversions()),
-		digestSQL(v.target, v.shadow.Schema(), v.shadow.ShadowTable(), types, nil),
-		nil
+	rows     observation
 }
 
 // compareNext cuts the next chunk from the source and reads both sides of
@@ -412,10 +389,13 @@ func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (so
 // locked both relations, so a cut queued behind a strong lock on the source
 // ends at the verifier's lock timeout whatever the caller's pool carries
 // (LK-2). ok is false once the key space is covered. With live set, a chunk
-// whose digests differ also carries the position of a marker written in the
-// same transaction, so the caller knows what the catch-up must confirm past
-// before the chunk can be read again.
-func (v *Verifier) compareNext(ctx context.Context, pool *pgxpool.Pool, chunker *copier.Chunker, sourceSQL, shadowSQL string, through copier.Watermark, live bool) (comparison, bool, error) {
+// whose digests differ is also read row by row on both sides in the same
+// snapshot — each side's rows confirmed against the digest the server
+// aggregated — and carries the position of a marker written in the same
+// transaction, so the caller knows what the catch-up must confirm past
+// before the chunk can be read again, and has the rows to judge each key
+// of the reread against.
+func (v *Verifier) compareNext(ctx context.Context, pool *pgxpool.Pool, chunker *copier.Chunker, stmts statements, through copier.Watermark, live bool) (comparison, bool, error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
 		return comparison{}, false, err
@@ -441,27 +421,48 @@ func (v *Verifier) compareNext(ctx context.Context, pool *pgxpool.Pool, chunker 
 	if err != nil {
 		return comparison{}, false, fmt.Errorf("%w (CO-1): verified chunk: %w", ErrInvariantViolation, err)
 	}
-	source, shadow, err := v.digestRange(ctx, tx, sourceSQL, shadowSQL, lower, upper)
+	source, shadow, err := v.digestRange(ctx, tx, stmts, lower, upper)
 	if err != nil {
 		return comparison{}, false, err
 	}
-	var lsn decode.LSN
+	var rows observation
 	if live && source != shadow {
-		if lsn, err = v.markPosition(ctx, tx); err != nil {
+		if rows, err = v.readDiffering(ctx, tx, stmts, compared, source, shadow); err != nil {
 			return comparison{}, false, err
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return comparison{}, false, fmt.Errorf("commit digest of chunk [%d, %d] of %s.%s: %w", lower, upper, v.target.Schema(), v.target.Table(), err)
 	}
-	return comparison{cut: cut, compared: compared, source: source, shadow: shadow, lsn: lsn}, true, nil
+	return comparison{cut: cut, compared: compared, source: source, shadow: shadow, rows: rows}, true, nil
+}
+
+// readDiffering reads every row of a chunk the sweep found differing on
+// both sides, in the transaction that digested it, confirms each side's
+// rows against the digest the server aggregated over the same snapshot,
+// and marks the position.
+func (v *Verifier) readDiffering(ctx context.Context, tx pgx.Tx, stmts statements, chunk copier.Chunk, source, shadow Digest) (observation, error) {
+	rows, err := v.readRange(ctx, tx, stmts, chunk)
+	if err != nil {
+		return observation{}, err
+	}
+	if err := confirmDigest("source", source, rows.source); err != nil {
+		return observation{}, fmt.Errorf("chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), v.shadow.Schema(), v.shadow.SourceTable(), err)
+	}
+	if err := confirmDigest("shadow", shadow, rows.shadow); err != nil {
+		return observation{}, fmt.Errorf("chunk [%d, %d] of shadow %s.%s: %w", chunk.Lower(), chunk.Upper(), v.shadow.Schema(), v.shadow.ShadowTable(), err)
+	}
+	if rows.lsn, err = v.markPosition(ctx, tx); err != nil {
+		return observation{}, err
+	}
+	return rows, nil
 }
 
 // digestChunk reads both sides of the closed range [lower, upper] in one
 // guarded transaction of its own, so the two digests describe one snapshot.
 // It counts nothing: the caller knows whether the digest is a comparison or a
 // reread.
-func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, lower, upper int64) (source, shadow Digest, err error) {
+func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, stmts statements, lower, upper int64) (source, shadow Digest, err error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
 		return Digest{}, Digest{}, err
@@ -472,7 +473,7 @@ func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQ
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
-	source, shadow, err = v.digestRange(ctx, tx, sourceSQL, shadowSQL, lower, upper)
+	source, shadow, err = v.digestRange(ctx, tx, stmts, lower, upper)
 	if err != nil {
 		return Digest{}, Digest{}, err
 	}
@@ -483,12 +484,12 @@ func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQ
 }
 
 // digestRange reads both sides of the closed range [lower, upper] in tx.
-func (v *Verifier) digestRange(ctx context.Context, tx pgx.Tx, sourceSQL, shadowSQL string, lower, upper int64) (source, shadow Digest, err error) {
-	source, err = digest(ctx, tx, sourceSQL, lower, upper)
+func (v *Verifier) digestRange(ctx context.Context, tx pgx.Tx, stmts statements, lower, upper int64) (source, shadow Digest, err error) {
+	source, err = digest(ctx, tx, stmts.source.digest, lower, upper)
 	if err != nil {
 		return Digest{}, Digest{}, fmt.Errorf("digest chunk [%d, %d] of %s.%s: %w", lower, upper, v.shadow.Schema(), v.shadow.SourceTable(), err)
 	}
-	shadow, err = digest(ctx, tx, shadowSQL, lower, upper)
+	shadow, err = digest(ctx, tx, stmts.shadow.digest, lower, upper)
 	if err != nil {
 		return Digest{}, Digest{}, fmt.Errorf("digest chunk [%d, %d] of shadow %s.%s: %w", lower, upper, v.shadow.Schema(), v.shadow.ShadowTable(), err)
 	}

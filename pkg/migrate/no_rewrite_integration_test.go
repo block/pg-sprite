@@ -157,7 +157,8 @@ var noRewriteCases = map[string][]noRewriteCase{
 // cannot speak to, and why.
 var noRewriteNotApplicable = map[string]string{
 	"greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one": "the table does not exist before the statement, so there is no heap to rewrite",
-	"declarative-row-security-library": "changes only policies and the table's row-security flags, through the row-security executor rather than a statement",
+	"extension-objects-named-unqualified-in-a-desired-file":                                                    "changes only where a desired file's names resolve; the statements it plans are proven by the rows for each statement kind",
+	"declarative-row-security-library":                                                                         "changes only policies and the table's row-security flags, through the row-security executor rather than a statement",
 }
 
 // Every capability row whose imperative front door executes natively makes

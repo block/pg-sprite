@@ -190,7 +190,7 @@ is `RefusalCause.Class()` converted by token (`pkg/migrate/copy_swap_refusal.go`
 | --- | --- | --- | --- |
 | `shadow-lock-unproven` | The operation was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; no retry against the server changes that. |
 | `shadow-lock-lost` | The table lock session reported that it lost the lock, before or during the operation ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The operation's transaction is aborted and nothing is written; re-acquire the lock and repeat. |
-| `shadow-lock-held-elsewhere` | `pg_locks` shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this one yields and the operator decides which run continues. |
+| `shadow-lock-held-elsewhere` | `pg_locks` shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this one yields and the operator decides which run continues. A session only waiting on the key in `pg_locks` (`granted = false`) is not a holder and does not cause this refusal. |
 | `shadow-lock-unconfirmed` | `pg_locks` shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and repeat. On a run's first working transaction, with the lock session still healthy, it is a wiring error instead — the lock session and the pool reach different databases — and re-acquiring refuses the same way; escalate it. |
 | `shadow-proof-empty` | The copy-and-swap target proof is the zero value ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | Only the shape check mints a populated proof; a zero one was constructed, not earned. |
 | `shadow-source-shape` | The source's catalog is outside the shape the proof admits: an identity column without an internally owned sequence, or a replica identity other than `DEFAULT` or `FULL` ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The catalog changed after preflight admitted the table; re-run preflight against the table as it is now. |
@@ -292,7 +292,7 @@ same way.
 | `copy-shadow-mismatch` | The shadow handed to the copier does not describe a copy into the proven target's shadow: it is nil or empty, built for another table, the source itself by name or by OID, missing the relation OIDs the per-chunk check compares against, or its copy columns do not carry the primary key ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | The caller paired a target with a shadow built for something else; no retry against the server changes that. | `copy-shadow-mismatch` |
 | `copy-lock-unproven` | The copier was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; refused before any connection opens. | `shadow-lock-unproven` |
 | `copy-lock-lost` | The table lock session reported that it lost the lock, before the copy began or while a chunk was in flight ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The interrupted chunk's transaction is rolled back and the landed watermark stands; re-acquire the lock and resume from it. The refusal also answers `errors.Is` for `dbconn.ErrTableLockLost`. | `shadow-lock-lost` |
-| `copy-lock-held-elsewhere` | `pg_locks`, read from the connection about to write a chunk, shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this copy yields and the operator decides which run continues. | `shadow-lock-held-elsewhere` |
+| `copy-lock-held-elsewhere` | `pg_locks`, read from the connection about to write a chunk, shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this copy yields and the operator decides which run continues. A session only waiting on the key in `pg_locks` (`granted = false`) is not a holder and does not cause this refusal. | `shadow-lock-held-elsewhere` |
 | `copy-lock-unconfirmed` | `pg_locks`, read from the connection about to write a chunk, shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and resume. On a run's first chunk, with the lock session still healthy, it is a wiring error instead — the lock session and the pool reach different databases — and re-acquiring refuses the same way; escalate it. The refusal also answers `errors.Is` for `dbconn.ErrTableLockNotHeld`. | `shadow-lock-unconfirmed` |
 | `copy-relation-replaced` | The source or the shadow is no longer the relation its proof was minted for: the name no longer resolves, resolves to another OID, or the key column the proof says is a primary key answered a boundary query with `NULL` ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The proof describes a table that no longer exists; drop the shadow and start the change over from preflight. | `cutover-relation-replaced` |
 | `copy-frontier-broken` | The copier's own accounting of the key space broke: a chunk was cut with its lower bound above its upper, a claimed chunk does not start at the cut frontier, or the copy returned without error at a watermark short of the key space ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)) | `invariant-violation` | The chunker produced a sequence it cannot have produced; report it, since the watermark it would have saved cannot be trusted. | `copy-frontier-broken` |
@@ -414,12 +414,17 @@ keyed on sites alone would go green with `admissionRefusalVerdict` classified
 EXISTS`.
 
 RLS preview uses the plan registry's `capability-boundary` refusal for review-only
-policy deltas. A missing target uses the shared `RowSecurityMissingTableRefusal`
-in both preview and apply, with class `environmental`. Atomic RLS execution uses `migrate.RowSecurityRefusal`:
-missing owner or database CREATE privileges (including PostgreSQL SQLSTATE 42501)
-carry `insufficient-privileges` / `environmental`; an absent target table carries
-`unsupported-statement` / `environmental`; unsupported declarations or target
-shapes carry `unsupported-statement` / `capability-boundary`. Operational failures
+policy deltas. A missing target is created with its row security, so preview
+and apply refuse it only when the existing-table executor finds the table gone
+under its lock; that case uses the shared `RowSecurityMissingTableRefusal`, with
+class `environmental`. Atomic RLS execution uses `migrate.RowSecurityRefusal`:
+missing owner or database CREATE privileges (including PostgreSQL SQLSTATE 42501),
+missing schema CREATE for a new table, and an unknown create owner carry
+`insufficient-privileges` / `environmental`; an absent target table carries
+`unsupported-statement` / `environmental`; a name the new table claims that the
+catalog already holds carries `create-collision` / `environmental`; a new
+table's shape refusals use the create path's admission classes; unsupported
+declarations or target shapes carry `unsupported-statement` / `capability-boundary`. Operational failures
 remain failures. Typed privilege causes take precedence over the executor's general
 admission sentinel. The registry tests cover these mappings and refusal classes.
 

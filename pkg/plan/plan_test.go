@@ -478,7 +478,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 18 against this test.
+// omissions. A consumer pins format_version 19 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -534,7 +534,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 18,
+		"format_version": 19,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -592,7 +592,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 18,
+		"format_version": 19,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -617,7 +617,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 18,
+		"format_version": 19,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -707,8 +707,28 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 		"exec_sql is what runs: identity changes with it")
 }
 
+// The extension schemas a plan was derived with are part of its identity:
+// a table that does not exist yet is created from the file's own SQL, whose
+// unqualified names resolve through them. A plan without them hashes as it
+// always has, and the serialization with them is pinned like the rest.
+func TestFingerprintCoversExtensionSchemas(t *testing.T) {
+	st := plan.Statement{SQL: "CREATE TABLE s.t (email citext)", Route: planner.RouteNative,
+		Backend: router.BackendNative, Disposition: router.DispositionExecute}
+	base := plan.Fingerprint([]plan.Statement{st})
+	assert.Equal(t, base, plan.Fingerprint([]plan.Statement{st}, []string{}...),
+		"no extension schemas hash exactly as before")
+
+	resolved := plan.Fingerprint([]plan.Statement{st}, "extensions")
+	assert.Equal(t, "sha256:bb2fe2be4d00807a969c3240b1bc8105bf5b7ea0fbeba3c615c0d9db7ad85972", resolved)
+	assert.NotEqual(t, base, resolved, "the same SQL resolved through an extension schema is a different plan")
+	assert.NotEqual(t, resolved, plan.Fingerprint([]plan.Statement{st}, "other"),
+		"other extension schemas are a different plan")
+	assert.NotEqual(t, plan.Fingerprint([]plan.Statement{st}, "a", "b"), plan.Fingerprint([]plan.Statement{st}, "b", "a"),
+		"search order is part of identity")
+}
+
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 18.
+// pinned to format_version 19.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

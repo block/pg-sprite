@@ -1,0 +1,336 @@
+package schemadiff_test
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
+)
+
+// nestedRowDesired declares every replayable kind of expression with a
+// nested row comparison, which the server expands one row level each time it
+// parses the text: the first build prints ROW(a, b) IS DISTINCT FROM ROW(1, 2)
+// for the inner rows, and only a second parse expands those too.
+const nestedRowDesired = `
+CREATE TABLE t (
+  a int, b int, c int, d int, e int,
+  f boolean DEFAULT (((1, 2), (3, 4), 5) IS DISTINCT FROM ((1, 2), (3, 4), 6)),
+  CONSTRAINT ck CHECK (((a, b), (c, d), e) IS DISTINCT FROM ((1, 2), (3, 4), 5))
+);
+CREATE INDEX t_p_idx ON t (a) WHERE ((a, b), (c, d), e) IS DISTINCT FROM ((1, 2), (3, 4), 5);
+`
+
+// The live table holds whatever text its definitions printed after the
+// replays they went through: one when the desired file created it, more
+// when it was recreated from its own exported definitions. Every text on
+// that chain is the same definition, so the diff is empty against either
+// table, and a real change to the definition still plans its drop and add.
+func TestDiffTakesEveryReplayOfADesiredExpressionAsTheSame(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	ds, err := statement.ParseDesired(nestedRowDesired)
+	require.NoError(t, err)
+
+	t.Run("a table the desired file created", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		createFromDesired(t, pool, schema, nestedRowDesired)
+		assert.Empty(t, diffDesired(t, pool, schema, ds))
+	})
+
+	t.Run("a table recreated from its own definitions", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		createFromDesired(t, pool, schema, nestedRowDesired)
+		before := liveDefinitions(t, pool, schema)
+		replayLiveDefinitions(t, pool, schema)
+		after := liveDefinitions(t, pool, schema)
+		require.NotEqual(t, before, after, "the second parse must expand the inner rows, or this case tests nothing")
+		assert.Empty(t, diffDesired(t, pool, schema, ds))
+		replayLiveDefinitions(t, pool, schema)
+		assert.Empty(t, diffDesired(t, pool, schema, ds), "a third parse is on the same chain")
+	})
+
+	t.Run("a recreated table whose check was left NOT VALID", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		createFromDesired(t, pool, schema, nestedRowDesired)
+		replayLiveDefinitions(t, pool, schema)
+		check := liveDefinitions(t, pool, schema)[0]
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(
+			"ALTER TABLE %[1]s.t DROP CONSTRAINT ck, ADD CONSTRAINT ck %[2]s NOT VALID", schema, check))
+		require.NoError(t, err)
+		notValid := liveDefinitions(t, pool, schema)[0]
+		require.Truef(t, strings.HasSuffix(notValid, " NOT VALID"), "the re-added check must be left NOT VALID: %s", notValid)
+		changes := diffDesired(t, pool, schema, ds)
+		require.Len(t, changes, 1, "only the VALIDATE is planned, not a drop and add")
+		assert.Equal(t, schemadiff.ChangeValidateConstraint, changes[0].Kind)
+		assert.Equal(t, fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "ck"`, schema), changes[0].SQL)
+		require.NotNil(t, changes[0].Validates)
+		assert.Equal(t, notValid, changes[0].Validates.Def)
+	})
+
+	t.Run("a real change to the definition", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		createFromDesired(t, pool, schema, nestedRowDesired)
+		replayLiveDefinitions(t, pool, schema)
+		changed, err := statement.ParseDesired(`
+			CREATE TABLE t (
+			  a int, b int, c int, d int, e int,
+			  f boolean DEFAULT (((1, 2), (3, 4), 5) IS DISTINCT FROM ((1, 2), (3, 4), 6)),
+			  CONSTRAINT ck CHECK (((a, b), (c, d), e) IS DISTINCT FROM ((1, 2), (3, 4), 7))
+			);
+			CREATE INDEX t_p_idx ON t (a) WHERE ((a, b), (c, d), e) IS DISTINCT FROM ((1, 2), (3, 4), 5);`)
+		require.NoError(t, err)
+		var sqls []string
+		for _, c := range diffDesired(t, pool, schema, changed) {
+			sqls = append(sqls, c.SQL)
+		}
+		assert.Equal(t, []string{
+			fmt.Sprintf(`ALTER TABLE "%s"."t" DROP CONSTRAINT "ck"`, schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" ADD CONSTRAINT "ck" CHECK ((((ROW(a, b) IS DISTINCT FROM ROW(1, 2)) OR (ROW(c, d) IS DISTINCT FROM ROW(3, 4))) OR (e IS DISTINCT FROM 7)))`, schema),
+		}, sqls, "only the changed check is planned, with the first build's text")
+	})
+}
+
+// A desired file pulled from the live table holds the live text, and
+// building it prints the next text on the chain, one replay ahead of the
+// live table. The diff still finds them the same, and a real change made
+// to the pulled file is still planned.
+func TestDiffTakesAPulledDesiredFileAsTheSame(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	createFromDesired(t, pool, schema, nestedRowDesired)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	pulled, err := schemadiff.Render(live)
+	require.NoError(t, err)
+	require.Contains(t, pulled, "ROW(a, b) IS DISTINCT FROM ROW(1, 2)", "the pulled file must hold the unexpanded inner rows, or this case tests nothing")
+
+	ds, err := statement.ParseDesired(pulled)
+	require.NoError(t, err)
+	built, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	require.NotEqual(t, liveDefinitions(t, pool, schema)[0], constraintDef(built, "ck"),
+		"building the pulled file must print the next text on the chain, or this case tests nothing")
+	assert.Empty(t, diffDesired(t, pool, schema, ds))
+
+	changed, err := statement.ParseDesired(strings.Replace(pulled, "(e IS DISTINCT FROM 5)", "(e IS DISTINCT FROM 7)", 1))
+	require.NoError(t, err)
+	var kinds []schemadiff.ChangeKind
+	for _, c := range diffDesired(t, pool, schema, changed) {
+		kinds = append(kinds, c.Kind)
+	}
+	assert.Equal(t, []schemadiff.ChangeKind{schemadiff.ChangeDropConstraint, schemadiff.ChangeAddConstraint}, kinds,
+		"a real change to the pulled check is planned")
+}
+
+// A live text that does not apply to the desired table is not on the
+// chain. Here the live check reads column x, which the desired table drops,
+// so replaying it on the scratch table fails with an undefined column. That
+// failure is rolled back with its savepoint: the check and the dropped
+// column are still planned, and the partial index after it, which the file
+// holds in its pulled form, is still matched to the live one.
+func TestDiffPlansALiveExpressionTheDesiredTableCannotHold(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (
+		  a int,
+		  b int,
+		  c int,
+		  x int,
+		  CONSTRAINT ck CHECK (((a, b), x) IS DISTINCT FROM ((1, 2), 3))
+		);
+		CREATE INDEX t_p_idx ON %[1]s.t (a) WHERE ((a, b), c) IS DISTINCT FROM ((1, 2), 3);`, schema))
+	require.NoError(t, err)
+	ds, err := statement.ParseDesired(`
+		CREATE TABLE t (
+		  a integer,
+		  b integer,
+		  c integer,
+		  CONSTRAINT ck CHECK (((ROW(a, b) IS DISTINCT FROM ROW(1, 2)) OR (c IS DISTINCT FROM 3)))
+		);
+		CREATE INDEX t_p_idx ON t USING btree (a) WHERE ROW(a, b) IS DISTINCT FROM ROW(1, 2) OR c IS DISTINCT FROM 3;`)
+	require.NoError(t, err)
+	var sqls []string
+	for _, c := range diffDesired(t, pool, schema, ds) {
+		sqls = append(sqls, c.SQL)
+	}
+	assert.Equal(t, []string{
+		fmt.Sprintf(`ALTER TABLE "%s"."t" DROP CONSTRAINT "ck"`, schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."t" DROP COLUMN "x"`, schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."t" ADD CONSTRAINT "ck" CHECK ((((a IS DISTINCT FROM 1) OR (b IS DISTINCT FROM 2)) OR (c IS DISTINCT FROM 3)))`, schema),
+	}, sqls, "the check and the dropped column are planned; the index is not")
+}
+
+// Matching a live text to the desired chain never hides a real change. A
+// column with no live default still plans the default the file adds, and a
+// changed generation expression is still planned on a server that cannot
+// replay one, where the scratch table would only ever print the desired
+// text. The check gives the build something to replay, so the live texts
+// are matched at all.
+func TestDiffStillPlansExpressionsTheLiveTableLacks(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	t.Run("a default the live column does not have", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t (
+			a int,
+			f boolean
+		)`, schema))
+		require.NoError(t, err)
+		ds, err := statement.ParseDesired(`CREATE TABLE t (
+			a int,
+			f boolean DEFAULT (((1, 2), 3) IS DISTINCT FROM ((1, 2), 4))
+		);`)
+		require.NoError(t, err)
+		changes := diffDesired(t, pool, schema, ds)
+		require.Len(t, changes, 1)
+		assert.Equal(t, schemadiff.ChangeSetDefault, changes[0].Kind)
+	})
+
+	t.Run("a changed generation expression", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t (
+			a int,
+			b int,
+			c int,
+			g boolean GENERATED ALWAYS AS (a IS NULL) STORED,
+			CONSTRAINT ck CHECK (a > 0)
+		)`, schema))
+		require.NoError(t, err)
+		ds, err := statement.ParseDesired(`CREATE TABLE t (
+			a int,
+			b int,
+			c int,
+			g boolean GENERATED ALWAYS AS (((a, b), c) IS DISTINCT FROM ((1, 2), 3)) STORED,
+			CONSTRAINT ck CHECK (a > 0)
+		);`)
+		require.NoError(t, err)
+		changes := diffDesired(t, pool, schema, ds)
+		require.Len(t, changes, 1)
+		assert.Equal(t, schemadiff.ChangeSetGeneratedExpression, changes[0].Kind)
+	})
+}
+
+// An expression whose printed text is still changing after every replay
+// the build allows is refused by name, instead of planning against a text
+// the live table may never hold.
+func TestIntrospectDesiredRefusesAnExpressionThatNeverSettles(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	ds, err := statement.ParseDesired(`CREATE TABLE t (
+		a int, b int, c int, d int, e int, f int, g int,
+		CONSTRAINT deep CHECK ((((((a, b), c), d), e), f, g) IS DISTINCT FROM (((((1, 2), 3), 4), 5), 6, 7))
+	);`)
+	require.NoError(t, err)
+	_, err = schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.ErrorIs(t, err, schemadiff.ErrExpressionUnsettled)
+	assert.ErrorContains(t, err, `constraint "deep" of table t still changed after 4 replays`)
+}
+
+func constraintDef(m schemadiff.Model, name string) string {
+	for _, c := range m.Constraints {
+		if c.Name == name {
+			return c.Def
+		}
+	}
+	return ""
+}
+
+// A generation expression settles the same way on a server that can
+// replace one in place.
+func TestDiffTakesEveryReplayOfAGenerationExpressionAsTheSame(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	var num int
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::int").Scan(&num))
+	if num < 170000 {
+		t.Skipf("ALTER COLUMN ... SET EXPRESSION exists from PostgreSQL 17; server reports %d", num)
+	}
+	const desired = `CREATE TABLE t (a int, b int, c int,
+		g boolean GENERATED ALWAYS AS (((a, b), c) IS DISTINCT FROM ((1, 2), 3)) STORED);`
+	ds, err := statement.ParseDesired(desired)
+	require.NoError(t, err)
+	schema := testutil.NewSchema(t, pool)
+	createFromDesired(t, pool, schema, desired)
+	assert.Empty(t, diffDesired(t, pool, schema, ds))
+
+	var expr string
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d
+		WHERE d.adrelid = $1::regclass`, schema+".t").Scan(&expr))
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN g SET EXPRESSION AS (%s)", schema, expr))
+	require.NoError(t, err)
+	assert.Empty(t, diffDesired(t, pool, schema, ds))
+}
+
+// createFromDesired creates the desired file's objects in schema, as the
+// create path would.
+func createFromDesired(t *testing.T, pool *pgxpool.Pool, schema, sql string) {
+	t.Helper()
+	ds, err := statement.ParseDesired(sql)
+	require.NoError(t, err)
+	for _, st := range ds.Statements() {
+		qualified, err := statement.Qualify(st.SQL(), schema)
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), qualified)
+		require.NoError(t, err)
+	}
+}
+
+// diffDesired diffs the live table t in schema against ds.
+func diffDesired(t *testing.T, pool *pgxpool.Pool, schema string, ds statement.DesiredSchema) []schemadiff.Change {
+	t.Helper()
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	changes, err := schemadiff.Diff(schema, live, desired)
+	require.NoError(t, err)
+	return changes
+}
+
+// liveDefinitions reads the text the server prints for t's check, default,
+// and partial index, in that order.
+func liveDefinitions(t *testing.T, pool *pgxpool.Pool, schema string) []string {
+	t.Helper()
+	var check, def, index string
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT pg_get_constraintdef(c.oid),
+		       (SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d WHERE d.adrelid = c.conrelid),
+		       pg_get_indexdef(($1 || '.t_p_idx')::regclass)
+		FROM pg_constraint c WHERE c.conrelid = ($1 || '.t')::regclass AND c.conname = 'ck'`, schema).
+		Scan(&check, &def, &index))
+	return []string{check, def, index}
+}
+
+// replayLiveDefinitions recreates t's check, default, and partial index from
+// the text the server printed for them, as recreating the table from its
+// own exported definitions would.
+func replayLiveDefinitions(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	defs := liveDefinitions(t, pool, schema)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		ALTER TABLE %[1]s.t DROP CONSTRAINT ck, ADD CONSTRAINT ck %[2]s;
+		ALTER TABLE %[1]s.t ALTER COLUMN f SET DEFAULT %[3]s;
+		DROP INDEX %[1]s.t_p_idx;
+		%[4]s`, schema, defs[0], defs[1], defs[2]))
+	require.NoError(t, err)
+}

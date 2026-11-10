@@ -226,3 +226,36 @@ func TestExecuteRowSecurityAcceptsADeclaredSerialSequence(t *testing.T) {
 		})
 	}
 }
+
+// The atomic executor changes only row security. A file whose row security
+// matches and whose table definition differs is refused with nothing
+// changed, and the refusal names the path that runs the table change; a
+// file that changes both is refused as a mixed change.
+func TestExecuteRowSecurityNamesTheTablePathForATableOnlyChange(t *testing.T) {
+	pool, schema := rlsFixture(t)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	file := func(policy string) string {
+		return fmt.Sprintf(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner_id bigint NOT NULL,
+     title text
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (%s);`, policy)
+	}
+
+	_, err = applyRLS(t, pool, schema, file("owner_id = 7"))
+	require.ErrorIs(t, err, executor.ErrRowSecurityRefused)
+	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
+	assert.ErrorContains(t, err, "run the table change with migrate.RunDesiredWithRowSecurity")
+
+	_, err = applyRLS(t, pool, schema, file("owner_id = 8"))
+	require.ErrorIs(t, err, executor.ErrRowSecurityRefused)
+	assert.NotErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
+	assert.ErrorContains(t, err, "mixed table and row security changes")
+
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "nothing changed")
+}

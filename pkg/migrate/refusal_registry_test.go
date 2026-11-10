@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/stretchr/testify/assert"
@@ -390,6 +391,11 @@ func TestRowSecurityRefusalRegistry(t *testing.T) {
 		{"privileges", errors.Join(executor.ErrRowSecurityRefused, executor.ErrRowSecurityPrivileges), verdict.ReasonInsufficientPrivileges, verdict.ClassEnvironmental},
 		{"unsupported", executor.ErrRowSecurityRefused, verdict.ReasonUnsupportedStatement, verdict.ClassCapabilityBoundary},
 		{"missing-table", executor.ErrTableNotFound, verdict.ReasonUnsupportedStatement, verdict.ClassEnvironmental},
+		{"missing-schema", preflight.ErrSchemaNotFound, verdict.ReasonUnsupportedStatement, verdict.ClassEnvironmental},
+		{"create-privileges", &preflight.PrivilegeError{Tier: preflight.TierCreateTable, Check: "has_schema_privilege(app, CREATE)"}, verdict.ReasonInsufficientPrivileges, verdict.ClassEnvironmental},
+		{"create-owner-not-found", preflight.ErrCreateOwnerNotFound, verdict.ReasonInsufficientPrivileges, verdict.ClassEnvironmental},
+		{"create-collision", executor.ErrCreateCollision, verdict.ReasonCreateCollision, verdict.ClassEnvironmental},
+		{"create-admission", executor.ErrIfNotExistsUnsupported, verdict.ReasonUnsupportedStatement, verdict.ClassByDesign},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -402,4 +408,33 @@ func TestRowSecurityRefusalRegistry(t *testing.T) {
 	}
 	_, ok := RowSecurityRefusal(errors.New("operational failure"))
 	assert.False(t, ok)
+}
+
+// A desired file that declares one index constraint twice is a mistake in
+// the file, so it is refused by design; a CREATE TABLE that names a live
+// parent is a capability boundary. Both front doors that build a desired
+// file, RunDesired and the row-security executor, classify them the same
+// way, however deeply the error is wrapped.
+func TestDesiredShapeRefusalClasses(t *testing.T) {
+	merged := fmt.Errorf("inspect desired row security for public.t: %w",
+		fmt.Errorf("%w: table %q, constraint %q", schemadiff.ErrDesiredConstraintMerged, "t", "c2"))
+	tests := []struct {
+		name string
+		err  error
+		want verdict.Refusal
+	}{
+		{"a constraint declared twice", merged, verdict.ByDesign(verdict.ReasonUnsupportedStatement)},
+		{"a partition of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredPartitionOf), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
+		{"an inheritance child of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredInherits), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := desiredShapeRefusal(tt.err)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got)
+			got, ok = RowSecurityRefusal(tt.err)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
