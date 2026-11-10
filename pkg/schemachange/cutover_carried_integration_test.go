@@ -1,9 +1,11 @@
 package schemachange_test
 
 import (
+	"context"
 	"math"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,19 +25,24 @@ func (rewrite rewritingPosition) Confirmed() decode.LSN {
 	return math.MaxUint64
 }
 
-// A verified-shadow proof that names keys the pass could not judge proves
-// every key but those, and leaves them for the swap to compare under its
-// lock. This swap compares none, so the gate refuses the proof as
-// cutover-unverified (CO-1) and the source stays live. No catch-up runs
-// here, so the shadow never changes, and source row 7 is rewritten before
-// the pass and before each reread: the pass, allowed to leave one key,
-// mints a proof naming it.
-func TestGateCutoverRefusesAProofThatLeavesKeysForTheSwap(t *testing.T) {
-	f := newReconcileFixture(t, 300)
-	shadow := f.buildShadow(t)
+// carriedKey is the row the swaps below are left to compare.
+const carriedKey int64 = 7
+
+// leaveKeyForSwap copies the fixture's table into shadow and runs a live
+// pass that mints a proof leaving carriedKey for the swap. No catch-up
+// runs, so the shadow never changes, and the source row is rewritten
+// before the pass and before each reread: the pass, allowed to leave one
+// key, cannot judge it and names it in the proof. It returns the cutover
+// gate's proof and the amount the source now holds for the key, which the
+// shadow does not.
+func leaveKeyForSwap(t *testing.T, f reconcileFixture, shadow schemachange.BuiltShadow) (schemachange.CutoverReady, string) {
+	t.Helper()
 	copyAll(t, f, newCopier(t, f, shadow))
 	rewrite := func() {
-		_, err := f.pool.Exec(t.Context(), `UPDATE `+f.table.Qualified()+` SET amount = amount + 1 WHERE id = 7`)
+		_, err := f.pool.Exec(t.Context(), `
+			UPDATE `+f.table.Qualified()+`
+			SET amount = amount + 1
+			WHERE id = $1`, carriedKey)
 		require.NoError(t, err)
 	}
 	rewrite()
@@ -50,13 +57,88 @@ func TestGateCutoverRefusesAProofThatLeavesKeysForTheSwap(t *testing.T) {
 	require.NoError(t, err)
 	verified, minted := outcome.VerifiedShadow()
 	require.True(t, minted)
-	require.Equal(t, []int64{7}, verified.Carried(), "the proof leaves key 7 for the swap")
+	require.Equal(t, []int64{carriedKey}, verified.Carried(), "the proof leaves the key for the swap")
 
-	_, err = schemachange.GateCutover(t.Context(), f.pool, f.lock, shadow, verified, schemachange.Options{})
+	ready, err := schemachange.GateCutover(t.Context(), f.pool, f.lock, shadow, verified, schemachange.Options{})
+	require.NoError(t, err, "the gate accepts a proof that leaves keys; the swap compares them")
+
+	var onSource, onShadow string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT amount::text
+		FROM `+f.table.Qualified()+`
+		WHERE id = $1`, carriedKey).Scan(&onSource))
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT amount::text
+		FROM `+shadowName(f, shadow)+`
+		WHERE id = $1`, carriedKey).Scan(&onShadow))
+	require.NotEqual(t, onSource, onShadow, "the shadow holds an earlier amount for the key")
+	return ready, onSource
+}
+
+// shadowName is the shadow's schema-qualified, quoted name.
+func shadowName(f reconcileFixture, shadow schemachange.BuiltShadow) string {
+	return pgx.Identifier{f.table.Schema, shadow.ShadowTable()}.Sanitize()
+}
+
+// A proof that leaves a key for the swap is finished inside the swap
+// transaction: after the drain, under ACCESS EXCLUSIVE on both tables, the
+// swap reads the key on the source and on the shadow. The drain here
+// stands in for the catch-up's and applies the one change the stream would
+// carry, the source's latest amount for the key, so the two sides are
+// equal, the swap commits, and the live table holds that amount.
+func TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft(t *testing.T) {
+	f := newReconcileFixture(t, 300)
+	shadow := f.buildShadow(t)
+	ready, want := leaveKeyForSwap(t, f, shadow)
+	drain := func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE `+shadowName(f, shadow)+` AS held
+			SET amount = source.amount
+			FROM `+f.table.Qualified()+` AS source
+			WHERE source.id = held.id
+			  AND held.id = $1`, carriedKey)
+		return err
+	}
+
+	swapped, err := schemachange.Cutover(t.Context(), f.pool, f.lock, ready, drain, schemachange.CutoverOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, f.table.Table, swapped.Table())
+	var live bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT to_regclass($1)::oid = $2`, f.table.Qualified(), shadow.ShadowOID()).Scan(&live))
+	assert.True(t, live, "the shadow bears the source's name")
+	var got string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT amount::text
+		FROM `+f.table.Qualified()+`
+		WHERE id = $1`, carriedKey).Scan(&got))
+	assert.Equal(t, want, got, "the live table holds the source's latest amount for the key")
+}
+
+// With a drain that applies nothing, the key the pass left still differs
+// under the swap lock: the shadow would go live holding an amount the
+// source has since replaced. The swap is refused as
+// cutover-carried-diverged (CO-1), an invariant violation, and rolled
+// back: the source still bears its name and still holds its amount.
+func TestCutoverRefusesWhenAKeyThePassLeftStillDiffersAfterTheDrain(t *testing.T) {
+	f := newReconcileFixture(t, 300)
+	shadow := f.buildShadow(t)
+	ready, want := leaveKeyForSwap(t, f, shadow)
+	drain := func(context.Context, pgx.Tx) error { return nil }
+
+	_, err := schemachange.Cutover(t.Context(), f.pool, f.lock, ready, drain, schemachange.CutoverOptions{})
 	require.Error(t, err)
+
+	assert.Equal(t, schemachange.CauseCarriedDiverged, schemachange.RefusalCauseOf(err))
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
-	assert.Equal(t, schemachange.CauseCutoverUnverified, schemachange.RefusalCauseOf(err))
+	assert.ErrorIs(t, err, schemachange.ErrCutoverRolledBack, "a refused swap says the source is live")
 	var live bool
 	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT to_regclass($1)::oid = $2`, f.table.Qualified(), shadow.SourceOID()).Scan(&live))
-	assert.True(t, live, "a refused gate leaves the source live")
+	assert.True(t, live, "the source still bears its name")
+	var got string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT amount::text
+		FROM `+f.table.Qualified()+`
+		WHERE id = $1`, carriedKey).Scan(&got))
+	assert.Equal(t, want, got, "the source row is as it was")
 }

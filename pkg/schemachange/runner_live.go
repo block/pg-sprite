@@ -142,6 +142,12 @@ func (r *Runner) fillLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	verified, report, err := r.verifyWith(ctx, lock, target, *state, func(ctx context.Context, verifier *checksum.Verifier) (checksum.Outcome, error) {
 		live := r.opts.Live
 		live.Confirmed = cap.catchup
+		// INV: CO-1 — a key still changing when its chunk runs out of
+		// rereads is left for the run's swap, which compares it where it
+		// cannot change; the cap bounds what that reads under the lock.
+		if live.CarryKeys == 0 {
+			live.CarryKeys = checksum.MaxCarryKeys
+		}
 		// INV: CO-3 — the policy is stated: a difference the stream
 		// cannot explain within the settle wait stops the run, since the
 		// stream is the shadow's only other writer.

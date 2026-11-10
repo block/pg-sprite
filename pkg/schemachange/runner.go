@@ -47,8 +47,12 @@ type RunOptions struct {
 	// still carrying changes for. Its Confirmed source is the run's own
 	// catch-up and must be left nil. So must Flushes: the run's pass
 	// recopies nothing (a divergence aborts it), and the flush gate a
-	// repair needs is the run's own catch-up too. CarryKeys must be left
-	// zero: the run's swap compares no key the pass leaves it.
+	// repair needs is the run's own catch-up too. CarryKeys is the most
+	// keys the pass may leave for the run's swap, which compares each of
+	// them on both sides under its lock, after its drain; zero is
+	// checksum.MaxCarryKeys, and a smaller value shortens what the swap
+	// may read under ACCESS EXCLUSIVE at the cost of stopping, as
+	// *checksum.UnresolvedError, a pass that leaves more.
 	Live checksum.LiveOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
@@ -109,7 +113,8 @@ type RunOptions struct {
 // built and the source fenced or its slot made (ST-6). A copier refusal
 // wraps both ErrInvalidOptions and the copier's own sentinel. The
 // verifier's options are validated where they are consumed, by its
-// constructor.
+// constructor, except the cap on the keys a live pass may leave for the
+// swap, which the pass would otherwise refuse only after the whole copy.
 func (o RunOptions) validate() error {
 	if err := o.Shadow.validate(); err != nil {
 		return err
@@ -129,8 +134,8 @@ func (o RunOptions) validate() error {
 	if o.Live.Flushes != nil {
 		return fmt.Errorf("%w: the live verification pass holds the run's own catch-up's flushes; leave Live.Flushes nil", ErrInvalidOptions)
 	}
-	if o.Live.CarryKeys != 0 {
-		return fmt.Errorf("%w: the run's swap compares no key the live verification pass leaves it; leave Live.CarryKeys zero", ErrInvalidOptions)
+	if o.Live.CarryKeys < 0 || o.Live.CarryKeys > checksum.MaxCarryKeys {
+		return fmt.Errorf("%w: live carry keys %d is outside 0 to %d; use zero for the default", ErrInvalidOptions, o.Live.CarryKeys, checksum.MaxCarryKeys)
 	}
 	return nil
 }

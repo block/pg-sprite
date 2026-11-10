@@ -100,8 +100,9 @@ const (
 	CauseStatementNewSequence RefusalCause = "shadow-statement-new-sequence"
 	// CauseCutoverUnverified means the cutover gate was handed no usable
 	// data-equality proof (CO-1): the built-shadow proof or the verified
-	// shadow proof is empty, the two name different relations, or the
-	// verified watermark does not cover the whole key space.
+	// shadow proof is empty, the two name different relations, the
+	// verified watermark does not cover the whole key space, or the proof
+	// leaves more keys for the swap than a pass may leave.
 	CauseCutoverUnverified RefusalCause = "cutover-unverified"
 	// CauseCutoverUndrained means the cutover was handed a verified shadow
 	// proof a live pass minted — the shadow equal to the source as of a
@@ -122,6 +123,13 @@ const (
 	// copy is left to change the outcome, so the schema change cannot
 	// converge and the swap is rolled back.
 	CauseDrainDeferred RefusalCause = "cutover-drain-deferred"
+	// CauseCarriedDiverged means a key the live pass left for the swap to
+	// compare, because it changed at every reread, held a different row on
+	// the source than on the shadow under the swap lock, after the drain
+	// had applied every change the stream carried (CO-1). Nothing was left
+	// to bring the shadow level, so the shadow does not hold what the
+	// source holds and the swap is rolled back.
+	CauseCarriedDiverged RefusalCause = "cutover-carried-diverged"
 	// CauseRelationReplaced means the source or the shadow under its name
 	// is no longer the relation the build proved (ST-6): the OID moved, so
 	// the proof describes a table that no longer exists.
@@ -272,6 +280,7 @@ func RefusalCauses() []RefusalCause {
 		CauseCutoverUndrained,
 		CauseCutoverUnfenced,
 		CauseDrainDeferred,
+		CauseCarriedDiverged,
 		CauseRelationReplaced,
 		CauseSchemaDrift,
 		CauseFidelityDrift,
@@ -318,7 +327,7 @@ func (c RefusalCause) Invariant() string {
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
 		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
 		return "ST-5"
-	case CauseCutoverUnverified, CauseCutoverUndrained, CauseCutoverUnfenced:
+	case CauseCutoverUnverified, CauseCutoverUndrained, CauseCutoverUnfenced, CauseCarriedDiverged:
 		return "CO-1"
 	case CauseDrainDeferred:
 		return "CO-6"
@@ -344,7 +353,7 @@ func (c RefusalCause) Invariant() string {
 // cannot fill, a new identity or sequence the swap cannot carry — is a capability
 // boundary. Every other cause is an invariant violation: an
 // input the caller handed in that cannot have come from this engine, or a
-// write of the engine's own that the catalog does not show; nothing on the
+// write of the engine's own that the catalog or the shadow does not show; nothing on the
 // server changes that, so the importer reports it. The class is a triage
 // decision; the cause's row in the document decides what the importer does
 // next — re-acquire, re-run preflight, drop and rebuild, or hand the
@@ -364,7 +373,7 @@ func (c RefusalCause) Class() refusal.Class {
 	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewColumn, CauseStatementNewSequence:
 		return refusal.ClassCapabilityBoundary
 	case CauseLockUnproven, CauseProofEmpty, CauseStatementTarget, CauseGrantsDiffer,
-		CauseCutoverUnverified, CauseCutoverUndrained, CauseSwapMismatch, CauseResumeTerminal,
+		CauseCutoverUnverified, CauseCutoverUndrained, CauseCarriedDiverged, CauseSwapMismatch, CauseResumeTerminal,
 		CauseResumeCutover, CauseResumeRowMismatch, CauseResumeRowDecoding,
 		CauseCopyShadowMismatch, CauseCopyFrontierBroken, CauseCopyChunksInFlight,
 		CauseCopyChunkUnknown:

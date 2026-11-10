@@ -13,7 +13,8 @@ import (
 
 // swapOnce is one attempt at the swap transaction: lock, confirm the write
 // fence when the caller requires it, drain, re-check the shape, re-gate,
-// rename, hand off, recheck, commit. Any error leaves the transaction
+// compare the keys a live pass left for the swap, rename, hand off,
+// recheck, commit. Any error leaves the transaction
 // rolled back on the server unless the client stopped hearing from it,
 // which the caller resolves by following the backend returned here to its
 // exit and then inspecting the catalog. The backend is zero when the
@@ -91,6 +92,13 @@ func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, rea
 	// so when it passes the two agree, and the lock makes this one final.
 	fresh, err := gateCutoverTx(ctx, tx, built, ready.verified)
 	if err != nil {
+		return SwappedTable{}, err
+	}
+	// The keys a live pass could not judge are compared here, where
+	// nothing can change them: after the drain, on the relations the
+	// checklist just confirmed, before any name moves.
+	// INV: CO-1
+	if err := compareCarried(ctx, tx, fresh); err != nil {
 		return SwappedTable{}, err
 	}
 	if err := renameForSwap(ctx, tx, fresh); err != nil {
