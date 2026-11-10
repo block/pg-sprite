@@ -29,7 +29,9 @@ refused form would take, what an operator who accepts a maintenance window can d
 - [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough)
 - [Deliberately operator-owned](#deliberately-operator-owned)
 
-A ✅ marks an implemented capability; check the front-door columns for CLI access.
+A ✅ marks an implemented capability; the tables below do not show which front door
+admits it — `pg-sprite capabilities` does (its `FRONT DOORS` column, or `front_doors` in
+`--json`).
 The atomic RLS executor is available through `migrate --desired` and the Go API.
 For an existing table, `diff` shows RLS changes for review without emitting
 executable SQL; for a missing table, it previews the create with its RLS.
@@ -129,9 +131,9 @@ instead.
 
 The invariant: **every T2 row is a tracked roadmap item; T3 rows deliberately have
 none.** If a refusal message points at a "planned" capability, that plan exists —
-otherwise the change is out of scope by design, and this page — not the refusal text,
-which today is one undifferentiated unsupported-statement reason for everything outside
-the imperative front door — names the tool class that owns the job.
+otherwise the change is out of scope by design, and this page names the tool class that
+owns the job; the refusal itself carries the same answer as its `class` and `owner`
+([refusal-classes.md](refusal-classes.md)).
 
 ### The engine path
 
@@ -175,8 +177,8 @@ one, or rebuilt the table through copy-and-swap.
 
 Support differs by front door, so the matrix marks the exceptions:
 
-- **Imperative** (`migrate --alter`, `plan`, `lint`, `suggest`): takes one DDL statement,
-  classifies it, and executes the online form — rewriting a blocking statement into its
+- **Imperative** (`migrate --alter`, `migrate --dry-run`, `lint`, `suggest`): takes one DDL
+  statement, classifies it, and executes the online form — rewriting a blocking statement into its
   safer sequence where one exists. This door has the **broadest coverage**.
 - **Declarative** (`diff`, `pull`, desired files): compares a desired `CREATE TABLE`
   file against the live table. This door depends on the canonical table *model*, which
@@ -399,7 +401,7 @@ Three related jobs stay with humans on purpose:
   schema — an orchestrator, or an operator running `diff` per file — therefore owns the
   set of tables: decide how far the declared files are authoritative, enumerate the live
   tables, and treat each undeclared one as a destructive divergence to resolve rather than
-  as up to date. Declare it (`pull` or `export` writes the desired file) or drop it through
+  as up to date. Declare it (`pull` writes the desired file) or drop it through
   a reviewed process; whether the owner blocks on it or quarantines it first (`ALTER TABLE …
   SET SCHEMA` / `RENAME TO`) is the owner's policy, not pg-sprite's. A schema being
   onboarded is entirely undeclared tables, so declare the existing tables first (`pull`
@@ -451,7 +453,8 @@ Three related jobs stay with humans on purpose:
   the recovery handles, and what the rest license a human to do is
   [invalid-index-recovery.md](invalid-index-recovery.md).
 - **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
-  engine does not drive `REINDEX` at all (see matrix) — run `REINDEX ... CONCURRENTLY`
+  engine runs `REINDEX` only as an accepted blocking statement under `--accept-blocking`
+  (see matrix) — run `REINDEX ... CONCURRENTLY`
   directly; *deciding* when an index needs rebuilding is monitoring-and-operations territory. Automating it is
   considered but on hold for the same ownership reasons as above.
 

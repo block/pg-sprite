@@ -32,7 +32,7 @@ and every refusal carries a routing class (and an owner when there is no online-
 problem for the engine to solve); [docs/capabilities.md](docs/capabilities.md) names the tool class that
 owns each job.
 
-**Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
+**Status: Phases 1, 2.1–2.5, and 3, with copy-and-swap in preview.** The parse boundary, declarative diff,
 classifier, router seam, versioned dry-run plan report, offline linter, and
 advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` classifies and
 routes the statement, then executes the routed SQL — the planner's safer native sequence by
@@ -108,7 +108,8 @@ refusal — never a silently wrong or incomplete result:
   refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, but cannot be
   expressed in or exported to desired files, and `migrate` refuses
-  `ATTACH PARTITION` and `DETACH PARTITION`.
+  `ATTACH PARTITION` and `DETACH PARTITION` unless `--force` names the table
+  ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
 - **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
@@ -241,8 +242,10 @@ why the substituted sequence is safer — same end state, different locking
 the machine-readable shape is in
 [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
-**Refuse: no safe path exists, so nothing runs.** A rewrite the copy-and-swap
-backend does not carry yet (a volatile column default, for one) refuses; the
+**Refuse: no safe path exists, so nothing runs.** A statement no online
+sequence can be built from (the demo's `ADD COLUMN … UNIQUE`), or a rewrite
+the copy-and-swap backend does not carry yet (a volatile column default),
+refuses; the
 dry run exits 2 so CI can gate on it without parsing JSON (the full four-code ladder is under
 [Exit codes](#exit-codes)). A destructive change (`DROP COLUMN`) is refused
 the same way, exit 2 with reason `destructive-change`, until

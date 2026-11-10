@@ -189,7 +189,9 @@ direct or session-mode endpoint.
 - **Size the pooler for pg-sprite:** in session mode each pg-sprite connection holds a server
   connection for its whole life. A run needs its pool, the dedicated table lock session, the
   proof's spare connection, and (for copy-and-swap on a live table) replication connections,
-  which never go through a transaction-mode pooler.
+  which never go through a transaction-mode pooler, plus short-lived dedicated sessions for the
+  slot claim and for the drain during each swap attempt
+  ([what a live run holds open](schemabot-integration.md#what-a-live-run-holds-open)).
 - **Keep idle limits longer than the table lock keepalive.** The lock session confirms it still
   holds the lock every 10 seconds by default. A pooler or server idle timeout
   (`idle_session_timeout`, a pooler's own idle limit) shorter than that can end the session,
@@ -205,7 +207,8 @@ direct or session-mode endpoint.
   re-proven; they inherit the endpoint the first one proved.
 - **Dedicated sessions from `dbconn.ConnectSession`** are not proven. They are used for work
   that is not tied to one session the way a session-level lock is: a transaction-scoped
-  advisory lock on a slot name, and the identity check of a copy-and-swap connection.
+  advisory lock on a slot name, the identity check of a copy-and-swap connection, and the
+  cutover drain's WAL marker and slot reads.
 - **Replication connections** are not proven. They are opened from the same connection
   settings and must reach the same database; a transaction-mode pooler can't carry them.
 

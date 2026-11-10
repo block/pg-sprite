@@ -39,14 +39,14 @@ the phased build plan should be traceable back to one of these.
   lifecycle, the gates, the refusals), not its directory structure — the code follows whatever
   is idiomatic for a Postgres + logical-decoding tool.
 - **Operator mental-model parity with Spirit.** Teams that already operate Spirit for MySQL carry its operator model. This engine deliberately mirrors Spirit's *operator surface* — the same lifecycle
-  stages, the same verbs (dry-run, pause/resume, throttle, abort; deferred cutover is a later
-  mode), the same
+  stages, the same verbs (dry-run and status today; pause/resume, throttle, and abort are
+  planned, and deferred cutover is a later mode), the same
   refusal semantics, and the same status/observability shape — so an operator carries **one
   mental model across both engines**. Runbooks, incident response, and intuition transfer; the
   PostgreSQL-specific machinery (logical slots, `CONCURRENTLY`, `NOT VALID`) is encoded by the
   engine, not relearned by the operator. This parity is itself a reason to build rather than
   adopt a tool with a different operational shape (see
-  tool-pg_osc.md).
+  [vision.md § where the existing ecosystem stops](vision.md#where-the-existing-ecosystem-stops)).
 
 ## Correctness and safety
 
@@ -116,16 +116,17 @@ the phased build plan should be traceable back to one of these.
   transactionality, and failure modes, which is exactly why the engine (not the user) owns
   running it (see the
   [online DDL reference](postgres-online-ddl-reference.md)). Running a
-  statement exactly as submitted requires an explicit `--force`, gated by prominent DANGER/CAUTION
-  output, a typed acknowledgement (not a bare `-y`), and an audit log entry. Force is an escape
+  statement exactly as submitted requires an explicit `--force`, gated by a typed acknowledgement
+  naming the target table (not a bare `-y`), an unconditional audit log entry, and the verdict's
+  `forced` field. Force is an escape
   hatch, not a convenience (see
   [high-level-design's advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one)).
 - **One planner, pluggable execution backends — choose the right pattern per migration.** The
   shared front-end (parse → declarative diff when declarative → classify → route) decides *what* changes and *which strategy*
   fits; interchangeable executors decide *how*: native DDL, log-based copy-and-swap, and
   (later) expand/contract via pgroll for reversible breaking changes. We don't pick one pattern
-  globally — the planner routes each migration to the executor whose tradeoffs fit, behind a
-  single `Executor` interface (see
+  globally — the planner routes each schema change to the executor whose tradeoffs fit, behind a
+  single `Executor` interface (planned; see
   [low-level-design's architecture](low-level-design.md#architecture-decoupled-planner-router-and-executors)).
 
 ## Declarative, review-first workflow
@@ -145,14 +146,15 @@ the phased build plan should be traceable back to one of these.
 
 ## PostgreSQL / Aurora-specific
 
-- **Log-based CDC, not triggers — but cluster-dependently so.** The future copy-and-swap backend
+- **Log-based CDC, not triggers — but cluster-dependently so.** The copy-and-swap backend
   captures concurrent writes via
   **logical decoding** (a replication slot), which adds near-zero synchronous overhead to the
   source — the key differentiator versus trigger-based tools like pg_osc. v1 builds only the
-  logical-decoding path and refuses clusters without it
+  logical-decoding path and refuses clusters without it unless the operator blocks the table's
+  writes for the run instead (`--block-writes`, offline mode)
   ([D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput)); a trigger-based
-  implementation (survives failover, runs anywhere) is the documented, deferred alternative behind
-  the same seam, not a vestige — see the
+  implementation (survives failover, runs anywhere) is the documented, deferred alternative that
+  would sit behind a shared capture seam, not a vestige — see the
   [change-capture trade-off](change-capture-tradeoff.md). Note neither mechanism removes the
   mandatory checksum.
 - **Treat the replication slot as a managed, dangerous resource.** A durable, name-prefixed slot

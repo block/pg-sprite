@@ -47,21 +47,23 @@ class.
 
 **The class is a property of the typed cause where one exists, and of the refusal site only
 where none does.** Three reasons carry a second, typed discriminator beneath them —
-`unsupported-partitioned-parent` carries a `preflight.PartitionRefusalCause`, and
-`unsupported-statement` carries an `executor.CreateShapeCause` on the create path or one of a
-closed set of admission sentinel errors on the imperative path — and in each case the values
-of that discriminator span more than one class. A single site can therefore emit several
+`unsupported-partitioned-parent` carries a `preflight.PartitionRefusalCause`,
+`copy-and-swap-refused` carries a `preflight.CopySwapRefusalCause` or a
+`schemachange.RefusalCause`, and `unsupported-statement` carries an `executor.CreateShapeCause`
+on the create path or, on the imperative path, the statement's `statement.Kind` or one of a
+closed set of admission sentinel errors — and in each case the values of that discriminator
+span more than one class. A single site can therefore emit several
 classes (`admissionRefusalVerdict` in `pkg/migrate/verdicts.go` mints refusals for three
 sentinels across two classes), so keying on the site would leave the class ambiguous and let a
 completeness test pass with the wrong answer. Where a reason has no such discriminator, the
 site is the key. The same rule applies when a broad reason gains a new cause or site: the
 author classifies it explicitly; nothing is ever derived from the reason string.
 
-One site still covers several rows: the imperative front door refuses every statement kind it
-does not admit through a single catch-all in `pkg/migrate/verdicts.go` (`statement.KindOther`),
-which today cannot tell a backfill from a `GRANT`. Classifying that site means the parse
-boundary in `pkg/statement` distinguishes the kinds the rows below name, so that a `GRANT` is
-routed to provisioning and never to the data change runner.
+The imperative front door's gate keys every statement it does not admit on the kind the parse
+boundary in `pkg/statement` assigns (`gateRefusal` in `pkg/migrate/refusal_registry.go`), so a
+`GRANT` (`statement.KindProvisioning`) is routed to provisioning and never to the data change
+runner (`statement.KindDataChange`). A statement the parse boundary does not name is
+`statement.KindOther`, the one catch-all left.
 
 ### Reasons keyed on the site
 
@@ -71,6 +73,7 @@ routed to provisioning and never to the data change runner.
 | `unsupported-statement` | Grants, roles, row-level-security policies, publications, subscriptions | `no-online-safety-problem` | `provisioning` |
 | `unsupported-statement` | `DROP TABLE`, views, functions, triggers, extensions, standalone sequences, and other catalog work the matrix marks ⚪ | `no-online-safety-problem` | `direct-operator` |
 | `unsupported-statement` | Imperative `CREATE TABLE`; the detail already points to `diff` | `no-online-safety-problem` | `declarative-front-door` |
+| `unsupported-statement` | A statement kind the parse boundary does not name (`statement.KindOther`): the engine may learn to route it, and no other owner is named to run it | `capability-boundary` | — |
 | `unsupported-statement` | An admitted `ALTER TABLE` operation for which the planner has no route (`routeRefusalVerdict`) | `capability-boundary` | — |
 | `unsupported-statement` | Imperative admission sentinel `ErrUnsupportedSequenceStep` or `ErrUnnamedIndex`; create admission sentinel `ErrUnsupportedCreateStep` | `capability-boundary` | — |
 | `unsupported-statement` | Imperative or create admission sentinel `ErrIfNotExistsUnsupported`; create admission sentinel `ErrDuplicateCreateName` (the sentinel forms of the `if-not-exists` and `duplicate-name` causes below) | `by-design` | — |
@@ -473,10 +476,14 @@ words rather than defining its own:
 | T1 — supported today | No capability refusal; a run may still be `environmental` |
 | — | `invariant-violation` has no tier: it reports a defect in pg-sprite, not a property of the operation |
 
+The ❌ rows for index maintenance (`drop-index`, `reindex`) span two classes: the plain form
+refuses as `by-design`, while the concurrent form, which is the direct statement the operator
+runs, refuses as `no-online-safety-problem` with `owner: direct-operator`. Both carry the
+row's `index-statement` reason.
+
 The matrix, its contract, and this document define one vocabulary and must change together.
 The matrix describes the operation independent of a run; the verdict reports how one run met
-that contract. The cause tables above are the decision; the matrix mark for the `NOT VALID` foreign key
-on a partitioned parent was corrected to agree with them.
+that contract. Where the two disagree, the cause tables above are the decision.
 
 ## Compatibility and rollout
 
