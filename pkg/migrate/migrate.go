@@ -269,6 +269,9 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	if st.Kind() == statement.KindRenameIndex {
 		return renameIndex(ctx, pool, st, opts, logger)
 	}
+	if st.Kind() == statement.KindAddEnumValue {
+		return addEnumValue(ctx, pool, st, opts, logger)
+	}
 	st, err := resolveTarget(ctx, pool, st, logger)
 	if err != nil {
 		return verdict.Verdict{}, err

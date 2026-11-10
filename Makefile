@@ -70,7 +70,7 @@ test-db-rest:
 # run it beside test-db, and internal/testutil's own-server completeness test
 # holds the list here to the helper's callers.
 test-own-server:
-	PG_DSN= $(GO) test $(RACE) -count=1 -run '^(TestServerMajorMatchesRequestedVersion|TestCheckPrivilegesReplicationAccess|TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC|TestBuildShadowKeepsTheSourceTablespace|TestIntrospectReplicaIdentityUnderAPublicationForAllTables)$$' ./internal/testutil ./pkg/preflight ./pkg/schemachange ./pkg/schemadiff
+	PG_DSN= $(GO) test $(RACE) -count=1 -run '^(TestServerMajorMatchesRequestedVersion|TestCheckPrivilegesReplicationAccess|TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC|TestBuildShadowKeepsTheSourceTablespace|TestIntrospectReplicaIdentityUnderAPublicationForAllTables|TestVerifySessionSettingsReadsTheBoundsWhileTheCatalogIsLocked)$$' ./internal/testutil ./pkg/dbconn ./pkg/preflight ./pkg/schemachange ./pkg/schemadiff
 
 # Full suite against every supported PostgreSQL major (14 -> 18) via
 # testcontainers — the local mirror of the CI matrix.

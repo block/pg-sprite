@@ -26,6 +26,8 @@ func (s *Stream) Confirmed() LSN { return s.confirmed }
 // could not be told ends the stream, since the connection can no longer
 // carry a report; the record of what was confirmed is left where it was.
 func (s *Stream) Confirm(ctx context.Context, lsn LSN) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.failed != nil {
 		return s.failed
 	}
@@ -55,7 +57,9 @@ func (s *Stream) Confirm(ctx context.Context, lsn LSN) error {
 // The write is not bounded by ctx: the library ignores it, and the message
 // is one the socket's send buffer takes whole unless the server has stopped
 // reading. The error names the report, not the caller's operation, since a
-// Confirm, a keepalive reply, and a wait that ran out all send the same one.
+// Confirm, a keepalive reply, a wait that ran out, and the heartbeat all
+// send the same one. The caller holds mu; the report's time is recorded for
+// the heartbeat.
 func (s *Stream) sendStatus(ctx context.Context, confirmed LSN) error {
 	err := pglogrepl.SendStandbyStatusUpdate(ctx, s.conn, pglogrepl.StandbyStatusUpdate{
 		WALWritePosition: pglogrepl.LSN(confirmed),
@@ -65,5 +69,6 @@ func (s *Stream) sendStatus(ctx context.Context, confirmed LSN) error {
 	if err != nil {
 		return fmt.Errorf("report %s to slot %s: %w", confirmed, s.slotName, err)
 	}
+	s.lastReport = s.clock.Now()
 	return nil
 }

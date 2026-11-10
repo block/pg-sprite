@@ -66,6 +66,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	if v.SQLState != "" {
 		fmt.Fprintf(&b, "\n  %s    %s (SQLSTATE %s)", pal.bold("server:"), v.ServerError, v.SQLState)
 	}
+	if len(v.ExtensionSchemas) > 0 {
+		fmt.Fprintf(&b, "\n  %s schemas searched after the table's schema and public: %s", pal.bold("extension:"), strings.Join(v.ExtensionSchemas, ", "))
+	}
 	if len(v.ExecutedSQL) > 0 {
 		if v.Outcome == verdict.OutcomeFailed {
 			fmt.Fprintf(&b, "\n  %s", pal.bold("committed before the failure (their state remains):"))

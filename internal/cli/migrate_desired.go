@@ -50,8 +50,8 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
-		if err := refuseExtensionSchemasWithRowSecurity(c.ExtensionSchema); err != nil {
-			return err
+		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
+			return fmt.Errorf("--extension-schema: %w", err)
 		}
 		return c.runDesiredRowSecurity(ctx, out, rowSecurity)
 	}

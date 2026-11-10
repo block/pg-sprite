@@ -136,9 +136,10 @@ func (c *DiffCmd) previewCreateWithRowSecurity(ctx context.Context, out io.Write
 		// The script runs in one transaction, as migrate --desired does, so
 		// running it never leaves the table visible without its row security.
 		// It sets the search_path each part of that transaction runs under:
-		// the table definition's statements under the schema and then
-		// public, so an unqualified type or default resolves as it did in
-		// the preview, and the row security under pg_catalog alone (RS-4).
+		// the table definition's statements under the schema, public, and
+		// the extension schemas, so an unqualified type or default resolves
+		// as it did in the preview, and the row security under pg_catalog
+		// alone (RS-4).
 		// The create runs the definition's statements first, one step each.
 		tableSteps := len(desired.TableDefinition().Statements())
 		if tableSteps > len(preview.Statements) {
@@ -147,7 +148,7 @@ func (c *DiffCmd) previewCreateWithRowSecurity(ctx context.Context, out io.Write
 		}
 		header := sqlDiagnosticComment(fmt.Sprintf("%s.%s does not exist; pg-sprite migrate --desired creates it with its row security in one transaction",
 			preview.Schema, preview.Table))
-		lines := []string{header, "BEGIN;", dbconn.LocalSearchPath(preview.Schema, "public") + ";"}
+		lines := []string{header, "BEGIN;", dbconn.LocalSearchPath(executor.AttemptSearchPath(preview.Schema, desired.ExtensionSchemas())...) + ";"}
 		for i, sql := range preview.Statements {
 			if i == tableSteps {
 				lines = append(lines, dbconn.LocalSearchPath("pg_catalog")+";")
