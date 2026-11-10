@@ -291,11 +291,13 @@ outcome; they do not assume every unsuccessful change rolls back completely.
   only. Supabase installs extensions such as `citext`, `uuid-ossp`, and
   `pg_trgm` in the `extensions` schema, so either qualify them
   (`extensions.citext`) or pass `--extension-schema extensions` to `diff` and
-  `migrate --desired` (Go: `DesiredSchema.WithExtensionSchemas`). The plan
-  still names each such object qualified. In policy expressions, qualify
-  external types and functions even in `public`, such as `public.doc_status`;
-  the policy workspace does not search `public`, and a file that declares row
-  security does not accept `--extension-schema`
+  `migrate --desired` (Go: `DesiredSchema.WithExtensionSchemas`, or
+  `DesiredWithRowSecurity.WithExtensionSchemas` for a file that declares row
+  security). The plan still names each such object qualified. The flag
+  applies to the table definition only. In policy expressions, qualify
+  external types and functions even in `public` or `extensions`, such as
+  `public.doc_status` or `extensions.citext`; the policy workspace searches
+  neither
 - Desired schema files plan foreign keys but do not apply them, and refuse
   a reference to another schema such as `auth.users`. Use the supported
   statement workflow where available; see [capabilities.md](capabilities.md)

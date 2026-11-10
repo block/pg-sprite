@@ -86,6 +86,18 @@ var noRewriteCases = map[string][]noRewriteCase{
 			statement: "ALTER INDEX %[1]s.t_email_idx RENAME TO t_contact_email_idx",
 		},
 	},
+	"alter-type-add-value": {
+		{
+			name: "add a value between two labels",
+			setup: []string{
+				"CREATE TYPE %[1]s.mood AS ENUM ('happy', 'sad')",
+				"CREATE TABLE %[1]s.t (id int PRIMARY KEY, mood %[1]s.mood NOT NULL)",
+				"INSERT INTO %[1]s.t SELECT g, CASE WHEN mod(g, 2) = 0 THEN 'happy' ELSE 'sad' END::%[1]s.mood FROM generate_series(1, 100) g",
+				"CREATE INDEX t_mood_idx ON %[1]s.t (mood)",
+			},
+			statement: "ALTER TYPE %[1]s.mood ADD VALUE 'calm' BEFORE 'sad'",
+		},
+	},
 	"alter-column-type-binary-coercible-proven-against-live-column-facts": {
 		{name: "widen varchar", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE varchar(100)"},
 		{name: "varchar to text", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE text"},

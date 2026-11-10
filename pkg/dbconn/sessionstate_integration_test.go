@@ -29,8 +29,8 @@ func TestPoolCarriesItsSessionTimeouts(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	assert.Equal(t, int64(1500), sessionSetting(t, pool, "lock_timeout"))
-	assert.Equal(t, int64(7000), sessionSetting(t, pool, "statement_timeout"))
+	assert.Equal(t, "1500ms", sessionSetting(t, pool, "lock_timeout"))
+	assert.Equal(t, "7s", sessionSetting(t, pool, "statement_timeout"))
 }
 
 // A transaction-mode pooler gives a client no stable server session, so a
@@ -136,7 +136,7 @@ func TestNewPoolAcceptsSessionPooling(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	assert.Equal(t, int64(2000), sessionSetting(t, pool, "lock_timeout"))
+	assert.Equal(t, "2s", sessionSetting(t, pool, "lock_timeout"))
 }
 
 // A timeout below one millisecond is refused before any connection is made,
@@ -158,15 +158,16 @@ func TestSubMillisecondTimeoutNeverYieldsAnUnboundedSession(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url, LockTimeout: time.Millisecond})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	assert.Equal(t, int64(1), sessionSetting(t, pool, "lock_timeout"))
+	assert.Equal(t, "1ms", sessionSetting(t, pool, "lock_timeout"))
 }
 
-// sessionSetting reads a timeout the server actually holds, in milliseconds
-// — the value the engine's bounds really have, not the one it asked for.
-func sessionSetting(t *testing.T, pool *pgxpool.Pool, name string) int64 {
+// sessionSetting reads a timeout the server actually holds, as SHOW renders
+// it — the value the engine's bounds really have, not the one it asked for.
+// SHOW reads it without a catalog lookup, so the read cannot wait on a
+// catalog lock under a bound as small as 1ms.
+func sessionSetting(t *testing.T, pool *pgxpool.Pool, name string) string {
 	t.Helper()
-	var ms int64
-	require.NoError(t, pool.QueryRow(t.Context(),
-		"SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = $1", name).Scan(&ms))
-	return ms
+	var shown string
+	require.NoError(t, pool.QueryRow(t.Context(), "SHOW "+name).Scan(&shown))
+	return shown
 }

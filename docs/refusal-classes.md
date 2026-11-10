@@ -353,7 +353,7 @@ For example, an `UPDATE` backfill changes only by additive fields:
   "outcome": "refused",
   "reason": "unsupported-statement",
   "statement": "UPDATE accounts SET normalized_name = lower(name)",
-  "detail": "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
+  "detail": "only ALTER TABLE, CREATE INDEX, ALTER INDEX ... RENAME TO, and ALTER TYPE ... ADD VALUE statements are supported by the imperative front door"
 }
 ```
 
@@ -364,7 +364,7 @@ For example, an `UPDATE` backfill changes only by additive fields:
   "class": "no-online-safety-problem",
   "owner": "data-change-runner",
   "statement": "UPDATE accounts SET normalized_name = lower(name)",
-  "detail": "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
+  "detail": "only ALTER TABLE, CREATE INDEX, ALTER INDEX ... RENAME TO, and ALTER TYPE ... ADD VALUE statements are supported by the imperative front door"
 }
 ```
 

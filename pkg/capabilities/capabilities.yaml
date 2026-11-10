@@ -492,7 +492,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "A desired file resolves names against the target schema and `public` only, so an extension installed elsewhere is named qualified (`extensions.citext`) unless `--extension-schema` (Go: `DesiredSchema.WithExtensionSchemas`) names its schema. Those schemas are searched after the target schema and `public` when the scratch build and the create path run the file, and never shadow a name either one defines. The model is introspected without them, so each such object prints qualified on both sides, and every planned statement on an existing table names the object it resolved to. A table that does not exist yet is created from the file's own statements under the same search path; the plan report lists the schemas in `extension_schemas`, its fingerprint covers them, and `diff --sql` sets that search path before the create. Opt-in, because with more schemas searched an unqualified function call can resolve to a different overload. Policy expressions in a row-security file still resolve nothing, and `--extension-schema` is refused for one"
+    reason_notes: "A desired file resolves names against the target schema and `public` only, so an extension installed elsewhere is named qualified (`extensions.citext`) unless `--extension-schema` (Go: `DesiredSchema.WithExtensionSchemas`) names its schema. Those schemas are searched after the target schema and `public` when the scratch build and the create path run the file, and never shadow a name either one defines. The model is introspected without them, so each such object prints qualified on both sides, and every planned statement on an existing table names the object it resolved to. A table that does not exist yet is created from the file's own statements under the same search path; the plan report lists the schemas in `extension_schemas`, its fingerprint covers them, and `diff --sql` sets that search path before the create. Opt-in, because with more schemas searched an unqualified function call can resolve to a different overload. In a row-security file the schemas apply to the table definition only (Go: `DesiredWithRowSecurity.WithExtensionSchemas`), and a missing table's create preview lists them in `extension_schemas`; policy expressions still resolve nothing but the table and the built-ins, so they name every such object qualified"
   - id: enum-typed-columns-on-plain-tables
     area: "types_and_non_table_objects"
     operation: "Enum-typed columns on plain tables"
@@ -508,15 +508,14 @@ rows:
   - id: alter-type-add-value
     area: "types_and_non_table_objects"
     operation: "`ALTER TYPE ... ADD VALUE`"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
     online_safety_problem: true
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: unsupported-statement
-    reason_notes: "Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it"
+      migrate: supported
+      diff: not_applicable
+    reason_notes: "Metadata-only: the statement writes one `pg_enum` row under a lock on the type alone, so no table that uses the type is locked, scanned, or rewritten, and reads and writes on those tables carry on while it runs. It waits only for another session altering the same type, under the brief budgets with lock-timeout retry. `BEFORE`, `AFTER`, and `IF NOT EXISTS` run as written; a position next to the empty label is refused as `unsupported-statement`, since the parse tree cannot carry it. `migrate` resolves the type on the session `search_path`, checks that it is an enum, that the role has `USAGE` on a schema the name spells, and that the role is a member of the type's owning role (else `insufficient-privileges`), pins the attempt's `search_path` to the type's schema, and confirms before the commit that every label the transaction wrote belongs to that type, or, when `IF NOT EXISTS` wrote nothing, that the name still resolves to it, since `ALTER TYPE ... RENAME` does not wait for the lock and another session can move the name meanwhile (else the permanent `enum-type-drift` code, nothing added). Sessions can use the new value once it commits. `--force`, `--allow-destructive`, and the copy-and-swap acknowledgements do not apply. A desired file does not model enum types"
   - id: enum-value-rename-removal
     area: "types_and_non_table_objects"
     operation: "Enum value rename / removal"
@@ -528,7 +527,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since it takes only `ALTER TABLE` and `CREATE INDEX`, and `DROP VALUE` does not parse"
+    reason_notes: "PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since the only `ALTER TYPE` form it takes is `ADD VALUE`, and `DROP VALUE` does not parse"
   - id: enum-domain-type-creation-and-drop
     area: "types_and_non_table_objects"
     operation: "Enum/domain type creation and drop"

@@ -413,6 +413,20 @@ func TestStringExecuted(t *testing.T) {
 	assert.Contains(t, s, "ALTER TABLE t ADD COLUMN x int")
 }
 
+// A table created under extension schemas names them beside the statements
+// it ran, since those statements resolved names in them.
+func TestStringNamesTheExtensionSchemasACreateRanUnder(t *testing.T) {
+	s := Verdict{
+		Outcome:          OutcomeExecuted,
+		Table:            "app.accounts",
+		TableCreated:     true,
+		ExtensionSchemas: []string{"extensions", "contrib"},
+		ExecutedSQL:      []string{"CREATE TABLE app.accounts (id int PRIMARY KEY, email citext NOT NULL)"},
+	}.String()
+	assert.Contains(t, s, "\n  extension: schemas searched after the table's schema and public: extensions, contrib\n  executed as:")
+	assert.NotContains(t, Verdict{Outcome: OutcomeExecuted}.String(), "extension:")
+}
+
 func TestStringRefusedIncludesReasonAndIdiom(t *testing.T) {
 	s := Verdict{
 		Outcome:    OutcomeRefused,
