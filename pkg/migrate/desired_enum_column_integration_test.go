@@ -1,6 +1,7 @@
 package migrate_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -84,6 +85,42 @@ func TestRunDesiredAddsAnEnumColumnWithADefault(t *testing.T) {
 	// The test session's search_path omits the fixture schema, so
 	// format_type qualifies the name: the column is bound to that schema's enum.
 	assert.Equal(t, schema+".account_state", state)
+}
+
+// A desired file can name an enum that lives in public, not in the table's
+// schema: the scratch build and introspection both resolve the bare name
+// through public, so the column binds to public's enum and the rerun is
+// empty. The enum's name carries the fixture schema's so concurrent runs on
+// a shared server do not collide in public.
+func TestRunDesiredAddsAColumnOfAnEnumInPublic(t *testing.T) {
+	pool := enumPool(t)
+	schema := enumDesiredFixture(t, pool, `
+		CREATE TABLE %s.accounts (
+			id bigint PRIMARY KEY
+		)`)
+	enum := schema + "_tier"
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE public.%s AS ENUM ('basic', 'premium')`, enum))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if _, err := pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(`DROP TYPE IF EXISTS public.%s`, enum)); err != nil {
+			t.Logf("drop public enum %s: %v", enum, err)
+		}
+	})
+
+	convergeEnumDesired(t, pool, schema, fmt.Sprintf(`
+		CREATE TABLE accounts (
+			id   bigint PRIMARY KEY,
+			tier %[1]s NOT NULL DEFAULT 'basic'
+		);`, enum),
+		`ALTER TABLE %s.accounts ADD COLUMN tier `+enum+` DEFAULT ('basic'::`+enum+`) NOT NULL`)
+
+	var typeSchema string
+	require.NoError(t, pool.QueryRow(t.Context(), fmt.Sprintf(`
+		SELECT n.nspname FROM pg_attribute a
+		JOIN pg_type ty ON ty.oid = a.atttypid
+		JOIN pg_namespace n ON n.oid = ty.typnamespace
+		WHERE a.attrelid = '%s.accounts'::regclass AND a.attname = 'tier'`, schema)).Scan(&typeSchema))
+	assert.Equal(t, "public", typeSchema, "the column is bound to the enum in public")
 }
 
 // An index on an enum column is planned like any other column index.
