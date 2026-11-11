@@ -282,6 +282,9 @@ go install github.com/block/pg-sprite/cmd/pg-sprite@latest
 
 ## Commands
 
+[docs/cli.md](docs/cli.md) walks through the commands task by task, with
+captured output.
+
 Half the CLI works offline on DDL text alone; the other half connects to a
 live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
 and `statement_timeout`; a `search_path` that lists `pg_catalog` after a user
