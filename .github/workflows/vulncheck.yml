@@ -1,0 +1,38 @@
+# Kept out of ci.yml, and so out of the all-green rollup, deliberately. This
+# check fails for a reason that has nothing to do with the diff in front of
+# it: the advisory database moves on its own, so a dependency graph that
+# scanned clean yesterday goes red today with no commit in between. Folding
+# that into all-green would make a red required check stop meaning "this
+# change has a problem".
+name: Vulnerability Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          # The directive is also the standard library the scan judges: a
+          # finding in the standard library is fixed by raising it.
+          go-version-file: go.mod
+          # setup-go's cache key is shared with every job in ci.yml. The scan
+          # compiles no tests, so a cache saved from here would be the thinnest
+          # one any of them could restore.
+          cache: false
+      - run: make check-vulnerabilities
