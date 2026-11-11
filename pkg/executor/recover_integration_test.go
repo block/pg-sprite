@@ -83,7 +83,10 @@ func startBlockedBuild(t *testing.T, blockerPool, buildPool *pgxpool.Pool, schem
 	t.Cleanup(func() {
 		cancelBuild()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Logf("the cancelled build ended with: %v", err)
+			}
 		case <-time.After(time.Minute):
 			t.Error("the cancelled build did not return")
 		}

@@ -175,8 +175,7 @@ func admissionSentinels() []error {
 // admissionSentinels(), and for a *SequenceStepError wrapper — execution
 // started, which is never an admission refusal.
 func admissionRefusal(err error) (verdict.Refusal, bool) {
-	var stepErr *executor.SequenceStepError
-	if errors.As(err, &stepErr) {
+	if _, ok := errors.AsType[*executor.SequenceStepError](err); ok {
 		return verdict.Refusal{}, false
 	}
 	if !isInSentinelSet(err, admissionSentinels()) {

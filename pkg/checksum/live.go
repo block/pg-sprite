@@ -404,8 +404,7 @@ type settledChunks struct {
 // says nothing about the data is an error here.
 func (v *Verifier) settleInto(ctx context.Context, pool *pgxpool.Pool, stmts statements, prior observation, live LiveOptions, into *settledChunks) error {
 	settled, err := v.settle(ctx, pool, stmts, prior, 0, live)
-	var unresolved *UnresolvedError
-	if errors.As(err, &unresolved) {
+	if unresolved, ok := errors.AsType[*UnresolvedError](err); ok {
 		into.unsettled++
 		if into.first == nil {
 			into.first = unresolved

@@ -139,8 +139,7 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, st statement.St
 		limit = preflight.NoSizeLimit
 	}
 	pt, err := preflight.CheckTable(ctx, pool, facts.Schema, facts.Table, limit)
-	var sizeErr *preflight.SizeError
-	if errors.As(err, &sizeErr) {
+	if sizeErr, ok := errors.AsType[*preflight.SizeError](err); ok {
 		v := sizeGuardVerdict(st, sizeErr, false)
 		v.Table = table
 		return v, nil
@@ -153,8 +152,7 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, st statement.St
 		return verdict.Verdict{}, err
 	}
 	_, err = preflight.CheckPrivileges(ctx, pool, facts.Schema, facts.Table, preflight.Requirement{Tier: tier})
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		v := privilegeVerdict(st, privErr, false)
 		v.Table = table
 		return v, nil

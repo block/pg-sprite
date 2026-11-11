@@ -433,8 +433,7 @@ func corroborateValidateCancel(ctx context.Context, err error, b ValidateBudget,
 	// INV: LK-4 — a COMMIT that ended with the caller's context may have
 	// landed, so it stays an unknown outcome rather than a cancellation the
 	// client can call clean.
-	var commitUnknown *CommitOutcomeUnknownError
-	if errors.As(err, &commitUnknown) {
+	if _, ok := errors.AsType[*CommitOutcomeUnknownError](err); ok {
 		return err
 	}
 	var budgetErr *BudgetError
