@@ -513,8 +513,7 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		limit = preflight.NoSizeLimit
 	}
 	pt, err := preflight.CheckTable(ctx, pool, st.Schema(), st.Table(), limit)
-	var sizeErr *preflight.SizeError
-	if errors.As(err, &sizeErr) {
+	if sizeErr, ok := errors.AsType[*preflight.SizeError](err); ok {
 		return sizeGuardVerdict(st, sizeErr, forced), nil
 	}
 	if err != nil {
@@ -525,8 +524,7 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		return verdict.Verdict{}, err
 	}
 	if err := preflight.CheckPartitionSupport(pt, serverMajor, execSQL); err != nil {
-		var partitionErr *preflight.UnsupportedPartitionedParentError
-		if errors.As(err, &partitionErr) {
+		if partitionErr, ok := errors.AsType[*preflight.UnsupportedPartitionedParentError](err); ok {
 			return partitionedParentVerdict(st, partitionErr, forced)
 		}
 		return verdict.Verdict{}, err
@@ -537,8 +535,7 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	}
 	priv, err := preflight.CheckPrivileges(ctx, pool, st.Schema(), st.Table(),
 		preflight.Requirement{Tier: tier})
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		return privilegeVerdict(st, privErr, forced), nil
 	}
 	if err != nil {

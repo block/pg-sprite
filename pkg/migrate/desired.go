@@ -388,8 +388,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		return stopBefore(fmt.Errorf("verify %s.%s is absent: %w", report.Schema, report.Table, err))
 	}
 	role, err := preflight.CheckCreatePrivilegesAs(ctx, pool, req.Schema, opts.CreateOwner)
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		return result.refused(insufficientPrivilegesRefusal(), privErr.Error()+"; nothing was executed"), nil
 	}
 	if errors.Is(err, preflight.ErrCreateOwnerNotFound) {
@@ -479,8 +478,7 @@ func createFailureDetail(err error) string {
 		return "the step's COMMIT did not return success, so whether it committed cannot be established from the client; " +
 			"inspect the catalog for what the step creates before retrying; Code names the outcome"
 	}
-	var mismatch *executor.CreateNameMismatchError
-	if errors.As(err, &mismatch) {
+	if mismatch, ok := errors.AsType[*executor.CreateNameMismatchError](err); ok {
 		return fmt.Sprintf("the step's CREATE TABLE committed and was not rolled back: %v; Code names the outcome", mismatch)
 	}
 	if errors.Is(err, executor.ErrCreateNamesUnverified) {

@@ -103,8 +103,8 @@ the tool itself (see below):
 | `ADD UNIQUE` (direct) | 2 steps: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT … USING INDEX` (this page's example) |
 | `ADD PRIMARY KEY` (direct) | The same 2 steps — **on a column already `NOT NULL`**. On a nullable column, adopting the index must also set `NOT NULL`, and PostgreSQL validates that by scanning the heap under `ACCESS EXCLUSIVE` — the blocking work the substitution exists to avoid, and a scan the brief step budget cancels. Reach `NOT NULL` first via the 4-step sequence above, then add the primary key |
 | `ADD CHECK` / `ADD FOREIGN KEY` (direct) | 2 steps: `ADD CONSTRAINT … NOT VALID` → `VALIDATE CONSTRAINT` — the validation scan runs under a lock that lets reads and writes proceed |
-| `CREATE INDEX` (non-concurrent) | 1 statement: the same build with `CONCURRENTLY` — on a live table only. For a table that does not exist yet (`diff` greenfield), each create step commits in its own transaction under the brief `lock_timeout` / `statement_timeout` budget, so `CREATE TABLE` is visible before its indexes build and a concurrent writer that already knows the name makes the step fail fast rather than block. The build is `metadata-only` because its cost is bounded by that budget on a table born in the run, and it runs as written |
-| `DETACH PARTITION` (non-concurrent) | 1 statement: `DETACH PARTITION … CONCURRENTLY` — shown by `suggest`, but **execution refuses this step today**, and `--dry-run` reports that same refusal: a cancelled concurrent detach leaves a detach-pending partition state the executor does not own recovering |
+| `CREATE INDEX` (non-concurrent) | 1 statement: the same build with `CONCURRENTLY` — on a live table only. On a table that does not exist yet (`diff` greenfield) the build is [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) and runs as written |
+| `DETACH PARTITION` (non-concurrent) | 1 statement: `DETACH PARTITION … CONCURRENTLY` — shown by `suggest`, but **execution refuses this step** ([why](#when-the-substitution-does-not-help)) |
 
 Statements already in the safe form (`… USING INDEX`, `… NOT VALID`,
 `CONCURRENTLY`) are recognized as the online idiom and run as submitted.
@@ -121,7 +121,7 @@ $ echo 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);' \
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 5,
   "suggestions": [
     {
       "statement": 1,

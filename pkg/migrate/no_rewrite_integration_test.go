@@ -98,6 +98,27 @@ var noRewriteCases = map[string][]noRewriteCase{
 			statement: "ALTER TYPE %[1]s.mood ADD VALUE 'calm' BEFORE 'sad'",
 		},
 	},
+	"enum-typed-columns-on-plain-tables": {
+		{
+			name:      "add an enum column with a constant default",
+			setup:     append(slices.Clone(noRewriteFixture), "CREATE TYPE %[1]s.mood AS ENUM ('happy', 'sad')"),
+			statement: "ALTER TABLE %[1]s.t ADD COLUMN mood %[1]s.mood NOT NULL DEFAULT 'happy'",
+		},
+		{
+			name: "change an enum column's default",
+			setup: append(slices.Clone(noRewriteFixture),
+				"CREATE TYPE %[1]s.mood AS ENUM ('happy', 'sad')",
+				"ALTER TABLE %[1]s.t ADD COLUMN mood %[1]s.mood NOT NULL DEFAULT 'happy'"),
+			statement: "ALTER TABLE %[1]s.t ALTER COLUMN mood SET DEFAULT 'sad'",
+		},
+		{
+			name: "index an enum column",
+			setup: append(slices.Clone(noRewriteFixture),
+				"CREATE TYPE %[1]s.mood AS ENUM ('happy', 'sad')",
+				"ALTER TABLE %[1]s.t ADD COLUMN mood %[1]s.mood NOT NULL DEFAULT 'happy'"),
+			statement: "CREATE INDEX CONCURRENTLY t_mood_idx ON %[1]s.t (mood)",
+		},
+	},
 	"alter-column-type-binary-coercible-proven-against-live-column-facts": {
 		{name: "widen varchar", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE varchar(100)"},
 		{name: "varchar to text", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE text"},

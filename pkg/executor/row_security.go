@@ -125,8 +125,7 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	if err == nil {
 		return nil
 	}
-	var unknown *RowSecurityOutcomeUnknownError
-	if errors.As(err, &unknown) {
+	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return err
 	}
 	if caller.Err() != nil && errors.Is(err, caller.Err()) {

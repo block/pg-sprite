@@ -11,6 +11,7 @@ results to the workflows you can use today and includes commands to run the suit
 | --- | --- |
 | Succeeds | pg-sprite executed the requested change and the database checks matched the expected result |
 | Requires unavailable copy-and-swap | pg-sprite refused the change with `backend-unavailable`; it did not execute the requested DDL |
+| Routes to copy-and-swap | With the route opened, its preflight refused the change with `copy-and-swap-refused` before writing anything, and the desired plan routes it to copy-and-swap |
 | Refuses a destructive desired plan | The entire plan was refused, including any supported additions in the same plan |
 | Execution fails | The expected error occurred, and the test verified the durable state left behind |
 
@@ -28,9 +29,11 @@ The shared helper also checks existing rows, table identity, row-level security
 policies, grants, publication membership, and tenant API access.
 
 Copy-and-swap cases show both an explicit `ALTER TABLE` and a desired
-`CREATE TABLE` definition. The `safe_prefix` column is intentional: neither
-entry point may apply that harmless addition before refusing the unsupported
-change. The helper compares schema and data snapshots, then verifies tenant reads
+`CREATE TABLE` definition. The `safe_prefix` column is intentional: for a shape
+the engine does not carry, neither entry point may apply that harmless addition
+before refusing the change; for a shape it carries, the statement's preflight
+refuses on the table's Realtime publication and the desired plan routes the
+change to copy-and-swap. The helper compares schema and data snapshots, then verifies tenant reads
 and new Realtime events on the same subscriptions opened before the refusal.
 
 In [failure_test.go](failure_test.go), unsuccessful execution has specific

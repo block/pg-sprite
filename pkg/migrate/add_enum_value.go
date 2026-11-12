@@ -62,8 +62,7 @@ func addEnumValue(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	}
 
 	et, err := preflight.CheckEnumTarget(ctx, pool, st.EnumType())
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		return privilegeVerdict(st, privErr, false), nil
 	}
 	if err != nil {

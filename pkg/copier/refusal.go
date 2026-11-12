@@ -179,8 +179,7 @@ func refuse(cause RefusalCause, wrapped []error, detail string, args ...any) err
 // class, and the empty class for an error that is not a copier refusal — a
 // server error the importer routes by SQLSTATE, or the bare sentinel.
 func RefusalCauseOf(err error) RefusalCause {
-	var refusal *RefusalError
-	if errors.As(err, &refusal) {
+	if refusal, ok := errors.AsType[*RefusalError](err); ok {
 		return refusal.Cause
 	}
 	return ""

@@ -47,21 +47,23 @@ class.
 
 **The class is a property of the typed cause where one exists, and of the refusal site only
 where none does.** Three reasons carry a second, typed discriminator beneath them —
-`unsupported-partitioned-parent` carries a `preflight.PartitionRefusalCause`, and
-`unsupported-statement` carries an `executor.CreateShapeCause` on the create path or one of a
-closed set of admission sentinel errors on the imperative path — and in each case the values
-of that discriminator span more than one class. A single site can therefore emit several
+`unsupported-partitioned-parent` carries a `preflight.PartitionRefusalCause`,
+`copy-and-swap-refused` carries a `preflight.CopySwapRefusalCause` or a
+`schemachange.RefusalCause`, and `unsupported-statement` carries an `executor.CreateShapeCause`
+on the create path or, on the imperative path, the statement's `statement.Kind` or one of a
+closed set of admission sentinel errors — and in each case the values of that discriminator
+span more than one class. A single site can therefore emit several
 classes (`admissionRefusalVerdict` in `pkg/migrate/verdicts.go` mints refusals for three
 sentinels across two classes), so keying on the site would leave the class ambiguous and let a
 completeness test pass with the wrong answer. Where a reason has no such discriminator, the
 site is the key. The same rule applies when a broad reason gains a new cause or site: the
 author classifies it explicitly; nothing is ever derived from the reason string.
 
-One site still covers several rows: the imperative front door refuses every statement kind it
-does not admit through a single catch-all in `pkg/migrate/verdicts.go` (`statement.KindOther`),
-which today cannot tell a backfill from a `GRANT`. Classifying that site means the parse
-boundary in `pkg/statement` distinguishes the kinds the rows below name, so that a `GRANT` is
-routed to provisioning and never to the data change runner.
+The imperative front door's gate keys every statement it does not admit on the kind the parse
+boundary in `pkg/statement` assigns (`gateRefusal` in `pkg/migrate/refusal_registry.go`), so a
+`GRANT` (`statement.KindProvisioning`) is routed to provisioning and never to the data change
+runner (`statement.KindDataChange`). A statement the parse boundary does not name is
+`statement.KindOther`, the one catch-all left.
 
 ### Reasons keyed on the site
 
@@ -71,6 +73,7 @@ routed to provisioning and never to the data change runner.
 | `unsupported-statement` | Grants, roles, row-level-security policies, publications, subscriptions | `no-online-safety-problem` | `provisioning` |
 | `unsupported-statement` | `DROP TABLE`, views, functions, triggers, extensions, standalone sequences, and other catalog work the matrix marks ⚪ | `no-online-safety-problem` | `direct-operator` |
 | `unsupported-statement` | Imperative `CREATE TABLE`; the detail already points to `diff` | `no-online-safety-problem` | `declarative-front-door` |
+| `unsupported-statement` | A statement kind the parse boundary does not name (`statement.KindOther`): the engine may learn to route it, and no other owner is named to run it | `capability-boundary` | — |
 | `unsupported-statement` | An admitted `ALTER TABLE` operation for which the planner has no route (`routeRefusalVerdict`) | `capability-boundary` | — |
 | `unsupported-statement` | Imperative admission sentinel `ErrUnsupportedSequenceStep` or `ErrUnnamedIndex`; create admission sentinel `ErrUnsupportedCreateStep` | `capability-boundary` | — |
 | `unsupported-statement` | Imperative or create admission sentinel `ErrIfNotExistsUnsupported`; create admission sentinel `ErrDuplicateCreateName` (the sentinel forms of the `if-not-exists` and `duplicate-name` causes below) | `by-design` | — |
@@ -188,10 +191,10 @@ is `RefusalCause.Class()` converted by token (`pkg/migrate/copy_swap_refusal.go`
 
 | `RefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
-| `shadow-lock-unproven` | The operation was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; no retry against the server changes that. |
-| `shadow-lock-lost` | The table lock session reported that it lost the lock, before or during the operation ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The operation's transaction is aborted and nothing is written; re-acquire the lock and repeat. |
-| `shadow-lock-held-elsewhere` | `pg_locks` shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this one yields and the operator decides which run continues. A session only waiting on the key in `pg_locks` (`granted = false`) is not a holder and does not cause this refusal. |
-| `shadow-lock-unconfirmed` | `pg_locks` shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and repeat. On a run's first working transaction, with the lock session still healthy, it is a wiring error instead — the lock session and the pool reach different databases — and re-acquiring refuses the same way; escalate it. |
+| `shadow-lock-unproven` | The operation was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; no retry against the server changes that. |
+| `shadow-lock-lost` | The table lock session reported that it lost the lock, before or during the operation ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `environmental` | The operation's transaction is aborted and nothing is written; re-acquire the lock and repeat. |
+| `shadow-lock-held-elsewhere` | `pg_locks` shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `environmental` | Another engine instance holds the table; this one yields and the operator decides which run continues. A session only waiting on the key in `pg_locks` (`granted = false`) is not a holder and does not cause this refusal. |
+| `shadow-lock-unconfirmed` | `pg_locks` shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and repeat. On a run's first working transaction, with the lock session still healthy, it is a wiring error instead — the lock session and the pool reach different databases — and re-acquiring refuses the same way; escalate it. |
 | `shadow-proof-empty` | The copy-and-swap target proof is the zero value ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | Only the shape check mints a populated proof; a zero one was constructed, not earned. |
 | `shadow-source-shape` | The source's catalog is outside the shape the proof admits: an identity column without an internally owned sequence, or a replica identity other than `DEFAULT` or `FULL` ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The catalog changed after preflight admitted the table; re-run preflight against the table as it is now. |
 | `shadow-statement-target` | The gated statement is not an `ALTER TABLE` on the proven table, or its retargeted form does not name the shadow with the same operations ([ST-7](invariants.md#st-7--the-executor-runs-exactly-the-statement-that-was-gated)) | `invariant-violation` | The caller gated one statement and handed the build another; the pairing is the caller's, not the server's. |
@@ -290,10 +293,10 @@ same way.
 | --- | --- | --- | --- | --- |
 | `copy-proof-empty` | The copy-and-swap target proof is the zero value ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | Only the preflight checks mint a populated proof; a zero one was constructed, not earned. | `shadow-proof-empty` |
 | `copy-shadow-mismatch` | The shadow handed to the copier does not describe a copy into the proven target's shadow: it is nil or empty, built for another table, the source itself by name or by OID, missing the relation OIDs the per-chunk check compares against, or its copy columns do not carry the primary key ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | The caller paired a target with a shadow built for something else; no retry against the server changes that. | `copy-shadow-mismatch` |
-| `copy-lock-unproven` | The copier was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; refused before any connection opens. | `shadow-lock-unproven` |
-| `copy-lock-lost` | The table lock session reported that it lost the lock, before the copy began or while a chunk was in flight ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The interrupted chunk's transaction is rolled back and the landed watermark stands; re-acquire the lock and resume from it. The refusal also answers `errors.Is` for `dbconn.ErrTableLockLost`. | `shadow-lock-lost` |
-| `copy-lock-held-elsewhere` | `pg_locks`, read from the connection about to write a chunk, shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this copy yields and the operator decides which run continues. A session only waiting on the key in `pg_locks` (`granted = false`) is not a holder and does not cause this refusal. | `shadow-lock-held-elsewhere` |
-| `copy-lock-unconfirmed` | `pg_locks`, read from the connection about to write a chunk, shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and resume. On a run's first chunk, with the lock session still healthy, it is a wiring error instead — the lock session and the pool reach different databases — and re-acquiring refuses the same way; escalate it. The refusal also answers `errors.Is` for `dbconn.ErrTableLockNotHeld`. | `shadow-lock-unconfirmed` |
+| `copy-lock-unproven` | The copier was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; refused before any connection opens. | `shadow-lock-unproven` |
+| `copy-lock-lost` | The table lock session reported that it lost the lock, before the copy began or while a chunk was in flight ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `environmental` | The interrupted chunk's transaction is rolled back and the landed watermark stands; re-acquire the lock and resume from it. The refusal also answers `errors.Is` for `dbconn.ErrTableLockLost`. | `shadow-lock-lost` |
+| `copy-lock-held-elsewhere` | `pg_locks`, read from the connection about to write a chunk, shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `environmental` | Another engine instance holds the table; this copy yields and the operator decides which run continues. A session only waiting on the key in `pg_locks` (`granted = false`) is not a holder and does not cause this refusal. | `shadow-lock-held-elsewhere` |
+| `copy-lock-unconfirmed` | `pg_locks`, read from the connection about to write a chunk, shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and resume. On a run's first chunk, with the lock session still healthy, it is a wiring error instead — the lock session and the pool reach different databases — and re-acquiring refuses the same way; escalate it. The refusal also answers `errors.Is` for `dbconn.ErrTableLockNotHeld`. | `shadow-lock-unconfirmed` |
 | `copy-relation-replaced` | The source or the shadow is no longer the relation its proof was minted for: the name no longer resolves, resolves to another OID, or the key column the proof says is a primary key answered a boundary query with `NULL` ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The proof describes a table that no longer exists; drop the shadow and start the change over from preflight. | `cutover-relation-replaced` |
 | `copy-frontier-broken` | The copier's own accounting of the key space broke: a chunk was cut with its lower bound above its upper, a claimed chunk does not start at the cut frontier, or the copy returned without error at a watermark short of the key space ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)) | `invariant-violation` | The chunker produced a sequence it cannot have produced; report it, since the watermark it would have saved cannot be trusted. | `copy-frontier-broken` |
 | `copy-chunks-in-flight` | The copy's ledger and its workers disagree about what landed: a worker landed a chunk the ledger had not in flight, or the copy stopped without error with chunks still in flight ([LK-3](invariants.md#lk-3--pending-work-is-claimed-exactly-once-and-wait-means-finished)) | `invariant-violation` | The ledger is the only record of what the watermark covers; a disagreement means the watermark cannot be trusted either way. | `copy-chunks-in-flight` |
@@ -473,10 +476,14 @@ words rather than defining its own:
 | T1 — supported today | No capability refusal; a run may still be `environmental` |
 | — | `invariant-violation` has no tier: it reports a defect in pg-sprite, not a property of the operation |
 
+The ❌ rows for index maintenance (`drop-index`, `reindex`) span two classes: the plain form
+refuses as `by-design`, while the concurrent form, which is the direct statement the operator
+runs, refuses as `no-online-safety-problem` with `owner: direct-operator`. Both carry the
+row's `index-statement` reason.
+
 The matrix, its contract, and this document define one vocabulary and must change together.
 The matrix describes the operation independent of a run; the verdict reports how one run met
-that contract. The cause tables above are the decision; the matrix mark for the `NOT VALID` foreign key
-on a partitioned parent was corrected to agree with them.
+that contract. Where the two disagree, the cause tables above are the decision.
 
 ## Compatibility and rollout
 

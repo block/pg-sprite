@@ -1,6 +1,6 @@
 # Lock-budgeted passthrough
 
-**Decision: pg-sprite will add `--accept-blocking` as an explicit, imperative-front-door
+**Decision: pg-sprite adds `--accept-blocking` as an explicit, imperative-front-door
 acknowledgement that a specifically eligible refused schema change may run without an
 online-safety guarantee, but only after normal refusal analysis and only in an engine-owned
 session with required `lock_timeout` and `statement_timeout` bounds.** A successful run has
@@ -100,7 +100,7 @@ it is acquired.
 | 4 | Success is `executed-without-online-safety` in text and JSON and exits 3. `executed-natively` and exit 0 remain exclusive to online-safe paths. |
 | 5 | Interruption makes no resume promise. The verdict and documentation describe the state PostgreSQL left rather than manufacturing a checkpoint. |
 | 6 | Eligibility is selected from a closed registry keyed by typed class, reason, and cause or refusal site. No renderer text or SQL substring participates in the decision. |
-| 7 | A dry-run reports the original refusal and a per-statement `blocking_passthrough_eligible` boolean, but executes nothing even when the flag is present. |
+| 7 | A dry-run reports the original refusal and a per-statement `blocking_passthrough_eligible` boolean and executes nothing; `--accept-blocking` cannot be combined with `--dry-run`, so a dry run never appears to have accepted anything. |
 
 The full typed refusal proof is available while its verdict remains in process, and
 `Refusal()` returns it only when it validates as a classified refusal and still matches the
@@ -159,8 +159,8 @@ blocking form makes unavailable: a plain `DROP INDEX` takes `ACCESS EXCLUSIVE` o
 table, and a parent index build locks the parent. The partitioned-parent statements and
 `REINDEX TABLE` name that table themselves. `DROP INDEX` and `REINDEX INDEX` name only the
 index, and the imperative front door's parse-only target resolution knows no table for those
-kinds, so the acknowledgement needs one catalog lookup the current flow does not make: resolve
-the index name against `search_path`, then read its owning table from `pg_index.indrelid`.
+kinds, so the acknowledgement needs one catalog lookup beyond it: resolve the index name
+against `search_path`, then read its owning table from `pg_index.indrelid`.
 
 That lookup runs after the refusal is produced and found eligible and only when the flag is
 present, so the statement-kind gate stays parse-only and a refusal is produced exactly where it
@@ -221,7 +221,7 @@ The v1 set is:
 | Class | Typed refusal shape | v1 | Rationale |
 | --- | --- | --- | --- |
 | `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) and `DROP INDEX ... CASCADE`, whose dependent drops reach tables beyond the acknowledged one, stay ineligible. `REINDEX` on a partitioned table or index is eligible by shape but cannot run inside the engine-owned transaction; the executor reports it as `unsupported-accepted-blocking` (see [Engine-owned session and budgets](#engine-owned-session-and-budgets)). |
-| `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible | The missing partition-aware flow does not make the plain PostgreSQL statement unknown. Its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. |
+| `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible in the registry; not reachable from `migrate` | The missing partition-aware flow does not make the plain PostgreSQL statement unknown. Its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. An unforced plain `CREATE INDEX` on a partitioned parent is refused with the `parent-concurrent-index-build` cause instead, because the partition check runs against the substituted concurrent form, and the blocking cause arises only under `--force`, which `--accept-blocking` rejects. |
 | `capability-boundary` | `not-native-safe-rewrite-required` | ineligible | A rewrite holds its strong lock for the full rewrite. Bounding acquisition alone does not bound the outage, and v1 must not imply otherwise. |
 | `capability-boundary` | `backend-unavailable` and all other missing routes or backends | ineligible | A missing execution backend is not permission to substitute an unrelated blocking implementation. |
 | `no-online-safety-problem` | data changes, provisioning, imperative `CREATE TABLE`, and owner catalog work | ineligible | The lock budget is not pg-sprite's reason to own these jobs. Another tool or front door owns them, and broad admission would become arbitrary SQL passthrough. |
@@ -307,14 +307,13 @@ refusal or as the caller's cancellation, never as statement work
 ([AB-2](invariants.md#ab-2--lock-budget-exhaustion-executes-nothing)). The statement budget
 then measures the submitted statement, whose lock requests are already granted.
 
-Explicit is a stronger requirement than non-zero, and the flag's current shape cannot express
-it: `--statement-timeout` is a shared connection flag with a non-zero default, so the command
-receives the same duration whether the operator typed it or not. The implementation must
-therefore read whether the flag was supplied from the parsed command line — the argument
-parser records that per flag — rather than inspecting the duration's value, and it must not
-change the shared flag's type or default for every other command to get there. Downgrading the
-requirement to "non-zero" because that is what the value alone can show is not an acceptable
-implementation shortcut.
+Explicit is a stronger requirement than non-zero, and the flag's value cannot express it:
+`--statement-timeout` is a shared connection flag with a non-zero default, so the command
+receives the same duration whether the operator typed it or not. `migrate` therefore reads
+whether the flag was supplied from the parsed command line — the argument parser records that
+per flag — rather than inspecting the duration's value, and the shared flag keeps its type and
+default for every other command. Downgrading the requirement to "non-zero" because that is
+what the value alone can show is not an acceptable shortcut.
 
 The required bound wins over an unbounded default with an optional override. An unbounded
 statement can protect lock acquisition yet take a table out of service indefinitely after
@@ -410,12 +409,12 @@ below states. Every other path keeps its cancellation at exit 2; the rules in
 [optimistic-attempt.md](optimistic-attempt.md) are unchanged.
 
 Exit 3 is the only code where the statement committed and the engine does not vouch for online
-safety, so a consumer can read it without JSON. The exit code is produced the way exit 2 is
-today: `migrate` returns a typed sentinel after printing the verdict, and the entry point maps
-that sentinel to the code. Exit 3 needs a second sentinel and constant beside
-`ExitCodeRefused` in `pkg/verdict`, because the verdict is a success that must still leave a
-non-zero process status; `kong`'s default error path would otherwise print it as an
-operational failure and exit 1.
+safety, so a consumer can read it without JSON. The exit code is produced the way exit 2 is:
+`migrate` returns a typed sentinel after printing the verdict, and the entry point maps that
+sentinel to the code. Exit 3 has its own sentinel and constant beside `ErrRefused` and
+`ExitCodeRefused` in `pkg/verdict` (`ErrAcceptedBlocking`, `ExitCodeAcceptedBlocking`), because
+the verdict is a success that must still leave a non-zero process status; `kong`'s default
+error path would otherwise print it as an operational failure and exit 1.
 
 ## Failure and interruption semantics
 
