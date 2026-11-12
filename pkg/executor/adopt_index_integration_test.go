@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
@@ -112,4 +113,94 @@ func TestRunSequenceAdoptingRefusesAnInvalidIndex(t *testing.T) {
 	require.ErrorIs(t, err, executor.ErrAdoptedIndexDrift)
 	assert.Equal(t, executor.CodeAdoptedIndexDrift, executor.OutcomeCode(err))
 	assert.Contains(t, err.Error(), "is invalid")
+}
+
+// A caller that tracks progress runs a planned adoption as one optimistic
+// step: the index the plan matched is taken over, and the tracker reports
+// the exact statement, the one attempt, and a finished phase.
+func TestExecuteNativeAdoptingWithProgressAttachesThePlannedIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (
+			id    bigint,
+			email text NOT NULL
+		);
+		CREATE UNIQUE INDEX t_email_key ON %[1]s.t (email)`, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	sql := fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key", schema)
+	require.NoError(t, executor.ExecuteNativeAdoptingWithProgress(t.Context(), pool, pt, mustParse(t, sql),
+		budget, executor.DefaultRetryPolicy(),
+		schemadiff.IndexAdoption{Index: "t_email_key", Def: "CREATE UNIQUE INDEX t_email_key ON t USING btree (email)"},
+		tracker))
+
+	exists, _ := constraintState(t, pool, schema, "t", "t_email_key")
+	assert.True(t, exists, "the planned index was taken over")
+	requireOneStepSnapshot(t, tracker, progress.PhaseFinished, progress.OperationOptimistic, sql, 1)
+}
+
+// The progress-tracked adoption reads the index again under the table's
+// lock, exactly as the sequence's adopting step does: an index replaced
+// under the same name after planning refuses with the permanent
+// adopted-index-drift code, nothing is attached, and the tracker records
+// the failure against the statement.
+func TestExecuteNativeAdoptingWithProgressRefusesAnIndexReplacedAfterPlanning(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (
+			id    bigint,
+			email text NOT NULL,
+			code  text NOT NULL
+		);
+		CREATE UNIQUE INDEX t_email_key ON %[1]s.t (email)`, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	// The plan matched t_email_key on (email); it is replaced under the
+	// same name by an index on (code, email) before the statement runs.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		DROP INDEX %[1]s.t_email_key;
+		CREATE UNIQUE INDEX t_email_key ON %[1]s.t (code, email)`, schema))
+	require.NoError(t, err)
+
+	sql := fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key", schema)
+	err = executor.ExecuteNativeAdoptingWithProgress(t.Context(), pool, pt, mustParse(t, sql),
+		budget, executor.DefaultRetryPolicy(),
+		schemadiff.IndexAdoption{Index: "t_email_key", Def: "CREATE UNIQUE INDEX t_email_key ON t USING btree (email)"},
+		tracker)
+	require.ErrorIs(t, err, executor.ErrAdoptedIndexDrift)
+	assert.Equal(t, executor.CodeAdoptedIndexDrift, executor.OutcomeCode(err))
+	exists, _ := constraintState(t, pool, schema, "t", "t_email_key")
+	assert.False(t, exists, "the replacement index was not attached")
+	requireOneStepSnapshot(t, tracker, progress.PhaseFailed, progress.OperationOptimistic, sql, 1)
+}
+
+// A planned adoption the statement does not perform is a breach of the
+// plan's contract: it refuses as an invariant violation before any attempt
+// runs, so the column stays and the tracker observed no attempt.
+func TestExecuteNativeAdoptingWithProgressRefusesAStatementThatAdoptsNothing(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (
+			id   bigint,
+			note text
+		)`, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	sql := fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema)
+	err = executor.ExecuteNativeAdoptingWithProgress(t.Context(), pool, pt, mustParse(t, sql),
+		budget, executor.DefaultRetryPolicy(),
+		schemadiff.IndexAdoption{Index: "t_note_key", Def: "CREATE UNIQUE INDEX t_note_key ON t USING btree (note)"},
+		tracker)
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.Equal(t, "text", columnType(t, pool, schema, "t", "note"), "nothing ran")
+	requireOneStepSnapshot(t, tracker, progress.PhaseFailed, progress.OperationOptimistic, sql, 0)
 }

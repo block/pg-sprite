@@ -717,6 +717,21 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   pg-sprite's `Apply` must re-resolve the routing decision at execution time and act on that
   fresh decision — never treat the stored plan-time verdict as execution authority. This is
   [OC-4](invariants.md#oc-4--toctou-discipline-on-all-async-state) applied to the verdict.
+- **A statement that names only an index or a constraint needs the entry point that re-checks
+  it.** An adapter that runs planned statements through the executor directly, rather than
+  through `migrate.RunDesired`, picks the entry point the way `migrate` does: a plan statement
+  (`plan.Statement`, carried over from `schemadiff.Change`) with `Adopts` set runs through
+  `executor.ExecuteNativeAdoptingWithProgress` with that `IndexAdoption`, one with `Validates`
+  set through `executor.ExecuteNativeValidatingWithProgress` with that `ConstraintValidation`,
+  and a statement whose `statement.Kind` is `KindRenameIndex` through
+  `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index.
+  Each re-reads the index or constraint under the
+  lock it runs with and refuses with `adopted-index-drift`, `validated-constraint-drift`, or
+  `renamed-index-drift` when it changed after planning. `ExecuteNativeWithProgress` carries no
+  planned definition and runs an adoption or validation unchecked, and refuses an index
+  rename under ST-7, since the statement names no table. `Adopts` and `Validates` stay out of
+  the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  or derives the plan again at apply time.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
   all direct-routed statements run first, then all engine-driven ones, regardless of their
   relative order in the plan — and a statement in one partition that depends on one in the

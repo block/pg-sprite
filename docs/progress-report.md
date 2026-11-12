@@ -273,6 +273,11 @@ returns the identical snapshot, elapsed values included.
 | `checksum` | The copy-and-swap checksum pass comparing the source table with its shadow and, under the `repair` policy, recopying differing chunks (`work` is engine-measured). |
 | `catch-up` | The copy-and-swap catch-up applying the changes decoded from the source table's WAL to its shadow and confirming the applied position to the server (`work` is engine-measured). |
 
+The transactional single-statement entry points report one step (`total_steps` `1`):
+`ExecuteNativeWithProgress`, `ExecuteNativeAdoptingWithProgress`, and
+`ExecuteIndexRenameWithProgress` under `optimistic`, and `ExecuteNativeValidatingWithProgress`
+under `validate-constraint`, the operation a sequence's validation step reports.
+
 ## Polling semantics
 
 The tracker is caller-owned and has no goroutines or timers. A poll during an active

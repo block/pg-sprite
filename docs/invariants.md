@@ -1337,9 +1337,12 @@ which enforces exactly one statement through the real grammar — and refuses, b
 executes, any statement whose target table does not match the preflight proof it was handed.
 A proof for one table can never smuggle SQL against another, and a multi-statement string can
 never reach the database through the executor (pgx's simple protocol would happily run all of
-it). *Enforced:* `pkg/executor` (`ExecuteNative`; `RunSequence` admission re-proves every step's
+it). *Enforced:* `pkg/executor` (`ExecuteNative` and its `ExecuteNativeWithProgress`,
+`ExecuteNativeAdoptingWithProgress`, and `ExecuteNativeValidatingWithProgress` variants;
+`RunSequence` admission re-proves every step's
 target against the preflight proof before the first step executes; `ExecuteCreate` re-proves
 every desired statement's target against the absence proof the same way; `ExecuteIndexRename`
+(and `ExecuteIndexRenameWithProgress`)
 and `ExecuteEnumValueAdd`, whose statements name an index or a type rather than a table,
 confirm in the catalog before the commit that the statement reached the object the engine
 checked), `pkg/statement`
