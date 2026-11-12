@@ -57,6 +57,14 @@ type SlotStatus struct {
 	// position — what the slot keeps on the volume and what D11's lag
 	// ceiling bounds.
 	Retained RetainedWAL
+	// Unconfirmed is the WAL between ConfirmedFlushLSN and the current
+	// write position — what the slot's consumer has yet to confirm, the
+	// share of Retained that the stream itself accounts for. The rest of
+	// Retained is WAL the consumer confirmed that the server has not yet
+	// released: the restart position moves only at the running-transactions
+	// records the server logs periodically, once the consumer has confirmed
+	// past one, or stays pinned by a transaction still open on the source.
+	Unconfirmed RetainedWAL
 	// Conflicting is the server's conflict flag for a logical slot
 	// (PostgreSQL 16 and later; false before). Before 17 every
 	// invalidation sets it; from 17 only a recovery conflict does —
@@ -113,38 +121,49 @@ func (i SlotInvalidation) String() string {
 	}
 }
 
-// RetainedWAL is the WAL a slot keeps on the volume. Known is false when
-// the server cannot measure it — the slot has no restart position, as
-// after the server removed the WAL it needed, or the server is in recovery
-// and has no write position to measure against — so an unknown amount is
-// never read as nothing retained.
+// RetainedWAL is a span of WAL measured back from the server's write
+// position, in bytes: what a slot keeps on the volume, or what its
+// consumer has yet to confirm. Known is false when the server cannot
+// measure it — the slot has no position to measure from, as after the
+// server removed the WAL it needed or for a slot nothing has confirmed,
+// or the server is in recovery and has no write position to measure
+// against — so an unknown amount is never read as nothing.
 type RetainedWAL struct {
 	Bytes int64
 	Known bool
 }
 
-// inspectSlotSQL reads one slot. The retained measure needs the server's
-// write position, which a server in recovery refuses to report, so on a
-// standby — a demoted writer the reaper reads after a failover — it is
-// NULL and the rest of the row is still read. The conflict flag, the
-// invalidation cause, and the inactive-since time exist only from
-// PostgreSQL 16, 17, and 17 respectively, so they are read through the
-// row's jsonb rendering: a key the server's catalog lacks reads as NULL
-// where naming the column would fail the statement, and whether the
-// server has the cause column at all is read alongside it.
+// inspectSlotSQL reads one slot. The retained and unconfirmed measures
+// need the server's write position, which a server in recovery refuses to
+// report, so on a standby — a demoted writer the reaper reads after a
+// failover — they are NULL and the rest of the row is still read. The
+// conflict flag, the invalidation cause, and the inactive-since time
+// exist only from PostgreSQL 16, 17, and 17 respectively, so they are
+// read through the row's jsonb rendering: a key the server's catalog
+// lacks reads as NULL where naming the column would fail the statement,
+// and whether the server has the cause column at all is read alongside
+// it. The write position is read once, so both measures run to the same
+// point and the retained WAL exceeds the unconfirmed by exactly the span
+// from the restart position to the confirmed one; a subquery whose output
+// is volatile is not flattened into the outer query, so it is evaluated
+// once.
 const inspectSlotSQL = `
 	SELECT s.database, s.slot_type = 'logical',
 	       s.slot_type = 'logical' AND s.database = pg_catalog.current_database(),
 	       s.active, s.active_pid, s.wal_status,
 	       s.restart_lsn::text, s.confirmed_flush_lsn::text,
-	       CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
-	            ELSE pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), s.restart_lsn)::bigint
-	       END,
+	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.restart_lsn)::bigint,
+	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.confirmed_flush_lsn)::bigint,
 	       (extra.rendered ->> 'conflicting')::boolean,
 	       extra.rendered ? 'invalidation_reason',
 	       extra.rendered ->> 'invalidation_reason',
 	       (extra.rendered ->> 'inactive_since')::timestamptz
 	FROM pg_catalog.pg_replication_slots s
+	CROSS JOIN (
+	       SELECT CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
+	                   ELSE pg_catalog.pg_current_wal_lsn()
+	              END AS write_lsn
+	       ) AS pos
 	CROSS JOIN LATERAL (SELECT pg_catalog.to_jsonb(s) AS rendered) AS extra
 	WHERE s.slot_name = $1`
 
@@ -153,17 +172,17 @@ const inspectSlotSQL = `
 // is false when no slot of that name exists on the cluster; a slot of
 // another database, or a physical one, is reported with Own false and its
 // Database so the caller never mistakes it for its own. On a server in
-// recovery the slot's retained WAL
-// is unknown and the rest of the row is reported. The invalidation cause
-// is Reported only on a server that has the column.
+// recovery the slot's retained and unconfirmed WAL are unknown and the
+// rest of the row is reported. The invalidation cause is Reported only on
+// a server that has the column.
 func InspectSlot(ctx context.Context, db dbconn.RowQuerier, name string) (status SlotStatus, found bool, err error) {
 	var database, walStatus, restartLSN, confirmedFlushLSN, invalidation *string
 	var activePID *int32
-	var retained *int64
+	var retained, unconfirmed *int64
 	var conflicting *bool
 	var inactiveSince *time.Time
 	err = db.QueryRow(ctx, inspectSlotSQL, name).
-		Scan(&database, &status.Logical, &status.Own, &status.Active, &activePID, &walStatus, &restartLSN, &confirmedFlushLSN, &retained,
+		Scan(&database, &status.Logical, &status.Own, &status.Active, &activePID, &walStatus, &restartLSN, &confirmedFlushLSN, &retained, &unconfirmed,
 			&conflicting, &status.Invalidation.Reported, &invalidation, &inactiveSince)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SlotStatus{}, false, nil
@@ -202,6 +221,9 @@ func InspectSlot(ctx context.Context, db dbconn.RowQuerier, name string) (status
 	}
 	if retained != nil {
 		status.Retained = RetainedWAL{Bytes: *retained, Known: true}
+	}
+	if unconfirmed != nil {
+		status.Unconfirmed = RetainedWAL{Bytes: *unconfirmed, Known: true}
 	}
 	return status, true, nil
 }

@@ -159,7 +159,7 @@ the phased build plan should be traceable back to one of these.
   mandatory checksum.
 - **Treat the replication slot as a managed, dangerous resource.** A durable, name-prefixed slot
   that resume can reattach to ([D11](copy-and-swap-design.md#d11--bound-and-reap-logical-decoding-state)),
-  a startup reaper for orphans, and a hard slot-lag ceiling; never leave an orphaned slot
+  a startup reaper for orphans, and a slot-lag ceiling; never leave an orphaned slot
   retaining WAL.
 - **Checksums must be deterministic across PostgreSQL quirks.** TOAST (including the
   unchanged-TOAST-on-UPDATE case), `STORED` generated columns, and non-deterministic

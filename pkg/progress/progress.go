@@ -49,7 +49,7 @@ const (
 // field semantics. Adding a phase or operation value is a contract change
 // and bumps this version, even when no field is added or renamed. Adding a
 // field also bumps this version so strict consumers can detect the new shape.
-const FormatVersion = 6
+const FormatVersion = 7
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -83,11 +83,11 @@ const (
 // engine's own WorkSource reported the step's counters — and then every
 // counter marshals explicitly — a fresh build reports honest zeros, never an
 // empty object a consumer must guess at. Rows and bytes belong to the
-// copy-and-swap row copy; chunks compared, rows hashed, chunks mismatched,
-// chunks repaired and chunks reread to the checksum pass; changes applied,
-// changes buffered and lag bytes to the catch-up; blocks, tuples and
-// lockers to a concurrent index build. No operation fabricates another's
-// counters.
+// copy-and-swap row copy; chunks compared, rows hashed, rows to hash, chunks
+// mismatched, chunks repaired and chunks reread to the checksum pass;
+// changes applied, changes buffered and lag bytes to the catch-up; blocks,
+// tuples and lockers to a concurrent index build. No operation fabricates
+// another's counters.
 type Work struct {
 	RowsCopied       uint64 `json:"rows_copied"`
 	RowsTotal        uint64 `json:"rows_total"`
@@ -95,6 +95,7 @@ type Work struct {
 	BytesTotal       uint64 `json:"bytes_total"`
 	ChunksCompared   uint64 `json:"chunks_compared"`
 	RowsHashed       uint64 `json:"rows_hashed"`
+	RowsToHash       uint64 `json:"rows_to_hash"`
 	ChunksMismatched uint64 `json:"chunks_mismatched"`
 	ChunksRepaired   uint64 `json:"chunks_repaired"`
 	ChunksReread     uint64 `json:"chunks_reread"`
@@ -121,6 +122,19 @@ type Detail struct {
 	Attempt          int    `json:"attempt,omitempty"`
 	Work             *Work  `json:"work,omitempty"`
 	CurrentLockerPID uint32 `json:"current_locker_pid,omitempty"`
+	// Percent is the running step's completion in [0, 99.9], derived at the
+	// poll from Work: rows against the catalog's row estimate for a copy or
+	// a checksum pass, the server's phase and counters for a concurrent
+	// index build. It is never 100 — the step ending is completion — and
+	// nil when the operation has no measurable total or its total is not
+	// known, so unknown is never reported as zero.
+	Percent *float64 `json:"percent,omitempty"`
+	// ETA is the running step's projected time left, derived at the poll
+	// from Percent's fraction and the step's elapsed time on the tracker's
+	// clock. It is nil whenever Percent is, until the step has enough
+	// signal to project from, and once a counter has reached the estimate
+	// it is measured against.
+	ETA *time.Duration `json:"eta_ns,omitempty"`
 }
 
 // Snapshot is one immutable progress observation. For a terminal phase the
@@ -545,7 +559,8 @@ func (t *Tracker) readState() (Snapshot, dbconn.RowQuerier, uint32, WorkSource) 
 
 // Progress returns a snapshot and, for an active concurrent index build,
 // queries PostgreSQL's progress view by the executor-owned backend PID; for
-// a step with a WorkSource it asks the source for the step's counters. On a
+// a step with a WorkSource it asks the source for the step's counters; from
+// whichever counters it read it derives the step's percent and ETA. On a
 // query or source error the snapshot still carries the last-known tracker
 // state. The state lock is released before the query, so concurrent pollers
 // serialize only against each other (and the four handoff fences), never
@@ -581,7 +596,8 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 		return s, nil
 	}
 	if source != nil {
-		return observeEngineWork(ctx, s, source)
+		observed, err := observeEngineWork(ctx, s, source)
+		return estimate(observed), err
 	}
 	if pid == 0 || session == nil {
 		return s, nil
@@ -607,5 +623,5 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 	}
 	s.Detail.Active, s.Detail.ServerPhase, s.Detail.Work = true, p.Phase, &work
 	s.Detail.CurrentLockerPID = p.CurrentLockerPID
-	return s, nil
+	return estimate(s), nil
 }

@@ -1064,8 +1064,12 @@ does-not-discard-a-done-row tests).
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
 
 Replication slots are created with a recognizable name prefix; a reaper drops orphaned
-engine-prefixed slots (including one stranded on a demoted writer after failover); a hard
-slot-lag ceiling aborts the schema change before an abandoned slot can fill the volume. No exit path
+engine-prefixed slots (including one stranded on a demoted writer after failover); a slot-lag
+ceiling aborts the schema change before an abandoned slot can fill the volume. The ceiling is
+hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
+may stand over it for a bounded grace (the server's release interval plus one cycle) while the
+server releases what the stream confirmed, so the volume needs headroom above the ceiling of
+about the source's write rate times that grace. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
 attempt to reuse — and drops a slot the server created but did not describe usably;
@@ -1075,10 +1079,16 @@ before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder un
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
 drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
 drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
-reads retained WAL on a primary and reports it unknown on a server in recovery rather than
-fail the read; `SlotStatus.WithinLagCeiling` judges a slot against a ceiling in bytes —
-lost before any measure, unknown never read as nothing retained, over the ceiling a typed
-`SlotLagExceededError` — and refuses a ceiling below one byte) + `pkg/checkpoint`
+reads two measures of WAL on a primary — retained, what the slot keeps on the volume, and
+unconfirmed, what its consumer has yet to confirm — and reports both unknown on a server in
+recovery rather than fail the read; `SlotLagWatch` judges successive readings of one slot
+against a ceiling in bytes — lost before any measure, unknown never read as nothing retained,
+unconfirmed WAL over the ceiling a typed `SlotLagExceededError` on one reading (cause
+`stream-behind`), retained WAL over it the same error (cause `wal-retained`) only once the
+readings have stayed over for a grace of `RestartReleaseInterval` plus the consumer's own
+cycle, since the server moves a slot's restart position only at the running-transactions
+records it logs on that interval and so releases confirmed WAL in steps — and refuses a
+ceiling below one byte or a negative grace) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
 database: the slots are listed first and the checkpoint rows that own them read in a later
 statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
@@ -1096,10 +1106,13 @@ snapshot; a slot a live row names, a slot a process holds, and a name wearing th
 without the engine's shape are reported and left; a database whose checkpoint table does not
 exist is refused with `ErrTableMissing` rather than read as all orphans; two reapers over one
 database take turns at each slot, the one that waited finding the slot gone) + `pkg/applier`
-`Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it
-against `CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot
-be set below one byte; a slot that vanished is `SlotLostError`; crossing the ceiling ends
-`Run` with the table lock intact and the slot in place for the operator to read) +
+`Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it,
+through one `decode.SlotLagWatch` for the run whose grace is `RestartReleaseInterval` plus
+the cycle's `Interval`, against `CatchupOptions.SlotLagCeiling`, default
+`decode.DefaultSlotLagCeiling`, which cannot be set below one byte; a slot that vanished is
+`SlotLostError`; the stream's unconfirmed WAL over the ceiling ends `Run` at once, the slot's
+retained WAL over it ends `Run` once it has outlasted the grace, either with the table lock
+intact and the slot in place for the operator to read which measure crossed) +
 `pkg/schemachange.Runner` (on a decoding target it creates the slot under the store's lock on
 the slot's name, in the same step as the row that names it, so the reaper never meets the slot
 before its row; a first save whose row does not land drops the slot and the shadow again, while
