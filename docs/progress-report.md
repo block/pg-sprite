@@ -1,13 +1,38 @@
 # The progress report contract
 
 The progress snapshot is the machine-readable observation a caller receives when it polls a
-running schema change through the `*WithProgress` executor entry points. It is the one JSON
-shape an operator or orchestrator consumes to display or act on execution progress. This
-document is the contract: the fields, the closed vocabularies, and the behavior required of
-a consumer. The Go source of truth is `pkg/progress`; `TestSnapshotJSONShape`,
-`TestSnapshotJSONShapeForACopyStep`, `TestSnapshotJSONShapeForAChecksumStep` and
-`TestSnapshotJSONShapeForACatchUpStep` pin the exact keys, including the four examples at the
-end of this page.
+running schema change. It is the one JSON shape an operator or orchestrator consumes to
+display or act on execution progress. This document is the contract: the fields, the closed
+vocabularies, and the behavior required of a consumer. The Go source of truth is
+`pkg/progress`; `TestSnapshotJSONShape`, `TestSnapshotJSONShapeForACopyStep`,
+`TestSnapshotJSONShapeForAChecksumStep` and `TestSnapshotJSONShapeForACatchUpStep` pin the
+exact keys, including the four examples at the end of this page.
+
+## Obtaining progress
+
+A caller builds one `*progress.Tracker` per call (`progress.NewTracker`), hands it to the
+front door as `migrate.Options.Progress`, and polls `Tracker.Progress` from its own goroutine
+while `migrate.Run` or `migrate.RunDesired` blocks. The front door owns the tracker's
+lifecycle — it calls `Start` and `Finish` — so the caller never does:
+
+- **The steps are the statements the call runs.** `Run` reports a run of one step; `RunDesired`
+  reports one step per planned statement, so `step` / `total_steps` is "planned statement N of
+  M". The tracker stays `pending` while `RunDesired` derives its plan, then runs with
+  operation `admitting` while the front door gates, resolves, routes, and preflights, until the
+  statement executes.
+- **The detail is what executes now, within the step.** A safer sequence reports each of its
+  statements under the step in turn, with its own operation and SQL (a concurrent index build
+  with the server's build counters); a copy-and-swap reports its `copy`, a live run's
+  `catch-up`, and its `checksum` pass under the step, each with its engine-measured counters.
+  Each of these restarts the step's clock, so `step_elapsed_ns` times the operation in flight.
+- **The terminal phase is the call's outcome.** `finished` when the call returns an executed
+  outcome without an error, `failed` otherwise — a refusal included, since nothing it was asked
+  to run executed.
+
+The executor's `*WithProgress` entry points and the per-step `Tracker` fields of the copier,
+the checksum verifier and the catch-up remain for a caller that drives those packages
+directly; a front-door caller sets `Options.Progress` and leaves
+`Options.CopySwap.Copier.Tracker` nil, which the front door enforces.
 
 ## Versioning: `format_version`
 
@@ -72,7 +97,8 @@ engine's own frozen chunk insert (the template with its `$1`/`$2` key bounds, no
 rendered values). Either way it is real SQL that reached the server, so a consumer rendering
 it into a shared surface must clamp and escape it. A `checksum` step runs several frozen
 statements per chunk, and a `catch-up` step several per flushed batch, so the orchestrator that
-owns the step chooses what, if anything, to put in `statement`.
+owns the step chooses what, if anything, to put in `statement`. The `migrate` front door puts
+nothing there for any of the three copy-and-swap operations: none of them is one statement.
 
 ### Work counters
 
