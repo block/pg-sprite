@@ -7,10 +7,14 @@ import (
 	"time"
 )
 
-// DefaultSlotLagCeiling is the most WAL a slot may retain before the route
+// DefaultSlotLagCeiling is the most WAL a slot may hold before the route
 // aborts: one GiB (D11). A slot is cluster state that keeps WAL on the
-// volume until it is confirmed or dropped, so the bound is hard and the
-// abort fails closed.
+// volume until it is confirmed or dropped, so the abort fails closed. The
+// bound is hard for the WAL the stream has yet to confirm, judged on one
+// reading. The WAL the slot retains may stand over it for a grace while
+// the server releases what the stream confirmed, so the volume needs
+// headroom above the ceiling of about the source's write rate times that
+// grace (see SlotLagWatch).
 const DefaultSlotLagCeiling int64 = 1 << 30
 
 // RestartReleaseInterval is the longest the server goes between the
@@ -40,7 +44,8 @@ var ErrSlotLost = errors.New("replication slot is lost")
 var ErrSlotLagUnknown = errors.New("replication slot's retained WAL cannot be measured")
 
 // SlotLagCause is which measure of a slot crossed the ceiling, and so
-// what an operator looks at.
+// what an operator looks at. The set of causes can grow, so a caller that
+// switches on it keeps a default branch.
 type SlotLagCause string
 
 const (
@@ -76,10 +81,15 @@ func (e *SlotLagExceededError) Error() string {
 		return fmt.Sprintf("slot %s has %s of WAL its stream has not confirmed, over the %s ceiling (%d > %d bytes); "+
 			"the stream has fallen behind the source's writes, and running the schema change again resumes it from the slot once the write rate allows",
 			e.Slot, humanBytes(e.Unconfirmed), humanBytes(e.Ceiling), e.Unconfirmed, e.Ceiling)
-	default:
+	case SlotLagWALRetained:
 		return fmt.Sprintf("slot %s retains %s of WAL, over the %s ceiling (%d > %d bytes), for longer than the server takes to release WAL the stream confirmed, "+
-			"and the stream itself is %s behind; the usual cause is a long-open transaction on the source, and the run can resume once it ends",
+			"and the stream itself is %s behind; either a transaction on the source holds the WAL back (an open write transaction or a prepared one), "+
+			"and the run can resume once it ends, or the source writes more WAL per release interval than the ceiling allows, "+
+			"and the run needs a higher SlotLagCeiling",
 			e.Slot, humanBytes(e.Retained), humanBytes(e.Ceiling), e.Retained, e.Ceiling, humanBytes(e.Unconfirmed))
+	default:
+		return fmt.Sprintf("slot %s is over the %s ceiling (cause %q): retains %s, %s unconfirmed",
+			e.Slot, humanBytes(e.Ceiling), e.Cause, humanBytes(e.Retained), humanBytes(e.Unconfirmed))
 	}
 }
 
@@ -170,6 +180,10 @@ func (w *SlotLagWatch) Judge(s SlotStatus, now time.Time) error {
 	if w.overSince.IsZero() {
 		w.overSince = now
 	}
+	// INV: ST-3 — retained WAL is the one measure let stand over the
+	// ceiling, and only for the grace: it includes WAL the stream already
+	// confirmed, which the server releases at its next running-transactions
+	// record. A stream that stops confirming is caught above, with no grace.
 	if now.Sub(w.overSince) < w.grace {
 		return nil
 	}

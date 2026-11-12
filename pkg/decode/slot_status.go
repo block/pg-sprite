@@ -142,23 +142,28 @@ type RetainedWAL struct {
 // read through the row's jsonb rendering: a key the server's catalog
 // lacks reads as NULL where naming the column would fail the statement,
 // and whether the server has the cause column at all is read alongside
-// it.
+// it. The write position is read once, so both measures run to the same
+// point and the retained WAL exceeds the unconfirmed by exactly the span
+// from the restart position to the confirmed one; a subquery whose output
+// is volatile is not flattened into the outer query, so it is evaluated
+// once.
 const inspectSlotSQL = `
 	SELECT s.database, s.slot_type = 'logical',
 	       s.slot_type = 'logical' AND s.database = pg_catalog.current_database(),
 	       s.active, s.active_pid, s.wal_status,
 	       s.restart_lsn::text, s.confirmed_flush_lsn::text,
-	       CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
-	            ELSE pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), s.restart_lsn)::bigint
-	       END,
-	       CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
-	            ELSE pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), s.confirmed_flush_lsn)::bigint
-	       END,
+	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.restart_lsn)::bigint,
+	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.confirmed_flush_lsn)::bigint,
 	       (extra.rendered ->> 'conflicting')::boolean,
 	       extra.rendered ? 'invalidation_reason',
 	       extra.rendered ->> 'invalidation_reason',
 	       (extra.rendered ->> 'inactive_since')::timestamptz
 	FROM pg_catalog.pg_replication_slots s
+	CROSS JOIN (
+	       SELECT CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
+	                   ELSE pg_catalog.pg_current_wal_lsn()
+	              END AS write_lsn
+	       ) AS pos
 	CROSS JOIN LATERAL (SELECT pg_catalog.to_jsonb(s) AS rendered) AS extra
 	WHERE s.slot_name = $1`
 

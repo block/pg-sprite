@@ -785,7 +785,7 @@ Design implications the rest of the system must honour:
   from a process crash (where the slot *does* survive and we resume cleanly).
 - **Detect it:** watch for the slot disappearing / becoming inactive and for writer-identity
   changes, and enter reconcile mode rather than blindly continuing.
-- **Bound the blast radius:** the hard slot-lag ceiling and the name-prefixed reaper
+- **Bound the blast radius:** the slot-lag ceiling and the name-prefixed reaper
   ([D11](copy-and-swap-design.md#d11--bound-and-reap-logical-decoding-state)) must also clean up
   the *orphaned* slot a failover can strand on the demoted instance.
 - **Make the trade explicit to the operator:** on logical-decoding clusters, a long schema change

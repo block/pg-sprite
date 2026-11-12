@@ -44,8 +44,48 @@ func TestInspectSlotMeasuresTheWALTheSlotRetains(t *testing.T) {
 		"retained bytes span from the restart position to at least the write position the insert reached")
 	require.True(t, after.Unconfirmed.Known)
 	assert.Greater(t, after.Unconfirmed.Bytes, fresh.Unconfirmed.Bytes, "nothing confirmed, so the unread insert is unconfirmed too")
-	assert.LessOrEqual(t, after.Unconfirmed.Bytes, after.Retained.Bytes,
+	assert.Equal(t, int64(after.ConfirmedFlushLSN-after.RestartLSN), after.Retained.Bytes-after.Unconfirmed.Bytes,
 		"the unconfirmed WAL is the part of the retained WAL from the confirmed position on")
+}
+
+// Once the stream confirms, the slot's restart position trails the
+// confirmed one until the server releases the WAL in between. The
+// unconfirmed WAL is measured from the confirmed position, so it covers
+// only what was written after the confirmation, while the retained WAL
+// also covers the confirmed WAL the server still keeps: the two differ by
+// exactly the span from the restart position to the confirmed one, as
+// both run to the one write position the reading took.
+func TestInspectSlotMeasuresUnconfirmedWALFromTheConfirmedPosition(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	stream := f.openStream(t, slot.ConsistentPoint())
+
+	f.exec(t, `INSERT INTO %s.ledger (id, note) VALUES (101, 'to confirm')`)
+	ev := nextChange(t, stream)
+	awaitDelivered(t, stream, ev.LSN+1)
+	delivered := stream.Delivered()
+	require.NoError(t, stream.Confirm(t.Context(), delivered))
+	stream.assertConfirmedFlushBecomes(t, slot, delivered)
+
+	f.exec(t, `CREATE TABLE %s.other (id bigint PRIMARY KEY, pad text)`)
+	f.exec(t, `
+		INSERT INTO %s.other (id, pad)
+		SELECT g, repeat('y', 1000) FROM generate_series(1, 2000) AS g`)
+	before := f.currentWALLSN(t)
+	status, found, err := decode.InspectSlot(t.Context(), f.pool, slot.Name())
+	require.NoError(t, err)
+	require.True(t, found)
+	after := f.currentWALLSN(t)
+
+	require.True(t, status.Unconfirmed.Known)
+	require.True(t, status.Retained.Known)
+	assert.Equal(t, delivered, status.ConfirmedFlushLSN)
+	assert.GreaterOrEqual(t, status.Unconfirmed.Bytes, int64(before-status.ConfirmedFlushLSN))
+	assert.LessOrEqual(t, status.Unconfirmed.Bytes, int64(after-status.ConfirmedFlushLSN),
+		"unconfirmed WAL runs from the confirmed position, not from the restart position")
+	require.Less(t, status.RestartLSN, status.ConfirmedFlushLSN, "the server has not yet released the confirmed WAL")
+	assert.Equal(t, int64(status.ConfirmedFlushLSN-status.RestartLSN), status.Retained.Bytes-status.Unconfirmed.Bytes,
+		"both measures run to one write position")
 }
 
 // A slot whose WAL the server has removed is reported with the server's

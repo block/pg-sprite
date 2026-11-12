@@ -339,8 +339,10 @@ checkpoint row naming the slot commits, and the stream later decodes on a connec
 own. The slot is created with an exported snapshot, but nothing imports it — the copy and the
 stream meet at the slot's consistent point, which the row records as the applied position —
 so the second free sender is a margin, not something the run uses.
-Slot lag has a hard byte ceiling, default 1 GiB; crossing it aborts
-fail closed. The reaper, `checkpoint.Store.ReapOrphanSlots`, drops orphan `pgsprite_*` slots
+Slot lag has a byte ceiling, default 1 GiB; crossing it aborts
+fail closed. It is hard for the WAL the stream has yet to confirm; the WAL the slot retains may
+stand over it for the server's release interval plus one cycle, so the volume needs headroom of
+about the write rate times that grace above the ceiling (ST-3). The reaper, `checkpoint.Store.ReapOrphanSlots`, drops orphan `pgsprite_*` slots
 that belong to the current database (`pg_replication_slots.database = current_database()`), are
 inactive (`active_pid IS NULL`), and whose checkpoint row is absent or terminal; slots of other
 databases are never inspected, let alone dropped. Nothing runs it at startup in this build: it
@@ -394,7 +396,7 @@ database, or a reaper in one database would push another's in-flight change into
 
 ### D12 — Throttle by chunk time and slot lag
 
-**Decision.** The copier adjusts chunk size toward a 500 ms target and also obeys D11's hard slot
+**Decision.** The copier adjusts chunk size toward a 500 ms target and also obeys D11's slot
 lag ceiling.
 
 **Why.** Time-targeted chunks adapt to row width and server capacity while keeping feedback and

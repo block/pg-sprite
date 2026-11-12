@@ -1064,8 +1064,12 @@ does-not-discard-a-done-row tests).
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
 
 Replication slots are created with a recognizable name prefix; a reaper drops orphaned
-engine-prefixed slots (including one stranded on a demoted writer after failover); a hard
-slot-lag ceiling aborts the schema change before an abandoned slot can fill the volume. No exit path
+engine-prefixed slots (including one stranded on a demoted writer after failover); a slot-lag
+ceiling aborts the schema change before an abandoned slot can fill the volume. The ceiling is
+hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
+may stand over it for a bounded grace (the server's release interval plus one cycle) while the
+server releases what the stream confirmed, so the volume needs headroom above the ceiling of
+about the source's write rate times that grace. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
 attempt to reuse — and drops a slot the server created but did not describe usably;
