@@ -10,6 +10,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The daily run scans main while no one pushes, so a new advisory turns this
+  # workflow red on main instead of first appearing on an unrelated PR.
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,8 +33,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
-          # The directive is also the standard library the scan judges: a
-          # finding in the standard library is fixed by raising it.
+          # The script pins the toolchain to the go directive, so the
+          # directive is the standard library the scan judges, here and
+          # locally: a finding in the standard library is fixed by raising it.
           go-version-file: go.mod
           # setup-go's cache key is shared with every job in ci.yml. The scan
           # compiles no tests, so a cache saved from here would be the thinnest

@@ -24,32 +24,50 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 # Pinned so the scanner is reproducible. The vulnerability database it reads
-# is live by design, and is the part that is meant to move.
+# is live by design, and is the part that is meant to move. Renovate bumps
+# this pin (see renovate.json).
 GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.6.0}"
 
-GOBIN="$(go env GOPATH)/bin"
-GOVULNCHECK="${GOBIN}/govulncheck"
+# govulncheck judges the standard library of the toolchain go resolves to.
+# Pinning that toolchain to the go directive makes a local run judge the same
+# standard library CI does, which installs exactly that version. The directive
+# is read under GOTOOLCHAIN=auto so an older local toolchain can read it too.
+GOTOOLCHAIN="go$(GOTOOLCHAIN=auto go list -m -f '{{.GoVersion}}')"
+export GOTOOLCHAIN
 
-# Reuse an existing binary only when it is the pinned version. A developer who
-# already has a different govulncheck installed would otherwise get a different
-# answer from the one CI gets, from the same command, with nothing on screen
-# saying why.
-installed=""
-if [ -x "$GOVULNCHECK" ]; then
-    installed="$("$GOVULNCHECK" -version 2>/dev/null | awk '/^Scanner:/ { print $2 }')" || installed=""
-fi
-
-if [ "$installed" != "govulncheck@${GOVULNCHECK_VERSION}" ]; then
+# The scanner lives in a directory named for its version, which this script
+# both installs to and runs from, so a govulncheck installed anywhere else
+# never answers in its place. GOFLAGS is set for the install only: it lets the
+# install work under a vendoring GOFLAGS, and must not reach the scan, where
+# -mod=mod would let go list rewrite go.mod.
+GOVULNCHECK_DIR="bin/govulncheck-${GOVULNCHECK_VERSION}"
+GOVULNCHECK="${GOVULNCHECK_DIR}/govulncheck"
+if [ ! -x "$GOVULNCHECK" ]; then
     echo "Installing govulncheck ${GOVULNCHECK_VERSION}..."
-    GOFLAGS=-mod=mod go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+    GOBIN="$PWD/$GOVULNCHECK_DIR" GOFLAGS=-mod=mod \
+        go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
 fi
 
-if ! "$GOVULNCHECK" ./...; then
+# govulncheck exits 3 when the code calls a vulnerable symbol and 1 when the
+# scan itself could not run (advisory fetch, package load, toolchain); only
+# the first is fixed by a version bump.
+status=0
+"$GOVULNCHECK" ./... || status=$?
+case "$status" in
+0)
+    echo "No reachable vulnerabilities."
+    ;;
+3)
     echo ""
     echo "Reachable vulnerabilities found. Bump the affected modules to the"
     echo "release named in the advisory, and check that release for advisories"
     echo "of its own before landing on it."
-    exit 1
-fi
-
-echo "No reachable vulnerabilities."
+    exit 3
+    ;;
+*)
+    echo ""
+    echo "govulncheck could not complete the scan (exit ${status}); the output"
+    echo "above names the cause. This is not a vulnerability finding."
+    exit "$status"
+    ;;
+esac
