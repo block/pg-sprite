@@ -522,15 +522,20 @@ the native route's blind bounded attempt, which this route never makes. A statem
 does not take this route at all: `--force` keeps its one meaning, the submitted form run
 natively as a bounded blind attempt, and the audit record says so.
 
-Rows copied come from `Copier.Tracker` (`*progress.Tracker`), not from the hook, whose rows
-carry a key position. The adapter builds one tracker per run and calls its `Start` before
-`Run`: `Start` and `StartStep` drop the tracker's work source, so either called while the
-copy runs stops the counters, and two runs sharing one tracker each register as its source,
-the first to finish dropping the source the other still reports to. The copier is the work
-source from the copy's first chunk until just before the copy returns, so progress counters
-are for the copy alone: before it, after it, and through the verification pass and a live
-run's catch-up the tracker reports no work, and those phases reach the adapter only as
-`OnCheckpoint` rows. `rows_copied` counts this run's rows, rising monotonically, and
+Progress comes from one `*progress.Tracker` the adapter builds per call and hands to the
+front door as `Options.Progress`, then polls with `Tracker.Progress` from its own goroutine
+while `Run` or `RunDesired` blocks; the front door calls `Start` and `Finish`, so the adapter
+calls neither. The steps are the statements the call runs — one for `Run`, one per planned
+statement for `RunDesired` — and the detail is what executes inside the current one: a safer
+sequence's statements in turn, a concurrent index build with the server's build counters, and
+for a copy-and-swap the `copy`, a live run's `catch-up`, and the `checksum` pass, each with its
+engine-measured counters ([the contract](progress-report.md#obtaining-progress)). The tracker
+ends `finished` only for an executed outcome; a refusal or a failure ends it `failed`. Rows
+copied come from the tracker, not from the `OnCheckpoint` hook, whose rows carry a key
+position. `Options.Progress` replaces `Copier.Tracker`, and a policy that sets both is an
+error before anything runs: a tracker reads one work source at a time, and the front door
+hands it the one the phase in progress owns. A tracker serves one call at a time.
+`rows_copied` counts this run's rows, rising monotonically, and
 `rows_total` is the source's catalog estimate at the copy's start — `0` for a table `ANALYZE`
 has never visited, and possibly below `rows_copied` once the table has grown or on a resumed
 run — so a display treats `0` as unknown and a ratio over one as possible. The verdict's

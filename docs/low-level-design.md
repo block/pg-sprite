@@ -893,7 +893,8 @@ automation can distinguish nothing-committed from partial state left behind; an
 operator-accepted blocking change that committed ends in an `executed-without-online-safety`
 verdict (exit 3), the one case that is committed but not vouched for as online-safe
 ([the ladder](cli-output-examples.md#exit-codes)). Native execution
-exposes a caller-owned `progress.Tracker`. Embedders run a blocking executor
+exposes a caller-owned `progress.Tracker`, which the front doors take as `migrate.Options.Progress`
+and report every statement and copy-and-swap phase of the call to. Embedders run a blocking
 call in their own bounded task and poll `Tracker.Progress(ctx)` (a build read can outlast `ctx`
 by up to a minute; see [progress-report.md](progress-report.md)): sequence position and elapsed
 time come from in-process state, while an active concurrent index build is read on demand from

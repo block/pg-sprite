@@ -48,6 +48,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -131,6 +132,14 @@ type Options struct {
 	// CLI wires an always-on stderr handler here so an operator's
 	// deliberate safety override is visible even without diagnostics.
 	Audit *slog.Logger
+
+	// Progress, when set, is the tracker the whole call reports to, for the
+	// caller to poll from another goroutine while the call runs; nil
+	// reports nothing. The call owns the tracker's lifecycle: it calls
+	// Start and Finish, and one tracker serves one call at a time. See
+	// [Run] and [RunDesired] for the steps each reports. It replaces
+	// CopySwap.Copier.Tracker, which must be left nil when it is set.
+	Progress *progress.Tracker
 }
 
 // DefaultOptions is the sanctioned starting point for an embedding caller:
@@ -186,6 +195,9 @@ func (o Options) validate() error {
 	if o.CopySwap.Restart != "" && (o.Force != "" || o.AcceptBlocking != "") {
 		return errors.New("migrate: Options.CopySwap.Restart acknowledges a copy-and-swap run starting over, which Options.Force and Options.AcceptBlocking both route away from; name one acknowledgement")
 	}
+	if o.Progress != nil && o.CopySwap.Copier.Tracker != nil {
+		return errors.New("migrate: Options.Progress reports the copy along with every other step; leave Options.CopySwap.Copier.Tracker nil")
+	}
 	return nil
 }
 
@@ -235,9 +247,21 @@ func (o Options) retry() executor.RetryPolicy {
 // entry on every session, which the engine's other reads rely on (CO-9,
 // docs/schemabot-integration.md).
 //
+// With Options.Progress set, Run reports to it as a run of one step: it
+// starts the tracker with operation admitting while it gates, resolves,
+// routes, and preflights, reports the statement as step 1 once it
+// executes, and finishes the tracker as it returns — finished for an
+// executed verdict, failed for a refusal or a failure. While the step runs
+// the detail names what is executing now: each statement of a safer
+// sequence in turn with its own operation, a concurrent index build with
+// the server's build counters, and for a copy-and-swap the copy, a live
+// run's catch-up, and the verification pass, each with its counters.
+//
 // Run does not close the pool; one pool serves any number of calls.
-func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
-	return run(ctx, pool, st, opts, nil, nil)
+func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (v verdict.Verdict, err error) {
+	opts.startProgress(1)
+	defer func() { opts.finishProgress(v.Outcome, err) }()
+	return run(ctx, pool, st, opts, 1, nil, nil)
 }
 
 // run is Run for a statement that may be a diff-planned index adoption or
@@ -245,14 +269,14 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 // when validates is set, st validates that constraint. Either way
 // execution checks the planned definition again under the table's lock
 // before acting on it.
-func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
-	v, err := runStatement(ctx, pool, st, opts, adopts, validates)
+func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
+	v, err := runStatement(ctx, pool, st, opts, step, adopts, validates)
 	return WithServerError(v, err), err
 }
 
 // runStatement is run before a failed verdict records the server error
 // that failed it.
-func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
+func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
 	if err := opts.validate(); err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -262,15 +286,15 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 			// The acknowledged passthrough: the refusal stands as
 			// analysis, and the refused statement runs as-is under the
 			// brief budgets instead of not at all.
-			return acceptBlocking(ctx, pool, st, v, proof, opts)
+			return acceptBlocking(ctx, pool, st, v, proof, opts, step)
 		}
 		return v, nil
 	}
 	if st.Kind() == statement.KindRenameIndex {
-		return renameIndex(ctx, pool, st, opts, logger)
+		return renameIndex(ctx, pool, st, opts, step, logger)
 	}
 	if st.Kind() == statement.KindAddEnumValue {
-		return addEnumValue(ctx, pool, st, opts, logger)
+		return addEnumValue(ctx, pool, st, opts, step, logger)
 	}
 	st, err := resolveTarget(ctx, pool, st, logger)
 	if err != nil {
@@ -341,7 +365,7 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		auditRestart(opts.audit(), st)
 	}
 
-	v, err := dispatch(ctx, pool, st, canonical, rs, opts, adopts, validates, logger)
+	v, err := dispatch(ctx, pool, st, canonical, rs, opts, step, adopts, validates, logger)
 	if allowedDestructive && v.Outcome != "" {
 		v.AllowedDestructive = true
 	}
@@ -351,19 +375,19 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 // dispatch runs a routed statement that is past the front door's
 // acknowledgement gates down the path its disposition names.
 func dispatch(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, canonical string,
-	rs router.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation,
+	rs router.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation,
 	logger *slog.Logger) (verdict.Verdict, error) {
 	switch rs.Disposition {
 	case router.DispositionExecute:
 		if rs.Backend == router.BackendCopyAndSwap {
 			if opts.Force == "" {
-				return copyAndSwap(ctx, pool, st, opts, logger)
+				return copyAndSwap(ctx, pool, st, opts, step, logger)
 			}
 			// The acknowledged override keeps its one meaning: the
 			// submitted form runs natively as a blind bounded attempt
 			// instead of through the shadow table.
 			auditForce(opts.audit(), st, rs)
-			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
+			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, logger)
 		}
 		execSQL := rs.ExecSQL
 		substituted := len(execSQL) != 1 || execSQL[0] != rs.Statement
@@ -374,19 +398,19 @@ func dispatch(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, c
 			execSQL, substituted = []string{canonical}, false
 			auditForce(opts.audit(), st, rs)
 		}
-		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, adopts, validates, logger)
+		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, step, adopts, validates, logger)
 	case router.DispositionRewriteRequired:
 		if opts.Force == "" {
 			return rewriteRequiredVerdict(st, rs)
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, logger)
 	case router.DispositionUnavailable:
 		if opts.Force == "" {
 			return backendUnavailableVerdict(st, rs), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, logger)
 	case router.DispositionRefuse:
 		// A planner refusal means no known safe path — there is nothing
 		// bounded to acknowledge, so the force acknowledgement does not
@@ -490,7 +514,7 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // with the exact provisioning statement instead.
 func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	execSQL []string, plan planner.Plan, substituted, forced bool,
-	opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, logger *slog.Logger) (verdict.Verdict, error) {
+	opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, logger *slog.Logger) (verdict.Verdict, error) {
 	// An adoption or a validation is diff-planned SQL, which is never
 	// forced: the override exists for a submitted statement the router
 	// would substitute or decline.
@@ -553,15 +577,10 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	retry := opts.retry()
 	start := time.Now()
 	var rep executor.SequenceReport
-	switch {
-	case forced:
-		err = executor.ExecuteNative(ctx, pool, pt, st, opts.Budget.Brief, retry)
-	case adopts != nil:
-		rep, err = executor.RunSequenceAdopting(ctx, pool, pt, execSQL, opts.Budget, retry, *adopts)
-	case validates != nil:
-		rep, err = executor.RunSequenceValidating(ctx, pool, pt, execSQL, opts.Budget, retry, *validates)
-	default:
-		rep, err = executor.RunSequence(ctx, pool, pt, execSQL, opts.Budget, retry)
+	if forced {
+		err = executor.ExecuteNativeAsStep(ctx, pool, pt, st, opts.Budget.Brief, retry, opts.runStep(step))
+	} else {
+		rep, err = executor.RunSequenceAsStep(ctx, pool, pt, execSQL, opts.Budget, retry, adopts, validates, opts.runStep(step))
 	}
 	elapsed := time.Since(start)
 	if v, refused := execRefusal(st, err, substituted, forced, onlineIdiomPlan(plan)); refused {

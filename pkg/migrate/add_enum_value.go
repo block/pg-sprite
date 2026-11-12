@@ -39,7 +39,7 @@ func enumTypeFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Stateme
 // (preflight.CheckEnumTarget), and the statement runs as one bounded
 // attempt that confirms before the commit that the label went to that
 // type.
-func addEnumValue(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, logger *slog.Logger) (verdict.Verdict, error) {
+func addEnumValue(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
 	if err := rejectTableAcks(opts); err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -69,6 +69,7 @@ func addEnumValue(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		return verdict.Verdict{}, err
 	}
 
+	opts.startStep(step, st.SQL())
 	start := time.Now()
 	err = executor.ExecuteEnumValueAdd(ctx, pool, et, st, opts.Budget.Brief, opts.retry())
 	elapsed := time.Since(start)

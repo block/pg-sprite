@@ -37,7 +37,7 @@ func parseCopySwapStatement(t *testing.T) statement.Statement {
 // caller wired nothing wrong, the route is simply not open to it.
 func TestCopyAndSwapIsClosedUntilEnabled(t *testing.T) {
 	st := parseCopySwapStatement(t)
-	v, err := copyAndSwap(t.Context(), nil, st, Options{}, slog.New(slog.DiscardHandler))
+	v, err := copyAndSwap(t.Context(), nil, st, Options{}, 1, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
@@ -55,7 +55,7 @@ func TestCopyAndSwapIsClosedUntilEnabled(t *testing.T) {
 // means "nothing was executed".
 func TestCopyAndSwapRequiresTheConnection(t *testing.T) {
 	opts := Options{CopySwap: CopySwapOptions{Enabled: true}}
-	v, err := copyAndSwap(t.Context(), nil, parseCopySwapStatement(t), opts, slog.New(slog.DiscardHandler))
+	v, err := copyAndSwap(t.Context(), nil, parseCopySwapStatement(t), opts, 1, slog.New(slog.DiscardHandler))
 	require.ErrorIs(t, err, ErrCopySwapConnectionRequired)
 	assert.Zero(t, v)
 }
