@@ -207,12 +207,22 @@ func TestCheckLiveReportsAChunkThatKeepsChangingAsUnresolved(t *testing.T) {
 	assert.Equal(t, checksum.CauseHot, unresolved.Cause)
 	assert.Equal(t, 2, unresolved.Rereads)
 	assert.Equal(t, 1, unresolved.Keys, "only key 1 kept changing")
+	assert.Equal(t, []int64{1}, unresolved.HotKeys, "the error names the one row the source kept rewriting")
 	assert.Equal(t, chunk(t, math.MinInt64, 1000), unresolved.Chunk)
 	assert.Equal(t, int64(1000), unresolved.Source.Rows)
 	assert.Equal(t, int64(1000), unresolved.Shadow.Rows)
 	assert.NotEqual(t, unresolved.Source.Hash, unresolved.Shadow.Hash)
 	assert.Empty(t, outcome.Repairs, "an unsettled chunk is not repaired")
 	assertNoProofs(t, outcome)
+
+	// The chunk holds keys 1..1000 on both sides, so each row-by-row read
+	// of it returns 2000 rows: the sweep's read of the differing chunk and
+	// each of the two rereads, 3 × 2000. The other two chunks read equal
+	// and are never read row by row.
+	work, err := v.Work(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), work.ChunksReread)
+	assert.Equal(t, uint64(6000), work.SettleRowsRead, "the sweep's read and two rereads of a 1000-row chunk, both sides")
 }
 
 // A key settled at one reread is concluded as of that read, so the rereads
@@ -249,6 +259,7 @@ func TestCheckLiveJudgesOnlyTheKeysStillHotAfterTheFirstReread(t *testing.T) {
 	assert.Equal(t, checksum.CauseHot, unresolved.Cause)
 	assert.Equal(t, 2, unresolved.Rereads)
 	assert.Equal(t, 1, unresolved.Keys, "only key 1 was still changing")
+	assert.Equal(t, []int64{1}, unresolved.HotKeys, "key 2 settled at the first reread, so only key 1 is named")
 	assert.Equal(t, chunk(t, math.MinInt64, 1000), unresolved.Chunk)
 	assert.Empty(t, outcome.Report.Mismatches)
 	assertNoProofs(t, outcome)

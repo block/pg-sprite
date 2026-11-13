@@ -634,7 +634,7 @@ side compares unequal to an absence on the other):
 | --- | --- |
 | every key settled | clean (`Report.Settled`) |
 | any key diverged | a confirmed divergence (`Report.Mismatches`), with the digests of the last read |
-| no key diverged, some keys hot | another reread, judging only the keys still hot, up to `LiveOptions.Attempts` in all, then `*UnresolvedError` (cause `hot`, `Keys` the number still changing) |
+| no key diverged, some keys hot | another reread, judging only the keys still hot, up to `LiveOptions.Attempts` in all, then `*UnresolvedError` (cause `hot`, `Keys` the number still changing, `HotKeys` the lowest few of them, which the message names) |
 | the catch-up did not confirm past the marker within the wait | `*UnresolvedError` (cause `lagging`) |
 
 A key settled at one reread is concluded as of that read, and the stream carries every write

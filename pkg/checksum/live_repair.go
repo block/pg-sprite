@@ -107,6 +107,7 @@ func (v *Verifier) settleRepair(ctx context.Context, pool *pgxpool.Pool, stmts s
 		return err
 	}
 	v.countReread()
+	v.countSettleRows(now)
 	const rereads = 1
 	if source, shadow := now.digests(); source == shadow {
 		return nil

@@ -22,7 +22,8 @@ func runningTracker(t *testing.T) *progress.Tracker {
 
 // The counters accumulate what the pass tells them: compared chunks carry
 // their source row counts, a mismatch, a repair and a reread count chunks,
-// and nothing else moves. A fresh verifier reports all zeros.
+// a settling read counts the rows it returned on both sides, and nothing
+// else moves. A fresh verifier reports all zeros.
 func TestWorkAccumulatesTheCountersAPassReports(t *testing.T) {
 	v := &Verifier{}
 	work, err := v.Work(t.Context())
@@ -34,6 +35,7 @@ func TestWorkAccumulatesTheCountersAPassReports(t *testing.T) {
 	v.countMismatch()
 	v.countRepaired(2)
 	v.countReread()
+	v.countSettleRows(observation{source: make(rowSet, 3), shadow: make(rowSet, 2)})
 
 	work, err = v.Work(t.Context())
 	require.NoError(t, err)
@@ -43,6 +45,7 @@ func TestWorkAccumulatesTheCountersAPassReports(t *testing.T) {
 		ChunksMismatched: 1,
 		ChunksRepaired:   2,
 		ChunksReread:     1,
+		SettleRowsRead:   5,
 	}, work)
 }
 

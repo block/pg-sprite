@@ -43,7 +43,7 @@ phase or operation value is a contract change and bumps `format_version`, even i
 is added or renamed.
 
 Adding a field bumps `format_version` so a strict consumer can detect the new shape from the
-version. The current version is **7**: version 2 added `detail.statement`; version 3 added
+version. The current version is **8**: version 2 added `detail.statement`; version 3 added
 `detail.current_locker_pid`, `work.lockers_total`, and `work.lockers_done`; version 4 added
 the `copy` operation and split `work` into two counter families — the server-observed build
 counters and the engine-measured copy counters (`rows_*`, `bytes_*`) — selected by
@@ -52,7 +52,8 @@ version 5 added the `checksum` operation and its engine-measured counter family
 (`chunks_compared`, `rows_hashed`, `chunks_mismatched`, `chunks_repaired`, `chunks_reread`);
 version 6 added the `catch-up` operation and its engine-measured counter family
 (`changes_applied`, `changes_buffered`, `lag_bytes`); version 7 added `work.rows_to_hash` and the
-derived `detail.percent` and `detail.eta_ns` (see [Percent and ETA](#percent-and-eta)).
+derived `detail.percent` and `detail.eta_ns` (see [Percent and ETA](#percent-and-eta)); version
+8 added `work.settle_rows_read`.
 
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
@@ -143,8 +144,9 @@ that timeout whatever session defaults the caller's pool carries, so an observer
 the copy's stop path open.
 
 **Engine-measured** (`checksum`): `chunks_compared`, `rows_hashed`, `rows_to_hash`,
-`chunks_mismatched`, `chunks_repaired` and `chunks_reread` come from the checksum pass itself,
-which cuts its own chunks and digests each one on both tables inside one snapshot. The counters cover a whole
+`chunks_mismatched`, `chunks_repaired`, `chunks_reread` and `settle_rows_read` come from the
+checksum pass itself, which cuts its own chunks and digests each one on both tables inside one
+snapshot. The counters cover a whole
 `Check`: the comparison that finds differing chunks and, under the `repair` policy, the recopy
 and the reread that follow it, so a pass that spends most of its time repairing still shows
 movement. They cover a whole `CheckLive` the same way — the pass that runs while the source is
@@ -162,7 +164,8 @@ transaction before the first chunk. Native and `copy` operations report none of 
 | `rows_to_hash` | The rows the comparison expects to hash: the source's catalog row count (`pg_class.reltuples`) read when the comparison starts — the same estimate the copy reports as `rows_total`, read again since the copy. `0` for a table `ANALYZE` has never visited. An estimate, not a scan: it counts the whole source even when the pass stops at a partial watermark, and drifts from the rows actually there as the source is written, so `rows_hashed` can end short of it or pass it. A comparison that runs again under `recopy` reads it afresh while `rows_hashed` keeps counting. |
 | `chunks_mismatched` | Chunks the comparison found differing. Under `abort` this is the finding the pass returns with; under `repair` it is the number of chunks the recopy covers. In a live pass it counts every chunk the sweep found differing, whether or not it has settled since, so it is an upper bound on the divergences the pass will confirm: a chunk the stream had simply not reached yet is counted here and then settles clean. |
 | `chunks_repaired` | Chunks whose recopy from the source has committed. Every differing chunk is recopied in one transaction, so this moves from `0` to `chunks_mismatched` at that commit. A chunk still differing at its reread stops the pass; it stays counted here because its recopy did commit. |
-| `chunks_reread` | Chunks digested again in a fresh snapshot after the comparison. Under `Check` these are the repaired chunks reread after the recopy: it climbs from `0` towards `chunks_repaired` as the rereads commit, so `chunks_repaired − chunks_reread` is the repair phase's remaining work; a chunk that still differs at its reread is counted here before the pass stops on it. In a live pass every settling reread counts — of a chunk the sweep found differing, and of a repaired chunk after its recopy — and a settling reread reads every row of the chunk and judges it key by key, so the figure can exceed `chunks_mismatched` while the pass rereads a chunk some key of which keeps changing, and a pass that is still climbing here is waiting on the catch-up or on those keys to hold still. Each such reread costs about what the sweep's digest of the chunk did — the hash expression over every row of the chunk on both sides — and returns every row's key and hash rather than one aggregate, so on a busy table a live pass's read load beyond `rows_hashed` is the rows of its differing chunks, read once in the sweep and once per reread. |
+| `chunks_reread` | Chunks digested again in a fresh snapshot after the comparison. Under `Check` these are the repaired chunks reread after the recopy: it climbs from `0` towards `chunks_repaired` as the rereads commit, so `chunks_repaired − chunks_reread` is the repair phase's remaining work; a chunk that still differs at its reread is counted here before the pass stops on it. In a live pass every settling reread counts — of a chunk the sweep found differing, and of a repaired chunk after its recopy — and a settling reread reads every row of the chunk and judges it key by key, so the figure can exceed `chunks_mismatched` while the pass rereads a chunk some key of which keeps changing, and a pass that is still climbing here is waiting on the catch-up or on those keys to hold still. Each such reread costs about what the sweep's digest of the chunk did — the hash expression over every row of the chunk on both sides — and returns every row's key and hash rather than one aggregate, so on a busy table a live pass's read load beyond `rows_hashed` is the rows of its differing chunks, read once in the sweep and once per reread; `settle_rows_read` counts it. |
+| `settle_rows_read` | Rows a live pass has read row by row to settle the chunks it found differing, both sides counted: the sweep's read of each differing chunk, in the snapshot that digested it, and every settling reread, of a differing chunk or of a repaired one after its recopy. A chunk of 1000 rows on each side that the sweep found differing and that took two rereads adds `3 × 2000 = 6000`. It is the settling's read load beyond the sweep's digests — `rows_hashed` counts the source side of every chunk once — so a figure climbing fast against `chunks_reread` says the rereads are of large chunks, and one climbing while `chunks_mismatched` holds still says the pass is rereading chunks whose keys keep changing. `0` under `Check`, whose rereads are digests, not rows. |
 
 A pass sizes its chunks from the time each one takes, so the chunk count is known only when
 the pass ends; the comparison's completion is measured in rows instead, `rows_hashed` against
@@ -376,7 +379,7 @@ under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "phase": "running",
   "step": 2,
   "total_steps": 3,
@@ -401,6 +404,7 @@ under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
       "chunks_reread": 0,
+      "settle_rows_read": 0,
       "changes_applied": 0,
       "changes_buffered": 0,
       "lag_bytes": 0,
@@ -421,7 +425,7 @@ pins it):
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "phase": "running",
   "step": 2,
   "total_steps": 4,
@@ -444,6 +448,7 @@ pins it):
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
       "chunks_reread": 0,
+      "settle_rows_read": 0,
       "changes_applied": 0,
       "changes_buffered": 0,
       "lag_bytes": 0,
@@ -465,7 +470,7 @@ recopied, one of the two reread so far; under five seconds into the step, so no 
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "phase": "running",
   "step": 3,
   "total_steps": 4,
@@ -486,6 +491,7 @@ recopied, one of the two reread so far; under five seconds into the step, so no 
       "chunks_mismatched": 2,
       "chunks_repaired": 2,
       "chunks_reread": 1,
+      "settle_rows_read": 0,
       "changes_applied": 0,
       "changes_buffered": 0,
       "lag_bytes": 0,
@@ -506,7 +512,7 @@ buffered behind an in-flight chunk, some WAL still to confirm
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "phase": "running",
   "step": 3,
   "total_steps": 4,
@@ -526,6 +532,7 @@ buffered behind an in-flight chunk, some WAL still to confirm
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
       "chunks_reread": 0,
+      "settle_rows_read": 0,
       "changes_applied": 8200,
       "changes_buffered": 37,
       "lag_bytes": 65536,

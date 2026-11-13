@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -76,6 +79,12 @@ type UnresolvedError struct {
 	// last reread. It is zero under CauseLagging: a pass that never got
 	// to reread the chunk judged no key.
 	Keys int
+	// HotKeys is the lowest of those keys, in ascending order, at most
+	// hotKeysShown of them, so an operator can tell one row written over
+	// and over from churn across the chunk. It is empty under
+	// CauseLagging. The keys are the table's integer key values, which the
+	// chunk bounds already name; no other column of a row is carried.
+	HotKeys []int64
 	// Source and Shadow are the two digests of the pass's last read.
 	Source Digest
 	Shadow Digest
@@ -96,8 +105,8 @@ func (e *UnresolvedError) Error() string {
 		return fmt.Sprintf("chunk [%d, %d] read at %s is unsettled: the catch-up has confirmed only %s after %s; run the pass again once the catch-up has confirmed past the read",
 			e.Chunk.Lower(), e.Chunk.Upper(), e.Captured, e.Confirmed, rereadsPhrase(e.Rereads))
 	case CauseHot:
-		return fmt.Sprintf("chunk [%d, %d] kept changing through %s: %s still changing, source %d rows, shadow %d rows at %s; the source is changing faster than the pass can compare it, so run the pass again when it is quieter",
-			e.Chunk.Lower(), e.Chunk.Upper(), rereadsPhrase(e.Rereads), keysPhrase(e.Keys), e.Source.Rows, e.Shadow.Rows, e.Captured)
+		return fmt.Sprintf("chunk [%d, %d] kept changing through %s: %s still changing%s, source %d rows, shadow %d rows at %s; the source is changing faster than the pass can compare it, so run the pass again when it is quieter",
+			e.Chunk.Lower(), e.Chunk.Upper(), rereadsPhrase(e.Rereads), keysPhrase(e.Keys), hotKeysPhrase(e.HotKeys, e.Keys), e.Source.Rows, e.Shadow.Rows, e.Captured)
 	default:
 		return fmt.Sprintf("chunk [%d, %d] is unsettled after %s", e.Chunk.Lower(), e.Chunk.Upper(), rereadsPhrase(e.Rereads))
 	}
@@ -117,6 +126,39 @@ func keysPhrase(n int) string {
 		return "1 key"
 	}
 	return fmt.Sprintf("%d keys", n)
+}
+
+// hotKeysShown bounds how many still-changing keys an UnresolvedError
+// carries and names, so a chunk with every key hot yields a short message.
+const hotKeysShown = 3
+
+// firstHotKeys returns the lowest still-changing keys an UnresolvedError
+// carries: at most hotKeysShown of hot, which is in ascending order, in a
+// slice of its own.
+func firstHotKeys(hot []int64) []int64 {
+	return slices.Clone(hot[:min(len(hot), hotKeysShown)])
+}
+
+// hotKeysPhrase names the still-changing keys in parentheses — every one
+// when keys holds them all, the lowest otherwise — or nothing when there
+// are none to name. It names at most hotKeysShown keys whatever keys holds.
+func hotKeysPhrase(keys []int64, total int) string {
+	keys = keys[:min(len(keys), hotKeysShown)]
+	if len(keys) == 0 {
+		return ""
+	}
+	names := make([]string, len(keys))
+	for i, key := range keys {
+		names[i] = strconv.FormatInt(key, 10)
+	}
+	label := "keys"
+	switch {
+	case total > len(keys):
+		label = "lowest keys"
+	case len(keys) == 1:
+		label = "key"
+	}
+	return " (" + label + " " + strings.Join(names, ", ") + ")"
 }
 
 // Unwrap makes every UnresolvedError match ErrVerificationUnresolved.
@@ -279,8 +321,10 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 //
 // While it runs the verifier is the tracker's work source: the sweep's
 // differing chunks count as chunks_mismatched, and every settling reread
-// as chunks_reread. A CheckLive that overlaps a pass still running on this
-// verifier is refused with ErrPassRunning.
+// as chunks_reread, with the rows of every row-by-row read of a differing
+// chunk, the sweep's and each reread's, as settle_rows_read. A CheckLive
+// that overlaps a pass still running on this verifier is refused with
+// ErrPassRunning.
 func (v *Verifier) CheckLive(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, policy DivergencePolicy, live LiveOptions) (Outcome, error) {
 	if err := policy.validate(); err != nil {
 		return Outcome{}, v.verifyError(err)
