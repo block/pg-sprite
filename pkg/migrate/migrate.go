@@ -476,6 +476,10 @@ func qualifyStatement(st statement.Statement, schema string) (statement.Statemen
 	return statement.ParseOne(sql)
 }
 
+// ErrForceMismatch means the force acknowledgement named a table other than
+// the statement's resolved target. Nothing has executed.
+var ErrForceMismatch = errors.New("the force acknowledgement must name the resolved target table")
+
 // checkForceAck validates the force acknowledgement: it must name the
 // resolved schema-qualified target table exactly, proving the operator
 // names the relation whose lock they are accepting. A mismatch is a usage
@@ -484,8 +488,7 @@ func checkForceAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("the force acknowledgement must name the resolved target table %q, got %q; nothing was executed",
-		qualified(st), ack)
+	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrForceMismatch, qualified(st), ack)
 }
 
 // auditForce records the override decision before anything executes: the

@@ -74,6 +74,10 @@ func fenceAfterStop(ctx context.Context, store *checkpoint.Store, st statement.S
 var ErrBlockWritesNotSupported = errors.New(
 	"the block-writes acknowledgement applies to the imperative front door only; desired-state execution never takes a table offline for writes")
 
+// ErrBlockWritesMismatch means the block-writes acknowledgement named a
+// table other than the statement's resolved target. Nothing has executed.
+var ErrBlockWritesMismatch = errors.New("the block-writes acknowledgement must name the resolved target table")
+
 // checkBlockWritesAck confirms that the block-writes acknowledgement names the
 // resolved target table, exactly as the force and restart acknowledgements
 // must. A block-writes run refuses every write to the table for its whole
@@ -83,8 +87,7 @@ func checkBlockWritesAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("the block-writes acknowledgement must name the resolved target table %q, got %q; nothing was executed",
-		qualified(st), ack)
+	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrBlockWritesMismatch, qualified(st), ack)
 }
 
 // auditBlockWrites records, before the fence goes on, that the operator took
