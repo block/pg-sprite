@@ -90,6 +90,14 @@ func (f DBFlags) diag() *slog.Logger {
 	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
+// diagWriter is the diagnostics stream: stderr, or the test override.
+func (f DBFlags) diagWriter() io.Writer {
+	if f.diagOut != nil {
+		return f.diagOut
+	}
+	return os.Stderr
+}
+
 // audit returns the operator audit logger: warn-level text on stderr (or the
 // test override), always on — an audit record of a deliberate safety
 // override must not depend on --debug. The machine-readable counterpart is
@@ -131,6 +139,11 @@ type MigrateCmd struct {
 	Restart           string        `help:"Start a copy-and-swap over instead of resuming the leftover of an earlier run: the leftover shadow table, checkpoint row, and write fence or replication slot are discarded under the run's lock, then the statement runs from the beginning. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. A leftover whose swap already committed is not discarded; run the statement without this flag to finish it. Cannot be combined with --force, --accept-blocking, --dry-run, or --desired." placeholder:"SCHEMA.TABLE"`
 	DryRun            bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
 	JSON              bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
+	Progress          string        `help:"Show the running change's progress on stderr: the step, operation, percent, and ETA. auto shows it only when stderr is a terminal (TERM=dumb disables it), redrawn in place; always shows it on any stderr, as a plain line per change of step, operation, or ten-percent mark when stderr is not a terminal; never hides it. stdout carries only the verdict either way. Cannot be always with --json or --dry-run." enum:"auto,always,never" default:"auto"`
+
+	// progressInterval overrides how often progress is polled, in tests.
+	// Kong ignores unexported fields.
+	progressInterval time.Duration
 }
 
 // Validate rejects flag combinations with no coherent meaning. A dry run
@@ -182,6 +195,12 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	}
 	if c.Restart != "" && c.AcceptBlocking != "" {
 		return errors.New("--restart cannot be combined with --accept-blocking: an accepted blocking statement is not a copy-and-swap, so there is no leftover to discard")
+	}
+	if c.Progress == "always" && c.JSON {
+		return errors.New("--progress=always cannot be combined with --json: the machine-readable run shows no progress line")
+	}
+	if c.Progress == "always" && c.DryRun {
+		return errors.New("--progress=always cannot be combined with --dry-run: the dry run executes nothing, so there is no progress to show")
 	}
 	if c.AcceptBlocking != "" && !flagSupplied(kctx, "statement-timeout") {
 		return errors.New("--accept-blocking requires --statement-timeout on the same command line: it is the outage bound you accept after the lock is granted, and the default is not an acknowledgement")

@@ -16,6 +16,13 @@ import (
 	"github.com/block/pg-sprite/pkg/progress"
 )
 
+// The retained WAL's grace is the server's release interval plus one
+// cycle, so a slower cycle lengthens it by exactly its own length.
+func TestSlotLagGraceIsTheReleaseIntervalPlusOneCycle(t *testing.T) {
+	assert.Equal(t, 15*time.Second+DefaultCatchupInterval, slotLagGrace(CatchupOptions{}.withDefaults()))
+	assert.Equal(t, 17*time.Second, slotLagGrace(CatchupOptions{Interval: 2 * time.Second}))
+}
+
 func TestCatchupOptionsDefaults(t *testing.T) {
 	opts := CatchupOptions{}.withDefaults()
 	assert.Equal(t, DefaultCatchupInterval, opts.Interval)

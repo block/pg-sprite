@@ -8,9 +8,9 @@ directory).
 ## Prerequisites
 
 - [VHS](https://github.com/charmbracelet/vhs) (`brew install vhs`)
-- A built binary: `make build`
-- The compose database for the database-backed tapes: `make db-up`
-  (`lint.tape` is fully offline)
+- A built binary and, for the database-backed tapes, the compose database
+  (`lint.tape` is fully offline): `make demos` builds and starts both; run
+  `make build db-up` first when rendering a single tape with `vhs <tape>`
 
 ## Tapes
 
@@ -47,8 +47,7 @@ camera to show no database is needed.
 ## Re-rendering
 
 ```sh
-make build db-up
-make demos
+make demos   # builds the binary and starts the compose database first
 ```
 
 The GIFs are committed next to the tapes so the README renders without any

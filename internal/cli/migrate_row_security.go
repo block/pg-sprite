@@ -34,7 +34,12 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 		return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
 	}
 	if runsTheTablePlan(report, planErr) {
-		result, runErr := migrate.RunDesiredWithRowSecurity(ctx, pool, migrate.RowSecurityRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))
+		opts, stopProgress, err := c.startProgress(ctx, c.options(c.diag()))
+		if err != nil {
+			return err
+		}
+		result, runErr := migrate.RunDesiredWithRowSecurity(ctx, pool, migrate.RowSecurityRequest{Schema: c.Schema, Desired: desired}, opts)
+		stopProgress()
 		return c.finishDesired(out, result, runErr)
 	}
 	runReport, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, b)
@@ -68,6 +73,7 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 	if err == nil {
 		if report.TableCreated {
 			v.TableCreated = true
+			v.ExtensionSchemas = report.ExtensionSchemas
 			v.Detail = "table created with its row security: all changes committed in one transaction"
 		}
 		if len(report.Statements) == 0 {

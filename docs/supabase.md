@@ -8,8 +8,9 @@ Supabase's access policies, Data API, and Realtime subscriptions. An opt-in [hos
 real Auth users and service endpoints. Its Realtime schema change cases initialize
 one shared fixture and verify baseline delivery before applying changes, then
 check that events and tenant isolation survive on the same connections. Changes
-that need a replacement table are refused today because copy-and-swap is not
-implemented yet.
+that need a replacement table are refused on the tested tables: copy-and-swap
+refuses a table in a publication, as every table Realtime publishes is, and the
+rewrites it does not carry refuse `backend-unavailable`.
 
 Start with [your first change](#make-your-first-change). The [test results](#what-works-today)
 and [roadmap](#where-we-go-next) show how far the current coverage goes.
@@ -245,9 +246,11 @@ Since Supavisor 2.10, clients over the pooler's connection limit wait about
 | Defaults, nullability, widening `varchar`, and converting `varchar` to `text` | Executed without replacing the table; policies, grants, publication membership, data, and tenant API access preserved | [Native DDL matrix](../integration/supabase/ddl_matrix_test.go) |
 | Check and unique constraints, column removal, and a column rename run with `--force` (refused by default as app-breaking) | Catalog changes verified; tenant API access and existing protections preserved | [Native DDL matrix](../integration/supabase/ddl_matrix_test.go) |
 | Foreign key from an app table to `auth.users` | Statement workflow added and validated the constraint; orphan writes rejected | [Auth foreign key](../integration/supabase/failure_test.go) |
-| Integer widening, text-to-integer, `varchar` shrinking, numeric scale changes, and volatile defaults | Both statement and desired-schema workflows refused with `backend-unavailable`; full schema/data snapshots unchanged, including a safe addition in the same plan | [Copy-and-swap refusals](../integration/supabase/ddl_matrix_test.go) |
+| Integer widening, text-to-integer, `varchar` shrinking, and numeric scale changes on a Realtime-published table | Desired-schema plans route them to copy-and-swap; the statement workflow, with the route opened, refused at its preflight with `copy-and-swap-refused`, cause `copy-and-swap-publication-member`; full schema/data snapshots unchanged, including a safe addition in the same statement | [Copy-and-swap refusals](../integration/supabase/ddl_matrix_test.go) |
+| Volatile defaults | Both statement and desired-schema workflows refused with `backend-unavailable`; full schema/data snapshots unchanged, including a safe addition in the same plan | [Copy-and-swap refusals](../integration/supabase/ddl_matrix_test.go) |
 | Retype a column a policy reads, such as `owner_id` compared to `auth.uid()` or a `varchar` a restrictive policy filters on | Both statement and desired-schema workflows refused at plan time with `dependent-policy`, naming the policies; schema, data, policies, and tenant API access unchanged | [Dependent policies](../integration/supabase/dependent_policy_test.go) |
-| Stored generated column or explicit `USING` expression | Statement workflow refused with `backend-unavailable`; schema and data unchanged | [Additional refusals](../integration/supabase/failure_test.go) |
+| Stored generated column | Statement workflow refused with `backend-unavailable`; schema and data unchanged | [Additional refusals](../integration/supabase/failure_test.go) |
+| Explicit `USING` expression on a Realtime-published table | Statement workflow, with copy-and-swap opened, refused at its preflight with `copy-and-swap-publication-member`; schema and data unchanged | [Additional refusals](../integration/supabase/failure_test.go) |
 | Desired plan containing a column removal | Refused with `destructive-change`; no safe prefix applied | [Whole-plan admission](../integration/supabase/failure_test.go) |
 | Lock contention, null rows during `SET NOT NULL`, and duplicate rows during a unique index build | Typed outcomes and durable database state verified; tenant API access preserved | [Failure paths](../integration/supabase/failure_test.go) |
 | API and Realtime after each copy-and-swap refusal | Tenant reads and new INSERT events still worked on the original sockets | [Service continuity](../integration/supabase/continuity_test.go) |
@@ -288,11 +291,13 @@ outcome; they do not assume every unsuccessful change rolls back completely.
   only. Supabase installs extensions such as `citext`, `uuid-ossp`, and
   `pg_trgm` in the `extensions` schema, so either qualify them
   (`extensions.citext`) or pass `--extension-schema extensions` to `diff` and
-  `migrate --desired` (Go: `DesiredSchema.WithExtensionSchemas`). The plan
-  still names each such object qualified. In policy expressions, qualify
-  external types and functions even in `public`, such as `public.doc_status`;
-  the policy workspace does not search `public`, and a file that declares row
-  security does not accept `--extension-schema`
+  `migrate --desired` (Go: `DesiredSchema.WithExtensionSchemas`, or
+  `DesiredWithRowSecurity.WithExtensionSchemas` for a file that declares row
+  security). The plan still names each such object qualified. The flag
+  applies to the table definition only. In policy expressions, qualify
+  external types and functions even in `public` or `extensions`, such as
+  `public.doc_status` or `extensions.citext`; the policy workspace searches
+  neither
 - Desired schema files plan foreign keys but do not apply them, and refuse
   a reference to another schema such as `auth.users`. Use the supported
   statement workflow where available; see [capabilities.md](capabilities.md)
@@ -337,8 +342,10 @@ before we expand the support claim:
    Realtime payloads after column renames and removals, and real signup/login
    flows. Make the limits of desired schema files and access-policy handling
    clear in each case
-4. **Validate table rewrites when the engine supports them.** Copy-and-swap must
-   preserve data and the surrounding policies, grants, and replication setup.
+4. **Validate table rewrites.** Copy-and-swap carries a general column retype but
+   refuses a table in a publication, which covers every table Realtime publishes.
+   Running it on Supabase must preserve data and the surrounding policies, grants,
+   and replication setup.
    A successful copy alone is not enough to claim Supabase compatibility
 
 Have a Supabase workflow you want covered? The local fixture below gives you
