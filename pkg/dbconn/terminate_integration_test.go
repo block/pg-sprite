@@ -160,7 +160,10 @@ func blockOneBackendBehindAnother(t *testing.T, pool *pgxpool.Pool, table string
 	t.Cleanup(func() {
 		const insertSettleDeadline = 30 * time.Second
 		select {
-		case <-insertDone:
+		case err := <-insertDone:
+			if err != nil {
+				t.Logf("the waiter's insert ended with: %v", err)
+			}
 		case <-time.After(insertSettleDeadline):
 			t.Logf("the waiter's insert did not settle within %s", insertSettleDeadline)
 		}

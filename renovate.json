@@ -1,4 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"]
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The govulncheck version scripts/check-vulnerabilities.sh pins",
+      "managerFilePatterns": ["/^scripts/check-vulnerabilities\\.sh$/"],
+      "matchStrings": ["GOVULNCHECK_VERSION=\"\\$\\{GOVULNCHECK_VERSION:-(?<currentValue>v[0-9.]+)\\}\""],
+      "depNameTemplate": "golang.org/x/vuln",
+      "datasourceTemplate": "go"
+    }
+  ]
 }

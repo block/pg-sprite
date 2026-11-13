@@ -105,8 +105,10 @@ type catchupRun struct {
 	lock    *dbconn.TableLockSession
 	copier  *copier.Copier
 	catchup *applier.Catchup
-	cancel  context.CancelFunc
-	done    chan error
+	// slot is the name of the slot the catch-up's stream reads.
+	slot   string
+	cancel context.CancelFunc
+	done   chan error
 }
 
 // schemaChange is the change every test here applies: the workload table
@@ -185,7 +187,7 @@ func startCatchupWith(t *testing.T, f catchupFixture, setup catchupSetup) *catch
 		Clock:   setup.copierClock,
 	})
 	require.NoError(t, err)
-	run := &catchupRun{f: f, shadow: shadow, lock: lock, copier: c, done: make(chan error, 1)}
+	run := &catchupRun{f: f, shadow: shadow, lock: lock, copier: c, slot: slot.Name(), done: make(chan error, 1)}
 	positions := applier.PositionSource(c)
 	if setup.positions != nil {
 		run.copy(t)

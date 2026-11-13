@@ -155,8 +155,7 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 	}
 	if setsRole {
 		if err := checkSetRoleAccess(ctx, pool, accessFacts{role: role, owner: owner, versionNum: versionNum}); err != nil {
-			var privilegeErr *PrivilegeError
-			if errors.As(err, &privilegeErr) {
+			if privilegeErr, ok := errors.AsType[*PrivilegeError](err); ok {
 				privilegeErr.Tier = TierCreateTable
 			}
 			return CreationRole{}, err

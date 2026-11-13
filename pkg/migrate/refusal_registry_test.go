@@ -114,6 +114,7 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 		"gate:ALTER TABLE/concurrent=false", "gate:ALTER TABLE/concurrent=true",
 		"gate:CREATE INDEX/concurrent=false", "gate:CREATE INDEX/concurrent=true",
 		"gate:ALTER INDEX RENAME/concurrent=false", "gate:ALTER INDEX RENAME/concurrent=true",
+		"gate:ALTER TYPE ADD VALUE/concurrent=false", "gate:ALTER TYPE ADD VALUE/concurrent=true",
 	}, admitted, "only the admitted kinds may leave the gate unclassified")
 	for _, sentinel := range []string{
 		"create-shape:" + string(executor.CreateShapeIfNotExists),

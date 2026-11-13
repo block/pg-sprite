@@ -168,8 +168,7 @@ func (e *CreateShapeError) Unwrap() error {
 // empty cause when err is nil or carries no create-shape refusal. Wrappers,
 // including a *SequenceStepError naming the failed step, are read through.
 func CreateShapeCauseOf(err error) CreateShapeCause {
-	var shapeErr *CreateShapeError
-	if errors.As(err, &shapeErr) {
+	if shapeErr, ok := errors.AsType[*CreateShapeError](err); ok {
 		return shapeErr.Cause
 	}
 	return ""

@@ -136,22 +136,22 @@ func TestCheckReportsEachStageOfARepairPass(t *testing.T) {
 
 	compared, ok := observer.first(func(w progress.Work) bool { return w.ChunksCompared == 3 })
 	require.True(t, ok, "the repair transaction's first statement is polled with the comparison complete")
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, ChunksMismatched: 3}, compared, "every chunk differs and none has been repaired yet")
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows, ChunksMismatched: 3}, compared, "every chunk differs and none has been repaired yet")
 
 	repaired, ok := observer.first(func(w progress.Work) bool { return w.ChunksRepaired > 0 })
 	require.True(t, ok, "the rereads are polled after the repair committed")
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, ChunksMismatched: 3, ChunksRepaired: 3}, repaired, "one transaction repairs all three chunks, so the count moves from zero to three at once, before any reread")
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows, ChunksMismatched: 3, ChunksRepaired: 3}, repaired, "one transaction repairs all three chunks, so the count moves from zero to three at once, before any reread")
 
 	reread, ok := observer.first(func(w progress.Work) bool { return w.ChunksReread == 2 })
 	require.True(t, ok, "the third reread's first statement is polled with two rereads committed")
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, ChunksMismatched: 3, ChunksRepaired: 3, ChunksReread: 2}, reread, "a reread counts as a reread, not as a compared chunk or as hashed rows")
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows, ChunksMismatched: 3, ChunksRepaired: 3, ChunksReread: 2}, reread, "a reread counts as a reread, not as a compared chunk or as hashed rows")
 
 	after, err := observer.tracker.Progress(t.Context())
 	require.NoError(t, err)
 	assert.Nil(t, after.Detail.Work, "a returned pass is no longer the tracker's work source")
 	direct, err := v.Work(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, ChunksMismatched: 3, ChunksRepaired: 3, ChunksReread: 3}, direct, "three chunks compared, then the same three repaired and reread")
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows, ChunksMismatched: 3, ChunksRepaired: 3, ChunksReread: 3}, direct, "three chunks compared, then the same three repaired and reread")
 }
 
 // A clean Verify pass counts its three chunks and the source's rows and
@@ -176,7 +176,7 @@ func TestVerifyCountsAPassAndTheNextPassStartsFromZero(t *testing.T) {
 
 	direct, err := v.Work(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500}, direct)
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows}, direct)
 	after, err := observer.tracker.Progress(t.Context())
 	require.NoError(t, err)
 	assert.Nil(t, after.Detail.Work, "a returned pass is no longer the tracker's work source")
@@ -190,7 +190,7 @@ func TestVerifyCountsAPassAndTheNextPassStartsFromZero(t *testing.T) {
 	assert.Equal(t, progress.Work{}, seen[0], "the second pass's first statement is polled with every counter reset")
 	direct, err = v.Work(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500}, direct, "the second pass ends with only its own chunks counted")
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows}, direct, "the second pass ends with only its own chunks counted")
 }
 
 // Under DivergenceAbort the pass counts what it found and repairs nothing:
@@ -212,7 +212,7 @@ func TestCheckUnderAbortCountsMismatchesAndNoRepairs(t *testing.T) {
 
 	direct, err := v.Work(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, ChunksMismatched: 3}, direct, "the comparison ran to the end; the policy stopped the pass before any repair")
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows, ChunksMismatched: 3}, direct, "the comparison ran to the end; the policy stopped the pass before any repair")
 	after, err := observer.tracker.Progress(t.Context())
 	require.NoError(t, err)
 	assert.Nil(t, after.Detail.Work, "a refused pass has released the tracker too")
@@ -250,7 +250,7 @@ func TestCheckCountsNoRepairWhenTheRepairRollsBack(t *testing.T) {
 	require.ErrorIs(t, err, checksum.ErrInvariantViolation)
 	work, err := v.Work(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, ChunksMismatched: 1}, work, "the rolled-back recopy repaired nothing and reread nothing")
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows, ChunksMismatched: 1}, work, "the rolled-back recopy repaired nothing and reread nothing")
 }
 
 // An observer polls from its own goroutine, as an orchestrator does, for
@@ -300,5 +300,80 @@ func TestCheckFinishesUnderAConcurrentPoller(t *testing.T) {
 	require.NoError(t, <-pollErr, "every poll during the pass succeeded")
 	work, err := v.Work(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, ChunksMismatched: 3, ChunksRepaired: 3, ChunksReread: 3}, work)
+	assert.Equal(t, progress.Work{ChunksCompared: 3, RowsHashed: 2500, RowsToHash: rows, ChunksMismatched: 3, ChunksRepaired: 3, ChunksReread: 3}, work)
+}
+
+// A pass reads the source's catalog row count before its first chunk and
+// reports it as rows_to_hash, so a poller sees the comparison's completion
+// as it goes: once the first thousand-row chunk of the 2500-row source has
+// committed, the snapshot reads 40%.
+func TestVerifyReportsTheSourceRowEstimateAsRowsToHash(t *testing.T) {
+	f := newVerifierFixture(t)
+	target, lock, shadow := f.prepare(t)
+	tracker := checksumTracker(t)
+	// The hook records and never asserts, for the reason workObserver
+	// gives; the test asserts once the pass has returned.
+	var (
+		mu      sync.Mutex
+		seen    []progress.Snapshot
+		pollErr error
+	)
+	pool := f.hookedPool(t, func(ctx context.Context, _ *pgx.Conn, _ string) {
+		snapshot, err := tracker.Progress(ctx)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil && pollErr == nil {
+			pollErr = err
+		}
+		seen = append(seen, snapshot)
+	})
+
+	v, err := checksum.NewVerifier(target, shadow, lock, checksum.Options{Chunker: chunkRows, Tracker: tracker})
+	require.NoError(t, err)
+	_, err = v.Verify(t.Context(), pool, copier.NewWatermark(math.MaxInt64))
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NoError(t, pollErr, "every poll during the pass succeeded")
+	var firstChunk *progress.Snapshot
+	for i := range seen {
+		if w := seen[i].Detail.Work; w != nil && w.ChunksCompared == 1 {
+			firstChunk = &seen[i]
+			break
+		}
+	}
+	require.NotNil(t, firstChunk, "a poll lands between the first chunk's commit and the second's first statement")
+	assert.Equal(t, uint64(rows), firstChunk.Detail.Work.RowsToHash, "the analyzed source's catalog count")
+	require.NotNil(t, firstChunk.Detail.Percent)
+	assert.InDelta(t, 40.0, *firstChunk.Detail.Percent, 0, "1000 of 2500 rows hashed")
+}
+
+// A source ANALYZE has never visited has no catalog row count, so the pass
+// reports rows_to_hash as 0 — unknown — rather than the catalog's -1 read
+// as an unsigned number. Autovacuum is off for the table so no background
+// ANALYZE can supply a count mid-test.
+func TestVerifyReportsNoRowsToHashWithoutACatalogCount(t *testing.T) {
+	f := newVerifierFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL,
+			note text
+		) WITH (autovacuum_enabled = false)`)
+	f.exec(t, `
+		INSERT INTO %s.orders (id, qty, note)
+		SELECT n, n, 'order ' || n FROM generate_series(1, 300) AS n`)
+	target := f.prove(t, "orders")
+	lock := f.lock(t, "orders")
+	shadow := f.build(t, lock, target, `ALTER TABLE %s DROP COLUMN note`)
+	f.copy(t, target, shadow, lock)
+
+	v, err := checksum.NewVerifier(target, shadow, lock, checksum.Options{Chunker: chunkRows, Tracker: checksumTracker(t)})
+	require.NoError(t, err)
+	_, err = v.Verify(t.Context(), f.pool, copier.NewWatermark(math.MaxInt64))
+	require.NoError(t, err)
+	work, err := v.Work(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.Work{ChunksCompared: 1, RowsHashed: 300}, work)
 }

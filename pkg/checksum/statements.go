@@ -25,7 +25,8 @@ type statements struct {
 
 // digestStatements freezes the pass's statements from the shadow's column
 // types, read in a guarded transaction so the shadow whose types they name
-// is the shadow the proof describes.
+// is the shadow the proof describes. The same transaction reads the
+// source's row estimate the pass reports as rows_to_hash.
 func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (statements, error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
@@ -39,6 +40,9 @@ func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (st
 	}()
 	types, err := shadowColumnTypes(ctx, tx, v.shadow)
 	if err != nil {
+		return statements{}, err
+	}
+	if err := v.countRowsToHash(ctx, tx); err != nil {
 		return statements{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

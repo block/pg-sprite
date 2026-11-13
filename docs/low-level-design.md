@@ -64,14 +64,17 @@ strategies rather than the whole product:
   required? app schema-version aware? logical replication available? table shape?), **choose
   the executor** for each change. The router decides **which strategy**, and is the single
   place migration policy lives.
-- **Executors** — planned interchangeable implementations behind one `Executor` interface
-  (`Plan`/`Execute`/`Status`/`Abort`) that decide **how**: `native` DDL,
-  **copy-and-swap** (the heavy rewrite executor), and **expand/contract** (pgroll-derived, reversible).
-  New strategies can be added without touching the planner or router.
+- **Executors** — interchangeable implementations that decide **how**: `native` DDL,
+  **copy-and-swap** (the heavy rewrite executor), and, later, **expand/contract**
+  (pgroll-derived, reversible). One `Executor` interface (`Plan`/`Execute`/`Status`/`Abort`)
+  is planned; today `pkg/migrate` dispatches on the router's backend. New strategies can be
+  added without touching the planner or router.
 
 Spirit informs the *philosophy* (safety over speed, checksum gate, decisions-not-options)
-and the *copy-and-swap executor specifically* — not the overall shape. The `decode.Source`
-seam inside the copy-and-swap executor is the same idea applied one level down.
+and the *copy-and-swap executor specifically* — not the overall shape. A change-capture seam
+inside the copy-and-swap executor, so trigger capture could later stand beside logical
+decoding ([change-capture-tradeoff.md](change-capture-tradeoff.md)), is the same idea applied
+one level down; today `pkg/applier`'s `Catchup` consumes a `*decode.Stream` directly.
 
 ### Proposed architecture (end-to-end)
 
@@ -94,13 +97,13 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
           ▼
    ┌──────────────────── ROUTER  (pick an executor per change) ─────────────────┐
    │  policy + cluster facts: reversibility? app version-aware? logical repl?   │
-   │  table shape? → native now; copy-and-swap / expand-contract in later phases│
+   │  table shape? → native · copy-and-swap (preview) · expand-contract later   │
    └──────┬─────────────────────────────────────────────────────────────────────┘
           │  planned Executor{ Plan, Execute, Status, Abort }
    ╭──────┴───────────────┬──────────────────────────────┬─────────────────────╮
    ▼                      ▼                               ▼                     ▼
  native                copy-and-swap (Pattern A)       expand/contract        refuse with
- executor              executor — later phase           via pgroll (later)     verdict
+ executor              executor (preview)               via pgroll (later)     verdict
  ┌──────────────┐      ┌───────────────────────────-┐   ┌──────────────────┐
  │CONCURRENTLY  │      │1 create shadow table       │   │versioned views,  │
  │NOT VALID +   │      │2 pkg/decode  logical slot  │   │dual schema, app  │
@@ -114,7 +117,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
         │                            │
    ┌────┴────────────────────────────┴──── cross-cutting ──────────────────────┐
    │  pkg/dbconn   pgx pool · TLS/RDS CA · pg_terminate_backend · retries      │
-   │  pkg/throttler   chunk-time target (slot-lag ceiling: decode + applier)   │ planned
+   │  pkg/copier   chunk-time target · slot-lag ceiling: decode + applier      │
    └────┬──────────────────────────────────────────────────────────────────────┘
         │
    ╭────▼─────────────────────────── PostgreSQL ───────────────────────────────╮
@@ -188,10 +191,12 @@ The classifier, declarative diff, dry-run, lint, and status reporting are shared
 backend. An `Executor` interface (`Plan`, `Execute`, `Status`, `Abort`) is also
 planned; `pkg/executor` currently provides the native backend — the bounded optimistic
 attempt, the caller-owned concurrent index build with invalid-index recovery, the autocommit
-safer-sequence runner, the greenfield create path, and the accepted-blocking primitive. Until the
-in-house copy-and-swap executor
-lands in a later phase, every `needs-rewrite` change is refused as **not native-safe** rather than
-delegated to an external tool. pgroll remains a possible still-later backend.
+safer-sequence runner, the greenfield create path, and the accepted-blocking primitive — and
+`pkg/schemachange` provides the in-house copy-and-swap backend, in preview: `migrate` runs it
+only when `--copy-and-swap` opens the route, and it carries a rewrite-requiring
+`ALTER COLUMN TYPE` today. Every other `needs-rewrite` change, and every copy-and-swap route the
+run did not open, is refused rather than delegated to an external tool. pgroll remains a
+possible later backend.
 
 ### The honest tradeoffs (why this is an *option*, not a free win)
 
@@ -218,11 +223,11 @@ Routing to pgroll buys reversibility, but the patterns are not silently intercha
 
 ### v1 stance
 
-Build the **planner + router + native executor** first. A `needs-rewrite` result is a first-class
-**not native-safe** refusal, with the reason, a note that in-house copy-and-swap arrives in later
-phases, and a safer native alternative where one exists. It is never delegated to an external
-copy tool. Design the `Executor` interface from day one so copy-and-swap and, later,
-expand/contract can be added without reworking the front-end.
+Build the **planner + router + native executor** first, then the in-house copy-and-swap executor.
+A `needs-rewrite` result the copy-and-swap engine does not carry, or one whose run did not open
+the preview route, is a first-class refusal with the reason and a safer native alternative where
+one exists. It is never delegated to an external copy tool. Design the `Executor` interface so
+expand/contract can be added later without reworking the front-end.
 
 ## Declarative mode (desired-state schema diff)
 
@@ -301,7 +306,8 @@ live schema (introspected)  ─┘                          │
   `coordinated-table-rename`). `--force SCHEMA.TABLE` runs the submitted rename as a blind
   bounded attempt for the operator who has done that coordination.
 - **Diff is review-only.** `diff` prints every derived statement and its classified route without
-  executing. Copy-and-swap routes render as unavailable until that backend exists.
+  executing. A copy-and-swap route renders as executable when the engine carries the operation
+  (a rewrite-requiring `ALTER COLUMN TYPE`) and as unavailable otherwise.
 - **Out-of-band drift is surfaced, not steamrolled.** If the live table differs from what the
   desired file's base assumed, the diff makes that visible rather than blindly forcing the
   end state.
@@ -309,9 +315,9 @@ live schema (introspected)  ─┘                          │
 ### Why this matters
 
 Declarative mode lets schemas live as **reviewed, version-controlled `.sql` files** and lets
-CI compute "what would change" — while reusing classify → route today and the planned execution
-backends later. It is purely additive: the imperative `--alter` path remains the execution
-primitive.
+CI compute "what would change" — while reusing classify → route and, through
+`migrate --desired`, the same execution backends. It is purely additive: the imperative `--alter`
+path remains the execution primitive.
 
 ### Diff engine
 
@@ -334,8 +340,7 @@ with typed reason and caveat metadata, never executing anything.
 For each parsed statement the classifier produces a record along the lines of:
 
 - `original` — the statement as the user wrote it.
-- `class` — `native-safe` · `needs-rewrite` (refused until in-house copy-and-swap lands) ·
-  `refuse`.
+- `class` — `native-safe` · `needs-rewrite` (routed to copy-and-swap) · `refuse`.
 - `recommended` — the safer native form when the literal is risky as written
   (e.g. `CREATE INDEX` → `CREATE INDEX CONCURRENTLY`; `ADD CONSTRAINT` → `ADD … NOT VALID` +
   `VALIDATE`; `ADD PRIMARY KEY` → unique index `CONCURRENTLY` + `ADD PRIMARY KEY USING INDEX`).
@@ -391,7 +396,7 @@ What `--force` changes depends on how the statement routed:
 | --- | --- | --- |
 | Execute, safer sequence substituted (e.g. `CREATE INDEX` → `CONCURRENTLY`) | runs the safer sequence | runs the submitted form as one blind bounded attempt |
 | Execute, submitted form already safe | runs it | runs it; nothing to override, so the verdict does not record `forced` |
-| Execute on copy-and-swap (a table rewrite) | runs through the shadow table | runs the submitted form natively as one blind bounded attempt, not through the shadow table |
+| Execute on copy-and-swap (a table rewrite) | runs through the shadow table when `--copy-and-swap` opens the preview route; refused otherwise | runs the submitted form natively as one blind bounded attempt, not through the shadow table |
 | `rewrite-required` (e.g. `RENAME COLUMN`, `RENAME TO`) | refused with guidance, nothing executed, exit 2 | runs the submitted form as one blind bounded attempt |
 | `backend-unavailable` | refused, nothing executed, exit 2 | runs the submitted form as one blind bounded attempt |
 | Planner refusal (e.g. `RENAME CONSTRAINT`, `EXCLUDE`) | refused, nothing executed, exit 2 | still refused, exit 2; a matching acknowledgement changes nothing and the verdict does not record `forced` |
@@ -420,9 +425,9 @@ idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, 
 
 ## Copy-and-swap executor: lifecycle
 
-> This section details the later-phase **copy-and-swap executor**, the planned in-house heavy
-> strategy for genuine table rewrites. Until it lands, those rewrites receive a **not
-> native-safe** refusal. The `native` and `expand/contract`
+> This section details the **copy-and-swap executor** (`pkg/schemachange` `Runner`), the
+> in-house heavy strategy for genuine table rewrites, in preview behind `--copy-and-swap`
+> ([running a copy-and-swap](copy-and-swap.md)). The `native` and `expand/contract`
 > executors are described in the architecture section and in
 > [high-level-design.md § execution patterns](high-level-design.md#the-execution-patterns-and-when-each-is-chosen).
 > The per-primitive **Spirit (MySQL) →
@@ -451,17 +456,18 @@ idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, 
                                         |   SET lock_timeout                  |
                                         |   LOCK src ACCESS EXCLUSIVE         |
                                         |   final CDC drain                   |
-                                        |   RENAME swap                       |
+                                        |   RENAME swap + sequence handoff    |
                                         |   COMMIT                            |
-                                        |   then: recreate FKs referencing    |
-                                        |   src, fix sequence ownership, drop |
-                                        |   old table, drop slot              |
+                                        |   then: drop slot, drop old table   |
+                                        |   unless --keep-old                 |
                                         +-------------------------------------+
 ```
 
 Key correctness gate (same as Spirit): the **checksum must pass before cutover**. v1 proceeds to
 cutover when the gate passes; deferred cutover is out of scope (see
-[D10](copy-and-swap-design.md#d10--cut-over-as-soon-as-the-gate-passes)).
+[D10](copy-and-swap-design.md#d10--cut-over-as-soon-as-the-gate-passes)). The swap transaction
+step by step is in
+[copy-and-swap-design.md](copy-and-swap-design.md#cutover-transaction-step-by-step).
 
 ## Copy and apply ordering (the core correctness subtlety)
 
@@ -509,9 +515,9 @@ The invariants that resolve them (Spirit's model, translated):
 The **mandatory checksum remains the backstop, not the mechanism** — it catches a protocol bug
 before cutover, but the protocol must converge without it. The precise rule set (flush scheduling,
 chunk boundaries, and tombstone lifetime) is an executor deliverable with a dedicated convergence
-test per race above. Trigger capture has its own analog of this race —
-see risks-and-mitigations § trigger-specific risks; this
-section is the logical-decoding counterpart.
+test per race above. Trigger capture has its own analog of this race — see
+[change-capture-tradeoff.md](change-capture-tradeoff.md#does-either-approach-let-us-drop-the-checksum-or-the-checkpoint);
+this section is the logical-decoding counterpart.
 
 ## Coverage and limitations (does this cover every PostgreSQL deployment?)
 
@@ -539,7 +545,7 @@ matrix is part of the "decisions, not options" philosophy.
 
 | Precondition | Required for | If absent |
 | --- | --- | --- |
-| `rds.logical_replication = 1` (static → reboot) ⇒ `wal_level = logical` | logical-decoding CDC path | Typed refusal in v1; trigger capture is deferred |
+| `rds.logical_replication = 1` (static → reboot) ⇒ `wal_level = logical` | logical-decoding CDC path | Typed refusal (`copy-and-swap-logical-decoding-unavailable`) unless the run blocks the table's writes instead (`--block-writes`, offline mode); trigger capture is deferred |
 | `rds_replication` role granted (Aurora gives no `SUPERUSER`) | creating slot / starting replication | Request the grant; trigger capture is deferred |
 | Owning-role membership + schema `CREATE` (the tiered [engine-role contract](engine-role.md)) | all owner-gated DDL: in-place `ALTER`, index builds, shadow table / triggers / swap | Preflight refuses, naming the missing `GRANT` |
 | `max_replication_slots` / `max_wal_senders` headroom | concurrent migrations | Serialize migrations |
@@ -552,7 +558,7 @@ matrix is part of the "decisions, not options" philosophy.
 | Single-column integer/`bigint`/`identity` PK | ✅ Fast path | Best watermark + chunking |
 | Composite or `uuid`/`text` PK | ❌ v1 | Queue-mode apply is deferred |
 | **No** primary key / no unique-not-null key | ❌ | Required, same constraint as Spirit |
-| Foreign keys **referencing** the table | ❌ v1 | FKs must be re-pointed at cutover — defer to v2 |
+| Foreign keys **referencing** the table or **leaving** it | ❌ v1 (preflight refusal) | Both are bound to the table's OID and would follow the retained old table through the swap; FKs must be re-pointed at cutover — defer to v2 |
 | Triggers on the table | ❌ v1 | Must be recreated on the shadow with correct ordering |
 | Views defined on the table | ❌ v1 | PostgreSQL binds a view to the table's **OID**, not its name — after the rename-swap the view silently follows the renamed *old* table. Refuse in v1 (pg_repack avoids this only by swapping relfilenodes under one OID; recreating views inside the cutover txn is later work) |
 | Table is in a logical **publication** | ❌ v1 (preflight refusal) | Publication membership is also OID-bound; after the swap, downstream consumers (DMS, CDC pipelines) silently stop receiving the real table's changes |
@@ -607,7 +613,7 @@ this section states *why* and pins the analog to the underlying primitive.
 
 | Spirit (MySQL) requirement | PostgreSQL analog (v1) | Postgres-specific reason |
 | --- | --- | --- |
-| Table **must have a PRIMARY KEY** | Require a PK, or a `NOT NULL` `UNIQUE` key usable as one | Chunking needs a deterministic, range-scannable key to slice `WHERE pk BETWEEN …`; the applier needs a stable conflict target for `INSERT … ON CONFLICT (pk) DO UPDATE`; resume needs a watermark. No PK ⇒ would need `REPLICA IDENTITY FULL`, full-row matching on apply/delete, and a synthetic `ctid`-based chunker (unstable across `VACUUM`/rewrite) — unsafe for v1. |
+| Table **must have a PRIMARY KEY** | Require a non-deferrable PK; a `NOT NULL` `UNIQUE` key does not stand in for one (`copy-and-swap-pk-unsupported`) | Chunking needs a deterministic, range-scannable key to slice `WHERE pk BETWEEN …`; the applier needs a stable conflict target for `INSERT … ON CONFLICT (pk) DO UPDATE`; resume needs a watermark. No PK ⇒ would need `REPLICA IDENTITY FULL`, full-row matching on apply/delete, and a synthetic `ctid`-based chunker (unstable across `VACUUM`/rewrite) — unsafe for v1. |
 | PK should ideally be a single memory-comparable integer | Require a single-column `smallint`/`integer`/`bigint` PK in v1 | The high-watermark optimization (discard captured changes above the copier's position) and the optimistic chunker rely on a monotonic, cheaply-comparable key. Composite, `uuid`, and text keys require the deferred queue path. |
 | `binlog_row_image=FULL` (full before/after image) | `REPLICA IDENTITY` = PK (default) is enough for v1; `FULL` only if no PK | PG only logs the replica-identity columns for `UPDATE`/`DELETE` by default; that is sufficient when a PK exists. The **unchanged-TOAST** wrinkle (a TOASTed column not in the update isn't streamed) is the PG-specific gotcha the applier must handle. |
 
@@ -640,8 +646,9 @@ The desired DDL executes in that transaction, so the role needs `CREATE` on the 
 These have **no MySQL counterpart** but are hard requirements for the logical-decoding path:
 
 - **`rds.logical_replication = 1`** (⇒ `wal_level = logical`); static, needs a reboot. Without
-  it preflight refuses the copy-and-swap route (`copy-and-swap-logical-decoding-unavailable`);
-  trigger capture is the documented, deferred alternative
+  it preflight refuses the copy-and-swap route (`copy-and-swap-logical-decoding-unavailable`)
+  unless the run blocks the table's writes for its length instead (`--block-writes`, offline
+  mode); trigger capture is the documented, deferred alternative
   ([D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput)).
 - **`rds_replication` role** (Aurora grants no `SUPERUSER`) to create the slot and start
   replication.
@@ -658,13 +665,14 @@ These have **no MySQL counterpart** but are hard requirements for the logical-de
 
 > We intend to mirror Spirit's **design philosophy** (see
 > [Design decisions inherited from Spirit](#design-decisions-inherited-from-spirit-safety-over-speed)),
-> **not** its package layout. The existing packages establish the front end; the later-phase
-> packages show the intended execution architecture.
+> **not** its package layout. The front-end, native, and copy-and-swap packages exist; the
+> `Executor` interface is the one planned piece.
 
 ```
-cmd/pg-sprite/         -> CLI (migrate, pull, diff, fmt, lint, suggest, capabilities, status) - Kong, like Spirit
+cmd/pg-sprite/        -> binary entry point
+internal/cli/         -> CLI (migrate, pull, diff, fmt, lint, suggest, capabilities, status) - Kong, like Spirit
 
-Existing:
+Front end and native execution:
 pkg/statement/        -> Wasm go-pgquery boundary + typed operation descriptors and rewrites
 pkg/schemadiff/       -> execute-and-introspect desired state + live introspection + ordered diff
 pkg/planner/          -> classify each operation and construct safer native SQL
@@ -680,21 +688,21 @@ pkg/progress/         -> pollable progress snapshots (the executors' observation
 pkg/dbconn/           -> bounded database connections
 pkg/preflight/        -> schema-change preflight checks
 pkg/verdict/          -> typed outcomes, refusal classes, exit codes
+pkg/refusal/          -> the routing classes every typed refusal cause answers in
 pkg/capabilities/     -> embedded, validated support matrix
 
-Contracts and types exist; implementation lands with the copy-and-swap phases:
-pkg/decode/           -> logical-decoding client
-pkg/copier/           -> PK-range chunker, dynamic sizing, parallel chunked copy
-pkg/checksum/         -> chunked verification and cutover gate
-pkg/checkpoint/       -> durable resume state
-
-Package doc only (the invariants it will enforce are named; no types yet):
-pkg/schemachange/     -> orchestrator + runner + cutover
-pkg/applier/          -> captured-change apply
+Copy-and-swap (preview):
+pkg/decode/           -> logical-decoding stream, slot lifecycle, slot-lag ceiling
+pkg/copier/           -> PK-range chunker, chunk-time sizing, parallel chunked copy
+pkg/internal/chunksql/ -> the chunk insert statement the copier and the checksum repair share
+pkg/applier/          -> captured-change buffer, flush, catch-up loop
+pkg/checksum/         -> chunked verification, divergence policy, cutover proofs
+pkg/checkpoint/       -> durable resume state, orphan-slot reaper
+pkg/schemachange/     -> shadow build, runner, cutover gate and swap, slot-loss reconcile
 
 Planned:
-pkg/throttler/        -> chunk-time throttle (slot-lag ceiling lives in decode + applier; replica lag deferred, D12)
 Executor              -> Plan/Execute/Status/Abort backend interface
+(replica-lag throttling is deferred, D12)
 ```
 
 ## Library choices (Go)
@@ -729,10 +737,11 @@ Executor              -> Plan/Execute/Status/Abort backend interface
 
 ## Postgres-specific risks to design around
 
-The full enumeration of risks — **common to any copy-and-swap**, **logical-decoding-specific**,
-and **trigger-specific** — together with the **mitigation** for each, has moved to its own register
-so it can be maintained as a single source of truth: see
-risks-and-mitigations.md. The two most design-shaping ones,
+The risks — **common to any copy-and-swap**, **logical-decoding-specific**, and
+**trigger-specific** — are recorded with the decisions that mitigate them: the copy-and-swap
+engine's in [copy-and-swap-design.md](copy-and-swap-design.md), and the logical-decoding versus
+trigger trade-offs in [change-capture-tradeoff.md](change-capture-tradeoff.md). The two most
+design-shaping ones,
 **slot loss on failover** and the reconcile-don't-recopy recovery it forces, are detailed below
 because they drive the checkpoint/resume state machine.
 
@@ -748,7 +757,7 @@ A copy-and-swap migration has two kinds of progress, and they have very differen
 | --- | --- | --- |
 | **Copied-PK watermark** (how far the bulk copy got) | the engine's durable checkpoint store | ✅ yes — it's our own data |
 | **Shadow table contents** | a regular table | ✅ yes — replicated by Aurora storage |
-| **Logical slot + `confirmed_flush_lsn`** (CDC position) | the writer's replication slot | ⚠️ **not guaranteed** — see risk #7 |
+| **Logical slot + `confirmed_flush_lsn`** (CDC position) | the writer's replication slot | ⚠️ **not guaranteed** — see [D11](copy-and-swap-design.md#d11--bound-and-reap-logical-decoding-state) |
 | **In-flight decode buffer / un-applied changes** | engine memory | ❌ no |
 
 The trap: the slot's LSN is what makes the shadow *trustworthy*. If the slot is lost, you cannot
@@ -776,10 +785,12 @@ Design implications the rest of the system must honour:
   from a process crash (where the slot *does* survive and we resume cleanly).
 - **Detect it:** watch for the slot disappearing / becoming inactive and for writer-identity
   changes, and enter reconcile mode rather than blindly continuing.
-- **Bound the blast radius:** the hard slot-lag ceiling and the name-prefixed reaper (risk #1)
-  must also clean up the *orphaned* slot a failover can strand on the demoted instance.
-- **Make the trade explicit to the operator:** on logical-decoding clusters, a long migration is
-  exposed to failover/maintenance windows; the trigger path is the robustness escape hatch.
+- **Bound the blast radius:** the slot-lag ceiling and the name-prefixed reaper
+  ([D11](copy-and-swap-design.md#d11--bound-and-reap-logical-decoding-state)) must also clean up
+  the *orphaned* slot a failover can strand on the demoted instance.
+- **Make the trade explicit to the operator:** on logical-decoding clusters, a long schema change
+  is exposed to failover/maintenance windows; the deferred trigger path is the robustness escape
+  hatch.
 
 ## Decisions for later execution phases
 
@@ -797,12 +808,11 @@ deferred. See [D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput).
   overhead** on the source; this is what makes the tool better than pg_osc. Costs: needs
   `rds.logical_replication=1` (reboot), a slot (WAL-retention risk), `REPLICA IDENTITY`, and the
   failover/TOAST/DDL wrinkles in the
-  logical-decoding-specific risks.
+  [side-by-side comparison](change-capture-tradeoff.md#side-by-side-comparison).
 - **Triggers** (pg_osc style): no parameter/reboot, works anywhere; **survives failover** (the
   queue table is ordinary data). The cost is not just write amplification: capture lives **inside
   the write path**, so a trigger error can abort the application's write (an availability coupling),
-  and writes made under `session_replication_role = replica` silently bypass capture — see the
-  trigger-specific risks. It is the
+  and writes made under `session_replication_role = replica` silently bypass capture. It is the
   robustness escape hatch for clusters that can't enable logical replication or can't accept
   [slot loss on failover](#failover-during-migration-what-survives-and-what-doesnt) during a
   multi-day migration — not a strictly-safer option.
@@ -817,8 +827,9 @@ deferred. See [D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput).
 [the v1 scope table](copy-and-swap-design.md#v1-scope).
 
 The initial targets are rewrite-requiring `ALTER COLUMN TYPE`, volatile-default `ADD COLUMN`, and
-`STORED` generated-column addition. The classifier continues to route natively safe operations
-to direct DDL.
+`STORED` generated-column addition. The engine carries the first today; the other two route to
+copy-and-swap and are refused `backend-unavailable` ([capabilities.md](capabilities.md)). The
+classifier continues to route natively safe operations to direct DDL.
 
 Both the declarative and imperative front ends exist and share classify → route, matching the
 [README § the decided shape](README.md#the-decided-shape),
@@ -882,14 +893,20 @@ automation can distinguish nothing-committed from partial state left behind; an
 operator-accepted blocking change that committed ends in an `executed-without-online-safety`
 verdict (exit 3), the one case that is committed but not vouched for as online-safe
 ([the ladder](cli-output-examples.md#exit-codes)). Native execution
-exposes a caller-owned `progress.Tracker`. Embedders run a blocking executor
+exposes a caller-owned `progress.Tracker`, which the front doors take as `migrate.Options.Progress`
+and report every statement and copy-and-swap phase of the call to. Embedders run a blocking
 call in their own bounded task and poll `Tracker.Progress(ctx)` (a build read can outlast `ctx`
 by up to a minute; see [progress-report.md](progress-report.md)): sequence position and elapsed
 time come from in-process state, while an active concurrent index build is read on demand from
 `pg_stat_progress_create_index` by the build's backend PID. There is no background poller to
 own or stop, and a missing progress-view row is represented as an inactive observation rather
-than an error. The same snapshot already reserves optional row and byte copy counters for the
-copy-and-swap backend.
+than an error. The same snapshot carries the copy-and-swap run's row and byte counters, which the
+copier, the catch-up, and the checksum pass fill as the tracker's `progress.WorkSource`.
 
-The copy-and-swap backend, including change capture, copying, applying, checksumming, and
-cutover, follows Phase 3.
+The copy-and-swap backend — change capture (`pkg/decode`), copying (`pkg/copier`), applying
+(`pkg/applier`), checksumming (`pkg/checksum`), durable resume (`pkg/checkpoint`), and the
+orchestrated shadow build and cutover (`pkg/schemachange` `Runner`) — exists and is in preview
+behind `--copy-and-swap` ([running a copy-and-swap](copy-and-swap.md)); it carries a
+rewrite-requiring `ALTER COLUMN TYPE`. The continuous checker that runs `checksum` `Verifier.CheckLive` on
+a loop is planned, and the other rewrite-class operations stay typed refusals until the engine
+carries them ([capabilities.md](capabilities.md)).

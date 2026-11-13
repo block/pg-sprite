@@ -109,12 +109,10 @@ func contextEnded(err error) bool {
 // connection-exception SQLSTATE came back, the socket failed, or pgx
 // reports the connection closed. Only then is the outcome unknown.
 func connectionLost(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		return pgErr.Code == codeAdminShutdown || pgErr.Code == codeCrashShutdown || strings.HasPrefix(pgErr.Code, classConnectionException)
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if _, ok := errors.AsType[net.Error](err); ok {
 		return true
 	}
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || pgconn.SafeToRetry(err)

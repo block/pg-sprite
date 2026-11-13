@@ -61,7 +61,9 @@ const rows = 2500
 var chunkRows = copier.ChunkerOptions{InitialRows: 1000, MinRows: 1000, MaxRows: 1000}
 
 // createOrders creates the orders table every pass below compares, holding
-// keys 1..rows with qty = key and a note naming the order.
+// keys 1..rows with qty = key and a note naming the order. It is analyzed,
+// so the catalog's row count — the pass's rows_to_hash — is rows from the
+// start rather than whenever a background ANALYZE gets to it.
 func (f verifierFixture) createOrders(t *testing.T) {
 	t.Helper()
 	f.exec(t, `
@@ -73,6 +75,7 @@ func (f verifierFixture) createOrders(t *testing.T) {
 	f.exec(t, fmt.Sprintf(`
 		INSERT INTO %%s.orders (id, qty, note)
 		SELECT n, n, 'order ' || n FROM generate_series(1, %d) AS n`, rows))
+	f.exec(t, "ANALYZE %s.orders")
 }
 
 // prove mints the copy-and-swap proof for table.

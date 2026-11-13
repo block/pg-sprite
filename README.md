@@ -7,8 +7,6 @@
 > and the CLI surface may all change between releases. Do **not** run this
 > against any database you care about.
 
-> Working name — see the naming task in the research build tracker.
-
 An online schema-change engine for **PostgreSQL** (community, RDS, and
 Aurora; 14+): a decoupled **planner → router → executor** design where the
 planner classifies each change, the router picks a strategy, and
@@ -34,7 +32,7 @@ and every refusal carries a routing class (and an owner when there is no online-
 problem for the engine to solve); [docs/capabilities.md](docs/capabilities.md) names the tool class that
 owns each job.
 
-**Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
+**Status: Phases 1, 2.1–2.5, and 3, with copy-and-swap in preview.** The parse boundary, declarative diff,
 classifier, router seam, versioned dry-run plan report, offline linter, and
 advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` classifies and
 routes the statement, then executes the routed SQL — the planner's safer native sequence by
@@ -110,7 +108,8 @@ refusal — never a silently wrong or incomplete result:
   refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, but cannot be
   expressed in or exported to desired files, and `migrate` refuses
-  `ATTACH PARTITION` and `DETACH PARTITION`.
+  `ATTACH PARTITION` and `DETACH PARTITION` unless `--force` names the table
+  ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
 - **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
@@ -190,6 +189,8 @@ refusal — never a silently wrong or incomplete result:
   use them: the file names an object outside the table's schema and
   `public` qualified, or names it bare when `--extension-schema` lists
   the schema it lives in. The object's own definition is never managed.
+  One change to such an object runs imperatively: `migrate` adds a value
+  to an enum with `ALTER TYPE ... ADD VALUE`, which locks only the type.
 - **Dropping a table** is never planned or executed. pg-sprite converges
   one declared table at a time, so a live table with no desired file is
   the whole-schema owner's to enumerate and resolve — see
@@ -241,8 +242,10 @@ why the substituted sequence is safer — same end state, different locking
 the machine-readable shape is in
 [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
-**Refuse: no safe path exists, so nothing runs.** A rewrite the copy-and-swap
-backend does not carry yet (a volatile column default, for one) refuses; the
+**Refuse: no safe path exists, so nothing runs.** A statement no online
+sequence can be built from (the demo's `ADD COLUMN … UNIQUE`), or a rewrite
+the copy-and-swap backend does not carry yet (a volatile column default),
+refuses; the
 dry run exits 2 so CI can gate on it without parsing JSON (the full four-code ladder is under
 [Exit codes](#exit-codes)). A destructive change (`DROP COLUMN`) is refused
 the same way, exit 2 with reason `destructive-change`, until
@@ -262,11 +265,16 @@ codes — are in [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
 ## Install
 
+Install with [Homebrew](https://brew.sh/) on macOS or Linux:
+
+```sh
+brew install block/tap/pg-sprite
+```
+
 Release archives for linux/darwin on amd64/arm64, with `checksums.txt`, are
-published on the [releases page](https://github.com/block/pg-sprite/releases)
-once tags exist. The binary is pure Go (the SQL parser is Wasm), so on any
-other platform — or without waiting for a release — `go install` works with
-no C toolchain:
+published on the [releases page](https://github.com/block/pg-sprite/releases).
+The binary is pure Go (the SQL parser is Wasm), so on any other platform, or
+to build an unreleased commit, `go install` works with no C toolchain:
 
 ```sh
 go install github.com/block/pg-sprite/cmd/pg-sprite@latest
@@ -289,7 +297,7 @@ read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--copy-and-swap` (the route is in preview and closed without it) and `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--copy-and-swap` (the route is in preview and closed without it) and `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md). While the change runs, a progress line on stderr shows the step, operation, percent, and ETA when stderr is a terminal; `--progress=always` prints it as plain lines anywhere else, `--progress=never` hides it, and stdout carries only the verdict |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |

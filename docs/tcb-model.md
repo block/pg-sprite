@@ -57,8 +57,9 @@ or a missed optimization, it is periphery.
 .app / cold-storage pattern from the TCB model: transaction *generation* is untrusted because the
 signer enforces policy. Concretely: if the classifier wrongly says "native-safe", the native
 executor's own `lock_timeout` bound (LK-2) caps the damage; if it wrongly says "copy", the result
-will be a wasteful but *correct* migration once copy-and-swap exists (checksum will still gate).
-Today the router reports that route unavailable. The router may choose a bad
+is a wasteful but *correct* schema change (the checksum still gates the cutover), and a "copy"
+route for an operation the engine does not carry reports unavailable and nothing runs. The
+router may choose a bad
 strategy; it must never be *able* to cause a wrong result. This is also why the copy-and-swap
 executor re-runs preflight itself rather than trusting that the planner did.
 
@@ -97,17 +98,18 @@ to obtain the type is through the function that validates it.
 | table name | preflight | `PreflightedTable` (carries the proven facts: PK, no FKs/views, replica identity, headroom) | ST-6, RF-* |
 | table name (create target) | `preflight.CheckTableAbsent` | `AbsentTarget` (carries the resolved creation schema and the verified-free name; time-of-check — minted inside the apply session, never carried across a plan boundary, and re-verified at use the way ST-7 re-verifies `PreflightedTable`) | ST-6 for the create path |
 | creating role's access (create target) | `preflight.CheckCreatePrivileges` | `CreationRole` (carries the connected role and the resolved creation schema whose CONNECT / USAGE / CREATE grants were verified; time-of-check and session-scoped, like `AbsentTarget` — a revoked grant after minting fails with the server's own error) | ST-6 for the create path |
+| enum type name (`ALTER TYPE ... ADD VALUE`) | `preflight.CheckEnumTarget` | `EnumTarget` (carries the name the statement spells and the OID, schema, and name of the enum type it resolved to on the session `search_path`, which the connected role has USAGE on the schema of and is a member of the owning role of; time-of-check — `executor.ExecuteEnumValueAdd` refuses a target minted for another name and confirms by OID, before its commit, that the statement reached that type) | ST-7 for the enum value path |
 | connected role's access (target table) | `preflight.CheckPrivileges` | `PrivilegedRole` (carries the connected role, the catalog-resolved owner the copy-and-swap path will `SET LOCAL ROLE` to for shadow objects, and the tier it was verified at; time-of-check and session-scoped, like `CreationRole`) | ST-6; the engine-role tiers |
 | table name (copy-and-swap target) | `preflight.CheckCopySwapShape` (takes a `PrivilegedRole` verified at the copy-and-swap tier) | `CopySwapShape` — the table half of the copy-and-swap route's proof, carrying the relation OID, integer-family PK, and owner role that shadow objects are created under, minted only after the [v1 scope](copy-and-swap-design.md#v1-scope) shape checks pass (permanent table, single integer-family PK, replica identity `DEFAULT` or `FULL`, no foreign keys in or out, no triggers or rules, not partitioned or inherited, no `FORCE ROW LEVEL SECURITY`, no dependent views or materialized views, no publication other than the engine's own publishing it, no subscription applying into it, no other `pg_depend` dependent of its OID or row type); it also carries the catalog-resolved database and whether the `PrivilegedRole` verified replication access; grants were already proven by the `PrivilegedRole` it takes; only `CheckCopySwapEnvironment` accepts this type | ST-6, RF-1..RF-3 for the copy-and-swap route |
 | cluster and volume (copy-and-swap target) | `preflight.CheckCopySwapEnvironment` (takes a `CopySwapShape` and the caller-measured free disk) | `CopySwapTarget` — the copy-and-swap route's proof, carrying every `CopySwapShape` fact plus the run mode (`DecodesWAL`) the cluster was verified for; minted only here, so no table reaches a writing step with its environment unchecked. The check re-measures the proven relation by OID and refuses (a typed `*CopySwapEnvironmentError`) when logical decoding is unavailable, when a slot of the target's derived name is held by another database or as a physical slot, or when no slot is free or fewer than two WAL senders are — the slot's snapshot connection and the decoding stream hold one each (only for a run that decodes WAL, which must also present a shape whose proof verified replication access or it is a proof mismatch), or when free disk is below the shadow copy's headroom or was not measured. `preflight.CheckCopySwap` folds the privilege, shape, and environment checks into one call. The shadow builder, copier, and verifier accept **only** this type | ST-6 for the copy-and-swap route |
 | built shadow table | `schemachange.BuildShadow` — one bounded transaction under `SET LOCAL ROLE` owner that clones the source with `LIKE … INCLUDING ALL EXCLUDING IDENTITY`, replicates the metadata `LIKE` drops, applies the retargeted `ALTER TABLE`, and introspects both models; takes only a `CopySwapTarget` and a `statement.Statement` | `BuiltShadow` (carries the source and shadow fingerprints, the identity-sequence handoff facts, the copy column list, and the fidelity snapshot the cutover gate compares against) | ST-6 (proof re-check), ST-7 (retarget re-proof with the shadow as the sole permitted target), ST-5 (owner re-verified at creation) |
-| shadow table | full checksum pass (planned) | `VerifiedShadow` — its constructor is private to `pkg/checksum`; the planned cutover accepts **only** this type | CO-1 in the type system |
-| chunker low-watermark | all-checkers-clean pass (planned) | `CleanWatermark` — unobtainable in a pass that repaired anything | CO-2 |
-| — | planned table-lock acquisition | `TableLock` token, required by every mutating operation. The native recovery's `SHARE UPDATE EXCLUSIVE` proof lock is not this token: it is a per-transaction PostgreSQL lock whose proof lives and dies inside `RebuildAbandonedIndex` and is never carried across a boundary | LK-1; the recovery's lock is LK-5 |
+| shadow table | full checksum pass (`checksum` `Check` or `CheckLive`) | `VerifiedShadow` — its constructor is private to `pkg/checksum`; the cutover gate (`schemachange.GateCutover`) demands it to mint `CutoverReady`, the only input `Cutover` accepts | CO-1 in the type system |
+| chunker low-watermark | a checksum pass that found nothing and repaired nothing | `CleanWatermark` — unobtainable in a pass that repaired anything | CO-2 |
+| — | table-lock acquisition (`dbconn.AcquireTableLock`) | `TableLock` token, required by every mutating operation. The native recovery's `SHARE UPDATE EXCLUSIVE` proof lock is not this token: it is a per-transaction PostgreSQL lock whose proof lives and dies inside `RebuildAbandonedIndex` and is never carried across a boundary | LK-1; the recovery's lock is LK-5 |
 | orchestrator proto/request | adapter validation at the edge | engine domain types; proto types never cross into the engine | OC-5, OC-6 |
 
-The intended compile-time effect of the future cutover API: **the cutover cannot be called with
-an unverified shadow because no such call type-checks.** An LLM (or a tired human) writing periphery code cannot hand a raw string to
+The compile-time effect on the cutover API: **the cutover cannot be called with an unverified
+shadow because no such call type-checks.** An LLM (or a tired human) writing periphery code cannot hand a raw string to
 the router or a fresh shadow to the swap — the types refuse. This is the cheapest, most durable
 enforcement we have; runtime assertions (below) are the second layer for what Go's types can't
 express.
@@ -128,9 +130,11 @@ than a timeout: it bounds the client call (the executor refuses a context that c
 cancelled), while the server statement runs with `statement_timeout` off and stops only on a
 cancel request — the caller's, `Tracker.CancelBuild`'s, or an operator's — so a client that
 dies without cancelling leaves the build running. The gap is documented and the stop path
-named, not hidden behind "bounded". The future copy-and-swap
-path will also bound its change buffer, chunk target time, and slot-lag ceiling. The rule makes
-limits the *default*: an unbounded anything in a TCB package is a review-blocking defect. Where a
+named, not hidden behind "bounded". The copy-and-swap path bounds each catch-up cycle's
+changes (`applier.CatchupOptions.MaxChanges`), its chunk target time
+(500 ms, `copier` `DefaultTargetChunkTime`), and its slot-lag ceiling (1 GiB, `decode`
+`DefaultSlotLagCeiling`).
+The rule makes limits the *default*: an unbounded anything in a TCB package is a review-blocking defect. Where a
 loop is intentionally endless (the applier's consume loop), that must be stated and its exit
 conditions asserted.
 
@@ -144,9 +148,8 @@ not. Concretely:
   asserted where the copier produces them *and* where the checksum consumes them; the LSN
   asserted where decode records it *and* where the drain claims completion; row counts asserted
   before write and after read-back.
-- Invariant violations will map to a distinct error class (`ErrInvariantViolation`) in the
-  executor phases, always aborting fail-closed and naming the [invariants](invariants.md) ID —
-  never a warning, never retried.
+- Invariant violations map to a distinct error class (`ErrInvariantViolation`), always aborting
+  fail-closed and naming the [invariants](invariants.md) ID — never a warning, never retried.
 
 **Simple, explicit control flow (s2n-tls + TIGER_STYLE).** Linear happy path, branch on failure
 (Go's early-return idiom is s2n's `GUARD` pattern natively); treat `else` with suspicion; push
@@ -155,8 +158,8 @@ functions stay pure; no recursion in TCB packages; explicit state machines with 
 rather than booleans that can disagree.
 
 **Minimize state (TIGER_STYLE).** Derive rather than store; re-derive rather
-than persist when possible. The planned checkpoint (ST-1) will hold the *minimum* resumable state —
-watermark, slot name, LSN, statement fingerprint, engine version — everything else is
+than persist when possible. The checkpoint (ST-1) holds the *minimum* resumable state —
+watermark, slot name, applied LSN, source and target fingerprints, phase — everything else is
 reconstructed from the database on resume. Small state is what makes "work out all system state
 by hand" possible during an incident.
 
@@ -179,7 +182,7 @@ short:
 | Dependency | Status | Treatment |
 | --- | --- | --- |
 | `pgx/v5` / `pgconn` | TCB (unavoidable — the wire) | pin, review upgrades like TCB changes, changelog read before bump |
-| `pglogrepl` | planned TCB dependency (future decode path; not currently imported) | pin and review upgrades like TCB changes when added |
+| `pglogrepl` | TCB, confined to `pkg/decode` (the streaming-replication protocol and `pgoutput` decoding) | pinned to a commit in `go.mod` (the module publishes no tags); review upgrades like TCB changes |
 | `go-pgquery` (Wasm `libpg_query`) | boundary (parses untrusted input into typed operation descriptors) | fuzz at our boundary; parse failure is an error (CO-7), never a fallback; a parser crash is a Wasm trap surfaced as a Go error, not a process crash; verify wasilibs' reproducible-build provenance on every bump (cgo `pg_query_go` supplies AST types only) |
 | `kong`, `testcontainers`, testify | periphery / test-only | normal hygiene |
 
@@ -210,7 +213,7 @@ correct direction of that arrow.)
 ## The verification ladder
 
 Testing is necessary but not sufficient; each rung catches what the previous
-can't. The [phase mapping in 17](invariants.md#build-phase-mapping) says *when*; this says
+can't. The [invariant registry's phase mapping](invariants.md#build-phase-mapping) says *when*; this says
 *what kind*:
 
 1. **Unit + integration against real PostgreSQL** — the floor, already policy
@@ -242,8 +245,9 @@ tripping TCB assertions, not just by comparing final outputs.
 
 The AI-assistance posture differs per side of the boundary:
 
-- **Inside the TCB: less AI, more steering.** Detailed spec first (05 + the 17 invariant IDs are
-  the spec), test-first with the invariant's named test obligation, small diffs, careful review
+- **Inside the TCB: less AI, more steering.** Detailed spec first (the design docs and the
+  [invariant](invariants.md) IDs are the spec), test-first with the invariant's named test
+  obligation, small diffs, careful review
   against the rules above. Agents are *excellent* here precisely because the invariants are
   written down — but the human owns the mental model (TIGER_STYLE: assertions are a safety net,
   not a substitute for understanding).
@@ -261,7 +265,7 @@ The AI-assistance posture differs per side of the boundary:
    TCB packages may import, and `CODEOWNERS` routes TCB paths to maintainer review (the
    bitcoin-core discipline).
 2. **`cutover`/`swap` API takes domain types only** — the `VerifiedShadow`/`CleanWatermark`/
-   `TableLock` types land with their producing packages (Phases 4–7), not retrofitted.
+   `TableLock` types landed with their producing packages, not retrofitted.
 3. **The `// INV: <id>` convention and `ErrInvariantViolation` have landed** with the
    executor phases.
 4. **The enforcement backlog:** [SAFETY.md](../SAFETY.md), the depguard import-boundary

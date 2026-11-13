@@ -92,8 +92,7 @@ func pullTables(ctx context.Context, pool *pgxpool.Pool, schema, outDir string, 
 		if err != nil {
 			result.status = pullStatusError
 			result.err = err
-			var refusal *renderRefusal
-			if errors.As(err, &refusal) {
+			if _, ok := errors.AsType[*renderRefusal](err); ok {
 				result.status = pullStatusRefused
 			}
 		}
