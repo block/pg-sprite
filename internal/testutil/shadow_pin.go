@@ -31,9 +31,12 @@ type ShadowPin struct {
 	// disarmed a clock that was never read.
 	pinned chan struct{}
 	// tx is the pin's open transaction, set only when the insert succeeded.
-	tx    pgx.Tx
-	err   error
-	ended sync.Once
+	tx  pgx.Tx
+	err error
+	// reported is set once Wait has failed the test on err, so the cleanup
+	// does not report the same failure a second time.
+	reported bool
+	ended    sync.Once
 }
 
 // PinShadowKey arranges for key to be pinned with image qty in shadow, a
@@ -41,6 +44,10 @@ type ShadowPin struct {
 // Callers Wait before relying on the pin and end it with Release or
 // Commit; a pin still open at cleanup is rolled back, and a pin that could
 // not be placed fails the test.
+//
+// Cleanups run last-registered first, so a test registers the cleanup
+// that waits for its run to return after calling PinShadowKey: the run has
+// then stopped reading the clock before the pin's cleanup ends the pin.
 func PinShadowKey(t *testing.T, pool *pgxpool.Pool, shadow pgx.Identifier, key, qty int64) *ShadowPin {
 	t.Helper()
 	pin := newShadowPin(t.Context(), pool, shadow, key, qty)
@@ -92,8 +99,9 @@ func (p *ShadowPin) Wait(t *testing.T) {
 	select {
 	case <-p.pinned:
 	case <-time.After(pinDeadline):
-		t.Fatalf("the copier did not reach its first chunk within %s", pinDeadline)
+		t.Fatalf("the copier did not reach its first chunk within %s: its clock was never read, or the pin's insert is still waiting on another writer", pinDeadline)
 	}
+	p.reported = p.err != nil
 	require.NoError(t, p.err)
 }
 
@@ -126,11 +134,15 @@ func (p *ShadowPin) finish(end func(pgx.Tx) error) error {
 
 // end is the pin's cleanup. It disarms a clock that was never read, so a
 // later reading places nothing; otherwise it waits for the placing to
-// finish, reports a placing that failed, and rolls back a pin still open.
+// finish, reports a placing that failed unless Wait already has, and rolls
+// back a pin still open.
 func (p *ShadowPin) end(ctx context.Context) error {
 	p.clock.once.Do(func() { close(p.pinned) })
 	<-p.pinned
 	if p.err != nil {
+		if p.reported {
+			return nil
+		}
 		return p.err
 	}
 	return p.finish(func(tx pgx.Tx) error { return tx.Rollback(ctx) })
