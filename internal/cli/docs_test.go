@@ -148,6 +148,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		Statement: "ALTER TABLE users ALTER COLUMN id TYPE text",
 		Table:     "public.users",
 		Detail:    "verified 1000 rows in 2 chunks; the retained source is dropped",
+		SwapLSN:   "0/1A2B3C8",
 	}
 	// A live plan proves the default against the server; clock_timestamp()
 	// is computed per row, so the probe reports the default rewrites.

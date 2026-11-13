@@ -154,9 +154,13 @@ A successful run prints one verdict, `executed-via-copy-and-swap`, and exits 0. 
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
   "table": "public.order_archive",
-  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run"
+  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run",
+  "swap_lsn": "0/3F2A1B8"
 }
 ```
+
+`swap_lsn` is the server's WAL position read inside the swap transaction, under its lock:
+writes to the table after it exist only in the new table.
 
 The old table is dropped once the swap commits. Add `--keep-old` to keep it under its `_old`
 name for a rollback window; you drop it yourself when the window ends.

@@ -57,8 +57,8 @@ type watch struct {
 // binary. At every poll it reads the load's progress before it reads the
 // row: a mutation counts once its commit returns, so when the row then says
 // the swap has not happened, every counted mutation is in the source the
-// swap will retain. The last such progress is the mark: the row oracle
-// excludes the keys touched after its Touched count, and a load failure
+// swap will retain. The last such progress is the mark: the writes the
+// row oracle judges must reach past it into the stream, and a load failure
 // before its time cannot have been caused by the swap.
 func startWatch(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, load *testutil.LoadGenerator) *watch {
 	t.Helper()

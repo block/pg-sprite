@@ -475,8 +475,15 @@ cause `copy-and-swap-disk-headroom` when the shadow and its indexes would not
 fit the declared space), and either logical decoding on the server or
 `--block-writes SCHEMA.TABLE`, which names the table whose writes it blocks
 until the swap. The verdict's outcome is distinct
-from `executed-natively`, and `detail` says what the verification pass
-covered and what became of the retained source:
+from `executed-natively`, `detail` says what the verification pass
+covered and what became of the retained source, and `swap_lsn` is the
+server's WAL position read inside the swap transaction, under its lock,
+right before it committed. A write to the table that committed below that
+position is in the retained source and was carried into the new table;
+writes after it exist only in the new table. Compare it with another
+position as `pg_lsn`. A run that resumed after its swap had committed, or
+learned of the commit from the catalog after losing its connection, has no
+position from inside the swap and leaves `swap_lsn` out:
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy-and-swap --free-disk 20GiB --json
@@ -484,7 +491,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE users ALTER COLUMN id TYPE text",
   "table": "public.users",
-  "detail": "verified 1000 rows in 2 chunks; the retained source is dropped"
+  "detail": "verified 1000 rows in 2 chunks; the retained source is dropped",
+  "swap_lsn": "0/1A2B3C8"
 }
 ```
 

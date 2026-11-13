@@ -190,6 +190,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		AllowedDestructive:        true,
 		BlockingPassthrough:       true,
 		WritesBlocked:             true,
+		SwapLSN:                   "0/1A2B3C8",
 		TableCreated:              true,
 		ExtensionSchemas:          []string{"extensions"},
 		Abandoned:                 true,

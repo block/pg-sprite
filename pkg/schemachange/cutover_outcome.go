@@ -6,6 +6,8 @@ import (
 	"slices"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/block/pg-sprite/pkg/decode"
 )
 
 // SwappedTable is the proof that the swap committed: the shadow now bears
@@ -24,6 +26,9 @@ type SwappedTable struct {
 	sequences  []OwnedSequence
 	identities []IdentityColumn
 	attempts   int
+	// swapPosition is set by the swap transaction itself; zero in a proof
+	// minted from the catalog.
+	swapPosition decode.LSN
 }
 
 // newSwappedTable records what the swap transaction renamed and handed off.
@@ -91,6 +96,17 @@ func (s SwappedTable) IdentityColumns() []IdentityColumn {
 
 // Attempts is how many ACCESS EXCLUSIVE acquisitions the swap needed.
 func (s SwappedTable) Attempts() int { return s.attempts }
+
+// SwapPosition is the server's WAL insert position read inside the swap
+// transaction, under its ACCESS EXCLUSIVE lock and right before COMMIT. A
+// write to the table that committed below it committed before the lock and
+// is in the retained source, from which the run carried it into the live
+// table; a write that commits above it ran after the swap and exists only
+// in the live table. It is zero when this proof was not minted by the
+// transaction that committed the swap: InspectSwapped re-derived it, or
+// Cutover learned of the commit from the catalog after losing its
+// connection.
+func (s SwappedTable) SwapPosition() decode.LSN { return s.swapPosition }
 
 // confirmSwap re-reads the catalog inside the swap transaction, after the
 // renames and handoffs, and refuses to commit unless it shows exactly what

@@ -1,6 +1,8 @@
 package testutil
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -45,12 +47,16 @@ func TestLoadGenerator(t *testing.T) {
 	// Every committed mutation touches at least one row and a unique-key
 	// swap touches two, so the touched list is at least as long as the
 	// commit count and grows in commit order.
-	assert.GreaterOrEqual(t, len(summary.TouchedIDs), summary.Committed())
-	assert.Equal(t, summary.Inserts+summary.Updates+summary.Deletes+2*summary.UniqueMoves, len(summary.TouchedIDs))
-	require.LessOrEqual(t, len(running.TouchedIDs), len(summary.TouchedIDs))
-	assert.Equal(t, running.TouchedIDs, summary.TouchedIDs[:len(running.TouchedIDs)], "a snapshot's touched ids are the start of the final list")
-	assert.Subset(t, summary.TouchedIDs, summary.InsertedIDs)
-	assert.Subset(t, summary.TouchedIDs, summary.DeletedIDs)
+	assert.GreaterOrEqual(t, len(summary.Touches), summary.Committed())
+	assert.Equal(t, summary.Inserts+summary.Updates+summary.Deletes+2*summary.UniqueMoves, len(summary.Touches))
+	require.LessOrEqual(t, len(running.Touches), len(summary.Touches))
+	assert.Equal(t, running.Touches, summary.Touches[:len(running.Touches)], "a snapshot's touches are the start of the final list")
+	for _, touch := range summary.Touches {
+		assert.Positive(t, touch.Position, "every touch carries the WAL position its mutation read")
+	}
+	assert.Empty(t, summary.Ambiguous, "no mutation ran out its deadline on an uncontended table")
+	assert.Subset(t, summary.TouchedIDs(), summary.InsertedIDs)
+	assert.Subset(t, summary.TouchedIDs(), summary.DeletedIDs)
 	assert.Positive(t, summary.MaxLatency)
 	assert.Less(t, summary.MaxLatency, MutationTimeout, "a committed mutation finished inside its deadline")
 	assert.Empty(t, summary.Failures, "a generator that does not record failures never lists any")
@@ -59,7 +65,7 @@ func TestLoadGenerator(t *testing.T) {
 		Updates:     summary.Updates,
 		Deletes:     summary.Deletes,
 		UniqueMoves: summary.UniqueMoves,
-		Touched:     len(summary.TouchedIDs),
+		Touched:     len(summary.Touches),
 	}, generator.Progress(), "a stopped load's progress is its summary's counts")
 	var count, distinct int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*),count(DISTINCT uniq) FROM `+table.Qualified()).Scan(&count, &distinct))
@@ -89,7 +95,7 @@ func TestLoadGeneratorRecordsFailures(t *testing.T) {
 	summary, err := recording.Stop()
 	require.NoError(t, err)
 	assert.Zero(t, summary.Committed())
-	assert.Empty(t, summary.TouchedIDs)
+	assert.Empty(t, summary.Touches)
 	require.Greater(t, len(summary.Failures), 1, "the worker must keep ticking after a recorded failure")
 	for _, failure := range summary.Failures {
 		assert.Equal(t, "23514", failure.Code, "check_violation is the recorded SQLSTATE")
@@ -128,12 +134,12 @@ func TestLoadGeneratorRecordsBothKeysOfAKeyMove(t *testing.T) {
 	summary, err := generator.Stop()
 	require.NoError(t, err)
 	require.Positive(t, summary.KeyMoves)
-	require.Len(t, summary.TouchedIDs, 2*summary.KeyMoves, "each key move touches its old and its new key")
+	require.Len(t, summary.TouchedIDs(), 2*summary.KeyMoves, "each key move touches its old and its new key")
 	var maxID int64
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT max(id) FROM `+table.Qualified()).Scan(&maxID))
-	assert.Contains(t, summary.TouchedIDs, maxID, "the newest move's new key is the table's highest, and it is touched")
-	for i := 0; i < len(summary.TouchedIDs); i += 2 {
-		assert.Less(t, summary.TouchedIDs[i], summary.TouchedIDs[i+1], "a move's old key precedes the new one drawn from the sequence")
+	assert.Contains(t, summary.TouchedIDs(), maxID, "the newest move's new key is the table's highest, and it is touched")
+	for i := 0; i < len(summary.Touches); i += 2 {
+		assert.Less(t, summary.TouchedIDs()[i], summary.TouchedIDs()[i+1], "a move's old key precedes the new one drawn from the sequence")
 	}
 }
 
@@ -161,4 +167,45 @@ func TestLoadGeneratorCountsExpectedRaces(t *testing.T) {
 	var count int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*) FROM `+table.Qualified()).Scan(&count))
 	assert.Zero(t, count)
+}
+
+// ambiguousDeadline bounds the wait for an update to run out its
+// client-side deadline behind the held row locks; one deadline and a few
+// ticks suffice.
+const ambiguousDeadline = 4 * MutationTimeout
+
+// An update whose row another session holds locked waits past its
+// client-side deadline. The client gives up without hearing whether the
+// write committed, so the update is not counted or touched; its key is
+// listed as ambiguous, one per deadline failure, so a comparison can leave
+// the row out instead of judging a write that may have landed after all.
+func TestLoadGeneratorListsTheKeyOfAWriteThatRanOutItsDeadline(t *testing.T) {
+	dsn := StartPostgres(t)
+	pool, err := pgxpool.New(t.Context(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	table := NewWorkloadTable(t, pool)
+	require.NoError(t, table.SeedRows(t.Context(), 3))
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), `SELECT id FROM `+table.Qualified()+` FOR UPDATE`)
+	require.NoError(t, err)
+
+	generator := StartLoad(t, pool, table, LoadSpec{Seed: 5, Workers: 1, RatePerSecond: 5, Mix: Mix{Update: 1}, RecordFailures: true})
+	require.Eventually(t, func() bool { return len(generator.Snapshot().Ambiguous) > 0 },
+		ambiguousDeadline, 50*time.Millisecond, "an update waiting on a held row lock runs out its deadline")
+	require.NoError(t, holder.Rollback(t.Context()))
+	summary, err := generator.Stop()
+	require.NoError(t, err)
+
+	deadlines := 0
+	for _, failure := range summary.Failures {
+		if errors.Is(failure.Err, context.DeadlineExceeded) {
+			deadlines++
+		}
+	}
+	assert.Equal(t, deadlines, len(summary.Ambiguous), "each update that ran out its deadline lists its one key")
+	assert.Subset(t, []int64{1, 2, 3}, summary.Ambiguous, "the listed keys are rows the updates picked")
+	assert.Len(t, summary.Touches, summary.Updates, "an update counts as touched only when its commit was heard")
 }

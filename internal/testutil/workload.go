@@ -164,12 +164,20 @@ func (s LoadSpec) validate() error {
 // were dropped rather than retried. A run whose Races dwarf its committed
 // counts wrote far less than its spec suggests.
 //
-// TouchedIDs lists, in commit order, the primary key of every row a
-// committed mutation wrote: the inserted, updated, or deleted row, both
-// rows of a unique-key swap, and both the old and the new key of a key
-// move. A test that marks the length of the list at some instant knows
-// that every key before the mark committed before it, and can leave the
-// rows written after it out of a comparison.
+// Touches lists, in commit order, the primary key of every row a committed
+// mutation wrote — the inserted, updated, or deleted row, both rows of a
+// unique-key swap, and both the old and the new key of a key move — each
+// with the WAL position the mutation read while it wrote. A test that
+// marks the length of the list at some instant knows that every key before
+// the mark committed before it, and can leave the rows written after it
+// out of a comparison.
+//
+// Ambiguous lists the keys of every mutation whose client-side deadline
+// expired after it had sent its write: the server may have committed the
+// write all the same, before or after the deadline fired, so the row's
+// state is unknown and a comparison leaves the key out rather than judge
+// it. Each mutation names its keys before it writes, so a write whose
+// outcome the client never heard still names the rows it may have changed.
 //
 // MaxLatency is the longest a committed mutation took from its first
 // statement to its commit returning. Failures holds every mutation that
@@ -184,9 +192,33 @@ type Summary struct {
 	Races       int
 	InsertedIDs []int64
 	DeletedIDs  []int64
-	TouchedIDs  []int64
+	Touches     []Touch
+	Ambiguous   []int64
 	MaxLatency  time.Duration
 	Failures    []Failure
+}
+
+// Touch is one row a committed mutation wrote: its primary key, and the
+// server's WAL insert position the mutation read inside its own write
+// statement (or, for a multi-statement mutation, inside its transaction
+// after its last write). The mutation held its lock on the table when it
+// read the position, so a session holding ACCESS EXCLUSIVE on the table
+// for a stretch of WAL either saw this write commit before it was granted
+// the lock — the position is below anything it reads under the lock — or
+// let the write run only after it committed, when the position is above
+// its commit.
+type Touch struct {
+	ID       int64
+	Position uint64
+}
+
+// TouchedIDs returns the keys of Touches in the same order.
+func (s Summary) TouchedIDs() []int64 {
+	ids := make([]int64, len(s.Touches))
+	for i, touch := range s.Touches {
+		ids[i] = touch.ID
+	}
+	return ids
 }
 
 // Failure is one mutation that failed for a reason other than an expected
@@ -288,18 +320,34 @@ func (g *LoadGenerator) mutate(ctx context.Context, pool *pgxpool.Pool, table Wo
 	}
 }
 
+// walPosition is the SQL expression a mutation reads inside its write: the
+// server's WAL insert position as a byte offset, the form Touch.Position
+// holds.
+const walPosition = `(pg_current_wal_insert_lsn() - '0/0'::pg_lsn)::bigint`
+
+// nextIDQuery draws the next key from the table's identity sequence, so an
+// insert or a key move knows the key it writes before it writes it.
+const nextIDQuery = `SELECT nextval(pg_get_serial_sequence($1, 'id'))`
+
+// insert draws its key from the identity sequence before it writes, so a
+// write whose outcome is unknown still names its row.
 func (g *LoadGenerator) insert(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable, rng *rand.Rand) error {
 	uniq := 1_000_000 + rng.IntN(1_000_000_000)
-	var id int64
-	err := pool.QueryRow(ctx, `INSERT INTO `+table.Qualified()+` (uniq,amount,label,blob) VALUES ($1,$2,$3,repeat('x',9000)) RETURNING id`, uniq, "1.25", fmt.Sprintf("insert-%d", uniq)).Scan(&id)
-	if err == nil {
-		g.mu.Lock()
-		g.summary.Inserts++
-		g.summary.InsertedIDs = append(g.summary.InsertedIDs, id)
-		g.summary.TouchedIDs = append(g.summary.TouchedIDs, id)
-		g.mu.Unlock()
+	var id, position int64
+	if err := pool.QueryRow(ctx, nextIDQuery, table.Qualified()).Scan(&id); err != nil {
+		return err
 	}
-	return err
+	err := pool.QueryRow(ctx, `INSERT INTO `+table.Qualified()+` (id,uniq,amount,label,blob) VALUES ($1,$2,$3,$4,repeat('x',9000)) RETURNING `+walPosition, id, uniq, "1.25", fmt.Sprintf("insert-%d", uniq)).Scan(&position)
+	if err != nil {
+		g.writeUnheard(err, id)
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.Inserts++
+	g.summary.InsertedIDs = append(g.summary.InsertedIDs, id)
+	g.summary.Touches = append(g.summary.Touches, Touch{ID: id, Position: uint64(position)})
+	return nil
 }
 
 // randomPointQuery picks a uniformly random point in the table's key range
@@ -331,27 +379,44 @@ func (g *LoadGenerator) update(ctx context.Context, pool *pgxpool.Pool, table Wo
 	if rewrite {
 		q += `, blob=repeat(encode(sha256(convert_to(random()::text, 'UTF8')), 'hex'), 150)`
 	}
-	q += ` WHERE id=$1`
-	tag, err := pool.Exec(ctx, q, id)
-	if err == nil && tag.RowsAffected() == 1 {
-		g.mu.Lock()
-		g.summary.Updates++
-		g.summary.TouchedIDs = append(g.summary.TouchedIDs, id)
-		g.mu.Unlock()
+	q += ` WHERE id=$1 RETURNING ` + walPosition
+	var position int64
+	err := pool.QueryRow(ctx, q, id).Scan(&position)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The picked row was deleted before the update reached it; the
+		// update wrote nothing.
+		return nil
 	}
-	return err
+	if err != nil {
+		g.writeUnheard(err, id)
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.Updates++
+	g.summary.Touches = append(g.summary.Touches, Touch{ID: id, Position: uint64(position)})
+	return nil
 }
+
+// delete picks its row before it writes, so a write whose outcome is
+// unknown still names its row; a row deleted between the pick and the
+// write is the vanished-row race.
 func (g *LoadGenerator) delete(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable) error {
-	var id int64
-	err := pool.QueryRow(ctx, `DELETE FROM `+table.Qualified()+` WHERE id=(`+randomIDQuery(table)+`) RETURNING id`).Scan(&id)
-	if err == nil {
-		g.mu.Lock()
-		g.summary.Deletes++
-		g.summary.DeletedIDs = append(g.summary.DeletedIDs, id)
-		g.summary.TouchedIDs = append(g.summary.TouchedIDs, id)
-		g.mu.Unlock()
+	var id, position int64
+	if err := pool.QueryRow(ctx, randomIDQuery(table)).Scan(&id); err != nil {
+		return err
 	}
-	return err
+	err := pool.QueryRow(ctx, `DELETE FROM `+table.Qualified()+` WHERE id=$1 RETURNING `+walPosition, id).Scan(&position)
+	if err != nil {
+		g.writeUnheard(err, id)
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.Deletes++
+	g.summary.DeletedIDs = append(g.summary.DeletedIDs, id)
+	g.summary.Touches = append(g.summary.Touches, Touch{ID: id, Position: uint64(position)})
+	return nil
 }
 
 // uniqueMove swaps the unique keys of two rows inside one transaction by
@@ -385,31 +450,66 @@ func (g *LoadGenerator) uniqueMove(ctx context.Context, pool *pgxpool.Pool, tabl
 			return err
 		}
 	}
-	if err = tx.Commit(ctx); err == nil {
-		g.mu.Lock()
-		g.summary.UniqueMoves++
-		g.summary.TouchedIDs = append(g.summary.TouchedIDs, values[0].ID, values[1].ID)
-		g.mu.Unlock()
+	var position int64
+	if err = tx.QueryRow(ctx, `SELECT `+walPosition).Scan(&position); err != nil {
+		return err
 	}
-	return err
+	// Only the commit can land a write the client never hears about: a
+	// statement before it that runs out the deadline leaves the
+	// transaction uncommitted.
+	if err = tx.Commit(ctx); err != nil {
+		g.writeUnheard(err, values[0].ID, values[1].ID)
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.UniqueMoves++
+	g.summary.Touches = append(g.summary.Touches,
+		Touch{ID: values[0].ID, Position: uint64(position)},
+		Touch{ID: values[1].ID, Position: uint64(position)})
+	return nil
 }
 
 // keyMove gives a random row a fresh primary key from the table's identity
 // sequence, so the change decodes as an image under the new key carrying
 // the old key: the two halves the buffer pairs and the drain judges
-// together. A worker whose chosen row vanished under it sees the
-// vanished-row race.
+// together. It picks the row and draws the new key before it writes, so a
+// write whose outcome is unknown still names both keys. A worker whose
+// chosen row vanished under it sees the vanished-row race.
 func (g *LoadGenerator) keyMove(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable) error {
-	var oldID, newID int64
-	q := `WITH picked AS (` + randomIDQuery(table) + `) UPDATE ` + table.Qualified() + ` t SET id=nextval(pg_get_serial_sequence($1,'id')), updated_at=now() FROM picked WHERE t.id=picked.id RETURNING picked.id, t.id`
-	err := pool.QueryRow(ctx, q, table.Qualified()).Scan(&oldID, &newID)
-	if err == nil {
-		g.mu.Lock()
-		g.summary.KeyMoves++
-		g.summary.TouchedIDs = append(g.summary.TouchedIDs, oldID, newID)
-		g.mu.Unlock()
+	var oldID, newID, position int64
+	if err := pool.QueryRow(ctx, randomIDQuery(table)).Scan(&oldID); err != nil {
+		return err
 	}
-	return err
+	if err := pool.QueryRow(ctx, nextIDQuery, table.Qualified()).Scan(&newID); err != nil {
+		return err
+	}
+	err := pool.QueryRow(ctx, `UPDATE `+table.Qualified()+` SET id=$2, updated_at=now() WHERE id=$1 RETURNING `+walPosition, oldID, newID).Scan(&position)
+	if err != nil {
+		g.writeUnheard(err, oldID, newID)
+		return err
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.KeyMoves++
+	g.summary.Touches = append(g.summary.Touches,
+		Touch{ID: oldID, Position: uint64(position)},
+		Touch{ID: newID, Position: uint64(position)})
+	return nil
+}
+
+// writeUnheard records the keys of a write whose outcome the client never
+// heard: one that ran out its client-side deadline after it was sent, which
+// the server may still have committed. A server error is an answer, after
+// which the write has rolled back, so it is not listed; nor is a dropped
+// connection, which the load reports as a failure of its own.
+func (g *LoadGenerator) writeUnheard(err error, ids ...int64) {
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.Ambiguous = append(g.summary.Ambiguous, ids...)
 }
 func expectedRace(err error) bool {
 	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, context.Canceled) {
@@ -454,7 +554,8 @@ func (g *LoadGenerator) Snapshot() Summary {
 	s := g.summary
 	s.InsertedIDs = slices.Clone(s.InsertedIDs)
 	s.DeletedIDs = slices.Clone(s.DeletedIDs)
-	s.TouchedIDs = slices.Clone(s.TouchedIDs)
+	s.Touches = slices.Clone(s.Touches)
+	s.Ambiguous = slices.Clone(s.Ambiguous)
 	s.Failures = slices.Clone(s.Failures)
 	return s
 }
@@ -468,7 +569,7 @@ type Progress struct {
 	Deletes     int
 	UniqueMoves int
 	KeyMoves    int
-	// Touched is how long Summary.TouchedIDs was: the first Touched keys of
+	// Touched is how long Summary.Touches was: the first Touched entries of
 	// the final list are the rows written by mutations that committed
 	// before this progress was read.
 	Touched int
@@ -491,7 +592,7 @@ func (g *LoadGenerator) Progress() Progress {
 		Deletes:     s.Deletes,
 		UniqueMoves: s.UniqueMoves,
 		KeyMoves:    s.KeyMoves,
-		Touched:     len(s.TouchedIDs),
+		Touched:     len(s.Touches),
 	}
 }
 
