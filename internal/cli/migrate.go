@@ -54,7 +54,12 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	v, runErr := migrate.Run(ctx, pool, st, c.options(logger))
+	opts, stopProgress, err := c.startProgress(ctx, c.options(logger))
+	if err != nil {
+		return err
+	}
+	v, runErr := migrate.Run(ctx, pool, st, opts)
+	stopProgress()
 	v = cliPoolSizeIdiom(c.cliDiskHeadroomIdiom(v))
 	if runErr != nil {
 		// The failed verdict is the error's machine-readable twin on

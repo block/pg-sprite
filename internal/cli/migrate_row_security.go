@@ -34,7 +34,12 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 		return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
 	}
 	if runsTheTablePlan(report, planErr) {
-		result, runErr := migrate.RunDesiredWithRowSecurity(ctx, pool, migrate.RowSecurityRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))
+		opts, stopProgress, err := c.startProgress(ctx, c.options(c.diag()))
+		if err != nil {
+			return err
+		}
+		result, runErr := migrate.RunDesiredWithRowSecurity(ctx, pool, migrate.RowSecurityRequest{Schema: c.Schema, Desired: desired}, opts)
+		stopProgress()
 		return c.finishDesired(out, result, runErr)
 	}
 	runReport, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, b)

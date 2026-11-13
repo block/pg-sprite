@@ -78,7 +78,12 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, ExtensionSchema: c.ExtensionSchema, JSON: c.JSON}
 		return diff.writeDiffReport(out, report)
 	}
-	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))
+	opts, stopProgress, err := c.startProgress(ctx, c.options(c.diag()))
+	if err != nil {
+		return err
+	}
+	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, opts)
+	stopProgress()
 	return c.finishDesired(out, result, runErr)
 }
 
