@@ -93,7 +93,10 @@ be completed, say so rather than treating the pins as current.
 
 Handle unrelated upgrades in a separate follow-up. When making an upgrade:
 
-1. Keep both version tags and immutable digests in `compose/supabase.yml`
+1. Keep both version tags and immutable digests in `compose/supabase.yml`, and
+   run `make check-image-pins` to confirm each tag still resolves to its
+   digest. Docker pulls by digest alone, so a tag paired with the wrong digest
+   starts and passes the suite while the guide names a version that never ran
 2. For Supavisor, compare `pooler.exs` with its upstream source and update its
    source link and validated version together
 3. Run the required Supabase CI job and investigate failures before accepting
@@ -102,7 +105,8 @@ Handle unrelated upgrades in a separate follow-up. When making an upgrade:
    the same PR
 
 This check is triggered by agent work, not a scheduled update bot. Fresh CI
-runners pull the pinned images on each run, which also exposes unavailable pins.
+runners pull the pinned images on each run, which also exposes unavailable pins,
+and the Supabase job runs `make check-image-pins` before starting the services.
 
 ## Hosted projects
 

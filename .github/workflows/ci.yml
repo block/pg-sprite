@@ -217,6 +217,10 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      # Compose pulls by digest and ignores the tag, so only a registry
+      # lookup shows that each pinned tag still names the image tested.
+      - name: Check image pins resolve their tags
+        run: make check-image-pins
       - name: Start disposable Supabase services
         run: docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime up --wait --wait-timeout 120 -d
       - name: Run database suites against Supabase PostgreSQL
