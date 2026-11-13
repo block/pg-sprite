@@ -97,7 +97,11 @@ func TestCatchupEndsWhenTheSlotRetainsMoreThanTheCeiling(t *testing.T) {
 	run.awaitCycleAfter(t, "run a cycle after the one that judged the slot over the ceiling")
 	run.status(t) // still running: retained WAL over the ceiling is let stand for the grace
 
-	clock.advance(decode.RestartReleaseInterval + applier.DefaultCatchupInterval)
+	clock.advance(decode.RestartReleaseInterval / 2)
+	run.awaitCycleAfter(t, "run a cycle half a release interval after the slot went over the ceiling")
+	run.status(t) // half the server's release interval later the server may still release it
+
+	clock.advance(decode.RestartReleaseInterval/2 + applier.DefaultCatchupInterval)
 	err = run.wait(t)
 	require.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 	var exceeded *decode.SlotLagExceededError

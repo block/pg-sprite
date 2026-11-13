@@ -49,14 +49,14 @@ func (l *streamLag) bytes() uint64 {
 	return (*source).Status().Lag()
 }
 
-// pacedCopier is the run's copier options with the copy paced by lag: a
-// worker waits before a chunk while the stream's unconfirmed WAL is over
-// its share of the slot lag ceiling, so the copy's own inserts, which the
-// stream's backend has to read past, do not carry the slot to the ceiling
-// that ends the run (ST-3). The ceiling still ends a run whose lag is not
-// the copy's doing.
+// pacedCopier is the run's copier options, with the run's tracker when it
+// has one, and the copy paced by lag: a worker waits before a chunk while
+// the stream's unconfirmed WAL is over its share of the slot lag ceiling,
+// so the copy's own inserts, which the stream's backend has to read past,
+// do not carry the slot to the ceiling that ends the run (ST-3). The
+// ceiling still ends a run whose lag is not the copy's doing.
 func (r *Runner) pacedCopier(lag *streamLag) copier.Options {
-	opts := r.opts.Copier
+	opts := r.copierOptions()
 	opts.Pace = copier.Pace{
 		Backlog:   lag.bytes,
 		HighWater: copyPaceMark(r.opts.slotLagCeiling()),

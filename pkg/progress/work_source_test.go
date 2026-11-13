@@ -55,8 +55,10 @@ func runningTrackerWithSource(t *testing.T, source progress.WorkSource) *progres
 }
 
 // The copy step's JSON is the adapter-facing contract for the copy
-// operation: its operation value, and work carrying the engine's rows and
-// bytes with the checksum and build counters at honest zero.
+// operation: its operation value, work carrying the engine's rows and
+// bytes with the checksum and build counters at honest zero, and the
+// derived percent and ETA — 1200 of 5000 rows is 24%, and six seconds for
+// that share projects nineteen more for the rest.
 func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 	var polls atomic.Int32
 	clock := &fakeClock{now: time.Unix(100, 0)}
@@ -67,23 +69,25 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 	const copySQL = "INSERT INTO public.t_shadow (id) SELECT id FROM public.t WHERE id BETWEEN $1::bigint AND $2::bigint ON CONFLICT (id) DO NOTHING"
 	tracker.StartStep(2, progress.OperationCopy, copySQL)
 	tracker.SetWorkSource(countingSource(&polls))
-	clock.now = clock.now.Add(750 * time.Millisecond)
+	clock.now = clock.now.Add(6 * time.Second)
 
 	snapshot, err := tracker.Progress(t.Context())
 	require.NoError(t, err)
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 7,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 4,
-		"elapsed_ns": 2750000000,
-		"step_elapsed_ns": 750000000,
+		"elapsed_ns": 8000000000,
+		"step_elapsed_ns": 6000000000,
 		"detail": {
 			"operation": "copy",
 			"statement": "INSERT INTO public.t_shadow (id) SELECT id FROM public.t WHERE id BETWEEN $1::bigint AND $2::bigint ON CONFLICT (id) DO NOTHING",
 			"active": true,
+			"percent": 24,
+			"eta_ns": 19000000000,
 			"work": {
 				"rows_copied": 1200,
 				"rows_total": 5000,
@@ -91,6 +95,7 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 				"bytes_total": 409600,
 				"chunks_compared": 0,
 				"rows_hashed": 0,
+				"rows_to_hash": 0,
 				"chunks_mismatched": 0,
 				"chunks_repaired": 0,
 				"chunks_reread": 0,
@@ -110,13 +115,16 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 }
 
 // checksumCounters are distinct where the pass allows so a swapped pair
-// cannot pass: a repair pass that compared four chunks, found two differing,
-// recopied both, and has reread one of them so far.
-var checksumCounters = progress.Work{ChunksCompared: 4, RowsHashed: 3500, ChunksMismatched: 2, ChunksRepaired: 2, ChunksReread: 1}
+// cannot pass: a repair pass over a source the catalog counts at 5000 rows
+// that compared four chunks, found two differing, recopied both, and has
+// reread one of them so far.
+var checksumCounters = progress.Work{ChunksCompared: 4, RowsHashed: 3500, RowsToHash: 5000, ChunksMismatched: 2, ChunksRepaired: 2, ChunksReread: 1}
 
 // The checksum step's JSON is the adapter-facing contract for the checksum
-// operation: its operation value, and work carrying the engine's chunk and
-// row counters with the copy and build counters at honest zero.
+// operation: its operation value, work carrying the engine's chunk and row
+// counters with the copy and build counters at honest zero, and the derived
+// percent — 3500 of 5000 rows hashed is 70%. The step has run under a
+// second, too little to project an ETA from, so none is reported.
 func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(100, 0)}
 	tracker, err := progress.NewTracker(clock)
@@ -132,7 +140,7 @@ func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 7,
 		"phase": "running",
 		"step": 3,
 		"total_steps": 4,
@@ -141,6 +149,7 @@ func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 		"detail": {
 			"operation": "checksum",
 			"active": true,
+			"percent": 70,
 			"work": {
 				"rows_copied": 0,
 				"rows_total": 0,
@@ -148,6 +157,7 @@ func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 				"bytes_total": 0,
 				"chunks_compared": 4,
 				"rows_hashed": 3500,
+				"rows_to_hash": 5000,
 				"chunks_mismatched": 2,
 				"chunks_repaired": 2,
 				"chunks_reread": 1,
@@ -188,7 +198,7 @@ func TestSnapshotJSONShapeForACatchUpStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 7,
 		"phase": "running",
 		"step": 3,
 		"total_steps": 4,
@@ -204,6 +214,7 @@ func TestSnapshotJSONShapeForACatchUpStep(t *testing.T) {
 				"bytes_total": 0,
 				"chunks_compared": 0,
 				"rows_hashed": 0,
+				"rows_to_hash": 0,
 				"chunks_mismatched": 0,
 				"chunks_repaired": 0,
 				"chunks_reread": 0,

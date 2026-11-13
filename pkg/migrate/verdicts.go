@@ -398,8 +398,7 @@ func execRefusal(st statement.Statement, err error,
 	if replicaIdentityRecheckRefused(err) {
 		return admissionRefusalVerdict(st, err, verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), forced), true
 	}
-	var invalidErr *executor.InvalidIndexError
-	if errors.As(err, &invalidErr) {
+	if _, ok := errors.AsType[*executor.InvalidIndexError](err); ok {
 		return verdict.Verdict{}, false
 	}
 	var budgetErr *executor.BudgetError

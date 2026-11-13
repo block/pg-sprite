@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // swapLive fills and swaps the shadow of a live run, with the source
@@ -131,6 +132,7 @@ func (p landedPosition) Position() copier.Position {
 // capture that fails ends the step in progress.
 func (r *Runner) fillLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, state *runState, fill liveFill, cap *capture) (CutoverReady, checksum.Report, error) {
 	if state.cp.Phase == checkpoint.PhaseCopying {
+		r.startPhase(progress.OperationCopy)
 		if err := r.runCopy(ctx, pool, lock, fill.copier, state, cap.catchup.Confirmed, checkpoint.PhaseCatchingUp); err != nil {
 			return CutoverReady{}, checksum.Report{}, err
 		}
@@ -171,6 +173,9 @@ func (r *Runner) fillLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 // reported as a *CatchupWaitError carrying the catch-up's status at that
 // moment, so the caller reads what the capture was waiting on.
 func (r *Runner) awaitCaughtUp(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, state *runState, cap *capture) error {
+	r.startPhase(progress.OperationCatchUp)
+	stopReporting := r.reportCatchup(cap.catchup)
+	defer stopReporting()
 	marker, err := markWAL(ctx, pool)
 	if err != nil {
 		return err

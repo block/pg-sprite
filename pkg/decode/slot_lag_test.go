@@ -142,8 +142,10 @@ func TestNewSlotLagWatchRefusesABadCeilingOrGrace(t *testing.T) {
 }
 
 // The ceiling abort reads as an operator message for each cause: sizes in
-// binary units with the exact bytes beside them, the usual cause, and what
-// lets the run resume. A whole number of a unit renders without a decimal.
+// binary units with the exact bytes beside them, what can cause it, and
+// what lets the run resume. A whole number of a unit renders without a
+// decimal. A cause the renderer does not know is named as it is, with no
+// account borrowed from another cause.
 func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 	behind := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: decode.SlotLagStreamBehind,
 		Retained: 1395864371, Unconfirmed: 1288490188, Ceiling: 1 << 30}
@@ -156,8 +158,15 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 		Retained: 1536, Unconfirmed: 512, Ceiling: 1000}
 	assert.Equal(t,
 		"slot pgsprite_0123abcd retains 1.5 KiB of WAL, over the 1000 B ceiling (1536 > 1000 bytes), for longer than the server takes to release WAL the stream confirmed, "+
-			"and the stream itself is 512 B behind; the usual cause is a long-open transaction on the source, and the run can resume once it ends",
+			"and the stream itself is 512 B behind; either a transaction on the source holds the WAL back (an open write transaction or a prepared one), "+
+			"and the run can resume once it ends, or the source writes more WAL per release interval than the ceiling allows, "+
+			"and the run needs a higher SlotLagCeiling",
 		retained.Error())
+
+	unknown := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: "future-cause",
+		Retained: 1536, Unconfirmed: 512, Ceiling: 1000}
+	assert.Equal(t, `slot pgsprite_0123abcd is over the 1000 B ceiling (cause "future-cause"): retains 1.5 KiB, 512 B unconfirmed`,
+		unknown.Error())
 }
 
 // A slot that is gone is the lost state too, worded as absence.

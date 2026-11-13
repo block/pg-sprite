@@ -57,6 +57,7 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
   - [Real execution — exit 0](#real-execution--exit-0)
   - [Accepted blocking refusal (`index-statement`) — exit 3](#accepted-blocking-refusal-index-statement--exit-3)
   - [Failed mid-sequence (`execution-failed`) — exit 1](#failed-mid-sequence-execution-failed--exit-1)
+  - [Data fault in a copy-and-swap run (`data-fault`) — exit 1](#data-fault-in-a-copy-and-swap-run-data-fault--exit-1)
   - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
   - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
   - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
@@ -700,9 +701,10 @@ output was captured from the compose database after loading `demo/seed.sql`:
 
 ```console
 $ pg-sprite pull --schema public --out /tmp/pg-sprite-pull-example
+PULLED  contacts -> /tmp/pg-sprite-pull-example/contacts.sql
 PULLED  orders -> /tmp/pg-sprite-pull-example/orders.sql
 PULLED  users -> /tmp/pg-sprite-pull-example/users.sql
-Summary: 2 pulled, 0 refused, 0 errors
+Summary: 3 pulled, 0 refused, 0 errors
 ```
 
 See [pull.md](pull.md) for the refusal and exit-code contract and the

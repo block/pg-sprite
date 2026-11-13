@@ -49,7 +49,10 @@ type PositionSource interface {
 type CatchupOptions struct {
 	// Interval is the longest a cycle gathers changes before it drains and
 	// flushes. It is also the longest a quiet stream goes between
-	// confirmations, so the slot's retained WAL is released at this pace.
+	// confirmations, so the slot's retained WAL is released at this pace,
+	// and it is part of the grace the retained WAL may stand over
+	// SlotLagCeiling: a longer Interval lets the slot grow further past
+	// the ceiling before the run ends.
 	Interval time.Duration
 	// MaxChanges is the most changes a cycle adds before it drains and
 	// flushes: the bound on a flush transaction's size on a busy stream.
@@ -122,6 +125,14 @@ func (o CatchupOptions) validate() error {
 		return fmt.Errorf("%w: deadlock attempts %d is below one; use zero for the default", ErrInvalidCatchupOptions, o.DeadlockAttempts)
 	}
 	return nil
+}
+
+// slotLagGrace is how long the slot's retained WAL may stand over the
+// ceiling while the server releases what the stream confirmed: a release
+// waits for the server's next running-transactions record and then for
+// the cycle that confirms past it.
+func slotLagGrace(o CatchupOptions) time.Duration {
+	return decode.RestartReleaseInterval + o.Interval
 }
 
 // Status is one consistent snapshot of a catch-up as of the end of its last
@@ -244,11 +255,7 @@ func NewCatchup(stream *decode.Stream, flusher *Flusher, positions PositionSourc
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
-	// Retained WAL may stand over the ceiling while the server releases
-	// what the stream confirmed: a release waits for the server's next
-	// running-transactions record and then for the cycle that confirms
-	// past it.
-	slotLag, err := decode.NewSlotLagWatch(opts.SlotLagCeiling, decode.RestartReleaseInterval+opts.Interval)
+	slotLag, err := decode.NewSlotLagWatch(opts.SlotLagCeiling, slotLagGrace(opts))
 	if err != nil {
 		return nil, err
 	}

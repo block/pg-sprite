@@ -293,28 +293,22 @@ func OutcomeCode(err error) Code {
 	if err == nil {
 		return ""
 	}
-	var stepErr *SequenceStepError
-	if errors.As(err, &stepErr) {
+	if stepErr, ok := errors.AsType[*SequenceStepError](err); ok {
 		return OutcomeCode(stepErr.Err)
 	}
-	var invalidErr *InvalidIndexError
-	if errors.As(err, &invalidErr) {
+	if invalidErr, ok := errors.AsType[*InvalidIndexError](err); ok {
 		return invalidErr.Code()
 	}
-	var budgetErr *BudgetError
-	if errors.As(err, &budgetErr) {
+	if budgetErr, ok := errors.AsType[*BudgetError](err); ok {
 		return budgetErr.Code()
 	}
-	var rlsUnknown *RowSecurityOutcomeUnknownError
-	if errors.As(err, &rlsUnknown) {
+	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return CodeRowSecurityOutcomeUnknown
 	}
-	var unknownErr *BlockingOutcomeUnknownError
-	if errors.As(err, &unknownErr) {
+	if _, ok := errors.AsType[*BlockingOutcomeUnknownError](err); ok {
 		return CodeBlockingOutcomeUnknown
 	}
-	var commitUnknown *CommitOutcomeUnknownError
-	if errors.As(err, &commitUnknown) {
+	if _, ok := errors.AsType[*CommitOutcomeUnknownError](err); ok {
 		return CodeCommitOutcomeUnknown
 	}
 	return sentinelCode(err)

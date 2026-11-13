@@ -20,11 +20,13 @@ see [low-level-design.md](low-level-design.md).
 pg-sprite is a decoupled **planner → router → executor** engine. The planner decides *what*
 changes, the router decides *which strategy*, interchangeable executors decide *how*.
 
-The planner is itself a pipeline of five distinct stages. The two front-ends enter it at
+The planner is itself a pipeline of five distinct stages; the last, lint, is the offline `lint`
+command's view of the classification, not a gate on `diff` or `migrate`. The two front-ends
+enter it at
 different points — an imperative `migrate --alter` already *is* DDL, so it goes straight to parse;
 a declarative `diff --desired` schema must first be compared against the live database to
 *produce* DDL — and the derived statements then re-enter the parse boundary like any
-hand-written statement, so both routes converge on the same parse → classify → lint tail
+hand-written statement, so both routes converge on the same parse → classify → route tail
 and every operation is judged by the same rules regardless of how it arrived:
 
 ```
@@ -58,21 +60,13 @@ and every operation is judged by the same rules regardless of how it arrived:
    │             ╰──────────────────╮                                   │
    │                                ▼                                   │
    │                   ╭─────────────────────────╮                      │
-   │                   │ CLASSIFY                │                      │
-   │                   │ pkg/planner             │                      │
-   │                   │ per op: native-safe ·   │                      │
-   │                   │ needs-rewrite · refuse; │                      │
-   │                   │ emit the safer native   │                      │
-   │                   │ sequence where one      │                      │
+   │                   │ CLASSIFY                │   offline `lint`:    │
+   │                   │ pkg/planner             │   pkg/lint reports   │
+   │                   │ per op: native-safe ·   │   these decisions as │
+   │                   │ needs-rewrite · refuse; │   typed findings;    │
+   │                   │ emit the safer native   │   not a gate on      │
+   │                   │ sequence where one      │   diff or migrate    │
    │                   │ exists                  │                      │
-   │                   ╰────────────┬────────────╯                      │
-   │                                ▼                                   │
-   │                   ╭─────────────────────────╮                      │
-   │                   │ LINT                    │                      │
-   │                   │ pkg/lint                │                      │
-   │                   │ reject unsafe or        │                      │
-   │                   │ unsupported operations  │                      │
-   │                   │ before any write        │                      │
    │                   ╰────────────┬────────────╯                      │
    │                                │ Plan (ordered, classified steps)  │
    └────────────────────────────────┼───────────────────────────────────┘
@@ -83,7 +77,7 @@ and every operation is judged by the same rules regardless of how it arrived:
            ╭────────────────────────┼───────────────┬────────────────╮
            ▼                        ▼               ▼                ▼
       native DDL             copy-and-swap    expand/contract    refuse with
-      CONCURRENTLY           (later phase)    (reversible,       not-native-safe
+      CONCURRENTLY           (preview)        (reversible,       not-native-safe
       NOT VALID …                              later)            verdict
            ╰────────────────────────┴───────────────╯
                                     │ cross-cutting: connection mgmt,
@@ -100,9 +94,9 @@ and every operation is judged by the same rules regardless of how it arrived:
 | --- | --- | --- | --- | --- |
 | **Parse** | `pkg/statement` | No — the grammar is embedded (Wasm libpg_query) | SQL text → typed per-operation descriptors | One parse boundary using the real PostgreSQL grammar — no hand-parsing anywhere else; a parse failure is an error surfaced to the caller, never a guess |
 | **Introspect** | `pkg/schemadiff` | **Yes** — reads the target's catalog; executes desired DDL in a rolled-back scratch schema | live catalog (and desired DDL applied to a scratch schema) → schema models | The classifier and diff need *facts*, not text: column types, defaults, and constraint state come from PostgreSQL's own catalog, not a reimplementation of its semantics |
-| **Diff** | `pkg/schemadiff` | No — pure model-vs-model comparison, but both its inputs come from Introspect | desired model vs live model → ordered DDL statements | Declarative mode is a front-end that *produces statements*; its output re-enters the parse boundary and flows through the same classify → lint tail as hand-written DDL, so both modes get identical safety treatment |
+| **Diff** | `pkg/schemadiff` | No — pure model-vs-model comparison, but both its inputs come from Introspect | desired model vs live model → ordered DDL statements | Declarative mode is a front-end that *produces statements*; its output re-enters the parse boundary and flows through the same classify → route tail as hand-written DDL, so both modes get identical safety treatment |
 | **Classify** | `pkg/planner` | No — a pure function over parsed operations and facts gathered earlier | each operation + introspected facts → native-safe · needs-rewrite · refuse, with the safer native sequence where one exists | The safety decision lives in one pure, testable place — PostgreSQL's missing `ALGORITHM=`/`LOCK=` declaration ([design-principles.md](design-principles.md)) |
-| **Lint** | `pkg/lint` | No — pure over classified operations | classified operations → typed findings (errors refuse, warnings advise) | Policy-level rejection of unsafe or unsupported changes *before* any write — separate from the mechanical can-this-run-online judgment |
+| **Lint** | `pkg/lint` | No — pure over classified operations | classified operations → typed findings (errors refuse, warnings advise) | The offline `lint` command's policy-level report on unsafe or unsupported changes, for CI before anything is run — separate from the mechanical can-this-run-online judgment; `diff` and `migrate` do not consult it |
 
 Only Introspect touches the database. That is why `lint`, `suggest`, and `fmt` run fully
 offline against SQL text alone, while `diff` and `dry-run` require a connection for
@@ -142,7 +136,7 @@ back what it built. Step by step, for a `diff` against a desired-state file:
 6. **Introspect the live table** into the same model shape, canonicalize both, and diff them —
    the comparison is model vs model, never text vs text.
 7. **Re-enter the pipeline.** The derived statements go back through the parse boundary and
-   into classify → lint, exactly as if a user had submitted them with `--alter` — declarative
+   into classify → route, exactly as if a user had submitted them with `--alter` — declarative
    mode earns no shortcut past the safety rules.
 
 The result is a diff computed from what PostgreSQL *means*, not from what a Go reimplementation
@@ -187,7 +181,7 @@ different levels of commitment:
 | `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `pull` · `diff` · `fmt` · `lint` · `suggest` · `capabilities` · `status` | all eight exist |
 | `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all eight exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
-| `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
+| `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers, the advisory table lock and its session, and the replication connection | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); shadow DDL is validated by executing the retargeted statement on the empty shadow, and fingerprints come from `pkg/schemadiff`'s transaction-scoped scratch schema — execute-and-introspect, never AST surgery | exists |
 | `pkg/preflight` | Precondition verification and refusals before any write: target facts + table-size guard, tiered privilege checks (a refusal carries the exact provisioning `GRANT`), partitioned-table support gates, the copy-and-swap shape proof and its cluster/volume environment check | exists |
 | `pkg/verdict` | Structured outcome contract (executed / refused / failed + reason, stable executor code, and safer idiom), rendering, exit codes | exists (Phase 1) |
@@ -198,31 +192,27 @@ different levels of commitment:
 | `pkg/plan` | Versioned machine-readable dry-run plan report — the one JSON contract both front doors emit and an orchestrator consumes | exists (Phase 2.5) |
 | `pkg/diffplan` | The declarative front door as a library: desired schema in, routed `plan.Report` out — the CLI `diff` and embedding orchestrators share this one pipeline | exists |
 | `pkg/migrate` | The imperative front door as a library: one parsed statement in — gate, resolve, classify, route, execute — one `verdict.Verdict` out; the CLI `migrate` and embedding orchestrators share this one pipeline. Also the desired-state execution loop: `RunDesired` derives the convergence plan (`diffplan.Plan`), admits it as a whole (existence, destructive guard, dispositions, optional fingerprint pin), and runs each planned statement back through `Run` — per-statement verdicts, committed-prefix semantics | exists |
-| `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
-| `pkg/executor` | Native backend with stable outcome codes: the bounded optimistic attempt, the concurrent index build and its invalid-index recovery, the autocommit safer-sequence runner, the greenfield `CREATE TABLE` path, and the accepted-blocking passthrough primitive; the full `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) arrives with the copy-and-swap backend | native execution exists |
-| `pkg/progress` | Strategy-wide, pollable progress snapshots: native phase/elapsed time, sequence position, retry attempt, and server-reported concurrent-index work, and engine-measured work polled from the copier and the checksum verifier (`WorkSource`) | native progress and the copy and checksum work sources exist |
-| `pkg/copier` | PK-range chunker over one integer-family primary key with dynamic time-based sizing (produces `Chunk` and `Watermark`; composite keys refused in v1), and the parallel chunked copy into the shadow table (never overwrites; reports the cut frontier, in-flight chunks, and landed watermark for the applier, and fills the progress tracker's copy counters while it runs) — there is no separate chunker package | chunker, copy loop, and progress fillers exist |
-| `pkg/checksum` | The mandatory correctness gate: the chunk verifier (single-snapshot per-chunk digests through the shadow's types, reporting the chunks that differ up to the landed watermark), `Check` under an explicit divergence policy (abort, or repair each differing chunk with the copier's statement and reread it), and the proof constructors (`VerifiedShadow`, `CleanWatermark`) minted only by a pass that found nothing and repaired nothing; the pass reports its chunks compared, rows hashed, mismatches, and repairs to the progress tracker as its `WorkSource`; continuous checker to follow | verifier, policy, repair, proofs, and progress counters exist; checker planned |
-| `pkg/decode` | Logical-decoding change capture, LSN accounting, slot lifecycle | Phase 6, 8 |
-| `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling | Phase 6 |
-| `pkg/schemachange` | Orchestrator: lifecycle, cutover swap + fidelity gate, resume read and slot-loss reconcile (exist), checkpoint-driven resume | Phase 7–8 |
-| `pkg/checkpoint` | Durable resume state: one row per `(schema, table)` in the target database; the orphan-slot reaper, since the row is what makes a slot owned | Phase 8 |
-| `pkg/throttler` | Chunk-time targeting; replica-lag throttling deferred (a live copy is paced by slot lag in `pkg/copier`'s `Pace`, which `pkg/schemachange` sets; the hard slot-lag ceiling is judged by `pkg/decode` and enforced by `pkg/applier`'s catch-up loop) | Phase 8 |
+| `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; a copy-and-swap route executes when the engine carries the operation (a column type rewrite) and reports unavailable otherwise | exists (Phase 2.4) |
+| `pkg/executor` | Native backend with stable outcome codes: the bounded optimistic attempt, the concurrent index build and its invalid-index recovery, the autocommit safer-sequence runner, the greenfield `CREATE TABLE` path, and the accepted-blocking passthrough primitive; a common `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) across backends is planned | native execution exists |
+| `pkg/progress` | Strategy-wide, pollable progress snapshots: native phase/elapsed time, sequence position, retry attempt, and server-reported concurrent-index work, and engine-measured work polled from the copier, the catch-up, and the checksum verifier (`WorkSource`) | native progress and the copy, catch-up, and checksum work sources exist |
+| `pkg/copier` | PK-range chunker over one integer-family primary key with dynamic time-based sizing (produces `Chunk` and `Watermark`; composite keys refused in v1), and the parallel chunked copy into the shadow table (never overwrites; reports the cut frontier, in-flight chunks, and landed watermark for the applier, fills the progress tracker's copy counters while it runs, and on a live run waits before a chunk while the stream's unconfirmed WAL is over the `Pace` mark `pkg/schemachange` sets from the slot-lag ceiling) — there is no separate chunker package | chunker, copy loop, and progress fillers exist |
+| `pkg/checksum` | The mandatory correctness gate: the chunk verifier (single-snapshot per-chunk digests through the shadow's types, reporting the chunks that differ up to the landed watermark), `Check` under an explicit divergence policy (abort, repair each differing chunk with the copier's statement and reread it, or recopy without the reread for the slot-loss reconcile), `CheckLive` for a source written while the catch-up applies the stream, and the proof constructors (`VerifiedShadow`, `CleanWatermark`) minted only by a pass that found nothing and repaired nothing; the pass reports its chunks compared, rows hashed, mismatches, and repairs to the progress tracker as its `WorkSource`; continuous checker to follow | verifier, policies, repair, live pass, proofs, and progress counters exist; checker planned |
+| `pkg/internal/chunksql` | The chunk insert statement the copier and the checksum repair both run, and the `search_path` it runs under; unexported from the module | exists |
+| `pkg/decode` | Logical-decoding change capture (pgoutput stream), LSN accounting, slot lifecycle (create, drop, inspect, lag ceiling) | exists |
+| `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling, and the catch-up loop that enforces the slot-lag ceiling each cycle | exists |
+| `pkg/schemachange` | Orchestrator: shadow build, `Runner` (copy, catch-up, verify, cutover, checkpoint-driven resume), cutover swap + fidelity gate, resume read and slot-loss reconcile | exists (preview, behind `--copy-and-swap`) |
+| `pkg/checkpoint` | Durable resume state: one row per `(schema, table)` in the target database; the orphan-slot reaper, since the row is what makes a slot owned | exists |
+| `pkg/refusal` | The routing classes every typed refusal cause answers in, so the core never imports the verdict renderer | exists |
+| `pkg/capabilities` | Embedded, validated support matrix and its Markdown rendering | exists |
 
 ## The copy-and-swap lifecycle
 
-In a later phase, when the in-house heavy path is available and the router picks it:
-
-```
- create shadow table  ─▶  start change capture   ─▶  bulk-copy existing rows
- with the new schema      (logical decoding,         in parallel chunks
-                           off the WAL)                     │
-                                                            ▼
-        cut over  ◀──  CHECKSUM GATE  ◀──  drain the captured-change backlog
-   (brief ACCESS           (must prove          onto the shadow
-    EXCLUSIVE swap,         shadow == source
-    bounded + retried)      before cutover)
-```
+When the router picks the in-house heavy path and the run opens it (`--copy-and-swap`, in
+preview), `pkg/schemachange`'s `Runner` drives the lifecycle drawn in
+[high-level-design.md](high-level-design.md#the-copy-and-swap-path-conceptually): the shadow
+build (`pkg/schemachange`), change capture (`pkg/decode`), the chunked copy (`pkg/copier`), the
+catch-up (`pkg/applier`), the checksum gate (`pkg/checksum`), and the cutover swap
+(`pkg/schemachange`), saving its progress through `pkg/checkpoint`.
 
 The interleaving rules that make the copier and applier converge — and the invariant IDs every
 component must uphold — are registered in [invariants.md](invariants.md); the trust boundary

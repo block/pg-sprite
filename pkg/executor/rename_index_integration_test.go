@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // The rename names an index, so the executor binds it to the preflighted
@@ -211,6 +212,98 @@ func TestExecuteIndexRenameResolvesAnUnqualifiedNameInTheProofsSchemaOnly(t *tes
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`SELECT conname FROM pg_constraint WHERE conrelid = $1::regclass AND contype = 'p'`, otherTable).Scan(&conname))
 	assert.Equal(t, oldName, conname, "the public table's constraint keeps its name")
+}
+
+// A caller that tracks progress runs a plain index rename as one
+// optimistic step: the index renames, and the tracker reports the exact
+// statement, the one attempt, and a finished phase.
+func TestExecuteIndexRenameWithProgressRenamesAPlainIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id    int PRIMARY KEY,
+			email text NOT NULL
+		);
+		CREATE INDEX users_email_idx ON %[1]s.users (email)`, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "users")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	sql := fmt.Sprintf("ALTER INDEX %s.users_email_idx RENAME TO users_contact_email_idx", schema)
+	require.NoError(t, executor.ExecuteIndexRenameWithProgress(t.Context(), pool, pt, mustParse(t, sql),
+		budget, executor.DefaultRetryPolicy(), tracker))
+
+	assert.Equal(t, []string{"users", "users_contact_email_idx", "users_pkey"}, relationNames(t, pool, schema))
+	requireOneStepSnapshot(t, tracker, progress.PhaseFinished, progress.OperationOptimistic, sql, 1)
+}
+
+// The progress-tracked rename runs the same check under the table's lock
+// as ExecuteIndexRename: an index that came to back a unique constraint
+// after planning would rename the constraint with it, so the rename fails
+// with the permanent renamed-index-drift code, renames nothing, and the
+// tracker records the failure against the statement.
+func TestExecuteIndexRenameWithProgressRefusesAnIndexThatNowBacksAConstraint(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id    int PRIMARY KEY,
+			email text NOT NULL
+		);
+		CREATE UNIQUE INDEX users_email_idx ON %[1]s.users (email)`, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "users")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	// After planning, another session attaches a unique constraint to the
+	// index; the constraint takes the index's name.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"ALTER TABLE %s.users ADD CONSTRAINT users_email_idx UNIQUE USING INDEX users_email_idx", schema))
+	require.NoError(t, err)
+
+	sql := fmt.Sprintf("ALTER INDEX %s.users_email_idx RENAME TO users_contact_email_idx", schema)
+	err = executor.ExecuteIndexRenameWithProgress(t.Context(), pool, pt, mustParse(t, sql),
+		budget, executor.DefaultRetryPolicy(), tracker)
+	require.ErrorIs(t, err, executor.ErrRenamedIndexDrift)
+	assert.Equal(t, executor.CodeRenamedIndexDrift, executor.OutcomeCode(err))
+	assert.Equal(t, []string{"users", "users_email_idx", "users_pkey"}, relationNames(t, pool, schema),
+		"the refused rename renamed nothing")
+	requireOneStepSnapshot(t, tracker, progress.PhaseFailed, progress.OperationOptimistic, sql, 1)
+}
+
+// The progress-tracked rename runs only ALTER INDEX ... RENAME TO: any
+// other statement is refused as an invariant violation before any attempt
+// runs, so the index is not built and the tracker observed no attempt.
+func TestExecuteIndexRenameWithProgressRefusesAStatementThatIsNotAnIndexRename(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id    int PRIMARY KEY,
+			email text NOT NULL
+		)`, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "users")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	sql := fmt.Sprintf("CREATE INDEX users_email_idx ON %s.users (email)", schema)
+	err = executor.ExecuteIndexRenameWithProgress(t.Context(), pool, pt, mustParse(t, sql),
+		budget, executor.DefaultRetryPolicy(), tracker)
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.Equal(t, []string{"users", "users_pkey"}, relationNames(t, pool, schema), "nothing ran")
+	requireOneStepSnapshot(t, tracker, progress.PhaseFailed, progress.OperationOptimistic, sql, 0)
+}
+
+// relationNames lists every relation in schema by name, in name order.
+func relationNames(t *testing.T, pool *pgxpool.Pool, schema string) []string {
+	t.Helper()
+	rows, err := pool.Query(t.Context(),
+		`SELECT relname FROM pg_class WHERE relnamespace = $1::regnamespace ORDER BY relname`, schema)
+	require.NoError(t, err)
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	return names
 }
 
 // waitForRenameLockWait waits until a session running an ALTER INDEX whose

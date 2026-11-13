@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // fixedStatus is a catch-up whose last cycle left the status it holds.
@@ -58,14 +59,19 @@ func TestCopyPaceMarkIsAQuarterOfTheSlotLagCeiling(t *testing.T) {
 // the backlog is the lag of whichever catch-up the run then follows, the
 // mark is the run's share of its ceiling, and the wait uses the run's poll
 // and its injected sleep. The options pass the copier's own validation,
-// and the run's other copier settings are carried unchanged.
+// the run's other copier settings are carried unchanged, and the run's
+// tracker is the copy's tracker, as it is for a quiesced copy.
 func TestPacedCopierPacesByTheRunsOwnLag(t *testing.T) {
 	stopped := errors.New("slept")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
 	r, err := NewRunner(dbconn.Config{}, &checkpoint.Store{}, RunOptions{
 		Copier:  copier.Options{Workers: 3},
 		Catchup: applier.CatchupOptions{SlotLagCeiling: 200},
 		Live:    checksum.LiveOptions{Poll: 7 * time.Millisecond},
 		Sleep:   func(context.Context, time.Duration) error { return stopped },
+		Tracker: tracker,
+		Step:    1,
 	})
 	require.NoError(t, err)
 
@@ -74,6 +80,7 @@ func TestPacedCopierPacesByTheRunsOwnLag(t *testing.T) {
 	require.NoError(t, opts.Validate())
 
 	assert.Equal(t, 3, opts.Workers)
+	assert.Same(t, tracker, opts.Tracker, "the run's tracker reports the paced copy")
 	assert.Equal(t, uint64(50), opts.Pace.HighWater)
 	assert.Equal(t, 7*time.Millisecond, opts.Pace.Poll)
 	assert.ErrorIs(t, opts.Pace.Sleep(t.Context(), time.Second), stopped, "the wait is the run's injected sleep")
