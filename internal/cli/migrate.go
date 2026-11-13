@@ -98,12 +98,13 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 		Logger: logger,
 		Audit:  c.audit(),
 		CopySwap: migrate.CopySwapOptions{
-			Enabled:       c.CopyAndSwap,
-			Connection:    c.Config(),
-			FreeDiskBytes: int64(c.FreeDisk),
-			KeepOld:       c.KeepOld,
-			BlockWrites:   c.BlockWrites,
-			Restart:       c.Restart,
+			Enabled:             c.CopyAndSwap,
+			Connection:          c.Config(),
+			FreeDiskBytes:       int64(c.FreeDisk),
+			SlotLagCeilingBytes: int64(c.SlotLagCeiling),
+			KeepOld:             c.KeepOld,
+			BlockWrites:         c.BlockWrites,
+			Restart:             c.Restart,
 		},
 	}
 }

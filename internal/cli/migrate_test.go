@@ -185,7 +185,7 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "migrate --alter --copy-and-swap --restart")
 	})
 
-	for _, flag := range []string{"--copy-and-swap", "--free-disk=1GiB", "--keep-old", "--block-writes=public.t"} {
+	for _, flag := range []string{"--copy-and-swap", "--free-disk=1GiB", "--slot-lag-ceiling=2GiB", "--keep-old", "--block-writes=public.t"} {
 		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
 			c := New("test")
 			k, err := kong.New(c, kong.Vars{"version": "test"})

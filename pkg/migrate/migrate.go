@@ -195,6 +195,9 @@ func (o Options) validate() error {
 	if o.CopySwap.Restart != "" && (o.Force != "" || o.AcceptBlocking != "") {
 		return errors.New("migrate: Options.CopySwap.Restart acknowledges a copy-and-swap run starting over, which Options.Force and Options.AcceptBlocking both route away from; name one acknowledgement")
 	}
+	if o.CopySwap.SlotLagCeilingBytes < 0 {
+		return fmt.Errorf("migrate: Options.CopySwap.SlotLagCeilingBytes must not be negative, got %d; zero takes the one GiB default", o.CopySwap.SlotLagCeilingBytes)
+	}
 	if o.Progress != nil && o.CopySwap.Copier.Tracker != nil {
 		return errors.New("migrate: Options.Progress reports the copy along with every other step; leave Options.CopySwap.Copier.Tracker nil")
 	}

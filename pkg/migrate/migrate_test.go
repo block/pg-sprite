@@ -108,6 +108,20 @@ func TestRunRejectsUnrunnableOptions(t *testing.T) {
 	assert.Equal(t, verdict.Verdict{}, v, "an error before a verdict carries a zero verdict")
 }
 
+// A negative slot-lag ceiling is a wiring error refused before any database
+// work, rather than once a live run has built its shadow and slot and the
+// catch-up refuses it.
+func TestRunRejectsANegativeSlotLagCeiling(t *testing.T) {
+	st, err := statement.ParseOne("ALTER TABLE billing.invoices ALTER COLUMN id TYPE bigint")
+	require.NoError(t, err)
+	opts := DefaultOptions()
+	opts.CopySwap.SlotLagCeilingBytes = -1
+	v, err := Run(t.Context(), nil, st, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SlotLagCeilingBytes")
+	assert.Equal(t, verdict.Verdict{}, v)
+}
+
 func TestDefaultOptionsIsRunnable(t *testing.T) {
 	opts := DefaultOptions()
 	assert.NoError(t, opts.validate())
