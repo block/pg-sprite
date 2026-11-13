@@ -224,7 +224,10 @@ and `NewSchema` gives each test a throwaway schema so parallel tests never
 collide — which also means every integration test runs against a
 **non-`public` schema**, an axis some peer tools (pgroll) treat as a separate
 matrix dimension. `StartPostgresTLS` starts a TLS-only server with a
-generated CA for verify-full tests. The harness has its own tests proving
+generated CA for verify-full tests. `StartPrimaryWithStandby` starts a
+primary and a hot standby streaming from it, and returns once the standby
+is in recovery and has replayed the primary's position, for tests of what
+the engine reads on a server in recovery. The harness has its own tests proving
 the version selected by `PG_VERSION` is the version actually running, and
 that throwaway schemas are isolated.
 
