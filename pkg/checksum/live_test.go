@@ -80,12 +80,28 @@ func TestUnresolvedErrorWording(t *testing.T) {
 	require.ErrorIs(t, lagging, ErrVerificationUnresolved)
 	assert.EqualError(t, lagging, "chunk [1001, 2000] read at 0/1000000 is unsettled: the catch-up has confirmed only 0/800000 after 1 reread; run the pass again once the catch-up has confirmed past the read")
 
-	hot := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 3, Keys: 2, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 998}, Captured: 0x1000000}
+	hot := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 3, Keys: 2, HotKeys: []int64{1500, 1700}, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 998}, Captured: 0x1000000}
 	require.ErrorIs(t, hot, ErrVerificationUnresolved)
-	assert.EqualError(t, hot, "chunk [1001, 2000] kept changing through 3 rereads: 2 keys still changing, source 1000 rows, shadow 998 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
+	assert.EqualError(t, hot, "chunk [1001, 2000] kept changing through 3 rereads: 2 keys still changing (keys 1500, 1700), source 1000 rows, shadow 998 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
 
-	one := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 1, Keys: 1, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 1000}, Captured: 0x1000000}
-	assert.EqualError(t, one, "chunk [1001, 2000] kept changing through 1 reread: 1 key still changing, source 1000 rows, shadow 1000 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
+	one := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 1, Keys: 1, HotKeys: []int64{1500}, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 1000}, Captured: 0x1000000}
+	assert.EqualError(t, one, "chunk [1001, 2000] kept changing through 1 reread: 1 key still changing (key 1500), source 1000 rows, shadow 1000 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
+
+	// A chunk with more keys hot than the error carries names only the
+	// lowest few, so the message stays short however much of it churns.
+	churn := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 3, Keys: 400, HotKeys: []int64{1001, 1002, 1003, 1004}, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 1000}, Captured: 0x1000000}
+	assert.EqualError(t, churn, "chunk [1001, 2000] kept changing through 3 rereads: 400 keys still changing (lowest keys 1001, 1002, 1003), source 1000 rows, shadow 1000 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
+}
+
+// The error carries the lowest few still-changing keys, in a slice of its
+// own, so it neither grows with the chunk nor aliases the pass's keys.
+func TestFirstHotKeysIsBoundedAndOwned(t *testing.T) {
+	hot := []int64{5, 9, 12, 40, 41}
+	first := firstHotKeys(hot)
+	assert.Equal(t, []int64{5, 9, 12}, first)
+	hot[0] = 6
+	assert.Equal(t, int64(5), first[0], "the error's keys are its own copy")
+	assert.Equal(t, []int64{7}, firstHotKeys([]int64{7}))
 }
 
 // The wall-clock sleep returns early, with the context's error, when the

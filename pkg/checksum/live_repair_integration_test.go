@@ -47,6 +47,16 @@ func TestCheckLiveRefusesARepairThatDoesNotTake(t *testing.T) {
 	assert.Equal(t, chunk(t, 1001, 2000), failed.After.Chunk)
 	require.Len(t, outcome.Repairs, 1, "the recopy committed before the reread found the chunk wrong again")
 	assertNoProofs(t, outcome)
+
+	// Chunk [1001, 2000] holds 1000 rows on each side, so every row-by-row
+	// read of it returns 2000 rows. It was read four times: by the sweep
+	// that found it differing, by the reread that confirmed key 1400
+	// divergent, by the reread after the recopy that found key 1500 wrong,
+	// and by the reread that confirmed key 1500 divergent — 4 × 2000.
+	work, err := v.Work(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3), work.ChunksReread)
+	assert.Equal(t, uint64(8000), work.SettleRowsRead, "the sweep's read and three rereads of a 1000-row chunk, both sides")
 }
 
 // A live repair takes SHARE MODE on the shadow before it deletes anything,

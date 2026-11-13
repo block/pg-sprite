@@ -67,6 +67,7 @@ func (v *Verifier) settle(ctx context.Context, pool *pgxpool.Pool, stmts stateme
 			return settlement{}, err
 		}
 		v.countReread()
+		v.countSettleRows(now)
 		rereads++
 		if pending == nil {
 			pending = unionKeys(prior.source, prior.shadow, now.source, now.shadow)
@@ -81,7 +82,7 @@ func (v *Verifier) settle(ctx context.Context, pool *pgxpool.Pool, stmts stateme
 		if rereads >= live.Attempts {
 			source, shadow := now.digests()
 			return settlement{}, &UnresolvedError{
-				Chunk: now.chunk, Cause: CauseHot, Rereads: rereads, Keys: len(hot),
+				Chunk: now.chunk, Cause: CauseHot, Rereads: rereads, Keys: len(hot), HotKeys: firstHotKeys(hot),
 				Source: source, Shadow: shadow,
 				Captured: now.lsn, Confirmed: live.Confirmed.Confirmed(),
 			}

@@ -581,7 +581,7 @@ each asks for a different action. Whether the pass wrote the shadow is part of t
 | Outcome | What it means | Orchestrator action | Shadow written? |
 | --- | --- | --- | --- |
 | `Outcome` with `VerifiedShadow` minted (`Live()` true) | Every chunk was equal or settled against the catch-up's confirmed position; the shadow equals the source as of those positions and every change since is in the stream | Hand the proof to `GateCutover`; `Cutover` requires a `DrainFunc` that applies the stream through the final position under the swap lock, and refuses the proof without one (`cutover-undrained`) | No |
-| `*UnresolvedError`, no repairs | A chunk could not be settled: the catch-up did not confirm past the read within the wait (`lagging`), or some key of the chunk changed between every two rereads (`hot`, with `Keys` the number still changing at the last one). Not a finding about the data | Run the pass again — after the catch-up has confirmed further, or when the source is quieter; `Outcome.Report.Unsettled` counts the chunks that did not settle | No |
+| `*UnresolvedError`, no repairs | A chunk could not be settled: the catch-up did not confirm past the read within the wait (`lagging`), or some key of the chunk changed between every two rereads (`hot`, with `Keys` the number still changing at the last one and `HotKeys` the lowest few of them, so one row written over and over reads apart from churn across the chunk). Not a finding about the data | Run the pass again — after the catch-up has confirmed further, or when the source is quieter; `Outcome.Report.Unsettled` counts the chunks that did not settle | No |
 | `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect in the copy/apply ordering [CO-4](invariants.md#co-4--the-copyapply-ordering-invariants) enforces, not a retry: a second pass reads the same shadow and stops the same way, so start the run over (the `*checksum.DivergenceError` row above) | No |
 | `*UnresolvedError` with `Outcome.Repairs` listed (policy `repair`) | Every confirmed divergence was recopied and read back clean, but another chunk did not settle | The repairs are committed; run the pass again as above. No proof was minted (CO-2) | Yes — the listed repairs |
 | `*RepairError` (policy `repair`) | A repaired chunk was a confirmed divergence again after its recopy | Stop and report; the recopy committed and is listed in `Outcome.Repairs`, and something other than the stream is writing the shadow | Yes — the listed repairs |
@@ -589,8 +589,9 @@ each asks for a different action. Whether the pass wrote the shadow is part of t
 A pass that returns a context error, `ErrTableLockLost`, or `ErrPassRunning` decided nothing
 about the data and wrote nothing beyond any repairs it lists. Progress during a pass is the
 tracker's: `chunks_mismatched` counts the chunks the sweep found differing, which under the
-stream are chunks being re-checked rather than confirmed divergences, and `chunks_reread`
-every settling reread; the pass's final figures are the `Report` it returns.
+stream are chunks being re-checked rather than confirmed divergences, `chunks_reread`
+every settling reread, and `settle_rows_read` the rows the settling read, the sweep's row-by-row
+read of each differing chunk included; the pass's final figures are the `Report` it returns.
 
 ## Invalid-index outcomes of a concurrent index build
 
