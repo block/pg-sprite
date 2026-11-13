@@ -312,6 +312,7 @@ func TestCopySwapRunOptionsCarryTheHostsPolicy(t *testing.T) {
 		assert.True(t, got.ReplaceDone)
 		assert.Equal(t, 3, got.Copier.Workers)
 		assert.Equal(t, 2*time.Second, got.CheckpointInterval)
+		assert.Same(t, logger, got.Catchup.Logger, "the catch-up's requeue warnings reach the call's diagnostics")
 	})
 
 	t.Run("a run without a hook saves without complaint", func(t *testing.T) {

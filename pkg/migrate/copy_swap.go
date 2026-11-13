@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/applier"
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/copier"
@@ -172,10 +173,12 @@ type CopySwapOptions struct {
 // runOptions is the Runner's policy for the route: the operator's two
 // choices, the host's sizing and progress hook, and the one setting the
 // route fixes — a done row from an earlier run is replaced, since a second
-// change on the table is the next statement, not a rollback window.
+// change on the table is the next statement, not a rollback window. The
+// catch-up's requeue warnings go to the call's diagnostics logger.
 func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions {
 	return schemachange.RunOptions{
 		Copier:             o.Copier,
+		Catchup:            applier.CatchupOptions{Logger: logger},
 		KeepOld:            o.KeepOld,
 		ReplaceDone:        true,
 		Restart:            o.Restart != "",

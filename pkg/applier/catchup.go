@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -89,6 +90,13 @@ type CatchupOptions struct {
 	// count. Each attempt waits up to the server's deadlock_timeout to be
 	// chosen as the victim.
 	DeadlockAttempts int
+	// Logger receives a warning each time a cycle requeues its batch — a
+	// constraint refused it (Status.BatchesDeferred) or the server rolled
+	// its flush back as a deadlock victim (Status.BatchesDeadlocked) — so
+	// a caller that does not poll Status sees the condition while it
+	// lasts; nil discards them. The records carry the target and counts,
+	// never row data.
+	Logger *slog.Logger
 }
 
 func (o CatchupOptions) withDefaults() CatchupOptions {
@@ -106,6 +114,9 @@ func (o CatchupOptions) withDefaults() CatchupOptions {
 	}
 	if o.DeadlockAttempts == 0 {
 		o.DeadlockAttempts = DefaultDeadlockAttempts
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	return o
 }
@@ -421,7 +432,7 @@ func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return err
 	}
-	c.record(outcome, walEnd)
+	c.logRequeue(outcome, c.record(outcome, walEnd))
 	return c.checkSlot(ctx, pool)
 }
 
@@ -638,8 +649,8 @@ func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) (decode
 // its flush back as a deadlock victim; a committed flush's images and
 // deletes count as applied. A paused cycle drained nothing, so the last
 // drain's count of deferred entries stands and only the buffer and the
-// positions move.
-func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
+// positions move. It returns the status as recorded.
+func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch {
@@ -665,6 +676,7 @@ func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 	c.status.Delivered = c.stream.Delivered()
 	c.status.Confirmed = c.stream.Confirmed()
 	c.status.WALEnd = walEnd
+	return c.status
 }
 
 // recordRequeued folds a drained batch that went back into the buffer

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"testing"
@@ -133,6 +134,13 @@ type catchupSetup struct {
 	// copierClock, when set, is the copier's clock, which it reads as each
 	// chunk attempt starts and as each one commits.
 	copierClock progress.Clock
+}
+
+// testLogger writes the catch-up's records to the test's output, for a
+// reader of a failed run; no test reads them.
+func testLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	return slog.New(slog.NewTextHandler(t.Output(), nil))
 }
 
 func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *catchupRun {
