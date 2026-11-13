@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
@@ -228,6 +229,29 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.NotContains(t, v.Detail, "resumes from the row")
 	})
 
+	// A slot that retained more WAL than the ceiling with no transaction
+	// holding it back stops a resume under the same ceiling again, so the
+	// remedy names the setting to raise on both front doors. A stream that
+	// fell behind catches up on a plain resume once the write rate allows,
+	// and its remedy names no ceiling.
+	t.Run("a slot over the ceiling on retained WAL names the ceiling to raise", func(t *testing.T) {
+		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetained,
+			Retained: 2 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.Contains(t, v.Detail, "CopySwapOptions.SlotLagCeilingBytes, --slot-lag-ceiling SIZE on the CLI")
+	})
+
+	t.Run("a stream behind the ceiling resumes without naming the ceiling", func(t *testing.T) {
+		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagStreamBehind,
+			Retained: 2 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
+		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.NotContains(t, v.Detail, "--slot-lag-ceiling")
+	})
+
 	t.Run("a cancelled run is coded as cancelled by the caller", func(t *testing.T) {
 		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("copy: %w", context.Canceled))
 		assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)
@@ -304,14 +328,21 @@ func TestCopySwapRunOptionsCarryTheHostsPolicy(t *testing.T) {
 
 	t.Run("passes sizing and choices through", func(t *testing.T) {
 		got := CopySwapOptions{
-			KeepOld:            true,
-			Copier:             copier.Options{Workers: 3},
-			CheckpointInterval: 2 * time.Second,
+			KeepOld:             true,
+			Copier:              copier.Options{Workers: 3},
+			CheckpointInterval:  2 * time.Second,
+			SlotLagCeilingBytes: 3 << 30,
 		}.runOptions(logger)
 		assert.True(t, got.KeepOld)
 		assert.True(t, got.ReplaceDone)
 		assert.Equal(t, 3, got.Copier.Workers)
 		assert.Equal(t, 2*time.Second, got.CheckpointInterval)
+		assert.Equal(t, int64(3<<30), got.Catchup.SlotLagCeiling, "the ceiling reaches the catch-up that enforces it")
+	})
+
+	t.Run("an unset ceiling leaves the catch-up its default", func(t *testing.T) {
+		got := CopySwapOptions{}.runOptions(logger)
+		assert.Zero(t, got.Catchup.SlotLagCeiling, "zero is the catch-up's decode.DefaultSlotLagCeiling")
 	})
 
 	t.Run("a run without a hook saves without complaint", func(t *testing.T) {

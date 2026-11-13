@@ -16,6 +16,7 @@ choose, what each needs, and how to stop, resume, and start over. The design is 
 - [Live or offline](#live-or-offline)
 - [What each run needs](#what-each-run-needs)
 - [Free disk space](#free-disk-space)
+- [Slot lag ceiling](#slot-lag-ceiling)
 - [Run it](#run-it)
 - [Stop, resume, and start over](#stop-resume-and-start-over)
 
@@ -41,8 +42,8 @@ $ pg-sprite migrate --free-disk 1GiB --json \
 }
 ```
 
-The other route flags — `--free-disk`, `--block-writes`, `--keep-old`, `--restart` — open
-nothing on their own; they govern a run that `--copy-and-swap` has opened. The flag does not
+The other route flags — `--free-disk`, `--slot-lag-ceiling`, `--block-writes`, `--keep-old`,
+`--restart` — open nothing on their own; they govern a run that `--copy-and-swap` has opened. The flag does not
 combine with `--dry-run`, which never runs anything and so needs no opening. With
 `--desired`, a derived plan that routes any statement to copy-and-swap is refused whole,
 native statements included, unless the flag is set. `--force` keeps its meaning: it runs the
@@ -126,6 +127,41 @@ free space on its own volume over SQL, so you pass it with `--free-disk` (binary
 Never pass a made-up large value: the check is the only thing between the copy and a full
 volume. We would like to remove this flag by reading the free space where the platform exposes
 it. Until then it stays required.
+
+## Slot lag ceiling
+
+A live run's replication slot keeps WAL on the server until pg-sprite has applied the changes
+in it. To keep that WAL from filling the volume, the run stops when the slot holds more than
+the slot lag ceiling: 1 GiB unless you pass `--slot-lag-ceiling SIZE`
+(`CopySwapOptions.SlotLagCeilingBytes` as a library caller). An offline run holds no slot and
+does not read it.
+
+`SIZE` is a positive whole number of bytes, optionally followed by a binary unit: `B`, `KiB`,
+`MiB`, `GiB`, or `TiB`, case-insensitive; `KB`, `MB`, `GB`, and `TB` mean the same binary
+multiples. `2GiB` and `2147483648` are the same ceiling. Zero, negative values, fractions such
+as `1.5GiB`, and other units are refused as a usage error (exit 1) before anything runs. There
+is no minimum beyond one byte, as in the library; a ceiling well below the default stops a
+busy run sooner, not more safely.
+
+The run stops with a failed verdict (exit 1) whose detail says which of two measures crossed
+the ceiling; the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
+slot and the saved progress stay, so running the same command again resumes the run:
+
+- **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
+  pg-sprite fell behind the source's writes. Resume once the write rate drops; the resume
+  drains the backlog from the slot.
+- **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
+  for longer than it takes to release WAL pg-sprite has confirmed. Look for a transaction holding
+  it back first: an open write transaction (`pg_stat_activity` where `backend_xid IS NOT
+  NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`). End it, then
+  resume. If there is none, the source writes more WAL per release interval than the ceiling
+  allows: resume with a higher ceiling, above the retained WAL the detail reports, and with
+  room on the volume for that much WAL:
+
+```sh
+pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
+  --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
+```
 
 ## Run it
 
