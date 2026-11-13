@@ -124,9 +124,10 @@ type RunOptions struct {
 // options, since every phase uses them, and the copier's, since a value
 // the copier refuses would otherwise stop the run only once the shadow is
 // built and the source fenced or its slot made (ST-6). A copier refusal
-// wraps both ErrInvalidOptions and the copier's own sentinel. The
-// verifier's options are validated where they are consumed, by its
-// constructor.
+// wraps both ErrInvalidOptions and the copier's own sentinel. A copier
+// pace is refused as well: a live run sets its own, from its catch-up's
+// lag, and a quiesced run has no stream to fall behind. The verifier's
+// options are validated where they are consumed, by its constructor.
 func (o RunOptions) validate() error {
 	if err := o.Shadow.validate(); err != nil {
 		return err
@@ -136,6 +137,9 @@ func (o RunOptions) validate() error {
 	}
 	if err := o.Copier.Validate(); err != nil {
 		return fmt.Errorf("%w: copier: %w", ErrInvalidOptions, err)
+	}
+	if o.Copier.Pace.Backlog != nil {
+		return fmt.Errorf("%w: a live run paces its copy by its own catch-up's lag and a quiesced run has none; leave Copier.Pace zero", ErrInvalidOptions)
 	}
 	if o.CheckpointInterval < 0 {
 		return fmt.Errorf("%w: checkpoint interval %s is negative; use zero for the default", ErrInvalidOptions, o.CheckpointInterval)
@@ -252,6 +256,11 @@ type Result struct {
 	// Outcome when nothing had landed to recopy.
 	Reconciled     bool
 	Reconciliation checksum.Outcome
+	// CopyPaced is how far a live run's copy was held back by the WAL its
+	// stream had yet to confirm: the zero Paced for a quiesced run, for a
+	// run that resumed past the copy, and for a copy the stream kept up
+	// with. It counts this run's copy alone, not a stopped run's before it.
+	CopyPaced copier.Paced
 }
 
 // NewRunner prepares runs over the database cfg names, writing the
@@ -414,6 +423,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 	}
 	result.Reconciled = state.reconciled
 	result.Reconciliation = state.reconciliation
+	result.CopyPaced = state.copyPaced
 	if target.DecodesWAL() {
 		// The swap has committed, so the slot has carried its last change;
 		// a run resumed on a swapped row drops the slot it left too.

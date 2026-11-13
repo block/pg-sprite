@@ -59,6 +59,7 @@ func (r *Runner) swapLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	if err != nil {
 		return checksum.Report{}, err
 	}
+	fill.lag.follow(cap.catchup)
 	ready, report, fillErr := r.fillLive(liveCtx, pool, lock, target, state, fill, cap)
 	endErr := cap.end(ctx, pool, r.opts.sleep())
 	if err := captureOutcome(ctx, cap, fillErr, endErr); err != nil {
@@ -83,10 +84,13 @@ func (r *Runner) swapLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 
 // liveFill is what a live run fills the shadow with while its capture
 // runs: the copier, when the row is still copying, and in either case the
-// position source the catch-up reads for the keys it may write (CO-4).
+// position source the catch-up reads for the keys it may write (CO-4) and
+// the lag the copier is paced by, which reads the capture once the capture
+// has started.
 type liveFill struct {
 	copier    *copier.Copier
 	positions applier.PositionSource
+	lag       *streamLag
 }
 
 // newLiveFill makes the fill for the row's phase. A row past the copy
@@ -94,18 +98,19 @@ type liveFill struct {
 // may write any of them; a row still copying carries the watermark the
 // copier resumes from, and the copier's own position is what landed.
 func (r *Runner) newLiveFill(target preflight.CopySwapTarget, lock *dbconn.TableLockSession, state *runState) (liveFill, error) {
+	lag := &streamLag{}
 	if state.cp.Phase == checkpoint.PhaseCopying {
-		c, err := copier.NewCopier(target, state.built, lock, state.cp.Watermark, r.copierOptions())
+		c, err := copier.NewCopier(target, state.built, lock, state.cp.Watermark, r.pacedCopier(lag))
 		if err != nil {
 			return liveFill{}, copyRefusal(err, state.cp.Schema, state.cp.Table)
 		}
-		return liveFill{copier: c, positions: c}, nil
+		return liveFill{copier: c, positions: c, lag: lag}, nil
 	}
 	if !state.cp.Watermark.Complete() {
 		// INV: CO-4
 		return liveFill{}, fmt.Errorf("%w (CO-4): checkpoint row for %s.%s is in phase %s with a watermark short of the key space", ErrInvariantViolation, state.cp.Schema, state.cp.Table, state.cp.Phase)
 	}
-	return liveFill{positions: landedPosition{watermark: state.cp.Watermark}}, nil
+	return liveFill{positions: landedPosition{watermark: state.cp.Watermark}, lag: lag}, nil
 }
 
 // landedPosition is the position source of a run whose copy has landed
