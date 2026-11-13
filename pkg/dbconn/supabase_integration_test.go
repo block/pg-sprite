@@ -26,8 +26,8 @@ func TestSupavisorSessionBoundary(t *testing.T) {
 		pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: sessionURL, LockTimeout: 1500 * time.Millisecond, StatementTimeout: 7 * time.Second})
 		require.NoError(t, err)
 		t.Cleanup(pool.Close)
-		assert.Equal(t, int64(1500), sessionSetting(t, pool, "lock_timeout"))
-		assert.Equal(t, int64(7000), sessionSetting(t, pool, "statement_timeout"))
+		assert.Equal(t, "1500ms", sessionSetting(t, pool, "lock_timeout"))
+		assert.Equal(t, "7s", sessionSetting(t, pool, "statement_timeout"))
 	})
 	t.Run("transaction cannot supply a stable session", func(t *testing.T) {
 		// Supavisor transaction mode does not support named prepared statements.

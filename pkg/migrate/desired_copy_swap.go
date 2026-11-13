@@ -63,8 +63,7 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 		return stopped("the route's connection is not configured", ErrCopySwapConnectionRequired)
 	}
 	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
-		var mismatch *CopySwapConnectionMismatchError
-		if errors.As(err, &mismatch) {
+		if _, ok := errors.AsType[*CopySwapConnectionMismatchError](err); ok {
 			return stopped("the route's connection reaches another database than the pool", err)
 		}
 		return stopped("the route's connection could not be checked against the pool", err)

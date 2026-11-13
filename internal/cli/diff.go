@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,8 +35,8 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
-		if err := refuseExtensionSchemasWithRowSecurity(c.ExtensionSchema); err != nil {
-			return err
+		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
+			return fmt.Errorf("--extension-schema: %w", err)
 		}
 		return c.runRowSecurityDiff(ctx, out, rowSecurity, migrate.DefaultOptions().Budget.Brief)
 	}
@@ -66,17 +65,6 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"disposition", string(report.Disposition))
 
 	return c.writeDiffReport(out, report)
-}
-
-// refuseExtensionSchemasWithRowSecurity refuses --extension-schema for a
-// file that declares row security: that path does not resolve names
-// against extension schemas, and ignoring the flag would plan the file as
-// if it had not been passed.
-func refuseExtensionSchemasWithRowSecurity(schemas []string) error {
-	if len(schemas) == 0 {
-		return nil
-	}
-	return errors.New("--extension-schema is not supported for a file that declares row security; qualify extension names in the file instead, such as extensions.citext")
 }
 
 func (c *DiffCmd) writeDiffReport(out io.Writer, report plan.Report) error {

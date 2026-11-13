@@ -12,16 +12,18 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // copy runs a quiesced run's copier from the row's watermark to the end
 // of the key space and leaves the row in PhaseVerifying with the complete
 // watermark (TM-3).
 func (r *Runner) copy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, state *runState) error {
-	c, err := copier.NewCopier(target, state.built, lock, state.cp.Watermark, r.opts.Copier)
+	c, err := copier.NewCopier(target, state.built, lock, state.cp.Watermark, r.copierOptions())
 	if err != nil {
 		return copyRefusal(err, state.cp.Schema, state.cp.Table)
 	}
+	r.startPhase(progress.OperationCopy)
 	return r.runCopy(ctx, pool, lock, c, state, nil, checkpoint.PhaseVerifying)
 }
 

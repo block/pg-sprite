@@ -53,8 +53,11 @@ type RowSecurityRequest struct {
 // before it plans, it is refused, so it is never created without its row
 // security.
 //
-// The result-and-error contract is RunDesired's.
-func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowSecurityRequest, opts Options) (DesiredResult, error) {
+// The result-and-error contract is RunDesired's, and so is the progress
+// Options.Progress receives; the tracker finishes once the row security
+// has been compared again.
+func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowSecurityRequest, opts Options) (result DesiredResult, err error) {
+	defer func() { opts.finishProgress(result.Outcome, err) }()
 	// INV: RF-12 — desired-state execution takes no acknowledgement.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
@@ -76,7 +79,7 @@ func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowS
 			Detail:  "already converged: the live table and its row security match the desired file; nothing to run",
 		}, nil
 	}
-	result, err := runDesired(ctx, pool, DesiredRequest{
+	result, err = runDesired(ctx, pool, DesiredRequest{
 		Schema: req.Schema, Desired: req.Desired.TableDefinition(), ExpectedFingerprint: req.ExpectedFingerprint,
 	}, opts, refuseDroppedTable)
 	if err != nil || result.Outcome != verdict.OutcomeExecuted {
@@ -142,8 +145,7 @@ func rowSecurityPlanRefusal(err error) (DesiredResult, bool) {
 // the live row security still matches the file.
 func verifyRowSecurityConverged(ctx context.Context, pool *pgxpool.Pool, req RowSecurityRequest) (Convergence, error) {
 	again, err := diffplan.PlanWithRowSecurity(ctx, pool, req.Schema, req.Desired)
-	var review *diffplan.RowSecurityReviewRequired
-	if errors.As(err, &review) {
+	if _, ok := errors.AsType[*diffplan.RowSecurityReviewRequired](err); ok {
 		return Convergence{Status: ConvergenceUnverifiable},
 			fmt.Errorf("%w: the row security on %s.%s no longer matches the file: %w", ErrNotConverged, req.Schema, req.Desired.Table(), err)
 	}

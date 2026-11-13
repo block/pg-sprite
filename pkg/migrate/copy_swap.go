@@ -113,21 +113,24 @@ type CopySwapOptions struct {
 	// negative CheckpointInterval. The workers set the pool size the route
 	// admits: CopySwapMinConns(Copier).
 	//
-	// Copier.Tracker is the one source of rows copied; OnCheckpoint
-	// carries a key position, not a count. The host builds the tracker and
-	// calls its Start before Run, since Start and StartStep drop the
-	// tracker's work source and so, called while the copy runs, stop the
-	// counters. The copier is the work source from the copy's first chunk
-	// until just before the copy returns: the tracker reports no work
-	// before the copy, after it, or through the verification pass and a
-	// live run's catch-up, whose phases reach the host through
-	// OnCheckpoint alone; the verdict's detail reports the rows the
-	// verification pass covered. Rows copied counts this run's rows only,
-	// and rows total is the source's catalog estimate, zero for a table
-	// never analyzed, so a host treats a zero total as unknown and a ratio
-	// over one as possible. A tracker serves one run: two runs handed one
-	// tracker each make it their source, and the first to finish drops the
-	// source the other still reports to.
+	// Options.Progress is the way to observe the whole run: it reports the
+	// copy, a live run's catch-up, and the verification pass, each as the
+	// statement's step with its own counters, and Copier.Tracker must then
+	// be left nil. Without it, Copier.Tracker is the one source of rows
+	// copied; OnCheckpoint carries a key position, not a count. The host
+	// builds the tracker and calls its Start before Run, since Start and
+	// StartStep drop the tracker's work source and so, called while the
+	// copy runs, stop the counters. The copier is the work source from the
+	// copy's first chunk until just before the copy returns: the tracker
+	// reports no work before the copy, after it, or through the
+	// verification pass and a live run's catch-up, whose phases reach the
+	// host through OnCheckpoint alone; the verdict's detail reports the
+	// rows the verification pass covered. Rows copied counts this run's
+	// rows only, and rows total is the source's catalog estimate, zero for
+	// a table never analyzed, so a host treats a zero total as unknown and
+	// a ratio over one as possible. A tracker serves one run: two runs
+	// handed one tracker each make it their source, and the first to
+	// finish drops the source the other still reports to.
 	Copier copier.Options
 
 	// CheckpointInterval is how often a copy in progress saves its landed
@@ -216,7 +219,7 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 // code and an error wrapping executor.ErrPoolTooSmall, also before the
 // preflight, so nothing is created.
 func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
-	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
+	opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
 	if !opts.CopySwap.Enabled {
 		return copySwapNotEnabledVerdict(st), nil
 	}
@@ -227,7 +230,11 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
-	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, opts.CopySwap.runOptions(logger))
+	runOpts := opts.CopySwap.runOptions(logger)
+	if opts.Progress != nil {
+		runOpts.Tracker, runOpts.Step = opts.Progress, step
+	}
+	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, runOpts)
 	if err != nil {
 		return verdict.Verdict{}, fmt.Errorf("migrate: copy-and-swap options: %w", err)
 	}
@@ -301,8 +308,7 @@ func copySwapPreflightVerdict(st statement.Statement, err error) (verdict.Verdic
 // class the cause declares. Both front doors fold the same classification,
 // one into a verdict and one into a whole-plan refusal.
 func classifyCopySwapPreflight(err error) (verdict.Refusal, string, error) {
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		return insufficientPrivilegesRefusal(), privErr.Error(), nil
 	}
 	cause := preflight.CopySwapRefusalCauseOf(err)
@@ -404,8 +410,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		return "the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, " + released + ", and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
 	}
 	startOver := "correct the data or the statement, then start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release + ", deletes the checkpoint row, and runs the change from the start"
-	var divergence *checksum.DivergenceError
-	if errors.As(err, &divergence) {
+	if _, ok := errors.AsType[*checksum.DivergenceError](err); ok {
 		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + startOver
 	}
 	if schemachange.IsDataFault(err) {

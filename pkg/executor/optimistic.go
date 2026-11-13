@@ -199,14 +199,48 @@ func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 
 // ExecuteNativeWithProgress runs an optimistic native attempt while updating
 // tracker. The caller may poll tracker concurrently with this blocking call.
-func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) (err error) {
+func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
+	return executeNativeWithProgress(ctx, pool, pt, st, b, retry, nil, nil, progress.OperationOptimistic, tracker)
+}
+
+// ExecuteNativeAdoptingWithProgress is ExecuteNativeWithProgress for a
+// planned ADD CONSTRAINT ... USING INDEX (schemadiff.Change.Adopts): each
+// attempt first checks, under the table's lock and in the same
+// transaction, that adopts.Index is still valid and still has adopts.Def,
+// and refuses with ErrAdoptedIndexDrift when it is not — the check
+// RunSequenceAdopting runs on its adopting step. A statement that does not
+// take over adopts.Index is refused as an invariant violation before
+// anything runs.
+func ExecuteNativeAdoptingWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, adopts schemadiff.IndexAdoption, tracker *progress.Tracker) error {
+	return executeNativeWithProgress(ctx, pool, pt, st, b, retry, &adopts, nil, progress.OperationOptimistic, tracker)
+}
+
+// ExecuteNativeValidatingWithProgress is ExecuteNativeWithProgress for a
+// planned VALIDATE CONSTRAINT (schemadiff.Change.Validates): each attempt
+// first checks, under the validation's own SHARE UPDATE EXCLUSIVE lock and
+// in the same transaction, that validates.Constraint still has
+// validates.Def, and refuses with ErrValidatedConstraintDrift when it does
+// not — the check RunSequenceValidating runs on its validating step. A
+// statement that does not validate validates.Constraint is refused as an
+// invariant violation before anything runs. The validation scan is bounded
+// by b.StatementTimeout, so size it as a sequence sizes
+// ValidateBudget.Overall; the tracker reports the step as a
+// constraint-validation scan, as the sequence executor does.
+func ExecuteNativeValidatingWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, validates schemadiff.ConstraintValidation, tracker *progress.Tracker) error {
+	return executeNativeWithProgress(ctx, pool, pt, st, b, retry, nil, &validates, progress.OperationValidate, tracker)
+}
+
+// executeNativeWithProgress is executeNative as one tracked step reported
+// under operation; a nil tracker is a caller bug refused before anything
+// runs.
+func executeNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, operation progress.Operation, tracker *progress.Tracker) (err error) {
 	if tracker == nil {
 		return fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
-	tracker.Start(1, progress.OperationOptimistic)
-	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
+	tracker.Start(1, operation)
+	tracker.StartStep(1, operation, st.SQL())
 	defer func() { tracker.Finish(err) }()
-	return executeNative(ctx, pool, pt, st, b, retry, nil, nil, tracker)
+	return executeNative(ctx, pool, pt, st, b, retry, adopts, validates, tracker)
 }
 
 // executeNative runs st as bounded native attempts. When adopts is set, st

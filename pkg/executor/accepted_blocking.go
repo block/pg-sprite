@@ -250,8 +250,7 @@ func acceptedBlockingLockError(ctx context.Context, err error, b BlockingBudget)
 		return fmt.Errorf("%w: the accepted table lock was still being waited for, so nothing was submitted: %w",
 			ErrCancelledByCaller, err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
 		case sqlstateLockNotAvailable:
 			// INV: AB-2 — the lock request was refused; the DDL never ran.
@@ -267,8 +266,7 @@ func acceptedBlockingStatementError(ctx context.Context, err error, b BlockingBu
 	if ctx.Err() != nil {
 		return &BlockingOutcomeUnknownError{Err: err}
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
 		case sqlstateLockNotAvailable:
 			// INV: AB-2 — PostgreSQL rejected lock acquisition and aborted the

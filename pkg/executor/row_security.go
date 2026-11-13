@@ -20,17 +20,20 @@ import (
 // RowSecurityReport contains only committed RLS statements, in execution order.
 // A no-op has an empty Statements slice. Errors return a zero report.
 // TableCreated is true when the run created the table along with its row
-// security, so Statements begins with its CREATE TABLE.
+// security, so Statements begins with its CREATE TABLE. ExtensionSchemas
+// is set only then: the schemas the table definition's statements resolved
+// unqualified names against, after the schema and public.
 type RowSecurityReport struct {
-	Schema       string   `json:"schema"`
-	Table        string   `json:"table"`
-	Statements   []string `json:"statements"`
-	TableCreated bool     `json:"table_created,omitempty"`
+	Schema           string   `json:"schema"`
+	Table            string   `json:"table"`
+	Statements       []string `json:"statements"`
+	TableCreated     bool     `json:"table_created,omitempty"`
+	ExtensionSchemas []string `json:"extension_schemas,omitempty"`
 }
 
 // plan returns the statements a rolled-back run generated, as a preview.
 func (r RowSecurityReport) plan() RowSecurityPlan {
-	return RowSecurityPlan{Schema: r.Schema, Table: r.Table, Statements: r.Statements}
+	return RowSecurityPlan{Schema: r.Schema, Table: r.Table, Statements: r.Statements, ExtensionSchemas: r.ExtensionSchemas}
 }
 
 // RowSecurityPlan contains generated RLS statements in execution order. A
@@ -43,6 +46,11 @@ type RowSecurityPlan struct {
 	Schema     string   `json:"schema"`
 	Table      string   `json:"table"`
 	Statements []string `json:"statements"`
+	// ExtensionSchemas is set for a table that does not exist yet: the
+	// schemas its definition's statements resolve unqualified names
+	// against, after the schema and public. The row security statements
+	// run under pg_catalog alone.
+	ExtensionSchemas []string `json:"extension_schemas,omitempty"`
 }
 
 // ErrRowSecurityPlanChanged means the locked SQL sequence differs from review.
@@ -117,8 +125,7 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	if err == nil {
 		return nil
 	}
-	var unknown *RowSecurityOutcomeUnknownError
-	if errors.As(err, &unknown) {
+	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return err
 	}
 	if caller.Err() != nil && errors.Is(err, caller.Err()) {

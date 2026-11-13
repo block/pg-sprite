@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -46,6 +47,26 @@ var ErrRenamedIndexDrift = errors.New("the index the rename names is no longer a
 // back with ErrRenamedIndexDrift otherwise. The rename holds that index's
 // lock until the commit, so nothing renames it in between.
 func ExecuteIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
+	return executeIndexRename(ctx, pool, pt, st, b, retry, nil)
+}
+
+// ExecuteIndexRenameWithProgress runs ExecuteIndexRename, with the same
+// checks and the same ErrRenamedIndexDrift refusal, while updating tracker
+// as one optimistic step. The caller may poll tracker concurrently with
+// this blocking call.
+func ExecuteIndexRenameWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) (err error) {
+	if tracker == nil {
+		return fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
+	}
+	tracker.Start(1, progress.OperationOptimistic)
+	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
+	defer func() { tracker.Finish(err) }()
+	return executeIndexRename(ctx, pool, pt, st, b, retry, tracker)
+}
+
+// executeIndexRename is ExecuteIndexRename, reporting each bounded attempt
+// to tracker when one is set.
+func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -56,7 +77,7 @@ func ExecuteIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pr
 	if st.Kind() != statement.KindRenameIndex || rel.Kind != statement.IndexRelationIndex {
 		return fmt.Errorf("%w: ExecuteIndexRename runs ALTER INDEX ... RENAME TO, got %s", ErrInvariantViolation, st.Kind())
 	}
-	return executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
+	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
 		// INV: ST-7 — the rename runs only against the index of the table
 		// the preflight proof verified: checked under that table's lock
 		// before the statement, and confirmed by identity after it.
@@ -73,7 +94,11 @@ func ExecuteIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pr
 			return refuseRenamedOtherRelation(ctx, tx, pt, rel, st.RenamedTo(), checked)
 		}
 		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, after)
-	}, sleepContext)
+	}, sleepContext, func(attempt int) {
+		if tracker != nil {
+			tracker.SetAttempt(attempt)
+		}
+	})
 }
 
 // refuseRenamedIndexDrift locks pt's table alone in SHARE UPDATE

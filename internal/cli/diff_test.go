@@ -78,10 +78,10 @@ func TestFmtRefusesInvalidSQL(t *testing.T) {
 	assert.Empty(t, out.String())
 }
 
-// diff refuses --extension-schema for a file that declares row security
-// before connecting, rather than planning the file as if the flag were
-// absent.
-func TestDiffRefusesExtensionSchemaWithRowSecurity(t *testing.T) {
+// diff applies --extension-schema's rules to a file that declares row
+// security as it does to any other, so a system schema is refused before
+// connecting.
+func TestDiffRefusesASystemExtensionSchemaWithRowSecurity(t *testing.T) {
 	desired := filepath.Join(t.TempDir(), "schema.sql")
 	require.NoError(t, os.WriteFile(desired, []byte(`CREATE TABLE t (id bigint PRIMARY KEY, email citext);
 ALTER TABLE t ENABLE ROW LEVEL SECURITY;`), 0o600))
@@ -92,10 +92,10 @@ ALTER TABLE t ENABLE ROW LEVEL SECURITY;`), 0o600))
 		"diff",
 		"--url", "postgres://user@localhost:1/app",
 		"--desired", desired,
-		"--extension-schema", "extensions",
+		"--extension-schema", "pg_catalog",
 	})
 	require.NoError(t, err)
 	var out strings.Builder
-	require.ErrorContains(t, c.Diff.run(t.Context(), &out), "--extension-schema is not supported for a file that declares row security")
+	require.ErrorContains(t, c.Diff.run(t.Context(), &out), `--extension-schema: invalid extension schema: "pg_catalog" is a system schema`)
 	assert.Empty(t, out.String())
 }

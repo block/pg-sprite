@@ -1,9 +1,11 @@
 package dbconn
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,4 +98,38 @@ func TestVerifySessionSettingsAcceptsASessionCarryingTheBounds(t *testing.T) {
 	t.Cleanup(pool.Close)
 
 	require.NoError(t, verifySessionSettings(t.Context(), pool, sessionBounds(3*time.Second, 30*time.Second)))
+}
+
+// The read-back runs under the lock_timeout it verifies, so it must not wait
+// on a lock at all. A query that names a relation or a function looks it up
+// in the catalog, and a catalog lock held for a moment by another session's
+// DDL or by a vacuum truncating the catalog would cancel that lookup at a 1ms
+// bound and refuse a session that carries its bounds. Here another session
+// holds the catalogs a relation or function lookup reads, and the check
+// still reads the bounds the session holds.
+func TestVerifySessionSettingsReadsTheBoundsWhileTheCatalogIsLocked(t *testing.T) {
+	testutil.SkipOnSharedServer(t, "locks system catalogs, which would stall every other test on a shared server")
+	url := testutil.StartPostgres(t)
+	pc, err := buildPoolConfig(Config{URL: url, LockTimeout: time.Millisecond})
+	require.NoError(t, err)
+	// One connection, opened before the catalogs are locked, so the check
+	// runs on a session that already exists, as it does inside NewPool.
+	pc.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	require.NoError(t, pool.Ping(t.Context()))
+
+	holder, err := pgx.Connect(t.Context(), url)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, holder.Close(context.WithoutCancel(t.Context()))) })
+	tx, err := holder.Begin(t.Context())
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), "LOCK TABLE pg_catalog.pg_class, pg_catalog.pg_proc IN ACCESS EXCLUSIVE MODE")
+	require.NoError(t, err)
+
+	err = verifySessionSettings(t.Context(), pool, sessionBounds(time.Millisecond, DefaultStatementTimeout))
+
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback(t.Context()))
 }

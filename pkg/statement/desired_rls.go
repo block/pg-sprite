@@ -72,6 +72,28 @@ func (d DesiredWithRowSecurity) TableDefinition() DesiredSchema { return d.defin
 // Statements returns a defensive copy in scratch execution order.
 func (d DesiredWithRowSecurity) Statements() []Statement { return slices.Clone(d.statements) }
 
+// ExtensionSchemas returns the schemas the table definition's unqualified
+// names also resolve against, as [DesiredSchema.ExtensionSchemas] does. It
+// is empty unless [DesiredWithRowSecurity.WithExtensionSchemas] set it. The
+// slice is a copy.
+func (d DesiredWithRowSecurity) ExtensionSchemas() []string { return d.definition.ExtensionSchemas() }
+
+// WithExtensionSchemas returns a copy of d whose table definition resolves
+// unqualified type, function, and operator names against schemas as well,
+// under [DesiredSchema.WithExtensionSchemas]'s rules. Only the CREATE TABLE
+// and its indexes widen. Policy expressions still resolve nothing but the
+// table and PostgreSQL's built-ins, so every helper and table a policy
+// names stays qualified, and an extension schema can never change which
+// function a policy calls.
+func (d DesiredWithRowSecurity) WithExtensionSchemas(schemas ...string) (DesiredWithRowSecurity, error) {
+	definition, err := d.definition.WithExtensionSchemas(schemas...)
+	if err != nil {
+		return DesiredWithRowSecurity{}, err
+	}
+	d.definition = definition
+	return d, nil
+}
+
 // PolicyReads returns the tables the policies' expressions read, each
 // schema-qualified as the file names it, sorted and without duplicates. The
 // slice is a copy.

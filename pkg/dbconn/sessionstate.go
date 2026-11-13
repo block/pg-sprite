@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,9 +75,12 @@ func sessionBounds(lock, statement time.Duration) []sessionBound {
 // the connection succeeds and the setting is simply absent. Only the value
 // the server actually holds distinguishes the second case from success.
 //
-// Values are compared in milliseconds via pg_settings rather than against
-// current_setting's text, which renders 3000ms as "3s" and 500ms as "500ms"
-// — reproducing those unit rules here would be a second copy of them.
+// Each value is read with SHOW, which reads the session's own setting without
+// looking anything up in the catalog. A query that names a relation or a
+// function can wait on a catalog lock, which a vacuum truncating a catalog or
+// another session's DDL holds briefly, and that wait runs under the very
+// lock_timeout being verified: on a busy server, a session bounded at 1ms
+// could not read its own bound back.
 //
 // INV: LK-2 — every strong lock acquisition is bounded. lock_timeout is how
 // that bound is applied, so a session without it is unbounded: an ALTER that
@@ -81,9 +88,13 @@ func sessionBounds(lock, statement time.Duration) []sessionBound {
 // reader and writer of the table behind it.
 func verifySessionSettings(ctx context.Context, pool *pgxpool.Pool, want []sessionBound) error {
 	for _, bound := range want {
-		var got int64
-		err := pool.QueryRow(ctx,
-			"SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = $1", bound.name).Scan(&got)
+		// SHOW takes no placeholder, so the name is interpolated — it is
+		// one of this package's own bounds, never caller-supplied text.
+		var shown string
+		if err := pool.QueryRow(ctx, "SHOW "+bound.name).Scan(&shown); err != nil {
+			return fmt.Errorf("read session %s: %w", bound.name, err)
+		}
+		got, err := shownMilliseconds(shown)
 		if err != nil {
 			return fmt.Errorf("read session %s: %w", bound.name, err)
 		}
@@ -97,6 +108,47 @@ func verifySessionSettings(ctx context.Context, pool *pgxpool.Pool, want []sessi
 		}
 	}
 	return nil
+}
+
+// shownUnitMilliseconds is the number of milliseconds in each unit SHOW
+// renders a millisecond setting in. PostgreSQL names the largest unit that
+// divides the value exactly, so 1500 shows as "1500ms" and 3000 as "3s", and
+// it prints 0 with no unit.
+func shownUnitMilliseconds(unit string) (int64, bool) {
+	switch unit {
+	case "", "ms":
+		return 1, true
+	case "s":
+		return 1000, true
+	case "min":
+		return 60 * 1000, true
+	case "h":
+		return 60 * 60 * 1000, true
+	case "d":
+		return 24 * 60 * 60 * 1000, true
+	default:
+		return 0, false
+	}
+}
+
+// shownMilliseconds converts a timeout as SHOW renders it back into
+// milliseconds. Any other text is an error rather than a guess, so a
+// rendering this package does not know refuses the pool instead of being
+// read as some bound.
+func shownMilliseconds(shown string) (int64, error) {
+	digits := strings.TrimRightFunc(shown, unicode.IsLetter)
+	unit, known := shownUnitMilliseconds(shown[len(digits):])
+	if !known {
+		return 0, fmt.Errorf("SHOW returned %q, whose unit is not one PostgreSQL shows a timeout in", shown)
+	}
+	n, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("SHOW returned %q, which is not a whole number of a unit: %w", shown, err)
+	}
+	if n < 0 || n > math.MaxInt64/unit {
+		return 0, fmt.Errorf("SHOW returned %q, which is not a timeout PostgreSQL can hold", shown)
+	}
+	return n * unit, nil
 }
 
 // describeTimeout renders a millisecond timeout for an operator, naming zero

@@ -1,13 +1,38 @@
 # The progress report contract
 
 The progress snapshot is the machine-readable observation a caller receives when it polls a
-running schema change through the `*WithProgress` executor entry points. It is the one JSON
-shape an operator or orchestrator consumes to display or act on execution progress. This
-document is the contract: the fields, the closed vocabularies, and the behavior required of
-a consumer. The Go source of truth is `pkg/progress`; `TestSnapshotJSONShape`,
-`TestSnapshotJSONShapeForACopyStep`, `TestSnapshotJSONShapeForAChecksumStep` and
-`TestSnapshotJSONShapeForACatchUpStep` pin the exact keys, including the four examples at the
-end of this page.
+running schema change. It is the one JSON shape an operator or orchestrator consumes to
+display or act on execution progress. This document is the contract: the fields, the closed
+vocabularies, and the behavior required of a consumer. The Go source of truth is
+`pkg/progress`; `TestSnapshotJSONShape`, `TestSnapshotJSONShapeForACopyStep`,
+`TestSnapshotJSONShapeForAChecksumStep` and `TestSnapshotJSONShapeForACatchUpStep` pin the
+exact keys, including the four examples at the end of this page.
+
+## Obtaining progress
+
+A caller builds one `*progress.Tracker` per call (`progress.NewTracker`), hands it to the
+front door as `migrate.Options.Progress`, and polls `Tracker.Progress` from its own goroutine
+while `migrate.Run` or `migrate.RunDesired` blocks. The front door owns the tracker's
+lifecycle — it calls `Start` and `Finish` — so the caller never does:
+
+- **The steps are the statements the call runs.** `Run` reports a run of one step; `RunDesired`
+  reports one step per planned statement, so `step` / `total_steps` is "planned statement N of
+  M". The tracker stays `pending` while `RunDesired` derives its plan, then runs with
+  operation `admitting` while the front door gates, resolves, routes, and preflights, until the
+  statement executes.
+- **The detail is what executes now, within the step.** A safer sequence reports each of its
+  statements under the step in turn, with its own operation and SQL (a concurrent index build
+  with the server's build counters); a copy-and-swap reports its `copy`, a live run's
+  `catch-up`, and its `checksum` pass under the step, each with its engine-measured counters.
+  Each of these restarts the step's clock, so `step_elapsed_ns` times the operation in flight.
+- **The terminal phase is the call's outcome.** `finished` when the call returns an executed
+  outcome without an error, `failed` otherwise — a refusal included, since nothing it was asked
+  to run executed.
+
+The executor's `*WithProgress` entry points and the per-step `Tracker` fields of the copier,
+the checksum verifier and the catch-up remain for a caller that drives those packages
+directly; a front-door caller sets `Options.Progress` and leaves
+`Options.CopySwap.Copier.Tracker` nil, which the front door enforces.
 
 ## Versioning: `format_version`
 
@@ -18,7 +43,7 @@ phase or operation value is a contract change and bumps `format_version`, even i
 is added or renamed.
 
 Adding a field bumps `format_version` so a strict consumer can detect the new shape from the
-version. The current version is **6**: version 2 added `detail.statement`; version 3 added
+version. The current version is **7**: version 2 added `detail.statement`; version 3 added
 `detail.current_locker_pid`, `work.lockers_total`, and `work.lockers_done`; version 4 added
 the `copy` operation and split `work` into two counter families — the server-observed build
 counters and the engine-measured copy counters (`rows_*`, `bytes_*`) — selected by
@@ -26,7 +51,8 @@ counters and the engine-measured copy counters (`rows_*`, `bytes_*`) — selecte
 version 5 added the `checksum` operation and its engine-measured counter family
 (`chunks_compared`, `rows_hashed`, `chunks_mismatched`, `chunks_repaired`, `chunks_reread`);
 version 6 added the `catch-up` operation and its engine-measured counter family
-(`changes_applied`, `changes_buffered`, `lag_bytes`).
+(`changes_applied`, `changes_buffered`, `lag_bytes`); version 7 added `work.rows_to_hash` and the
+derived `detail.percent` and `detail.eta_ns` (see [Percent and ETA](#percent-and-eta)).
 
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
@@ -61,6 +87,8 @@ licenses a consumer to intervene in the change itself.
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
 | `current_locker_pid` | int | while waiting on a locker | PostgreSQL backend PID currently blocking the concurrent build; omitted when none is published. |
+| `percent` | number | running `copy`, `checksum` or `concurrent-index-build` step with a known total | The current step's completion, `0` to `99.9`, one decimal place, derived at the poll from `work` — see [Percent and ETA](#percent-and-eta). Never `100`: the step ending is completion. Omitted when the total is unknown, so an absent `percent` means unknown and `0` means nothing done yet. |
+| `eta_ns` | int | with `percent`, once the step has enough signal | Nanoseconds the current step is projected to take still, whole seconds, from its rate so far on the tracker's clock. Omitted whenever `percent` is, until the step has run 5 s and done 1% of its work, and once a counter has reached the estimate it is measured against. |
 | `work` | object | measured work only | Present exactly when something measured the step's work — the server published a progress row for a concurrent build, or the engine reported the copy, checksum or catch-up step's counters; then **every** counter below is present, so a fresh build or an empty copy reports honest zeros rather than an empty object. Which counters mean anything is decided by `operation`, not by `work` being present — see [Work counters](#work-counters). |
 
 `statement` is the SQL the engine is running for the step: for a native operation the
@@ -69,7 +97,8 @@ engine's own frozen chunk insert (the template with its `$1`/`$2` key bounds, no
 rendered values). Either way it is real SQL that reached the server, so a consumer rendering
 it into a shared surface must clamp and escape it. A `checksum` step runs several frozen
 statements per chunk, and a `catch-up` step several per flushed batch, so the orchestrator that
-owns the step chooses what, if anything, to put in `statement`.
+owns the step chooses what, if anything, to put in `statement`. The `migrate` front door puts
+nothing there for any of the three copy-and-swap operations: none of them is one statement.
 
 ### Work counters
 
@@ -113,35 +142,36 @@ The size read runs in a read-only transaction of the copy's own, under the copy'
 that timeout whatever session defaults the caller's pool carries, so an observer never holds
 the copy's stop path open.
 
-**Engine-measured** (`checksum`): `chunks_compared`, `rows_hashed`, `chunks_mismatched`,
-`chunks_repaired` and `chunks_reread` come from the checksum pass itself, which cuts its own
-chunks and digests each one on both tables inside one snapshot. The counters cover a whole
+**Engine-measured** (`checksum`): `chunks_compared`, `rows_hashed`, `rows_to_hash`,
+`chunks_mismatched`, `chunks_repaired` and `chunks_reread` come from the checksum pass itself,
+which cuts its own chunks and digests each one on both tables inside one snapshot. The counters cover a whole
 `Check`: the comparison that finds differing chunks and, under the `repair` policy, the recopy
 and the reread that follow it, so a pass that spends most of its time repairing still shows
 movement. They cover a whole `CheckLive` the same way — the pass that runs while the source is
 written and the catch-up applies the stream to the shadow — where a chunk the comparison found
 differing is read again once the catch-up has confirmed past the position it was read at, and
 again for as long as it keeps changing, up to a stated bound. They are read from the pass's
-memory — no catalog read, nothing for a poll to wait on — and reset to zero when a pass starts.
-Native and `copy` operations report none of them.
+memory — no catalog read, nothing for a poll to wait on — and reset to zero when a pass starts;
+`rows_to_hash` is the one figure the pass reads from the catalog, once, in its own guarded
+transaction before the first chunk. Native and `copy` operations report none of them.
 
 | Counter | Meaning |
 | --- | --- |
 | `chunks_compared` | Chunks the comparison has digested on both sides; a digest counts when its transaction commits. The rereads of the repair phase are not in this count. |
 | `rows_hashed` | Source rows those comparison digests covered. |
+| `rows_to_hash` | The rows the comparison expects to hash: the source's catalog row count (`pg_class.reltuples`) read when the comparison starts — the same estimate the copy reports as `rows_total`, read again since the copy. `0` for a table `ANALYZE` has never visited. An estimate, not a scan: it counts the whole source even when the pass stops at a partial watermark, and drifts from the rows actually there as the source is written, so `rows_hashed` can end short of it or pass it. A comparison that runs again under `recopy` reads it afresh while `rows_hashed` keeps counting. |
 | `chunks_mismatched` | Chunks the comparison found differing. Under `abort` this is the finding the pass returns with; under `repair` it is the number of chunks the recopy covers. In a live pass it counts every chunk the sweep found differing, whether or not it has settled since, so it is an upper bound on the divergences the pass will confirm: a chunk the stream had simply not reached yet is counted here and then settles clean. |
 | `chunks_repaired` | Chunks whose recopy from the source has committed. Every differing chunk is recopied in one transaction, so this moves from `0` to `chunks_mismatched` at that commit. A chunk still differing at its reread stops the pass; it stays counted here because its recopy did commit. |
 | `chunks_reread` | Chunks digested again in a fresh snapshot after the comparison. Under `Check` these are the repaired chunks reread after the recopy: it climbs from `0` towards `chunks_repaired` as the rereads commit, so `chunks_repaired − chunks_reread` is the repair phase's remaining work; a chunk that still differs at its reread is counted here before the pass stops on it. In a live pass every settling reread counts — of a chunk the sweep found differing, and of a repaired chunk after its recopy — and a settling reread reads every row of the chunk and judges it key by key, so the figure can exceed `chunks_mismatched` while the pass rereads a chunk some key of which keeps changing, and a pass that is still climbing here is waiting on the catch-up or on those keys to hold still. Each such reread costs about what the sweep's digest of the chunk did — the hash expression over every row of the chunk on both sides — and returns every row's key and hash rather than one aggregate, so on a busy table a live pass's read load beyond `rows_hashed` is the rows of its differing chunks, read once in the sweep and once per reread. |
 
-There is no completion figure for the comparison. A pass sizes its chunks from the time each
-one takes, so the chunk count is known only when the pass ends, and no row total describes the
-comparison either: the copy step's `rows_total` is `reltuples` at the copy's start, `0` on a
-table `ANALYZE` has never visited and short on a source that kept growing, so `rows_hashed`
-over it is an estimate dressed as a ratio, not a measure. As with the copy, completion is the
-step ending, and a rate comes from two snapshots of `rows_hashed` and `step_elapsed_ns`. The
-repair phase of a `Check` does have a measure: once `chunks_repaired` has moved, `chunks_reread` /
-`chunks_repaired` is the share of the rereads done. A live pass has none for its settling: how
-many rereads a chunk needs depends on how long its hot keys keep changing, not on the pass.
+A pass sizes its chunks from the time each one takes, so the chunk count is known only when
+the pass ends; the comparison's completion is measured in rows instead, `rows_hashed` against
+`rows_to_hash`, and like the copy's it is an estimate (see [Percent and ETA](#percent-and-eta)).
+As with the copy, completion itself is the step ending. The `percent` covers the comparison
+only: the repair phase of a `Check` has its own measure — once `chunks_repaired` has moved,
+`chunks_reread` / `chunks_repaired` is the share of the rereads done — and a live pass has none
+for its settling: how many rereads a chunk needs depends on how long its hot keys keep
+changing, not on the pass.
 
 The counters are the pass's, not the step's. Once the pass returns, `work` leaves the snapshot
 with it: a terminal snapshot carries no `work`, and a poll that lands after the pass returned
@@ -163,10 +193,60 @@ each cycle ends. Native, `copy` and `checksum` operations report none of them.
 | `changes_buffered` | Keys the buffer held at the end of the last cycle: changes waiting for an in-flight chunk to land, for a batch a constraint refused to be judged again while its chunk is in flight, or for the stream to pass a completion's read position. A batch the shadow still refuses once the copy has landed every key does not stay buffered: no chunk is left to resolve it, so the catch-up ends with the refusal. A figure that stays high after the copy has finished is therefore a catch-up waiting on the stream, not on a constraint. |
 | `lag_bytes` | How far the confirmed position trails the server's write position, in WAL bytes, both as of the end of the last cycle; `0` until a cycle has run. The write position is `pg_current_wal_lsn()` read on the catch-up's own connection as the cycle ends, not the position the walsender reports in its keepalives: that is how far the walsender has decoded, which stays small exactly while a backlog is undecoded, so a lag taken from it would read near zero when the catch-up is furthest behind. Everything below the confirmed position is in the shadow or was discarded as uncut, so this is the WAL the catch-up still has to work through before the cutover can wait for it to reach zero. |
 
-There is no completion figure for a catch-up: it runs until its owner decides the shadow is
-close enough to the source to cut over, which the owner judges from `lag_bytes` and
-`changes_buffered` together — a lag that shrinks to zero while changes stay buffered means
+There is no completion figure for a catch-up, so its snapshots carry no `percent` or `eta_ns`:
+it runs until its owner decides the shadow is close enough to the source to cut over, which
+the owner judges from `lag_bytes` and `changes_buffered` together — a lag that shrinks to zero while changes stay buffered means
 the stream is read but a chunk or a constraint is holding the flush back.
+
+### Percent and ETA
+
+`detail.percent` and `detail.eta_ns` are derived at each poll from the `work` that poll read
+and the step's `step_elapsed_ns` on the tracker's clock; nothing behind them is stored. They
+appear only on a running step whose operation has a measurable total and only while that total
+is known; every other snapshot omits them — a terminal one included, since it carries no `work`.
+
+| `operation` | `percent` measures | Omitted when |
+| --- | --- | --- |
+| `copy` | `rows_copied` / `rows_total` | `rows_total` is `0` (no catalog count) |
+| `checksum` | `rows_hashed` / `rows_to_hash` | `rows_to_hash` is `0` (no catalog count) |
+| `concurrent-index-build` | the server phase's band of the whole build, plus the share of the band its counter pair shows (below) | the server reports a phase the table does not know |
+| `catch-up`, and every other operation | — | always |
+
+Both row totals are the catalog's estimate, so a counter can reach or pass its total while work
+remains. `percent` therefore never reaches `100` while the step runs — it stops at `99.9` — and
+`eta_ns` is withdrawn once a counter has reached its total, because the total is then known to be
+short and the work left is unknown. On a resumed copy `rows_copied` counts only this run's rows,
+so the percent is this run's share of the source and ends short.
+
+`eta_ns` is the step's elapsed time scaled by the share left over the share done — the step's
+rate so far, projected — to the nearest whole second and never below one. It is omitted until
+the step has run five seconds and done one percent of its work, below which the first chunks or
+blocks dominate the rate.
+
+A concurrent index build's percent comes from the phase PostgreSQL reports in
+`pg_stat_progress_create_index.phase` and the counters the
+[PostgreSQL documentation](https://www.postgresql.org/docs/current/progress-reporting.html#CREATE-INDEX-PROGRESS-REPORTING)
+says that phase fills. Each phase owns a band of the whole build; the band widths are a
+heuristic for wall time, with the two table scans and the index scan owning the wide bands.
+A phase that counts nothing owns a zero-width band, because the server keeps a finished phase's
+counters in place through the phase after it, and a wait on other sessions does not move with
+`lockers_done`, since those sessions decide its length.
+
+| Server phase | Fills from | Band |
+| --- | --- | --- |
+| `initializing`, `waiting for writers before build`, `building index: initializing` | — | 0 |
+| `building index: scanning table` | `blocks_done` / `blocks_total` | 0–35 |
+| `building index: sorting live tuples`, `building index: sorting dead tuples` | — | 35 |
+| `building index: loading tuples in tree` | `tuples_done` / `tuples_total` | 35–50 |
+| `building index`, or a `building index: …` sub-phase not listed here | blocks when `blocks_total` is published, tuples otherwise | 0–50 |
+| `waiting for writers before validation` | — | 50 |
+| `index validation: scanning index` | `blocks_done` / `blocks_total` | 50–65 |
+| `index validation: sorting tuples` | — | 65 |
+| `index validation: scanning table` | `blocks_done` / `blocks_total` | 65–95 |
+| `waiting for old snapshots`, `waiting for readers before marking dead`, `waiting for readers before dropping` | — | 95 |
+
+The `building index: …` sub-phases listed are the ones btree reports. A consumer that wants its
+own rendering of a build still has `server_phase` and the counters verbatim.
 
 ## Phases
 
@@ -192,6 +272,11 @@ returns the identical snapshot, elapsed values included.
 | `copy` | The copy-and-swap row copy from the source table into its shadow (`work` is engine-measured). |
 | `checksum` | The copy-and-swap checksum pass comparing the source table with its shadow and, under the `repair` policy, recopying differing chunks (`work` is engine-measured). |
 | `catch-up` | The copy-and-swap catch-up applying the changes decoded from the source table's WAL to its shadow and confirming the applied position to the server (`work` is engine-measured). |
+
+The transactional single-statement entry points report one step (`total_steps` `1`):
+`ExecuteNativeWithProgress`, `ExecuteNativeAdoptingWithProgress`, and
+`ExecuteIndexRenameWithProgress` under `optimistic`, and `ExecuteNativeValidatingWithProgress`
+under `validate-constraint`, the operation a sequence's validation step reports.
 
 ## Polling semantics
 
@@ -258,7 +343,8 @@ reached the build?", and the answer falls into four classes:
 
 Check order is part of the contract. The second row matches both the sentinel and the context
 error, so a consumer that already classifies `context.DeadlineExceeded` as "possibly sent"
-must test for the sentinel first, or it silently keeps today's over-recording:
+must test for the sentinel first, or it records a cancel that was never sent as possibly
+delivered:
 
 ```go
 switch {
@@ -284,11 +370,13 @@ context ended reports `cancelled-by-caller`.
 
 ## Example
 
-A poll during step 2 of a 3-step sequence, mid concurrent index build:
+A poll during step 2 of a 3-step sequence, mid concurrent index build — an access method that
+reports no sub-phase, 11 of 40 blocks into the 0–50 build band, so 13.8%; the step has run
+under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "phase": "running",
   "step": 2,
   "total_steps": 3,
@@ -301,6 +389,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
     "active": true,
     "attempt": 2,
     "current_locker_pid": 31337,
+    "percent": 13.8,
     "work": {
       "rows_copied": 0,
       "rows_total": 0,
@@ -308,6 +397,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
       "bytes_total": 0,
       "chunks_compared": 0,
       "rows_hashed": 0,
+      "rows_to_hash": 0,
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
       "chunks_reread": 0,
@@ -325,21 +415,24 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
 }
 ```
 
-A poll during step 2 of a 4-step copy-and-swap, mid row copy (`TestSnapshotJSONShapeForACopyStep`
+A poll during step 2 of a 4-step copy-and-swap, mid row copy — 1200 of an estimated 5000 rows
+in six seconds is 24%, projecting nineteen seconds more (`TestSnapshotJSONShapeForACopyStep`
 pins it):
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "phase": "running",
   "step": 2,
   "total_steps": 4,
-  "elapsed_ns": 2750000000,
-  "step_elapsed_ns": 750000000,
+  "elapsed_ns": 8000000000,
+  "step_elapsed_ns": 6000000000,
   "detail": {
     "operation": "copy",
     "statement": "INSERT INTO public.t_shadow (id) SELECT id FROM public.t WHERE id BETWEEN $1::bigint AND $2::bigint ON CONFLICT (id) DO NOTHING",
     "active": true,
+    "percent": 24,
+    "eta_ns": 19000000000,
     "work": {
       "rows_copied": 1200,
       "rows_total": 5000,
@@ -347,6 +440,7 @@ pins it):
       "bytes_total": 409600,
       "chunks_compared": 0,
       "rows_hashed": 0,
+      "rows_to_hash": 0,
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
       "chunks_reread": 0,
@@ -365,12 +459,13 @@ pins it):
 ```
 
 A poll during step 3 of a 4-step copy-and-swap, mid checksum pass under the `repair` policy —
-three chunks compared, two found differing and recopied, one of the two reread so far
+four chunks compared covering 3500 of an estimated 5000 rows (70%), two found differing and
+recopied, one of the two reread so far; under five seconds into the step, so no ETA yet
 (`TestSnapshotJSONShapeForAChecksumStep` pins it):
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "phase": "running",
   "step": 3,
   "total_steps": 4,
@@ -379,6 +474,7 @@ three chunks compared, two found differing and recopied, one of the two reread s
   "detail": {
     "operation": "checksum",
     "active": true,
+    "percent": 70,
     "work": {
       "rows_copied": 0,
       "rows_total": 0,
@@ -386,6 +482,7 @@ three chunks compared, two found differing and recopied, one of the two reread s
       "bytes_total": 0,
       "chunks_compared": 4,
       "rows_hashed": 3500,
+      "rows_to_hash": 5000,
       "chunks_mismatched": 2,
       "chunks_repaired": 2,
       "chunks_reread": 1,
@@ -409,7 +506,7 @@ buffered behind an in-flight chunk, some WAL still to confirm
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "phase": "running",
   "step": 3,
   "total_steps": 4,
@@ -425,6 +522,7 @@ buffered behind an in-flight chunk, some WAL still to confirm
       "bytes_total": 0,
       "chunks_compared": 0,
       "rows_hashed": 0,
+      "rows_to_hash": 0,
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
       "chunks_reread": 0,

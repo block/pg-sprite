@@ -167,7 +167,7 @@ equivalent is given alongside.
 
 | Spirit (MySQL) | PostgreSQL equivalent |
 | --- | --- |
-| Binlog (`go-mysql` `BinlogSyncer`) | **Logical decoding** via a replication slot (`pgoutput` / `wal2json` / `test_decoding`) — the faithful, low-overhead analog of the binlog. Trigger-based capture is the fallback. |
+| Binlog (`go-mysql` `BinlogSyncer`) | **Logical decoding** via a replication slot (pg-sprite decodes with `pgoutput`) — the faithful, low-overhead analog of the binlog. Trigger-based capture is the designed fallback ([change-capture-tradeoff.md](change-capture-tradeoff.md)) and is not built; a run without logical decoding blocks the table's writes until the swap (`--block-writes`) instead. |
 | `binlog_row_image=FULL` | `REPLICA IDENTITY FULL` (or default = PK) on the source table so updates/deletes carry enough identity |
 | `SHOW BINARY LOG STATUS` → file:offset position | LSN + slot `confirmed_flush_lsn` |
 | `REPLACE INTO target VALUES (...)` (apply) | `INSERT ... ON CONFLICT (pk) DO UPDATE SET ...` + explicit delete handling |
