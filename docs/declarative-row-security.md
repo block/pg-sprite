@@ -46,8 +46,13 @@ optional and defaults to `NO FORCE`.
 Files without RLS declarations keep their table-only behavior: `diff` leaves
 access control separately managed. Export preserves policies even when RLS is
 disabled, and preserves enabled RLS even when there are no policies (default deny).
-`fmt` canonicalizes the expanded format, printing policy comments after the
-other statements; `lint` does not accept it.
+`fmt` prints the expanded format one statement per line, drops the default
+`AS PERMISSIVE` and `FOR ALL`, and spells an omitted role list `TO public`, so the
+first `fmt` of a pulled file rewrites its policy lines. Policies and settings keep
+the order the file wrote them in, and policy comments are printed after the other
+statements. `fmt` admits the file by the same rules as `diff`, so a file with a
+foreign key, or with a policy that [Current boundaries](#current-boundaries)
+refuses, is refused by `fmt` too. `lint` does not accept the format.
 
 ## Apply the declaration
 

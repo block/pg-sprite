@@ -102,3 +102,70 @@ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`), &out)
 	require.ErrorIs(t, err, statement.ErrCommentLoss)
 	assert.Empty(t, out.String())
 }
+
+// fmt keeps the order policies and settings were written in and moves only
+// policy comments. It carries each policy's mode, command, roles and
+// expressions through the deparser unchanged, drops the default AS
+// PERMISSIVE and FOR ALL, and spells an omitted role list TO public.
+func TestFmtRowSecurityKeepsPolicyOrderAndForms(t *testing.T) {
+	const in = `create table documents (id bigint primary key, owner text not null);
+create policy z_writes on documents as restrictive for update to app_rw, "App Admin"
+  using (owner = current_user) with check (owner <> 'root');
+comment on policy z_writes on documents is 'writers only';
+alter table documents enable row level security;
+create policy m_all on documents as permissive for all to public using (true);
+alter table documents no force row level security;
+create policy a_reads on documents for select using (true);
+comment on policy a_reads on documents is 'everyone reads';`
+	var out strings.Builder
+	require.NoError(t, (&FmtCmd{}).runFmt(strings.NewReader(in), &out))
+	assert.Equal(t,
+		"CREATE TABLE documents (id bigint PRIMARY KEY, owner text NOT NULL);\n"+
+			"CREATE POLICY z_writes ON documents AS RESTRICTIVE FOR UPDATE TO app_rw, \"App Admin\" USING (owner = current_user) WITH CHECK (owner <> 'root');\n"+
+			"ALTER TABLE documents ENABLE ROW LEVEL SECURITY;\n"+
+			"CREATE POLICY m_all ON documents TO public USING (true);\n"+
+			"ALTER TABLE documents NO FORCE ROW LEVEL SECURITY;\n"+
+			"CREATE POLICY a_reads ON documents FOR SELECT TO public USING (true);\n"+
+			"COMMENT ON POLICY z_writes ON documents IS 'writers only';\n"+
+			"COMMENT ON POLICY a_reads ON documents IS 'everyone reads';\n",
+		out.String())
+}
+
+// A row-security file the admission rules refuse is refused by fmt with the
+// same typed error diff gets, and nothing is written.
+func TestFmtRefusesRowSecurityFileTheFrontDoorRefuses(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sql  string
+		want error
+	}{
+		"policy without ENABLE or DISABLE": {
+			sql: `CREATE TABLE t (id bigint PRIMARY KEY);
+CREATE POLICY p ON t USING (true);`,
+			want: statement.ErrRowSecurityDeclaration,
+		},
+		"policy reads an unqualified table": {
+			sql: `CREATE TABLE t (id bigint PRIMARY KEY);
+ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON t USING (EXISTS (SELECT 1 FROM members));`,
+			want: statement.ErrPolicyRelationDependency,
+		},
+		"foreign key beside row security": {
+			sql: `CREATE TABLE t (id bigint PRIMARY KEY, o bigint REFERENCES o (id));
+ALTER TABLE t ENABLE ROW LEVEL SECURITY;`,
+			want: statement.ErrRowSecurityForeignKey,
+		},
+		"unparseable policy": {
+			sql: `CREATE TABLE t (id bigint PRIMARY KEY);
+ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON t USING (true`,
+			want: statement.ErrParseDesired,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out strings.Builder
+			err := (&FmtCmd{}).runFmt(strings.NewReader(tc.sql), &out)
+			require.ErrorIs(t, err, tc.want)
+			assert.Empty(t, out.String())
+		})
+	}
+}
