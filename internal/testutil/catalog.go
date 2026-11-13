@@ -78,7 +78,9 @@ type CatalogColumn struct {
 	// default.
 	StatisticsTarget int
 	// Options are the column's attribute options (pg_attribute.attoptions),
-	// e.g. "n_distinct=100", in the order the server stores them.
+	// e.g. "n_distinct=100", in the order the server stores them. The
+	// pg_attver option that newer PostgreSQL minor releases stamp on every
+	// column is left out: the server sets it, and it differs per table.
 	Options []string
 	// Sequence is the sequence the column owns — a serial's or an identity
 	// column's — and nil when it owns none.
@@ -175,7 +177,7 @@ func readCatalogColumns(ctx context.Context, tx pgx.Tx, rel string) ([]CatalogCo
        CASE WHEN a.attcollation <> t.typcollation THEN a.attcollation::regcollation::text ELSE '' END,
        a.attstorage::text, a.attcompression::text,
        coalesce(a.attstattarget::int, -1),
-       coalesce(a.attoptions, '{}'),
+       array(SELECT o FROM unnest(a.attoptions) o WHERE o NOT LIKE 'pg\_attver=%'),
        s.seqtypid IS NOT NULL,
        coalesce(format_type(s.seqtypid, NULL), ''),
        coalesce(s.seqstart, 0), coalesce(s.seqincrement, 0),
