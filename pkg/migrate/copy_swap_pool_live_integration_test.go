@@ -163,6 +163,21 @@ func pollUntil(t *testing.T, cond func(context.Context) (bool, error), msg strin
 	require.NoError(t, err, msg)
 }
 
+// pollNever polls cond for window and asserts it never reports true. A
+// query error stops the poll at once and fails the test with that error.
+func pollNever(t *testing.T, cond func(context.Context) (bool, error), window time.Duration, msg string) {
+	t.Helper()
+	var err error
+	held := assert.Never(t, func() bool {
+		var ok bool
+		ok, err = cond(t.Context())
+		return ok || err != nil
+	}, window, poolFloorPoll, msg)
+	if !held {
+		require.NoError(t, err, msg)
+	}
+}
+
 // startRun runs run on a goroutine the test owns and returns the wait for
 // it, which fails the test if the run has not returned by
 // poolFloorDeadline instead of waiting for the package timeout. The

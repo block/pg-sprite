@@ -215,8 +215,7 @@ func probeRewrite(ctx context.Context, tx pgx.Tx, probeTable, column string, alt
 // probeTableError separates the server refusing the probe table, which
 // only the deployment can fix, from any other failure to create it.
 func probeTableError(err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
 		case sqlstateReadOnlySQLTransaction:
 			return fmt.Errorf("%w: the server accepts no writes; plan the change against the primary: %w", ErrAddColumnProbeUnavailable, err)

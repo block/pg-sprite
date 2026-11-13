@@ -150,6 +150,15 @@ func TestConfigureTLS(t *testing.T) {
 		assertAutoTLS(t, pc)
 	})
 
+	t.Run("RDS host whose last repeated sslmode is empty is treated as choosing nothing and gets auto-TLS", func(t *testing.T) {
+		// pgx keeps the last occurrence of a repeated query key, so the
+		// earlier sslmode=disable is not what pgx applies.
+		url := rdsURL + "?sslmode=disable&sslmode="
+		pc := parse(t, url)
+		require.NoError(t, configureTLS(pc, Config{URL: url}))
+		assertAutoTLS(t, pc)
+	})
+
 	t.Run("RDS host in a keyword DSN with whitespace around sslmode's equals sign is honored", func(t *testing.T) {
 		dsn := "host=mydb.abc123.us-east-1.rds.amazonaws.com port=5432 user=user dbname=app sslmode = disable"
 		pc := parse(t, dsn)

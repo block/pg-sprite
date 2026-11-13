@@ -202,8 +202,18 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // Every planned statement runs back through [Run], so Run's note on the
 // pool's search_path applies to the pool passed here.
 //
+// With Options.Progress set, RunDesired reports to it as a run whose steps
+// are the planned statements: the tracker stays pending while the plan is
+// derived, starts with operation admitting for as many steps as the plan
+// has statements, reports planned statement N as step N while it executes
+// — with the detail Run reports for a statement of its own — and finishes
+// as RunDesired returns: finished for an executed result, failed for a
+// refused or failed one. A create reports each statement of the desired
+// file as its step.
+//
 // RunDesired does not close the pool; one pool serves any number of calls.
-func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
+func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (result DesiredResult, err error) {
+	defer func() { opts.finishProgress(result.Outcome, err) }()
 	return runDesired(ctx, pool, req, opts, nil)
 }
 
@@ -233,6 +243,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	opts.logger().Debug("desired plan derived",
 		"schema", report.Schema, "table", report.Table,
 		"statements", len(report.Statements), "fingerprint", report.Fingerprint)
+	opts.startProgress(len(report.Statements))
 
 	// An already-converged table resolves before admission: an empty plan
 	// carries no plan identity for a pinned fingerprint to verify (every
@@ -280,7 +291,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			return result, fmt.Errorf("%w: planned statement %d is engine-generated SQL its own parser rejects: %w",
 				executor.ErrInvariantViolation, i+1, err)
 		}
-		v, runErr := run(ctx, pool, st, opts, ps.Adopts, ps.Validates)
+		v, runErr := run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates)
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
 			// A zero verdict is Run's "stopped before reaching a verdict"
@@ -388,8 +399,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		return stopBefore(fmt.Errorf("verify %s.%s is absent: %w", report.Schema, report.Table, err))
 	}
 	role, err := preflight.CheckCreatePrivilegesAs(ctx, pool, req.Schema, opts.CreateOwner)
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		return result.refused(insufficientPrivilegesRefusal(), privErr.Error()+"; nothing was executed"), nil
 	}
 	if errors.Is(err, preflight.ErrCreateOwnerNotFound) {
@@ -407,7 +417,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	opts.logger().Debug("create preflight passed",
 		"schema", at.Schema(), "table", at.Table(), "role", role.Role(), "create_owner", role.Owner())
 
-	rep, execErr := executor.ExecuteCreate(ctx, pool, at, role, req.Desired, opts.Budget.Brief, opts.retry())
+	rep, execErr := executor.ExecuteCreateAsSteps(ctx, pool, at, role, req.Desired, opts.Budget.Brief, opts.retry(), opts.Progress)
 	// The plan's statements and the executor's steps share one order — the
 	// CREATE TABLE first, then the indexes in input order — so the verdict
 	// at position i is the verdict of Plan.Statements[i].
@@ -479,8 +489,7 @@ func createFailureDetail(err error) string {
 		return "the step's COMMIT did not return success, so whether it committed cannot be established from the client; " +
 			"inspect the catalog for what the step creates before retrying; Code names the outcome"
 	}
-	var mismatch *executor.CreateNameMismatchError
-	if errors.As(err, &mismatch) {
+	if mismatch, ok := errors.AsType[*executor.CreateNameMismatchError](err); ok {
 		return fmt.Sprintf("the step's CREATE TABLE committed and was not rolled back: %v; Code names the outcome", mismatch)
 	}
 	if errors.Is(err, executor.ErrCreateNamesUnverified) {

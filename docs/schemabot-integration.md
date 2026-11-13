@@ -55,7 +55,7 @@ this mapping clean — the orchestrator's engine verbs line up almost one-to-one
 | Engine verb | `pg-sprite` responsibility |
 | --- | --- |
 | plan | **Parse → declarative diff (when applicable) → classify → route**; declarative desired DDL executes only in the rolled-back scratch environment for introspection, with no writes to the target schema; return an engine-neutral table change |
-| apply | **Router + Executor**: run native changes **asynchronously**; return a refusal verdict for non-native-safe changes until later-phase executors land |
+| apply | **Router + Executor**: run native changes **asynchronously**, and copy-and-swap changes when the run opens that route; return a refusal verdict for a change no route carries |
 | progress | per-table rows-copied / total / percent / ETA / checksum state |
 | stop / start | checkpoint and resume (slot + copy + applier state) |
 | cutover | the gated atomic swap, taken as soon as the gates pass; an operator-gated deferred cutover is not in v1 ([D10](copy-and-swap-design.md#d10--cut-over-as-soon-as-the-gate-passes)) |
@@ -82,26 +82,26 @@ the integration phase starts; they drift.)
 | `Plan` | run parse → declarative diff when applicable → classify → route — exported as `diffplan.Plan` in [`pkg/diffplan`](../pkg/diffplan/diffplan.go) (parse via `statement.ParseDesired`, connect via `dbconn.NewPool`, inputs named by `diffplan.Request{Schema, Desired}`); return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason, ExecutionMode, ModeReason}`; map a **not native-safe** refusal to `engine.ExecutionModeBlocked` with the refusal reason as `ModeReason` (see [execution-mode verdicts](#execution-mode-verdicts-and-direct-execution)) |
 | `Apply` | start the native executor asynchronously and return immediately — the synchronous core is exported as `migrate.Run` in [`pkg/migrate`](../pkg/migrate/migrate.go) (parse via `statement.ParseOne`, gate via `migrate.Gate` before dialing, connect via `dbconn.NewPool`, policy via `migrate.DefaultOptions` tuned per table): one statement in, one `verdict.Verdict` out, with a three-shape contract — refusal (verdict, nil error), execution failure (failed verdict carrying the stable code and the committed prefix, plus the operational error), or an error with a zero verdict (stopped before executing). `Run` re-resolves the routing decision at execution time, so the adapter never trusts the stored plan-time verdict (see [execution-mode verdicts](#execution-mode-verdicts-and-direct-execution)). For the declarative flow the adapter does not iterate the plan itself: `migrate.RunDesired` takes the parsed desired schema, re-derives the convergence plan, and runs every planned statement back through `Run` — returning per-statement verdicts with committed-prefix semantics ([execution-model.md](execution-model.md)) — so plan-vs-execute drift and per-statement re-gating stay inside the engine, and the adapter can pin the reviewed plan with `ExpectedFingerprint` |
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
-| `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark). `Start` reads the row back through `checkpoint.Store.Load`, hands a non-terminal row to `schemachange.InspectResume`, and on `ResumeReconcile` runs `schemachange.Reconciler.Reconcile` before any stream reopens; the slot a reconcile returns in `Reconciled.Slot` is open and the adapter closes it. A reconcile that fails leaves the row in `reconciling`, which `InspectResume` answers as reconcile again, so repeating it is safe. How to classify each refusal is in [the resume path's refusals](#routing-the-resume-paths-refusals) |
-| `Cutover` | the deferred, operator-gated atomic swap |
+| `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark). `Start` reads the row back through `checkpoint.Store.Inspect`, hands a non-terminal row to `schemachange.InspectResume`, and on `ResumeReconcile` runs `schemachange.Reconciler.Reconcile` before any stream reopens; the slot a reconcile returns in `Reconciled.Slot` is open and the adapter closes it. A reconcile that fails leaves the row in `reconciling`, which `InspectResume` answers as reconcile again, so repeating it is safe. How to classify each refusal is in [the resume path's refusals](#routing-the-resume-paths-refusals) |
+| `Cutover` | the gated atomic swap, taken as soon as the gates pass; v1 has no operator-gated deferred cutover ([D10](copy-and-swap-design.md#d10--cut-over-as-soon-as-the-gate-passes)) |
 | `Cancel` | abort and **guarantee logical-slot + shadow-table cleanup**; for a running concurrent index build the stop path is `progress.Tracker.CancelBuild`, whose outcomes the adapter maps with the [cancel outcome table](progress-report.md#cancelling-a-concurrent-index-build) — test for `ErrCancelNotDispatched` before any context error, and record the operator's cancel as possibly delivered only when that sentinel is absent |
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
 
 Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)). Either way, a read that runs under a path pg-sprite builds that lists the application schema is only as safe as its own qualification; CO-9 lists the reads that are not qualified yet.
 
-A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason,
-notes that copy-and-swap support arrives in later phases, and names a safer native alternative
-where one exists. The adapter maps that verdict to `engine.ExecutionModeBlocked` at plan time; it
-never invokes pg-osc or another external copy tool.
+A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason
+and names a safer native alternative where one exists. The adapter maps that verdict to
+`engine.ExecutionModeBlocked` at plan time; it never invokes pg-osc or another external copy
+tool.
 
 **Adapter design notes for the `Plan` row** (recorded here so they are not rediscovered at
 implementation time):
 
 - **Disposition mapping is safety-critical.** `DispositionRefuse` maps to execution mode
-  `blocked`. `DispositionUnavailable` — a backend the plan needs has not landed — is *not*
-  "this change is fine" and must also surface as `blocked`, never as a green plan a merge
-  gate can pass. Pin this with a test at the adapter boundary, not just a mapping table.
+  `blocked`. `DispositionUnavailable` — the change needs a path its backend does not carry in
+  this build — is *not* "this change is fine" and must also surface as `blocked`, never as a
+  green plan a merge gate can pass. Pin this with a test at the adapter boundary, not just a mapping table.
 - **Plan needs a write-capable connection.** SchemaBot's plan path is generally understood as
   read-only against the target, but `diffplan.Plan` executes the desired DDL in an
   always-rolled-back scratch schema on the target database, so the engine role needs `CREATE`
@@ -178,7 +178,7 @@ package. Landing this is one of:
 A greenfield desired file — the table does not exist on the target — has no single routing
 class, and an adapter must not fold its outcomes into one arm. The plan resolves
 shape-decidable author errors before the apply window, and `migrate.RunDesired` re-checks
-them when admitting execution. A greenfield run resolves to one of six things:
+them when admitting execution. A greenfield run resolves to one of these outcomes:
 
 | Outcome | Routing class |
 | --- | --- |
@@ -186,7 +186,7 @@ them when admitting execution. A greenfield run resolves to one of six things:
 | `create-collision` refusal | **Re-plan, then fix the occupant**: the table name or a claimed index, constraint-index, or sequence name is occupied. Re-diff the live catalog to see what holds it; re-planning alone reproduces the refusal — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Never blindly retry |
 | `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
 | Plan/admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed. The [plan report](plan-report.md) (`format_version` 3 and later) names the shape as the refused statement's typed `cause` — read that field rather than matching the executor's sentinels or the verdict's prose |
-| `declarative-foreign-key` refusal (`cause` `foreign-key`) | **Not yet supported**: the new table declares a foreign key, and desired-state execution does not run foreign-key changes. The plan still shows the `CREATE TABLE`; create the table without the foreign key, then add it with `migrate --alter` (`ADD FOREIGN KEY` runs as `NOT VALID` + `VALIDATE`) |
+| `declarative-foreign-key` refusal (`cause` `foreign-key`) | **Unsupported**: the new table declares a foreign key, and desired-state execution does not run foreign-key changes. The plan still shows the `CREATE TABLE`; create the table without the foreign key, then add it with `migrate --alter` (`ADD FOREIGN KEY` runs as `NOT VALID` + `VALIDATE`) |
 | `create-name-mismatch` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but a claimed first-choice constraint-index or sequence name went to an occupant inside the probe's window, so the server suffixed it. The executor leaves the table; an operator frees the claimed name and renames the owned relation to it, or drops the table, then re-diffs. A rerun does not re-enter the create path: it diffs the live table, and converging the suffixed relation onto its claimed name is a constraint drop the planner refuses as `destructive-change` (a suffixed sequence is a sequence change the planner does not converge), so nothing runs until the operator acts |
 | `create-names-unverified` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but the read of the names the table owns did not complete, so the claims are unproven — not failed. An operator compares the table's constraint-index and sequence names against the desired file, renames or drops, then re-diffs; a rerun diffs the live table exactly as above |
 | `insufficient-privileges` refusal naming a create owner that does not exist | **Operator configuration action**: `Options.CreateOwner` names a role the server does not have. Nothing ran; create the role or correct the configured owner. Not retryable until one of those changes |
@@ -300,7 +300,7 @@ assumes the failed run left nothing behind.
 ### Routing the resume path's refusals
 
 `Start` on a copy-and-swap target is two reads and, when the second says so, one write:
-`checkpoint.Store.Load` for the row, `schemachange.InspectResume` for the mode, and
+`checkpoint.Store.Inspect` for the row, `schemachange.InspectResume` for the mode, and
 `schemachange.Reconciler.Reconcile` when the mode is `ResumeReconcile`. The row's phase is
 dispatched first — `Phase.Terminal()` has nothing to resume, `cutover` is `InspectSwapped`'s
 question — and only then is the slot read. Both `InspectResume` and `Reconcile` refuse with a
@@ -336,7 +336,7 @@ the slot under the row (decoding target):
 | `cutover-unfenced` (quiesced target, from `Cutover`, through `Run`) | The swap, under its lock, found the engine's write fence on the source disabled, dropped, replaced by a trigger of another shape, or not enabled `ALWAYS`; nothing is swapped and the row is in `cutover` | Retry `Run`: it installs the fence again, verifies again, and swaps; a write that landed while the fence was down makes the verification pass stop on a `*checksum.DivergenceError`. Find what changed the source's triggers |
 | `*checksum.UnresolvedError` (decoding target) | The live pass could not settle a chunk some key of which the source kept writing within its reread bound; nothing was found wrong and nothing was minted, and the row stays in `verifying`. The bound is `LiveOptions.Attempts` fresh rereads of one chunk (default `checksum.DefaultSettleAttempts`), each waited on for the catch-up up to `LiveOptions.SettleWait`, and each reread judges the chunk key by key, so a chunk written somewhere between every two of its rereads still settles as long as each key holds still across one pair of reads; a key written again between every two rereads never settles, so a row written faster than the pass can read it twice is the case, whatever the table's total write rate. `UnresolvedError.Keys` is how many keys were still changing at the last reread | Retry `Run`: the resumed row catches up again and runs a fresh pass; a key that never settles is a hot row to wait out, write less often, or give more `Attempts` |
 | `cutover-drain-deferred` (decoding target) | The swap's drain met a unique-key move it could not order into the shadow; the swap rolled back and the row is in `cutover` with the position the drain reopened from | Retry `Run`: `InspectSwapped` answers `ErrNotSwapped`, the row goes back to `catching_up`, and the same changes are drained again once the rows the move touched have settled |
-| `*decode.SlotLagExceededError` (decoding target) | The slot retained more WAL than `CatchupOptions.SlotLagCeiling` while the capture ran; the run stopped with the slot in place under the row | Retry `Run` once the source's write rate allows: the stream reopens at the row's position and drains the backlog. Abandoning the run (`DropShadow`, `decode.DropSlot`, `Store.Delete`) releases the WAL |
+| `*decode.SlotLagExceededError` (decoding target) | The slot's WAL crossed `CatchupOptions.SlotLagCeiling` while the capture ran; the run stopped with the slot in place under the row. `Cause` says which measure crossed; switch on the constants, with a default branch, since the set can grow: `decode.SlotLagStreamBehind` (`stream-behind`) means the stream itself had more WAL unconfirmed than the ceiling — the capture fell behind the source's writes; `decode.SlotLagWALRetained` (`wal-retained`) means the stream was within the ceiling but the server kept more WAL back than it for longer than its release interval allows — either a transaction on the source holds the slot's restart position, or the source writes more WAL per release interval than the ceiling allows. The error carries both measures (`Unconfirmed`, `Retained`) and the ceiling | `stream-behind`: retry `Run` once the source's write rate allows; the stream reopens at the row's position and drains the backlog. `wal-retained`: look for the transaction holding WAL back — an open write transaction (`pg_stat_activity` where `backend_xid IS NOT NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`; a read-only transaction does not hold it) — end it, then retry `Run`; if none is found, the write rate is the cause and the run needs a higher `SlotLagCeiling`. Abandoning the run (`DropShadow`, `decode.DropSlot`, `Store.Delete`) releases the WAL in either case |
 | `applier.ErrBatchDeadlocked` (decoding target) | The copy and the catch-up kept writing the same unique values into the shadow, and the server rolled the catch-up's flush back to break the deadlock `CatchupOptions.DeadlockAttempts` cycles in a row; the rolled-back flushes committed nothing, the confirmed position never passed their changes, and the run stopped with the slot in place under the row. The error answers `errors.Is(err, applier.ErrBatchDeadlocked)`, and `errors.As` to `*pgconn.PgError` gives the server's `deadlock_detected` (SQLSTATE `40P01`) | Retry `Run`: the stream reopens at the row's position, at or below what the catch-up confirmed, and flushes the same changes again. Deadlocks that recur run after run are a source whose writes keep moving unique values through the range the copy is filling; retry once those writes ease, or raise `RunOptions.Catchup.DeadlockAttempts` |
 | `ErrCutoverRolledBack` / `ErrLockRetriesExhausted` | The swap did not commit; the source is still live and the row is in `cutover` | Retry `Run`: the row is answered by `InspectSwapped`, which sends the run back through verify and gate to a fresh swap attempt |
 | `ErrTableLockLost` (`shadow-lock-lost`) | The lock session dropped mid-run; whatever was in flight was cancelled with it | Retry `Run` once the database is reachable; the row says where to continue |
@@ -360,9 +360,11 @@ A `Run` on a decoding target keeps server sessions outside the pool it is handed
 the pool besides; an importer running many tables from one process sizes for both:
 
 - **Outside the pool, dialled from the `dbconn.Config`:** the table-lock session for the whole
-  run; one replication connection for the capture's stream while the row is in `copying`,
-  `catching_up`, or `verifying`, and one more for the drain's stream during each swap attempt
-  (preflight already requires two free `max_wal_senders` for this); one plain connection that
+  run; one replication connection to create the slot on a first start, closed once the row
+  naming it commits; one for the capture's stream while the row is in `copying`,
+  `catching_up`, or `verifying`; and one for the drain's stream during each swap attempt,
+  opened after the capture has ended — one at a time, so the two free `max_wal_senders`
+  preflight requires leave one as headroom; one plain connection that
   holds the slot's advisory lock only while the run makes its slot and commits its first row
   (`Store.WithSlotLock`); and one plain connection for the drain's marker and slot reads during
   each swap attempt. None of these waits on the pool, so a claim or a swap never holds a pool
@@ -537,15 +539,20 @@ the native route's blind bounded attempt, which this route never makes. A statem
 does not take this route at all: `--force` keeps its one meaning, the submitted form run
 natively as a bounded blind attempt, and the audit record says so.
 
-Rows copied come from `Copier.Tracker` (`*progress.Tracker`), not from the hook, whose rows
-carry a key position. The adapter builds one tracker per run and calls its `Start` before
-`Run`: `Start` and `StartStep` drop the tracker's work source, so either called while the
-copy runs stops the counters, and two runs sharing one tracker each register as its source,
-the first to finish dropping the source the other still reports to. The copier is the work
-source from the copy's first chunk until just before the copy returns, so progress counters
-are for the copy alone: before it, after it, and through the verification pass and a live
-run's catch-up the tracker reports no work, and those phases reach the adapter only as
-`OnCheckpoint` rows. `rows_copied` counts this run's rows, rising monotonically, and
+Progress comes from one `*progress.Tracker` the adapter builds per call and hands to the
+front door as `Options.Progress`, then polls with `Tracker.Progress` from its own goroutine
+while `Run` or `RunDesired` blocks; the front door calls `Start` and `Finish`, so the adapter
+calls neither. The steps are the statements the call runs — one for `Run`, one per planned
+statement for `RunDesired` — and the detail is what executes inside the current one: a safer
+sequence's statements in turn, a concurrent index build with the server's build counters, and
+for a copy-and-swap the `copy`, a live run's `catch-up`, and the `checksum` pass, each with its
+engine-measured counters ([the contract](progress-report.md#obtaining-progress)). The tracker
+ends `finished` only for an executed outcome; a refusal or a failure ends it `failed`. Rows
+copied come from the tracker, not from the `OnCheckpoint` hook, whose rows carry a key
+position. `Options.Progress` replaces `Copier.Tracker`, and a policy that sets both is an
+error before anything runs: a tracker reads one work source at a time, and the front door
+hands it the one the phase in progress owns. A tracker serves one call at a time.
+`rows_copied` counts this run's rows, rising monotonically, and
 `rows_total` is the source's catalog estimate at the copy's start — `0` for a table `ANALYZE`
 has never visited, and possibly below `rows_copied` once the table has grown or on a resumed
 run — so a display treats `0` as unknown and a ratio over one as possible. The verdict's
@@ -727,6 +734,21 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   pg-sprite's `Apply` must re-resolve the routing decision at execution time and act on that
   fresh decision — never treat the stored plan-time verdict as execution authority. This is
   [OC-4](invariants.md#oc-4--toctou-discipline-on-all-async-state) applied to the verdict.
+- **A statement that names only an index or a constraint needs the entry point that re-checks
+  it.** An adapter that runs planned statements through the executor directly, rather than
+  through `migrate.RunDesired`, picks the entry point the way `migrate` does: a plan statement
+  (`plan.Statement`, carried over from `schemadiff.Change`) with `Adopts` set runs through
+  `executor.ExecuteNativeAdoptingWithProgress` with that `IndexAdoption`, one with `Validates`
+  set through `executor.ExecuteNativeValidatingWithProgress` with that `ConstraintValidation`,
+  and a statement whose `statement.Kind` is `KindRenameIndex` through
+  `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index.
+  Each re-reads the index or constraint under the
+  lock it runs with and refuses with `adopted-index-drift`, `validated-constraint-drift`, or
+  `renamed-index-drift` when it changed after planning. `ExecuteNativeWithProgress` carries no
+  planned definition and runs an adoption or validation unchecked, and refuses an index
+  rename under ST-7, since the statement names no table. `Adopts` and `Validates` stay out of
+  the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  or derives the plan again at apply time.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
   all direct-routed statements run first, then all engine-driven ones, regardless of their
   relative order in the plan — and a statement in one partition that depends on one in the
@@ -761,7 +783,7 @@ CLI and through `migrate.Run`, plus one the Runner performs on its own; an orche
 
 | Operator need | What to do | What pg-sprite does |
 | --- | --- | --- |
-| **Start** a change | `pg-sprite migrate --url … 'ALTER TABLE s.t …'` (with `--copy-and-swap` to open the preview route and `--free-disk`, and `--block-writes SCHEMA.TABLE` to take the table offline for writes instead of streaming them) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
+| **Start** a change | `pg-sprite migrate --url … --alter 'ALTER TABLE s.t …'` (with `--copy-and-swap` to open the preview route and `--free-disk`, and `--block-writes SCHEMA.TABLE` to take the table offline for writes instead of streaming them) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
 | **Stop** a running change | Send `SIGINT` (Ctrl-C) or `SIGTERM` once | The run's context is cancelled and the run unwinds through its own stop path: a copy in flight saves the watermark its committed chunks reached, the table lock session is released, the row stays at its last save with the run's hold on the source — the write fence of a run that blocked writes, or the replication slot of a live run, which retains WAL until the run is finished or discarded — and the verdict is `failed` with `code: cancelled-by-caller` (exit 1). A second `SIGINT`/`SIGTERM` ends the process at once with exit 130, before the stop path completes; the row then records whatever the last save landed, and the lock session is released by the server when its connection drops |
 | **Resume** a stopped change | Run the same statement again — with `--copy-and-swap` (`CopySwap.Enabled`), since the resume is a copy-and-swap run too — and the same `--block-writes SCHEMA.TABLE` if the stopped run blocked writes | The checkpoint row says where to continue: a stopped copy continues from its watermark, a run past its copy verifies again, a `cutover` row is answered by the catalog (a committed swap finishes from the old-table drop; a rolled-back swap goes back through verify and gate). Unless the slot was lost, nothing is copied twice. A live run whose slot is gone or the server reports lost, or whose row is still in `reconciling` from a reconcile that stopped partway, is reconciled first, with no flag: a new slot, a comparison of every chunk below the watermark against the source, and a recopy of those that differ ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)); the run then continues as above, and `Result.Reconciled` reports it ([What `Runner.Run` returns](#what-runnerrun-returns)). A different statement on the same table is refused (`resume-row-mismatch`). A stopped run that blocked writes resumes only with the acknowledgement, and a stopped live run only without it; a run of the other kind is refused (`resume-row-decoding`) and leaves the stopped run's hold as it is |
 | **Start over** — discard a stopped change and run it from the beginning | Run the same statement, with `--copy-and-swap` (`CopySwap.Enabled`) and `--restart SCHEMA.TABLE`, where the value names the resolved target exactly | Under the run's own table lock session, discards what the stopped run left in the order a later restart could meet idempotently — the shadow, then the hold on the source (`DropWriteFence` for a blocked-writes row, `decode.DropSlot` for a live row), then the checkpoint row — and runs the change fresh. A leftover shadow that no row records is discarded the same way. The decision is written to the audit log before anything is discarded |
@@ -813,15 +835,15 @@ These shape the engine's state and API surface from day one, long before the ada
 they are registered as the `OC-*` invariants in
 [invariants § orchestration / control-plane](invariants.md#orchestration--control-plane-oc):
 
-- **Keep PostgreSQL-only machinery inside the adapter.** When the copy-and-swap backend and
-  adapter exist, logical-decoding slot create/cleanup, `REPLICA IDENTITY`, logical-replication
-  preflight, and any later trigger-capture implementation will all live behind
-  `Apply`/`Stop`/`Cancel` so the
+- **Keep PostgreSQL-only machinery inside the adapter.** When the adapter exists, the
+  copy-and-swap backend's logical-decoding slot create/cleanup, `REPLICA IDENTITY`, and
+  logical-replication preflight, and any later trigger-capture implementation, will all live
+  behind `Apply`/`Stop`/`Cancel` so the
   engine-neutral orchestration layer stays untouched
   (OC-6).
 - **Shared types stay engine-agnostic** — engine-specific data rides in generic
   `Metadata map[string]string` fields (OC-6).
-- **ID namespaces never conflate** — the engine's migration identifier is an opaque
+- **ID namespaces never conflate** — the engine's schema-change identifier is an opaque
   `external_id` to the orchestrator; the orchestrator's user-facing identifier is never routed
   to the engine (OC-5).
 - **The orchestrator is an untrusted request source** like the CLI: control requests are

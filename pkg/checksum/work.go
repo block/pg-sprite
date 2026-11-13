@@ -2,6 +2,9 @@ package checksum
 
 import (
 	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/block/pg-sprite/pkg/progress"
 )
@@ -18,6 +21,15 @@ import (
 //     comparison, whose chunks count here too, so the figure can pass the
 //     number of chunks through the watermark.
 //   - rows_hashed is the number of source rows those digests covered.
+//   - rows_to_hash is the number of rows the comparison expects to hash:
+//     the source's catalog row count (pg_class.reltuples) read when the
+//     comparison starts, the same estimate the copy reports as rows_total.
+//     It is 0 for a table ANALYZE has never visited, counts the whole
+//     source even when the pass stops at a partial watermark, and drifts
+//     from the rows actually there as the source is written, so
+//     rows_hashed can end short of it or pass it. A comparison that runs
+//     again under DivergenceRecopy reads it afresh while rows_hashed keeps
+//     counting.
 //   - chunks_mismatched is the number of chunks the comparison found
 //     differing.
 //   - chunks_repaired is the number of chunks whose recopy has committed.
@@ -78,6 +90,35 @@ func (v *Verifier) countCompared(rows int64) {
 	defer v.mu.Unlock()
 	v.work.ChunksCompared++
 	v.work.RowsHashed += uint64(rows)
+}
+
+// rowsToHashSQL reads the catalog's last-known row count of the source: the
+// figure ANALYZE or VACUUM recorded, -1 for a table neither has visited. It
+// runs in the pass's guarded transaction, after the guard has confirmed the
+// source is the proven relation, and every catalog name in it is qualified,
+// so the figure does not depend on the transaction's search_path (CO-9).
+const rowsToHashSQL = `
+	SELECT COALESCE(
+		(SELECT c.reltuples
+		   FROM pg_catalog.pg_class c
+		  WHERE c.oid OPERATOR(pg_catalog.=) $1::pg_catalog.oid),
+		-1)`
+
+// countRowsToHash records the source's catalog row count, read in tx, as
+// the comparison's rows_to_hash. A negative figure means the catalog has
+// none, which reports as 0 rather than as an unsigned wraparound.
+func (v *Verifier) countRowsToHash(ctx context.Context, tx pgx.Tx) error {
+	var relTuples float64
+	if err := tx.QueryRow(ctx, rowsToHashSQL, v.shadow.SourceOID()).Scan(&relTuples); err != nil {
+		return fmt.Errorf("read the row count of %s.%s: %w", v.target.Schema(), v.target.Table(), err)
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.work.RowsToHash = 0
+	if relTuples > 0 {
+		v.work.RowsToHash = uint64(relTuples)
+	}
+	return nil
 }
 
 // countMismatch records one chunk the comparison found differing.

@@ -29,7 +29,9 @@ refused form would take, what an operator who accepts a maintenance window can d
 - [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough)
 - [Deliberately operator-owned](#deliberately-operator-owned)
 
-A ✅ marks an implemented capability; check the front-door columns for CLI access.
+A ✅ marks an implemented capability; the tables below do not show which front door
+admits it — `pg-sprite capabilities` does (its `FRONT DOORS` column, or `front_doors` in
+`--json`).
 The atomic RLS executor is available through `migrate --desired` and the Go API.
 For an existing table, `diff` shows RLS changes for review without emitting
 executable SQL; for a missing table, it previews the create with its RLS.
@@ -129,9 +131,9 @@ instead.
 
 The invariant: **every T2 row is a tracked roadmap item; T3 rows deliberately have
 none.** If a refusal message points at a "planned" capability, that plan exists —
-otherwise the change is out of scope by design, and this page — not the refusal text,
-which today is one undifferentiated unsupported-statement reason for everything outside
-the imperative front door — names the tool class that owns the job.
+otherwise the change is out of scope by design, and this page names the tool class that
+owns the job; the refusal itself carries the same answer as its `class` and `owner`
+([refusal-classes.md](refusal-classes.md)).
 
 ### The engine path
 
@@ -177,8 +179,8 @@ one, or rebuilt the table through copy-and-swap.
 
 Support differs by front door, so the matrix marks the exceptions:
 
-- **Imperative** (`migrate --alter`, `plan`, `lint`, `suggest`): takes one DDL statement,
-  classifies it, and executes the online form — rewriting a blocking statement into its
+- **Imperative** (`migrate --alter`, `migrate --dry-run`, `lint`, `suggest`): takes one DDL
+  statement, classifies it, and executes the online form — rewriting a blocking statement into its
   safer sequence where one exists. This door has the **broadest coverage**.
 - **Declarative** (`diff`, `pull`, desired files): compares a desired `CREATE TABLE`
   file against the live table. This door depends on the canonical table *model*, which
@@ -199,7 +201,7 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**62 operations: 19 supported today, 24 planned behind a typed refusal, 14 out of scope
+**62 operations: 21 supported today, 22 planned behind a typed refusal, 14 out of scope
 by design, and 5 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
@@ -284,7 +286,7 @@ or the only online form is a direct statement the operator runs).
 | Virtual generated columns (PostgreSQL 18+) | 🟡 | native, planned flow | Yes | Typed refusal: the desired-file grammar cannot declare `VIRTUAL`, export refuses a live virtual column, and a desired file that declares it any other way fails the diff, so a virtual expression is never converged as a column default |
 | Columns whose default uses a sequence the column does not own | 🟡 | native, planned flow | Yes | Typed refusal: in a desired-state model that sequence exists only inside the scratch transaction, so no derived plan can reference it. Column-owned (`serial`-style) sequences are fine |
 | Greenfield `CREATE TABLE` apply (the table does not exist yet — a fresh database or a new table in a live one) | ✅ | native, as-is | Yes — a `REFERENCES` clause would take a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, but the create path refuses a `CREATE TABLE` that declares one, so no live table is locked | Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `REFERENCES`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `CONCURRENTLY` is refused upstream at desired-file parse and re-checked at admission as defense in depth |
-| Extension types, functions, and operators named unqualified in a desired file (such as `citext` installed in an `extensions` schema) | ✅ | native, as-is | Yes | A desired file resolves names against the target schema and `public` only, so an extension installed elsewhere is named qualified (`extensions.citext`) unless `--extension-schema` (Go: `DesiredSchema.WithExtensionSchemas`) names its schema. Those schemas are searched after the target schema and `public` when the scratch build and the create path run the file, and never shadow a name either one defines. The model is introspected without them, so each such object prints qualified on both sides, and every planned statement on an existing table names the object it resolved to. A table that does not exist yet is created from the file's own statements under the same search path; the plan report lists the schemas in `extension_schemas`, its fingerprint covers them, and `diff --sql` sets that search path before the create. Opt-in, because with more schemas searched an unqualified function call can resolve to a different overload. Policy expressions in a row-security file still resolve nothing, and `--extension-schema` is refused for one |
+| Extension types, functions, and operators named unqualified in a desired file (such as `citext` installed in an `extensions` schema) | ✅ | native, as-is | Yes | A desired file resolves names against the target schema and `public` only, so an extension installed elsewhere is named qualified (`extensions.citext`) unless `--extension-schema` (Go: `DesiredSchema.WithExtensionSchemas`) names its schema. Those schemas are searched after the target schema and `public` when the scratch build and the create path run the file, and never shadow a name either one defines. The model is introspected without them, so each such object prints qualified on both sides, and every planned statement on an existing table names the object it resolved to. A table that does not exist yet is created from the file's own statements under the same search path; the plan report lists the schemas in `extension_schemas`, its fingerprint covers them, and `diff --sql` sets that search path before the create. Opt-in, because with more schemas searched an unqualified function call can resolve to a different overload. In a row-security file the schemas apply to the table definition only (Go: `DesiredWithRowSecurity.WithExtensionSchemas`), and a missing table's create preview lists them in `extension_schemas`; policy expressions still resolve nothing but the table and the built-ins, so they name every such object qualified |
 <!-- capabilities:end declarative_model -->
 
 ### Types and non-table objects
@@ -292,9 +294,9 @@ or the only online form is a direct statement the operator runs).
 <!-- capabilities:begin types_and_non_table_objects -->
 | Object / operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| Enum-typed columns on plain tables | 🟡 | native, planned flow | Yes | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified) |
-| `ALTER TYPE ... ADD VALUE` | 🟡 | native, planned flow | Yes | Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it |
-| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since it takes only `ALTER TABLE` and `CREATE INDEX`, and `DROP VALUE` does not parse |
+| Enum-typed columns on plain tables | ✅ | native, as-is | Yes | An enum column is an ordinary column to both front doors: adding one (with a constant default it is catalog-only), changing its default, and indexing it run natively, and a desired file can create a table with one. A desired file names an enum in the table's schema or `public` bare; introspection renders the live column through `format_type`, so the file and the live table compare equal and a rerun plans nothing. The enum type itself is not managed: create it with owner tooling, and add values with `ALTER TYPE ... ADD VALUE`. Retyping a column to or from an enum rewrites the table and runs on copy-and-swap |
+| `ALTER TYPE ... ADD VALUE` | ✅ | native, as-is | Yes | Metadata-only: the statement writes one `pg_enum` row under a lock on the type alone, so no table that uses the type is locked, scanned, or rewritten, and reads and writes on those tables carry on while it runs. It waits only for another session altering the same type, under the brief budgets with lock-timeout retry. `BEFORE`, `AFTER`, and `IF NOT EXISTS` run as written; a position next to the empty label is refused as `unsupported-statement`, since the parse tree cannot carry it. `migrate` resolves the type on the session `search_path`, checks that it is an enum, that the role has `USAGE` on a schema the name spells, and that the role is a member of the type's owning role (else `insufficient-privileges`), pins the attempt's `search_path` to the type's schema, and confirms before the commit that every label the transaction wrote belongs to that type, or, when `IF NOT EXISTS` wrote nothing, that the name still resolves to it, since `ALTER TYPE ... RENAME` does not wait for the lock and another session can move the name meanwhile (else the permanent `enum-type-drift` code, nothing added). Sessions can use the new value once it commits. `--force`, `--allow-destructive`, and the copy-and-swap acknowledgements do not apply. A desired file does not model enum types |
+| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since the only `ALTER TYPE` form it takes is `ADD VALUE`, and `DROP VALUE` does not parse |
 | Enum/domain type creation and drop | ⚪ | — | No — owner tooling (psql, shipped with the code change) | Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code |
 | Views, materialized views (create and replace) | ⚪ | — | No — owner tooling | Transactional catalog work, but `CREATE OR REPLACE VIEW` takes a brief `ACCESS EXCLUSIVE` on the view and queues behind in-flight readers — run it under a `lock_timeout` |
 | `REFRESH MATERIALIZED VIEW` | 🔵 | — | No — data jobs / owner tooling | A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs |
@@ -401,7 +403,7 @@ Three related jobs stay with humans on purpose:
   schema — an orchestrator, or an operator running `diff` per file — therefore owns the
   set of tables: decide how far the declared files are authoritative, enumerate the live
   tables, and treat each undeclared one as a destructive divergence to resolve rather than
-  as up to date. Declare it (`pull` or `export` writes the desired file) or drop it through
+  as up to date. Declare it (`pull` writes the desired file) or drop it through
   a reviewed process; whether the owner blocks on it or quarantines it first (`ALTER TABLE …
   SET SCHEMA` / `RENAME TO`) is the owner's policy, not pg-sprite's. A schema being
   onboarded is entirely undeclared tables, so declare the existing tables first (`pull`
@@ -453,7 +455,8 @@ Three related jobs stay with humans on purpose:
   the recovery handles, and what the rest license a human to do is
   [invalid-index-recovery.md](invalid-index-recovery.md).
 - **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
-  engine does not drive `REINDEX` at all (see matrix) — run `REINDEX ... CONCURRENTLY`
+  engine runs `REINDEX` only as an accepted blocking statement under `--accept-blocking`
+  (see matrix) — run `REINDEX ... CONCURRENTLY`
   directly; *deciding* when an index needs rebuilding is monitoring-and-operations territory. Automating it is
   considered but on hold for the same ownership reasons as above.
 

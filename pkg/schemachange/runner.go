@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -43,6 +44,23 @@ type RunOptions struct {
 	// shadow while the copy and the verification pass run. Its Tracker is
 	// the caller's to set.
 	Catchup applier.CatchupOptions
+	// Tracker, when set, is the tracker of a longer run this one is step
+	// Step of: the caller has called Start and calls Finish, and the Runner
+	// reports its phases to it as that step. The copy is reported as
+	// progress.OperationCopy with the copier as the work source, a live
+	// run's wait for its capture to catch up to the marker as
+	// progress.OperationCatchUp with the run's catch-up as the work source,
+	// and the verification pass as progress.OperationChecksum with the
+	// verifier as the work source; each phase starts the step again with
+	// its own operation, so the step's elapsed time is the phase's. The
+	// statement is left empty: no one statement is what a phase runs. It
+	// replaces Copier.Tracker, Checksum.Tracker and Catchup.Tracker, which
+	// must be left nil when it is set: a tracker reads one work source at
+	// a time, and the Runner hands it the one the phase in progress owns.
+	Tracker *progress.Tracker
+	// Step is the 1-based step of the caller's run that Tracker reports
+	// this run as; zero when Tracker is nil.
+	Step int
 	// Live bounds how the verification pass settles a chunk the stream was
 	// still carrying changes for. Its Confirmed source is the run's own
 	// catch-up and must be left nil. So must Flushes: the run's pass
@@ -128,7 +146,7 @@ func (o RunOptions) validate() error {
 	if o.Live.Flushes != nil {
 		return fmt.Errorf("%w: the live verification pass holds the run's own catch-up's flushes; leave Live.Flushes nil", ErrInvalidOptions)
 	}
-	return nil
+	return o.validateTracker()
 }
 
 func (o RunOptions) checkpointInterval() time.Duration {
@@ -519,10 +537,11 @@ func (r *Runner) verifyWith(ctx context.Context, lock *dbconn.TableLockSession, 
 		// INV: CO-4
 		return checksum.VerifiedShadow{}, checksum.Report{}, fmt.Errorf("%w (CO-4): checkpoint row for %s.%s is in phase %s with a watermark short of the key space", ErrInvariantViolation, state.cp.Schema, state.cp.Table, state.cp.Phase)
 	}
-	verifier, err := checksum.NewVerifier(target, state.built, lock, r.opts.Checksum)
+	verifier, err := checksum.NewVerifier(target, state.built, lock, r.checksumOptions())
 	if err != nil {
 		return checksum.VerifiedShadow{}, checksum.Report{}, err
 	}
+	r.startPhase(progress.OperationChecksum)
 	outcome, err := pass(ctx, verifier)
 	if err != nil {
 		return checksum.VerifiedShadow{}, outcome.Report, err
