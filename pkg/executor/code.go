@@ -157,6 +157,11 @@ const (
 	// or now backing a constraint; nothing was renamed. Re-plan against the
 	// catalog as it stands.
 	CodeRenamedIndexDrift Code = "renamed-index-drift"
+	// CodeEnumTypeDrift: an ALTER TYPE ... ADD VALUE reached a type other
+	// than the enum type the engine checked, because another session gave
+	// the name to a different type; nothing was added. Plan again against
+	// the catalog as it stands.
+	CodeEnumTypeDrift Code = "enum-type-drift"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
 	// CodeDataFault: the server rejected the table's rows as the statement
@@ -225,6 +230,7 @@ func Codes() []Code {
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
+		CodeEnumTypeDrift,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation,
@@ -268,6 +274,7 @@ func (c Code) Permanent() bool {
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
+		CodeEnumTypeDrift,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation:
@@ -286,28 +293,22 @@ func OutcomeCode(err error) Code {
 	if err == nil {
 		return ""
 	}
-	var stepErr *SequenceStepError
-	if errors.As(err, &stepErr) {
+	if stepErr, ok := errors.AsType[*SequenceStepError](err); ok {
 		return OutcomeCode(stepErr.Err)
 	}
-	var invalidErr *InvalidIndexError
-	if errors.As(err, &invalidErr) {
+	if invalidErr, ok := errors.AsType[*InvalidIndexError](err); ok {
 		return invalidErr.Code()
 	}
-	var budgetErr *BudgetError
-	if errors.As(err, &budgetErr) {
+	if budgetErr, ok := errors.AsType[*BudgetError](err); ok {
 		return budgetErr.Code()
 	}
-	var rlsUnknown *RowSecurityOutcomeUnknownError
-	if errors.As(err, &rlsUnknown) {
+	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return CodeRowSecurityOutcomeUnknown
 	}
-	var unknownErr *BlockingOutcomeUnknownError
-	if errors.As(err, &unknownErr) {
+	if _, ok := errors.AsType[*BlockingOutcomeUnknownError](err); ok {
 		return CodeBlockingOutcomeUnknown
 	}
-	var commitUnknown *CommitOutcomeUnknownError
-	if errors.As(err, &commitUnknown) {
+	if _, ok := errors.AsType[*CommitOutcomeUnknownError](err); ok {
 		return CodeCommitOutcomeUnknown
 	}
 	return sentinelCode(err)
@@ -378,6 +379,8 @@ func sentinelCode(err error) Code {
 		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
 		return CodeRenamedIndexDrift
+	case errors.Is(err, ErrEnumTypeDrift):
+		return CodeEnumTypeDrift
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:

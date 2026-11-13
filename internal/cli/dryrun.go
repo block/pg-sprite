@@ -107,9 +107,10 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	// verdict instead of an executable plan. The checks that need live
 	// facts (size guard, privileges) stay the apply's; a missing target
 	// table is reported as such, since the apply stops there first. An
-	// index rename is run by its own executor, not the sequence executor,
-	// so the sequence admission does not apply to it.
-	if !tableMissing(report) && st.Kind() != statement.KindRenameIndex {
+	// index rename and an enum value add are each run by their own
+	// executor, not the sequence executor, so the sequence admission does
+	// not apply to them.
+	if !tableMissing(report) && !runsOwnExecutor(st) {
 		for _, ps := range report.Statements {
 			if ps.Disposition != router.DispositionExecute {
 				continue
@@ -147,4 +148,10 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		return verdict.ErrRefused
 	}
 	return nil
+}
+
+// runsOwnExecutor reports whether the apply runs the statement through an
+// executor of its own rather than the sequence executor.
+func runsOwnExecutor(st statement.Statement) bool {
+	return st.Kind() == statement.KindRenameIndex || st.Kind() == statement.KindAddEnumValue
 }

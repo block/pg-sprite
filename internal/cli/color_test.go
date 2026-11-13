@@ -191,6 +191,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		BlockingPassthrough:       true,
 		WritesBlocked:             true,
 		TableCreated:              true,
+		ExtensionSchemas:          []string{"extensions"},
 		Abandoned:                 true,
 		LockTimeout:               "3s",
 		StatementTimeout:          "10m",

@@ -93,7 +93,7 @@ func (f copySwapFixture) run(t *testing.T, alter string, opts Options) (verdict.
 	t.Helper()
 	st, err := statement.ParseOne(f.inSchema(alter))
 	require.NoError(t, err)
-	return copyAndSwap(t.Context(), f.pool, st, opts, slog.New(slog.DiscardHandler))
+	return copyAndSwap(t.Context(), f.pool, st, opts, 1, slog.New(slog.DiscardHandler))
 }
 
 func (f copySwapFixture) hasColumn(t *testing.T, table, column string) bool {
@@ -507,7 +507,7 @@ func TestCopyAndSwapCancelledWithACauseIsCancelledByTheCaller(t *testing.T) {
 	st, err := statement.ParseOne(f.inSchema(alter))
 	require.NoError(t, err)
 
-	v, err := copyAndSwap(runCtx, f.pool, st, opts, slog.New(slog.DiscardHandler))
+	v, err := copyAndSwap(runCtx, f.pool, st, opts, 1, slog.New(slog.DiscardHandler))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled, "a cancel with a cause still reads as a cancel")
 	assert.ErrorIs(t, err, ownerStop, "and still names the caller's cause")

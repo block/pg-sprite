@@ -33,7 +33,7 @@ several of these unrepresentable, and the in-TCB engineering rules live in
 
 ### CO-1 — The checksum gate is non-skippable
 
-A migration that cannot prove shadow == source **must refuse to cut over**. No flag, mode, or
+A schema change that cannot prove shadow == source **must refuse to cut over**. No flag, mode, or
 capture mechanism removes the gate; it is also the repair primitive for
 [slot-loss reconciliation](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 *Enforced:* cutover entry condition. *Enforced today:* `pkg/checksum` `Verifier` — the
@@ -83,11 +83,11 @@ confirmed source, and hands the swap a drain that reopens the stream from the po
 capture confirmed and applies it under the swap's lock (carries-a-live-table-from-no-row-to-done
 test). The live path reaches the `Runner` through `pkg/router`, which marks a `type-rewrite`
 plan executable only because the copy-and-swap engine carries that operation
-(`copyAndSwapCarriesReason`); every other copy-and-swap reason stays unavailable, so no
+(`copyAndSwapCarriesOperation`); every other copy-and-swap reason stays unavailable, so no
 rewrite reaches an executor without the gate (`migrate --alter`
 type-rewrite-runs-via-copy-and-swap and refuses-without-free-disk tests).
-*Source:* [design-principles](design-principles.md#correctness-and-safety),
-risks-and-mitigations; Spirit's "never skip it".
+*Source:* [design-principles](design-principles.md#correctness-and-safety);
+Spirit's "never skip it".
 
 ### CO-2 — A persisted checksum watermark describes only chunks verified clean on a fresh read
 
@@ -119,7 +119,7 @@ Whether a confirmed, stable source/shadow divergence **aborts** or **self-heals 
 explicit per-mode policy (Spirit's `ContinuousCheckerConfig.DivergenceIsFatal`), not something
 inferred from whether a recopier happens to be wired up:
 
-- **Steady-state migration** (CDC keeping the shadow in sync): divergence is a real bug —
+- **Steady-state schema change** (CDC keeping the shadow in sync): divergence is a real bug —
   `DivergenceIsFatal = true`, abort the cutover.
 - **Reconciliation after slot loss** (the checksum-repair pass): divergence is *expected* —
   `DivergenceIsFatal = false`, and a recopier is **mandatory** (self-heal without one is treated
@@ -634,9 +634,9 @@ read whose comparisons admit no overload is held to its qualification by a sourc
 
 ## Locking and concurrency (LK)
 
-### LK-1 — At most one migration runs per table
+### LK-1 — At most one schema change runs per table
 
-Migrations serialize per table via a **session-scoped advisory lock** — the analog of Spirit's
+Schema changes serialize per table via a **session-scoped advisory lock** — the analog of Spirit's
 `GET_LOCK` `MetadataLock` — with Spirit's hard-won connection rules carried over:
 
 - The key is the two-argument form `pg_try_advisory_lock(classid, objid)`: `classid` is the
@@ -649,7 +649,7 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
   precedes the attempt: the server derives the key and attempts the lock in one statement.
 - The lock is held on a **dedicated single connection outside the pool**, exempt from client-side
   connection recycling (a recycled connection silently releases a session lock — a window in
-  which a second instance could start a concurrent migration on the same table). The session
+  which a second instance could start a concurrent schema change on the same table). The session
   is prepared like a pooled one — bounded `lock_timeout`/`statement_timeout` (LK-2) and a
   catalog-first `search_path` (CO-9) — so nothing on it is unbounded and `hashtext` cannot be
   shadowed by a decoy.
@@ -1064,8 +1064,12 @@ does-not-discard-a-done-row tests).
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
 
 Replication slots are created with a recognizable name prefix; a reaper drops orphaned
-engine-prefixed slots (including one stranded on a demoted writer after failover); a hard
-slot-lag ceiling aborts the migration before an abandoned slot can fill the volume. No exit path
+engine-prefixed slots (including one stranded on a demoted writer after failover); a slot-lag
+ceiling aborts the schema change before an abandoned slot can fill the volume. The ceiling is
+hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
+may stand over it for a bounded grace (the server's release interval plus one cycle) while the
+server releases what the stream confirmed, so the volume needs headroom above the ceiling of
+about the source's write rate times that grace. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
 attempt to reuse — and drops a slot the server created but did not describe usably;
@@ -1075,10 +1079,16 @@ before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder un
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
 drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
 drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
-reads retained WAL on a primary and reports it unknown on a server in recovery rather than
-fail the read; `SlotStatus.WithinLagCeiling` judges a slot against a ceiling in bytes —
-lost before any measure, unknown never read as nothing retained, over the ceiling a typed
-`SlotLagExceededError` — and refuses a ceiling below one byte) + `pkg/checkpoint`
+reads two measures of WAL on a primary — retained, what the slot keeps on the volume, and
+unconfirmed, what its consumer has yet to confirm — and reports both unknown on a server in
+recovery rather than fail the read; `SlotLagWatch` judges successive readings of one slot
+against a ceiling in bytes — lost before any measure, unknown never read as nothing retained,
+unconfirmed WAL over the ceiling a typed `SlotLagExceededError` on one reading (cause
+`stream-behind`), retained WAL over it the same error (cause `wal-retained`) only once the
+readings have stayed over for a grace of `RestartReleaseInterval` plus the consumer's own
+cycle, since the server moves a slot's restart position only at the running-transactions
+records it logs on that interval and so releases confirmed WAL in steps — and refuses a
+ceiling below one byte or a negative grace) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
 database: the slots are listed first and the checkpoint rows that own them read in a later
 statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
@@ -1096,10 +1106,13 @@ snapshot; a slot a live row names, a slot a process holds, and a name wearing th
 without the engine's shape are reported and left; a database whose checkpoint table does not
 exist is refused with `ErrTableMissing` rather than read as all orphans; two reapers over one
 database take turns at each slot, the one that waited finding the slot gone) + `pkg/applier`
-`Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it
-against `CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot
-be set below one byte; a slot that vanished is `SlotLostError`; crossing the ceiling ends
-`Run` with the table lock intact and the slot in place for the operator to read) +
+`Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it,
+through one `decode.SlotLagWatch` for the run whose grace is `RestartReleaseInterval` plus
+the cycle's `Interval`, against `CatchupOptions.SlotLagCeiling`, default
+`decode.DefaultSlotLagCeiling`, which cannot be set below one byte; a slot that vanished is
+`SlotLostError`; the stream's unconfirmed WAL over the ceiling ends `Run` at once, the slot's
+retained WAL over it ends `Run` once it has outlasted the grace, either with the table lock
+intact and the slot in place for the operator to read which measure crossed) +
 `pkg/schemachange.Runner` (on a decoding target it creates the slot under the store's lock on
 the slot's name, in the same step as the row that names it, so the reaper never meets the slot
 before its row; a first save whose row does not land drops the slot and the shadow again, while
@@ -1121,7 +1134,7 @@ slot or publication, or standing in `catching_up` or `reconciling`, since a run 
 slot would leave it behind as nobody's; a decoding target's run refuses a row that names no
 slot, since the source behind it was fenced, not captured, and no stream could replay what it
 missed (refuses-a-row-that-names-a-slot, refuses-the-other-kind-of-runs-row tests).
-*Source:* risks-and-mitigations § logical-decoding risks.
+*Source:* [low-level-design § Postgres-specific risks](low-level-design.md#postgres-specific-risks-to-design-around).
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash
 
@@ -1275,8 +1288,7 @@ written in the index still has to agree) and lists the sequences the swap must r
 `pkg/schemachange` refuses to build a shadow the source's owner does not own, and refuses to inspect or drop anything under the
 shadow's name that is not a plain table the source's owner owns (an inspected shadow must also
 still draw each identity default from the source's sequence). *Source:*
-[low-level-design § operational caveats](low-level-design.md#operational-caveats),
-risks-and-mitigations.
+[low-level-design § operational caveats](low-level-design.md#operational-caveats).
 
 ### ST-6 — Preflight before the first write
 
@@ -1314,8 +1326,8 @@ runs the same check so a resume of such a shadow stops before the copy
 target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
 enforcement; the size guard and privilege preflight need live facts and stay the apply's.
-*Planned enforcement:* wiring those checks into the route, and
-all other execution paths in preflight. *Source:*
+Both front doors run the copy-and-swap checks through `preflight.CheckCopySwap` before the
+route writes anything. *Planned enforcement:* all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ### ST-7 — The executor runs exactly the statement that was gated
@@ -1325,9 +1337,15 @@ which enforces exactly one statement through the real grammar — and refuses, b
 executes, any statement whose target table does not match the preflight proof it was handed.
 A proof for one table can never smuggle SQL against another, and a multi-statement string can
 never reach the database through the executor (pgx's simple protocol would happily run all of
-it). *Enforced:* `pkg/executor` (`ExecuteNative`; `RunSequence` admission re-proves every step's
+it). *Enforced:* `pkg/executor` (`ExecuteNative` and its `ExecuteNativeWithProgress`,
+`ExecuteNativeAdoptingWithProgress`, and `ExecuteNativeValidatingWithProgress` variants;
+`RunSequence` admission re-proves every step's
 target against the preflight proof before the first step executes; `ExecuteCreate` re-proves
-every desired statement's target against the absence proof the same way), `pkg/statement`
+every desired statement's target against the absence proof the same way; `ExecuteIndexRename`
+(and `ExecuteIndexRenameWithProgress`)
+and `ExecuteEnumValueAdd`, whose statements name an index or a type rather than a table,
+confirm in the catalog before the commit that the statement reached the object the engine
+checked), `pkg/statement`
 (proof construction), `pkg/schemachange` (`BuildShadow` accepts only an `ALTER TABLE`
 `statement.Statement` naming the proven table, retargets it onto the shadow through the
 deparser, and refuses before executing unless the retargeted form re-parses to the same
@@ -1479,9 +1497,11 @@ includes the row security). Tests: `TestRunDesired`,
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
 
-- **RF-1** — The table must have a usable PK (or `NOT NULL UNIQUE` key), and the migration must
-  not alter or drop it. The PK is simultaneously chunk key, conflict target, and resume
-  watermark. *Source:* [low-level-design](low-level-design.md#table-shape-requirements-preconditions-to-even-start), Spirit.
+- **RF-1** — The table must have a usable PK — one non-deferrable `smallint`, `integer`, or
+  `bigint` column, refused otherwise as `copy-and-swap-pk-unsupported`
+  ([D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key))
+  — and the schema change must not drop it or convert it through a `USING` expression. The PK
+  is simultaneously chunk key, conflict target, and resume watermark. *Source:* [low-level-design](low-level-design.md#table-shape-requirements-preconditions-to-even-start), Spirit.
 - **RF-2** — No object the swap does not carry may depend on the table: no FKs referencing
   it, no triggers on it, no dependent **views**, no **publication** other than the engine's own
   publishing it (explicit, `FOR ALL TABLES`, or `FOR TABLES IN SCHEMA`), no **subscription**
@@ -1493,7 +1513,7 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   that keeps a new view, foreign key, or trigger from attaching to the source between the proof
   and the rename — refusing with the shape's own cause and rolling the attempt back
   (view-after-shape-proven test).
-  *Source:* [low-level-design coverage](low-level-design.md#schema-shapes), risks-and-mitigations.
+  *Source:* [low-level-design coverage](low-level-design.md#schema-shapes).
 - **RF-3** — Lossy **or failable** conversions are refused up front (shortening below max data
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather
   than discovered mid-copy. *Source:* Spirit blocklist + validation review.
@@ -1674,9 +1694,9 @@ Storage uncertainty, engine-state uncertainty, ownership ambiguity, or in-flight
 confirm the checksum state or the slot position, `status` reports the uncertainty and `cutover`
 refuses — it never rounds up to "ready". *Source:* SchemaBot AGENTS.md ("safety gates first").
 
-### OC-2 — Started migrations remain authoritative
+### OC-2 — Started schema changes remain authoritative
 
-Once a migration has **started** (shadow/slot/triggers exist), a later change of intent — the PR
+Once a schema change has **started** (shadow/slot/triggers exist), a later change of intent — the PR
 updated, the desired-state file reverted, a new plan — must not silently mark it succeeded or
 clean it up. The started operation blocks until an operator verb (`cancel`, `cutover`) resolves
 it and the target is reconciled. Cleanup alone never declares success. *Source:* SchemaBot
@@ -1717,7 +1737,7 @@ AGENTS.md ("TOCTOU review").
 
 ### OC-5 — ID namespaces are never conflated
 
-The engine's migration identifier is an **opaque external ID** to any orchestrator; the
+The engine's schema-change identifier is an **opaque external ID** to any orchestrator; the
 orchestrator's user-facing identifier is never routed to the engine. Every engine API takes
 exactly one of them, by name. *Source:* SchemaBot `docs/grpc-control-edge-cases.md`
 ("Remote apply ID invariant").
