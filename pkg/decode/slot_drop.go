@@ -84,13 +84,21 @@ func dropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name s
 	return confirmSlotGone(ctx, pool, name)
 }
 
+// slotIsOwnSQL reads whether the named slot is a logical slot of the
+// session's database. The pool is the caller's, whatever its search_path,
+// so every comparison is spelled OPERATOR(pg_catalog.=): a lookalike = on
+// name would otherwise call another database's slot this one's and let
+// the drop take it (CO-9).
+const slotIsOwnSQL = `
+		SELECT s.slot_type OPERATOR(pg_catalog.=) 'logical'
+		   AND s.database OPERATOR(pg_catalog.=) pg_catalog.current_database()
+		FROM pg_catalog.pg_replication_slots s
+		WHERE s.slot_name OPERATOR(pg_catalog.=) $1`
+
 // slotIsOwn reports whether the named slot exists and, if so, whether it is
 // a logical slot of pool's own database.
 func slotIsOwn(ctx context.Context, pool *pgxpool.Pool, name string) (own, found bool, err error) {
-	err = pool.QueryRow(ctx, `
-		SELECT s.slot_type = 'logical' AND s.database = pg_catalog.current_database()
-		FROM pg_catalog.pg_replication_slots s
-		WHERE s.slot_name = $1`, name).Scan(&own)
+	err = pool.QueryRow(ctx, slotIsOwnSQL, name).Scan(&own)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
 	}
