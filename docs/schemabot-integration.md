@@ -706,10 +706,16 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   a copy with every acknowledgement cleared and every other field kept, drawn from the same
   list `RunDesired` rejects from, so an acknowledgement added in a later release is cleared
   without an adapter change. The view clears acknowledgements without reporting that one was
-  set, and does not carry an operator's consent across doors: an adapter that maps an
-  operator approval onto an acknowledgement reads it from the operator's input before taking
-  the view, and runs the statement it approves through `Run`. The desired-state door's own
-  refusals still apply to the view, so a destructive plan is still refused whole.
+  set, and does not carry an operator's consent across doors: an adapter calls
+  `opts.Acknowledgements()` before taking the view, which names, in the order above, every
+  acknowledgement `opts` carries and so every one the view sets aside, and runs a statement
+  the operator approved through `Run`. `migrate.Acknowledgements()` names every
+  acknowledgement the engine takes — `force`, `accept-blocking`, `allow-destructive`,
+  `restart`, `block-writes`, each also the `migrate` command's flag for it — so an adapter
+  that maps its own approval switches onto them can assert in its tests that every one is
+  reachable, and learns of one added in a later release. Both return a fresh slice. The
+  desired-state door's own refusals still apply to the view, so a destructive plan is still
+  refused whole.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
