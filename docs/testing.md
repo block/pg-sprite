@@ -465,7 +465,7 @@ same package cover the rest of it.
 | CLI grammar / config | [internal/cli](../internal/cli/cli_test.go) |
 | Pool config, bounded session timeouts | [pkg/dbconn](../pkg/dbconn/pool_config_test.go), [integration](../pkg/dbconn/dbconn_integration_test.go) |
 | Retry classification and behavior | [pkg/dbconn/retry_test.go](../pkg/dbconn/retry_test.go) |
-| RDS/Aurora TLS (unit) | [pkg/dbconn/rds_test.go](../pkg/dbconn/rds_test.go) |
+| RDS/Aurora TLS (unit), every host of a multi-host URL included | [pkg/dbconn/rds_test.go](../pkg/dbconn/rds_test.go), [multi-host (unit)](../pkg/dbconn/rds_tls_test.go) |
 | Verify-full TLS against a live TLS-only server; a CA bundle never falls back to plaintext against a server that accepts both (`TestTLSIntegrationNoPlaintextFallback`, `StartPostgresTLSOrPlaintext`) | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go), [CA pinning (unit)](../pkg/dbconn/ca_tls_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |

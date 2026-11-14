@@ -1,7 +1,6 @@
 package dbconn
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
 	"errors"
@@ -68,14 +67,4 @@ func rdsRootPool() *x509.CertPool {
 		panic("embedded RDS global bundle contains no usable certificates")
 	}
 	return pool
-}
-
-// rdsTLSConfig returns a verify-full TLS config for an RDS/Aurora host using
-// the embedded global bundle.
-func rdsTLSConfig(host string) *tls.Config {
-	return &tls.Config{
-		RootCAs:    rdsRootPool(),
-		ServerName: host,
-		MinVersion: tls.VersionTLS12,
-	}
 }
