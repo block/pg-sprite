@@ -85,6 +85,10 @@ type UnresolvedError struct {
 	Captured decode.LSN
 	// Confirmed is the catch-up's confirmed position when the pass gave up.
 	Confirmed decode.LSN
+
+	// hot is the keys still changing at the last reread, in ascending
+	// order: the Keys the error counts. It is empty under CauseLagging.
+	hot []int64
 }
 
 // Error says what the pass could not decide and what to do about it: a
@@ -157,6 +161,17 @@ type LiveOptions struct {
 	// chunk whose keys each hold still across one pair of reads settles
 	// within the bound however much of the chunk is written.
 	Attempts int
+	// CarryKeys is the most keys the pass may leave for the swap to
+	// compare: keys still changing when their chunk ran out of rereads. A
+	// pass through the complete watermark that confirmed no divergence,
+	// left no chunk lagging, and left no more than this many keys changing
+	// mints a live VerifiedShadow naming them (VerifiedShadow.Carried)
+	// where it would otherwise return an *UnresolvedError: the swap holds
+	// every writer off the source and has applied the whole stream when
+	// it reads them, so there they hold still. Zero carries none, and
+	// every chunk that will not settle stays an *UnresolvedError. It may
+	// not exceed MaxCarryKeys.
+	CarryKeys int
 	// SettleWait bounds each wait for the catch-up to confirm past the
 	// position a chunk was read at. It is spent in sleeps of Poll, so it
 	// must be at least one Poll long.
@@ -202,6 +217,9 @@ func (o LiveOptions) validate(policy DivergencePolicy) error {
 	}
 	if o.Attempts < 1 {
 		return fmt.Errorf("%w: settle attempts %d is below one; use zero for the default", ErrInvalidOptions, o.Attempts)
+	}
+	if o.CarryKeys < 0 || o.CarryKeys > MaxCarryKeys {
+		return fmt.Errorf("%w: carry keys %d is outside 0 to %d; zero leaves no key for the swap", ErrInvalidOptions, o.CarryKeys, MaxCarryKeys)
 	}
 	for _, wait := range []struct {
 		name  string
@@ -261,7 +279,13 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // proofs as Check does, marked as a live pass's. A pass with unsettled
 // chunks and no divergence returns the first unsettled chunk as an
 // *UnresolvedError: not a finding about the data, the shadow is as the pass
-// found it, and the caller runs the pass again. Under DivergenceAbort a
+// found it, and the caller runs the pass again. The exception is a pass
+// told it may leave keys for the swap (LiveOptions.CarryKeys): when it ran
+// through the complete watermark, every chunk it gave up on was one whose
+// keys kept changing, and those keys number no more than it may leave, it
+// returns a nil error and a live VerifiedShadow naming them
+// (VerifiedShadow.Carried), with no clean watermark and the chunks still
+// counted unsettled in the Report. Under DivergenceAbort a
 // divergence is returned as a *DivergenceError with the shadow untouched,
 // whether or not other chunks were unsettled. Under DivergenceRepair every
 // divergent chunk is recopied from the source in one transaction, with
@@ -303,12 +327,16 @@ func (v *Verifier) CheckLive(ctx context.Context, pool *pgxpool.Pool, through co
 	}
 	ctx, unbind := v.lock.Bind(ctx)
 	defer unbind()
-	report, unresolved, err := v.sweepAndSettle(ctx, pool, through, live)
+	report, left, err := v.sweepAndSettle(ctx, pool, through, live)
 	if err != nil {
 		return Outcome{}, v.lostOr(err)
 	}
+	unresolved := left.first
 	if report.Clean() {
 		return v.prove(report, true), nil
+	}
+	if len(left.carried) > 0 {
+		return v.proveCarrying(report, left.carried), nil
 	}
 	if len(report.Mismatches) == 0 {
 		return Outcome{Report: report}, v.verifyError(unresolved)
@@ -343,21 +371,21 @@ const heldChunks = 4
 // sweepAndSettle runs the live sweep and settles every chunk it found
 // differing, in key order, returning the report with the confirmed
 // divergences as its mismatches and the settled and unsettled chunks
-// counted, and the first unsettled chunk when there was one. The sweep
-// holds the chunks it finds differing until heldChunks of them are held,
-// settles those, and reads on; whatever it holds when it reaches the
-// watermark is settled last. A chunk that does not settle is counted and
-// the next is settled; only a failure that says nothing about the data —
-// the context ending, the lock lost, a read refused — stops the settling.
-func (v *Verifier) sweepAndSettle(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, live LiveOptions) (Report, *UnresolvedError, error) {
+// counted, and what it left unsettled: the first such chunk when there was
+// one, and the keys the swap is to compare when the pass may carry them.
+// The sweep holds the chunks it finds differing until heldChunks of them
+// are held, settles those, and reads on; whatever it holds when it reaches
+// the watermark is settled last. A chunk that does not settle is counted
+// and the next is settled; only a failure that says nothing about the data
+// — the context ending, the lock lost, a read refused — stops the
+// settling.
+func (v *Verifier) sweepAndSettle(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, live LiveOptions) (Report, leftUnsettled, error) {
 	stmts, err := v.digestStatements(ctx, pool)
 	if err != nil {
-		return Report{}, nil, err
+		return Report{}, leftUnsettled{}, err
 	}
-	var (
-		held    []observation
-		settled settledChunks
-	)
+	var held []observation
+	settled := settledChunks{hot: hotKeys{limit: live.CarryKeys}}
 	settleHeld := func(ctx context.Context) error {
 		for _, prior := range held {
 			if err := v.settleInto(ctx, pool, stmts, prior, live, &settled); err != nil {
@@ -375,28 +403,40 @@ func (v *Verifier) sweepAndSettle(ctx context.Context, pool *pgxpool.Pool, throu
 		return settleHeld(ctx)
 	})
 	if err != nil {
-		return Report{}, nil, err
+		return Report{}, leftUnsettled{}, err
 	}
 	if err := settleHeld(ctx); err != nil {
-		return Report{}, nil, err
+		return Report{}, leftUnsettled{}, err
 	}
 	if lost := v.lockLost(); lost != nil {
-		return Report{}, nil, lost
+		return Report{}, leftUnsettled{}, lost
 	}
+	carried := settled.carried(through)
 	report.Mismatches = settled.mismatches
 	report.Settled = settled.settled
 	report.Unsettled = settled.unsettled
-	return report, settled.first, nil
+	report.Carried = len(carried)
+	return report, leftUnsettled{first: settled.first, carried: carried}, nil
+}
+
+// leftUnsettled is what a live pass could not settle: the first chunk it
+// gave up on, nil when every chunk settled, and the keys it leaves for the
+// swap to compare, nil unless the pass may carry every chunk it gave up on.
+type leftUnsettled struct {
+	first   *UnresolvedError
+	carried []int64
 }
 
 // settledChunks is what a live pass has concluded about the chunks it has
 // settled so far: the confirmed divergences in key order, how many chunks
-// settled and how many could not, and the first that could not.
+// settled and how many could not, the first that could not, and the keys
+// those chunks left changing.
 type settledChunks struct {
 	mismatches []Mismatch
 	settled    int
 	unsettled  int
 	first      *UnresolvedError
+	hot        hotKeys
 }
 
 // settleInto settles one differing chunk and records what it concluded in
@@ -406,6 +446,7 @@ func (v *Verifier) settleInto(ctx context.Context, pool *pgxpool.Pool, stmts sta
 	settled, err := v.settle(ctx, pool, stmts, prior, 0, live)
 	if unresolved, ok := errors.AsType[*UnresolvedError](err); ok {
 		into.unsettled++
+		into.hot.record(unresolved)
 		if into.first == nil {
 			into.first = unresolved
 		}

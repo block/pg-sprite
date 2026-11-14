@@ -39,6 +39,8 @@ func TestLiveOptionsRefuseUnboundedValues(t *testing.T) {
 	cases := map[string]LiveOptions{
 		"no confirmed source":             {},
 		"negative attempts":               {Confirmed: confirmedAt(0), Attempts: -1},
+		"negative carry keys":             {Confirmed: confirmedAt(0), CarryKeys: -1},
+		"carry keys above the ceiling":    {Confirmed: confirmedAt(0), CarryKeys: MaxCarryKeys + 1},
 		"settle wait below a millisecond": {Confirmed: confirmedAt(0), SettleWait: time.Microsecond},
 		"poll below a millisecond":        {Confirmed: confirmedAt(0), Poll: time.Nanosecond},
 		"settle wait shorter than poll":   {Confirmed: confirmedAt(0), SettleWait: 10 * time.Millisecond, Poll: 20 * time.Millisecond},
@@ -48,6 +50,13 @@ func TestLiveOptionsRefuseUnboundedValues(t *testing.T) {
 			assert.ErrorIs(t, opts.withDefaults().validate(DivergenceAbort), ErrInvalidOptions)
 		})
 	}
+}
+
+// The carry limit's range is inclusive: a pass may be told to leave exactly
+// MaxCarryKeys keys, and only one more is refused.
+func TestLiveOptionsAcceptTheCarryCeiling(t *testing.T) {
+	live := LiveOptions{Confirmed: confirmedAt(0), CarryKeys: MaxCarryKeys}.withDefaults()
+	assert.NoError(t, live.validate(DivergenceAbort))
 }
 
 // pauseNever is a FlushGate whose hold is a no-op, for options tests that
