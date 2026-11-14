@@ -36,25 +36,31 @@ type Reaped struct {
 // database's rows can speak for this database's slots (D11). The active
 // flag is advisory: pg_replication_slots reads shared memory, not a
 // snapshot, so holders come and go underneath any statement, and the drop
-// itself is what finds out whether a slot is held.
+// itself is what finds out whether a slot is held. The reaper runs on
+// whatever pool the caller passes, so every comparison is spelled
+// OPERATOR(pg_catalog.…) (LIKE is ~~): a lookalike = on name on the
+// session's search_path would otherwise list another database's slots as
+// this one's (CO-9).
 const candidateSlotsSQL = `
 SELECT slot_name, active
 FROM pg_catalog.pg_replication_slots
-WHERE database = pg_catalog.current_database()
-  AND slot_type = 'logical'
-  AND slot_name LIKE $1
+WHERE database OPERATOR(pg_catalog.=) pg_catalog.current_database()
+  AND slot_type OPERATOR(pg_catalog.=) 'logical'
+  AND slot_name OPERATOR(pg_catalog.~~) $1
 ORDER BY slot_name`
 
 // liveRowSlotsSQL names, among the given slots, those a checkpoint row in a
 // non-terminal phase owns. Terminal is judged by name, done or failed, and
 // every other phase counts as live: a row a newer engine left in a phase
 // this one does not know keeps its slot, since only that engine knows
-// whether the run behind it still decodes from it.
+// whether the run behind it still decodes from it. Its comparisons are
+// pg_catalog-qualified for the same reason as candidateSlotsSQL's; NOT IN
+// is its expansion, <> ALL.
 const liveRowSlotsSQL = `
 SELECT slot_name
 FROM ` + tableIdent + `
-WHERE slot_name = ANY($1)
-  AND phase NOT IN ($2, $3)`
+WHERE slot_name OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
+  AND phase OPERATOR(pg_catalog.<>) ALL (ARRAY[$2, $3]::pg_catalog.text[])`
 
 // candidateSlot is one row of candidateSlotsSQL.
 type candidateSlot struct {
