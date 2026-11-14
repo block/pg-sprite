@@ -1660,9 +1660,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   acknowledgement that names any table but the resolved target is a usage error that executes
   nothing. Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
   own sentinel before any database work, and `migrate --desired` rejects each flag. A new
-  string field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a new
-  destructive shape, or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry
-  entry and a desired-state decision. RF-10, RF-5, and AB-1..AB-5 state what each gate does;
+  string or bool field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a
+  new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI
+  until it has a registry entry and a desired-state decision, and a registry acknowledgement
+  with no `migrate` flag fails too. `Acknowledgements` exports the set by name and
+  `Options.Acknowledgements` names the ones a policy carries, so an adapter can tell
+  `WithoutAcknowledgements` set one aside. RF-10, RF-5, and AB-1..AB-5 state what each gate does;
   this invariant states that the set of acknowledgement gates is complete. Irreversible steps
   the engine takes on its own, with no operator decision to acknowledge, are outside the
   registry and held by their own invariants: dropping the retained source after a committed
@@ -1672,7 +1675,7 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
   refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and, for a CLI flag,
+  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
   (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
@@ -1684,9 +1687,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
   derives; `TestIrreversibleOperationsAreGated` for each entry's refusal and wrong-target usage
   error against real PostgreSQL with the table, checkpoint, and write path unchanged, and a
-  restart's unrecorded leftover left standing; and
-  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for each CLI flag reaching exactly its own
-  field and sentinel.
+  restart's unrecorded leftover left standing;
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for every `migrate` flag being an
+  acknowledgement or declared not one, each acknowledgement flag reaching exactly its own
+  field and sentinel, and every registry acknowledgement having a flag; and
+  `TestAcknowledgementsNamesTheRegistry` and
+  `TestOptionsAcknowledgementsNamesWhatThePolicyCarries` for the exported view.
   *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
 
 ## Orchestration / control-plane (OC)

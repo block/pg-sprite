@@ -20,10 +20,10 @@ import (
 // Options.WithoutAcknowledgements clears the same set. The destructive operation
 // shapes are not listed here but derived from the planner, the one answer
 // both destructive gates use. TestIrreversibleOperationRegistryIsComplete
-// fails when an acknowledgement, a string field on Options or
+// fails when an acknowledgement, a string or bool field on Options or
 // CopySwapOptions that could carry one, or a destructive shape arrives
 // without an entry, and when a listed entry names the wrong acknowledgement
-// or refusal.
+// or refusal. Acknowledgements exports the set by name.
 
 // ackKind is one typed acknowledgement the imperative front door takes.
 // Its value is the migrate command's flag name.
@@ -74,6 +74,37 @@ func (a ackKind) value(opts Options) (string, bool) {
 	return *f, true
 }
 
+// Acknowledgements returns the name of every typed acknowledgement the
+// engine takes, in the order [RunDesired] rejects them: "force",
+// "accept-blocking", "allow-destructive", "restart", "block-writes", and
+// any added later. Each name is also the migrate command's flag for it.
+// An orchestrator that maps its own approval switches onto the engine's
+// acknowledgements can assert every one is reachable. Each call returns a
+// fresh slice, so changing it changes nothing else.
+func Acknowledgements() []string {
+	kinds := ackKinds()
+	names := make([]string, 0, len(kinds))
+	for _, a := range kinds {
+		names = append(names, string(a))
+	}
+	return names
+}
+
+// Acknowledgements returns the name, as [Acknowledgements] spells it, of
+// every typed acknowledgement o carries, in the same order, or nil when o
+// carries none. An adapter calls it before [Options.WithoutAcknowledgements]
+// to learn which of an operator's acknowledgements the desired-state view
+// sets aside. Each call returns a fresh slice.
+func (o Options) Acknowledgements() []string {
+	var names []string
+	for _, a := range ackKinds() {
+		if v, _ := a.value(o); v != "" {
+			names = append(names, string(a))
+		}
+	}
+	return names
+}
+
 // WithoutAcknowledgements returns a copy of o with every typed
 // acknowledgement cleared — Force, AcceptBlocking, AllowDestructive,
 // CopySwap.Restart, CopySwap.BlockWrites, and any added later — and every
@@ -81,9 +112,10 @@ func (a ackKind) value(opts Options) (string, bool) {
 // policy: an adapter that builds one Options for both front doors passes
 // [RunDesired] o.WithoutAcknowledgements(), which RunDesired never rejects
 // for an acknowledgement. o itself is not modified. The view drops an
-// operator's consent without reporting it: an adapter that maps an operator
-// approval onto an acknowledgement reads it from the operator's input, not
-// from the view, and the desired-state door's own refusals still apply.
+// operator's consent without reporting it: an adapter that must not lose
+// one calls [Options.Acknowledgements] on o first, which names every
+// acknowledgement the view sets aside, and the desired-state door's own
+// refusals still apply.
 func (o Options) WithoutAcknowledgements() Options {
 	for _, a := range ackKinds() {
 		if f := a.field(&o); f != nil {
