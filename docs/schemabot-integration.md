@@ -695,6 +695,14 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `RunDesired` rejects it ([below](#rundesired-takes-no-acknowledgement)) and keeps
   refusing a destructive plan whole, so a declarative drop the operator approves runs as its
   own imperative statement.
+- **A wrong-table acknowledgement goes back to the operator.** Each acknowledgement `Run`
+  takes must name a schema-qualified table — the resolved target, or for `AcceptBlocking` the
+  table the statement locks — and one that names any other table is
+  a usage error with a zero verdict and nothing executed, carrying its own sentinel:
+  `ErrForceMismatch`, `ErrAcceptBlockingMismatch`, `ErrAllowDestructiveMismatch`,
+  `ErrRestartMismatch`, `ErrBlockWritesMismatch`. Branch on them with `errors.Is`, not on the
+  message, and report the mismatch to the operator rather than retrying: the message carries
+  the resolved table and the one given, and a retry with the same input fails the same way.
 - <a id="rundesired-takes-no-acknowledgement"></a>**`RunDesired` takes no acknowledgement.** Each of `Force`, `AcceptBlocking`,
   `AllowDestructive`, `CopySwap.Restart`, and `CopySwap.BlockWrites` accepts a loss for one
   statement the operator wrote, and a desired-state run executes statements the plan derived.

@@ -1658,7 +1658,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   reason, except the restart: without `--restart` a stopped run resumes and nothing is
   discarded, and a leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
-  nothing. Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
+  nothing, typed by its own sentinel so an embedder tells it from any other error.
+  Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
   own sentinel before any database work, and `migrate --desired` rejects each flag. A new
   string field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a new
   destructive shape, or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry
@@ -1672,12 +1673,15 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
   refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and, for a CLI flag,
+  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel its wrong-target check wraps;
+  a scenario in `irreversibleScenarios`; and, for a CLI flag,
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
   (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
-  `ErrBlockWritesNotSupported`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
+  `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`),
+  `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
   registry's shape and the desired-state rejections;
   `TestEveryOpKindIsClassifiedForDestructiveness` and
