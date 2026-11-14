@@ -285,7 +285,18 @@ func copySwapOutcome(st statement.Statement, hold sourceHold, result schemachang
 		Table:         qualified(st),
 		Detail:        detail,
 		WritesBlocked: hold == holdFence,
+		SwapLSN:       swapLSN(result),
 	}, nil
+}
+
+// swapLSN renders the WAL position the run's own swap transaction read, or
+// empty when the run's proof of the swap carries none: one re-derived from
+// the catalog, or none at all once the retained source was gone.
+func swapLSN(result schemachange.Result) string {
+	if result.Swapped.SwapPosition == 0 {
+		return ""
+	}
+	return result.Swapped.SwapPosition.String()
 }
 
 // copySwapPreflightVerdict folds a copy-and-swap preflight error into Run's

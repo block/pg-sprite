@@ -2,13 +2,15 @@
 // route: the built binary carries an identity-key retype over a large table
 // while a concurrent workload writes it through the copy, the catch-up, the
 // verify pass, the drain, and the swap, and the result is judged by oracles
-// that make no timing assumption. The row oracle judges every row except
-// those the load wrote after the last checkpoint poll before the cutover:
-// the writes of the drain and the swap are carried but not compared, and
-// results.json reports how many keys that leaves out. It is skipped unless
-// LOAD_PROOF=1; `make load-proof` builds the binary and runs it against the
-// compose database, and the same variables point it at any other server
-// with logical decoding on (see docs/testing.md).
+// that make no timing assumption. The row oracle judges every row whose
+// last write the load recorded below the WAL position the swap read under
+// its lock, the drain's and the lock wait's writes included; it leaves out
+// the rows written after the swap, which exist only in the live table, and
+// the rows of writes whose client deadline fired before their outcome was
+// heard, and results.json reports how many keys that leaves out. It is
+// skipped unless LOAD_PROOF=1; `make load-proof` builds the binary and runs
+// it against the compose database, and the same variables point it at any
+// other server with logical decoding on (see docs/testing.md).
 package loadproof_test
 
 import (
@@ -30,7 +32,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
-	"github.com/block/pg-sprite/pkg/schemachange"
+	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -263,6 +265,9 @@ func TestLoadProof(t *testing.T) {
 	var v verdict.Verdict
 	require.NoError(t, json.Unmarshal(output, &v), "verdict JSON: %s", output)
 	require.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome, "%s: %s", v.Reason, v.Detail)
+	require.NotEmpty(t, v.SwapLSN, "a run that committed its own swap reports the swap's WAL position")
+	swap, err := decode.ParseLSN(v.SwapLSN)
+	require.NoError(t, err)
 	require.NoError(t, w.Err, "the checkpoint poll failed")
 	require.True(t, w.MarkSet, "the poll never saw the row before the cutover, so no write is known to have committed before the swap")
 	requireMarkSpansTheStream(t, w, atStart)
@@ -273,7 +278,7 @@ func TestLoadProof(t *testing.T) {
 	require.NoError(t, err)
 	res.recordLoad(summary, atExit)
 
-	assertRowsConverged(t, pool, table, summary, w.Mark, res)
+	assertRowsConverged(t, pool, table, summary, swap, res)
 	assertCatalogMatchesNative(t, pool, table, shape)
 	window := swapWindow{opened: w.MarkAt, closed: exited}
 	for _, f := range summary.Failures {
@@ -345,21 +350,18 @@ func waitForLoad(t *testing.T, load *testutil.LoadGenerator, reached func(testut
 }
 
 // assertRowsConverged holds the retained source and the live table to the
-// row oracle over every row the load is not known to have touched after
-// the mark: a write the poll saw committed while the row still said the
-// swap had not happened is in both relations, and a later write may be in
-// the live table alone, so those keys are taken out of the comparison on
-// both sides rather than judged.
-func assertRowsConverged(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, summary testutil.Summary, mark testutil.Progress, res *results) {
+// row oracle over every row whose last write the load recorded below the
+// swap's WAL position (see excludedKeys): such a write committed before the
+// swap took its lock, so it is in both relations, while a later write, or
+// one whose outcome the load never heard, is taken out of the comparison
+// on both sides rather than judged.
+func assertRowsConverged(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, summary testutil.Summary, swap decode.LSN, res *results) {
 	t.Helper()
-	excluded := summary.TouchedIDs[mark.Touched:]
-	report, err := testutil.Diff(t.Context(), pool,
-		testutil.RelationRef{Schema: table.Schema, Table: schemachange.OldName(table.Schema, table.Table)},
-		testutil.RelationRef{Schema: table.Schema, Table: table.Table},
-		testutil.ConvergeOptions{ExcludeKeys: excluded})
+	report, excluded, err := judgeRows(t.Context(), pool, table, summary, swap)
 	require.NoError(t, err)
 	res.Rows.Compared = report.SourceCount
 	res.Rows.Excluded = len(excluded)
+	res.Rows.Ambiguous = len(summary.Ambiguous)
 	assert.True(t, report.Converged(), "the retained source and the live table differ: %+v", report.Differences)
 	assert.Positive(t, report.SourceCount, "the comparison covered no rows")
 }

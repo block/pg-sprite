@@ -90,9 +90,13 @@ type phaseInfo struct {
 type rowsInfo struct {
 	// Compared is how many retained-source rows the oracle compared.
 	Compared int64 `json:"compared"`
-	// Excluded is how many keys the load touched after the mark and the
-	// oracle therefore left out.
+	// Excluded is how many keys the oracle left out: those the load wrote
+	// above the swap's WAL position and those of writes whose outcome it
+	// never heard.
 	Excluded int `json:"excluded"`
+	// Ambiguous is how many keys writes that ran out their client-side
+	// deadline named, each of them among Excluded.
+	Ambiguous int `json:"ambiguous"`
 }
 
 // The keys failures without a SQLSTATE are counted under in

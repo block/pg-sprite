@@ -148,12 +148,15 @@ one convention.
 A load spec with `RecordFailures` keeps its workers writing through statements that
 fail for a reason other than an expected race, and lists each with its SQLSTATE and
 time, so a test measures what a swap does to an application's statements.
-`TouchedIDs` lists the key of every row a committed mutation wrote, in commit order
-(both keys of a unique-key swap or a key move), and `Progress` reads the counts and the
-list's length without copying it. The oracle's `ExcludeKeys` leaves keys out of both
+`Touches` lists the key of every row a committed mutation wrote, in commit order
+(both keys of a unique-key swap or a key move), each with the server's WAL insert
+position the mutation read inside its write, and `Progress` reads the counts and the
+list's length without copying it. Every mutation names its keys before it writes, so a
+write that runs out its client-side deadline, which the server may still commit, lists
+its keys in `Ambiguous` instead. The oracle's `ExcludeKeys` leaves keys out of both
 sides and both counts, so a test that marks the touched list at an instant compares
 exactly the rows last written before it. The [load proof](#the-load-proof) is built on
-these three.
+these.
 
 ### TM-6 — Every mutation direction per property
 
@@ -272,11 +275,15 @@ options the CLI sets; an importer's own cancellation and resume are not part of 
 A pass proves:
 
 - the binary exits 0 with `executed-via-copy-and-swap`;
-- the retained `_old` table and the live table agree row for row over every key the
-  load did not write after the mark, the last checkpoint poll before the cutover. The
-  mark must fall in the verify pass, after the run inserted, updated and deleted. Writes
-  during the drain and the swap are carried but not compared; `rows.excluded` in
-  `results.json` counts the keys left out;
+- the retained `_old` table and the live table agree row for row over every key whose
+  last write the load recorded below the verdict's `swap_lsn`, the WAL position the
+  swap read under its lock: writes made during the drain and while the swap waited for
+  its lock are compared too. A write above that position exists only in the live
+  table, and a write that ran out its client-side deadline may have committed on
+  either side, so their keys are left out; `rows.excluded` in `results.json` counts
+  them and `rows.ambiguous` the deadline ones. The mark, the last checkpoint poll
+  before the cutover, must fall in the verify pass, after the run inserted, updated
+  and deleted, so the judged writes span the stream;
 - the live table's catalog equals that of a table the statement changed natively;
 - every load failure is one the swap causes, when it can cause it: a lock timeout or a
   client deadline between the mark and one statement deadline after the binary exits,

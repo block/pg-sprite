@@ -63,7 +63,8 @@ var swapProofKeyPaths = []string{
 // can re-derive it: the pairing re-derived from the names the swap gave
 // knows no shadow names and lists an unpaired source dependent under the
 // derived name it bears, and no later read can know how many lock
-// acquisitions the swap needed.
+// acquisitions the swap needed or where the WAL stood inside its
+// transaction.
 func afterTheFact(proof schemachange.SwapProof) schemachange.SwapProof {
 	rederived := func(p schemachange.DependentPairing) schemachange.DependentPairing {
 		pairs := make([]schemachange.DependentPair, 0, len(p.Pairs))
@@ -79,6 +80,7 @@ func afterTheFact(proof schemachange.SwapProof) schemachange.SwapProof {
 	proof.Indexes = rederived(proof.Indexes)
 	proof.Statistics = rederived(proof.Statistics)
 	proof.Attempts = 0
+	proof.SwapPosition = 0
 	return proof
 }
 

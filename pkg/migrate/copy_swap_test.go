@@ -276,6 +276,18 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 		assert.NotContains(t, v.Detail, "the run then returned")
 		assert.False(t, v.WritesBlocked, "a live run's verdict does not claim the table was offline")
+		assert.Empty(t, v.SwapLSN, "a run whose proof carries no swap position reports none")
+	})
+
+	t.Run("the swap's WAL position is rendered as pg_lsn text", func(t *testing.T) {
+		done := schemachange.Result{
+			Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone},
+			Swapped:    schemachange.SwapProof{SwapPosition: 0x1_00A2B3C8},
+			SwapProven: true,
+		}
+		v, err := copySwapOutcome(st, holdSlot, done, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "1/A2B3C8", v.SwapLSN)
 	})
 
 	t.Run("a block-writes done row is marked writes-blocked", func(t *testing.T) {

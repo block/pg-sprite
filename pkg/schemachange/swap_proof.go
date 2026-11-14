@@ -3,6 +3,8 @@ package schemachange
 import (
 	"encoding/json"
 	"slices"
+
+	"github.com/block/pg-sprite/pkg/decode"
 )
 
 // SwapProof is the plain view of a SwappedTable: the same facts as its
@@ -37,6 +39,9 @@ type SwapProof struct {
 	// Attempts is how many ACCESS EXCLUSIVE acquisitions the swap needed;
 	// zero in a proof re-derived after the fact.
 	Attempts int `json:"attempts"`
+	// SwapPosition is the WAL position the swap transaction read under its
+	// lock before committing; zero in a proof re-derived after the fact.
+	SwapPosition decode.LSN `json:"swap_position,omitempty"`
 }
 
 // Proof returns the plain view of the swapped table: each field is what
@@ -54,6 +59,7 @@ func (s SwappedTable) Proof() SwapProof {
 		OwnedSequences:  s.OwnedSequences(),
 		IdentityColumns: s.IdentityColumns(),
 		Attempts:        s.Attempts(),
+		SwapPosition:    s.SwapPosition(),
 	}
 }
 
@@ -63,10 +69,11 @@ func (s SwappedTable) Proof() SwapProof {
 // live table and the same identity columns recreated on it. These are the
 // facts that identify what the swap left, and every one of them is read
 // back from the catalog whichever way the proof was minted. The dependent
-// pairings and Attempts are left out on purpose: the cutover's pairing
-// names the shadow dependents the swap renamed, a pairing re-derived
-// afterwards cannot (the derived names have no inverse), and no later read
-// can know how many lock acquisitions the swap needed. A resume compares
+// pairings, Attempts, and SwapPosition are left out on purpose: the
+// cutover's pairing names the shadow dependents the swap renamed, a
+// pairing re-derived afterwards cannot (the derived names have no
+// inverse), and no later read can know how many lock acquisitions the swap
+// needed or where the WAL stood inside its transaction. A resume compares
 // its checkpoint with the inspection through this, not through ==.
 func (p SwapProof) SameSwap(other SwapProof) bool {
 	return p.Schema == other.Schema &&

@@ -141,13 +141,24 @@ func (f copySwapFixture) rowCount(t *testing.T, table string) int64 {
 // fold: the statement's shape is live under the source's name with every
 // row the source had, the retained source is gone, and the one verdict
 // says so — the copy-and-swap outcome, a nil error, and a detail that
-// reports what the verification pass covered.
+// reports what the verification pass covered. The verdict carries the WAL
+// position the swap read under its lock, which lies between the positions
+// the server stood at before the run started and after it returned.
 func TestCopyAndSwapRunsAQuiescedTableToOneVerdict(t *testing.T) {
 	f := newCopySwapFixture(t)
 	f.createOrders(t)
 
+	var before string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT pg_current_wal_insert_lsn()::text`).Scan(&before))
 	v, err := f.run(t, `ALTER TABLE {schema}.orders DROP COLUMN note`, f.options())
 	require.NoError(t, err)
+	require.NotEmpty(t, v.SwapLSN, "the verdict carries the swap's WAL position")
+	var afterBefore, beforeNow bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT $1::pg_lsn < $2::pg_lsn, $2::pg_lsn < pg_current_wal_insert_lsn()`,
+		before, v.SwapLSN).Scan(&afterBefore, &beforeNow))
+	assert.True(t, afterBefore, "the swap's position %s is past where the WAL stood before the run, %s", v.SwapLSN, before)
+	assert.True(t, beforeNow, "the swap's position %s is below where the WAL stands after the run", v.SwapLSN)
 
 	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 	assert.Equal(t, f.schema+".orders", v.Table)
