@@ -295,7 +295,13 @@ than this machine (`localhost`, a loopback address, or a Unix socket) is refused
 `LOAD_PROOF_DSN` also skips starting the compose database. The test refuses to start
 when `go test`'s `-timeout` would end it before the binary's own two-hour budget,
 because a test the deadline ends skips the cleanup that drops the run's replication
-slot; the target passes `3h`. The record, `results.json` in the package directory
+slot; the target passes `3h`. An interrupt (Ctrl-C, or SIGTERM sent to the test
+process) does not skip it: the test kills the binary, waits for it, and fails, and its
+cleanups drop the slot, the publication, the checkpoint row, and the seeded schema; a
+second interrupt while they run is ignored so they finish. The slot cleanup waits, a
+bounded time longer than the server's default `wal_sender_timeout`, for the server to
+let go of the slot the killed binary held, and fails, leaving the slot, when something
+still holds it after that. The record, `results.json` in the package directory
 (`LOAD_PROOF_RESULTS` moves it), is written whether the run passed or failed: phase
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
 mutation, and the verdict.

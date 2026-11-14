@@ -3,7 +3,9 @@ package loadproof_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -59,24 +61,76 @@ func removeLeftoversOnCleanup(t *testing.T, pool *pgxpool.Pool, table testutil.W
 const deleteCheckpointSQL = `DELETE FROM "` + checkpoint.SchemaName + `"."` + checkpoint.TableName + `"
 	WHERE schema_name = $1 AND table_name = $2`
 
-// dropSlotIfLeft drops the replication slot when it still exists and no
+// The wait for a run's slot to be let go before the cleanup drops it.
+const (
+	// slotReleaseDeadline bounds the wait. The binary has exited by the
+	// time the cleanup runs, and the server releases the slot once the
+	// walsender serving the binary notices its client is gone: a moment
+	// after a closed connection, and within wal_sender_timeout (one minute
+	// by default) for a client that vanished without closing it. The
+	// deadline is that timeout with margin, so a slot still held after it
+	// belongs to a process that is still running.
+	slotReleaseDeadline = 90 * time.Second
+	// slotReleasePollInterval paces the reads of the slot's holder.
+	slotReleasePollInterval = 100 * time.Millisecond
+)
+
+// errSlotStillHeld reports a slot a backend still held when the wait for
+// it to be let go ran out.
+var errSlotStillHeld = errors.New("replication slot still held")
+
+// dropSlotIfLeft drops the replication slot when it still exists, once no
 // backend holds it, reporting whether it did. A slot the engine already
-// removed is not an error; a slot still active belongs to a process that
-// is still running and is left to it.
+// removed is not an error. A slot still held is waited on for
+// slotReleaseDeadline, since the server lets go of a killed binary's slot
+// only after it notices the closed connection; one held past that belongs
+// to a process that is still running, and is left to it with
+// errSlotStillHeld.
 func dropSlotIfLeft(ctx context.Context, pool *pgxpool.Pool, slot string) (bool, error) {
-	var active bool
-	err := pool.QueryRow(ctx, `SELECT active FROM pg_replication_slots WHERE slot_name = $1`, slot).Scan(&active)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if active {
-		return false, errors.New("slot is still active")
+	return dropSlotWhenReleased(ctx, pool, slot, slotReleaseDeadline)
+}
+
+// dropSlotWhenReleased is dropSlotIfLeft with the wait for the slot's
+// holder bounded by deadline.
+func dropSlotWhenReleased(ctx context.Context, pool *pgxpool.Pool, slot string, deadline time.Duration) (bool, error) {
+	giveUp := time.NewTimer(deadline)
+	defer giveUp.Stop()
+	poll := time.NewTicker(slotReleasePollInterval)
+	defer poll.Stop()
+	for {
+		holder, found, err := slotHolder(ctx, pool, slot)
+		if err != nil {
+			return false, fmt.Errorf("read replication slot %s: %w", slot, err)
+		}
+		if !found {
+			return false, nil
+		}
+		if holder == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false, fmt.Errorf("wait for replication slot %s to be let go: %w", slot, ctx.Err())
+		case <-giveUp.C:
+			return false, fmt.Errorf("%w: backend %d still holds %s after %s, so the process that owns it is still running", errSlotStillHeld, holder, slot, deadline)
+		case <-poll.C:
+		}
 	}
 	if _, err := pool.Exec(ctx, `SELECT pg_drop_replication_slot($1)`, slot); err != nil {
-		return false, err
+		return false, fmt.Errorf("drop replication slot %s: %w", slot, err)
 	}
 	return true, nil
+}
+
+// slotHolder reads the process ID of the backend holding the slot, zero
+// when none does, and whether the slot exists.
+func slotHolder(ctx context.Context, pool *pgxpool.Pool, slot string) (holder int32, found bool, err error) {
+	err = pool.QueryRow(ctx, `SELECT coalesce(active_pid, 0) FROM pg_replication_slots WHERE slot_name = $1`, slot).Scan(&holder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return holder, true, nil
 }

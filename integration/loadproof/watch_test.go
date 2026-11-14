@@ -95,6 +95,10 @@ func startWatch(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, 
 			w.record(cp, progress, readAt, lag)
 		}
 	})
+	// A test that ends before it stops the poll — interrupted, or failed
+	// while the binary ran — still waits for it before the leftover
+	// cleanup and the pool close run.
+	t.Cleanup(func() { w.stop() })
 	return w
 }
 
