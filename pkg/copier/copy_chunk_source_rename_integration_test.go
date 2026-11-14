@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/copier"
 )
 
@@ -45,11 +46,11 @@ func TestCopierFailsWhenASourceColumnIsRenamedBeforeTheFirstChunk(t *testing.T) 
 	source := pgx.Identifier{f.schema, shadow.SourceTable()}.Sanitize()
 
 	var renameErr error
-	clock := &hookedClock{hook: func() {
+	clock := testutil.NewHookedClock(func() {
 		if _, err := f.pool.Exec(t.Context(), "ALTER TABLE "+source+" RENAME COLUMN qty TO quantity"); err != nil {
 			renameErr = fmt.Errorf("rename the source column: %w", err)
 		}
-	}}
+	})
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{Workers: 1, Clock: clock})
 	require.NoError(t, err)
 	err = c.Run(t.Context(), f.pool)

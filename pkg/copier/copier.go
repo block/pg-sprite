@@ -65,6 +65,10 @@ type Options struct {
 	CollisionBackoff time.Duration
 	// Clock times each chunk for the chunker's chunk-time throttling
 	// feedback (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
+	// Its first reading comes at the start of the first chunk, after the
+	// resume clear and the first claim; tests hook that reading to place a
+	// concurrent shadow writer (testutil.ShadowPin), so a clock reading
+	// added earlier in Run moves every such test's writer ahead of the clear.
 	Clock progress.Clock
 	// Tracker, when set, is told the copy's work for the lifetime of Run: the
 	// copier is its progress.WorkSource from before the first chunk until

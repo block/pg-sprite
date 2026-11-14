@@ -52,14 +52,14 @@ func TestCopierReportsItsWorkWhileItRuns(t *testing.T) {
 	const rows = 2000
 	target, lock, shadow := f.prepare(t, rows)
 	f.exec(t, "ANALYZE %s.orders")
-	pin := f.pinShadowKeyAtFirstChunk(t, shadow, 1050, 0)
+	pin := testutil.PinShadowKey(t, f.pool, pgx.Identifier{f.schema, shadow.ShadowTable()}, 1050, 0)
 	tracker := copyTracker(t)
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:     4,
 		LockTimeout: 30 * time.Second,
 		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
-		Clock:       pin.clock,
+		Clock:       pin.Clock(),
 		Tracker:     tracker,
 	})
 	require.NoError(t, err)
@@ -68,7 +68,7 @@ func TestCopierReportsItsWorkWhileItRuns(t *testing.T) {
 	wg.Go(func() { results <- c.Run(t.Context(), f.pool) })
 	t.Cleanup(wg.Wait)
 
-	pin.wait(t)
+	pin.Wait(t)
 	const pinnedDeadline = 15 * time.Second
 	require.Eventually(t, func() bool {
 		pos := c.Position()
@@ -87,7 +87,7 @@ func TestCopierReportsItsWorkWhileItRuns(t *testing.T) {
 	assert.Positive(t, mid.Detail.Work.BytesCopied, "the landed chunks occupy shadow pages")
 	assert.Positive(t, mid.Detail.Work.BytesTotal)
 
-	pin.release(t)
+	pin.Release(t)
 	const finishDeadline = 15 * time.Second
 	select {
 	case err := <-results:
@@ -139,14 +139,14 @@ func TestCopierWorkResistsCatalogShadowing(t *testing.T) {
 		CREATE FUNCTION %%s.pg_table_size(oid) RETURNS bigint LANGUAGE sql
 			AS 'INSERT INTO %%s.impostor_calls VALUES (1); SELECT 424242::bigint'`, shadow.SourceOID()))
 	shadowing := testutil.NewCatalogShadowingPool(t, f.cfg.URL, f.schema)
-	pin := f.pinShadowKeyAtFirstChunk(t, shadow, 1050, 0)
+	pin := testutil.PinShadowKey(t, f.pool, pgx.Identifier{f.schema, shadow.ShadowTable()}, 1050, 0)
 	tracker := copyTracker(t)
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:     4,
 		LockTimeout: 30 * time.Second,
 		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
-		Clock:       pin.clock,
+		Clock:       pin.Clock(),
 		Tracker:     tracker,
 	})
 	require.NoError(t, err)
@@ -155,7 +155,7 @@ func TestCopierWorkResistsCatalogShadowing(t *testing.T) {
 	wg.Go(func() { results <- c.Run(t.Context(), shadowing) })
 	t.Cleanup(wg.Wait)
 
-	pin.wait(t)
+	pin.Wait(t)
 	const pinnedDeadline = 15 * time.Second
 	require.Eventually(t, func() bool {
 		pos := c.Position()
@@ -173,7 +173,7 @@ func TestCopierWorkResistsCatalogShadowing(t *testing.T) {
 	}, *mid.Detail.Work, "the counters come from the real catalog, not the impostors")
 	assert.Equal(t, int64(0), f.count(t, "impostor_calls", "true"), "the poll must not call a function from the session's search_path")
 
-	pin.release(t)
+	pin.Release(t)
 	const finishDeadline = 15 * time.Second
 	select {
 	case err := <-results:
@@ -265,10 +265,10 @@ func TestCopierWorkIsBoundedOnACallerBuiltPool(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(unbounded.Close)
 	parked, resume := make(chan struct{}), make(chan struct{})
-	park := &hookedClock{hook: func() {
+	park := testutil.NewHookedClock(func() {
 		close(parked)
 		<-resume
-	}}
+	})
 	tracker := copyTracker(t)
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{

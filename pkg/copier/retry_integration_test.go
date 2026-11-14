@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -44,14 +45,14 @@ func (f copierFixture) prepareSeats(t *testing.T, rows int64) (preflight.CopySwa
 // shadow row under key holding slot, standing in for an applier write that
 // moved the slot there from a row the first chunk is about to read. The
 // returned check fails the test if the row could not be placed.
-func (f copierFixture) holdSlotAtFirstChunk(t *testing.T, shadow schemachange.BuiltShadow, key, slot int64) (*hookedClock, func(t *testing.T)) {
+func (f copierFixture) holdSlotAtFirstChunk(t *testing.T, shadow schemachange.BuiltShadow, key, slot int64) (*testutil.HookedClock, func(t *testing.T)) {
 	t.Helper()
 	var placeErr error
-	clock := &hookedClock{hook: func() {
+	clock := testutil.NewHookedClock(func() {
 		if _, err := f.pool.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, slot) VALUES ($1, $2)", key, slot); err != nil {
 			placeErr = fmt.Errorf("hold slot %d under key %d: %w", slot, key, err)
 		}
-	}}
+	})
 	return clock, func(t *testing.T) {
 		t.Helper()
 		require.NoError(t, placeErr)
