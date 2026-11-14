@@ -51,12 +51,13 @@ func (o Outcome) CleanWatermark() (CleanWatermark, bool) {
 	return o.clean, o.clean.Watermark().Valid()
 }
 
-// VerifiedShadow returns the proof that the whole shadow equals its source,
-// and whether the pass minted one: a clean pass through the complete
-// watermark does; a clean pass through a partial watermark proves only
-// its prefix and does not. A live pass allowed to leave keys for the swap
-// mints one without being clean: the proof names the keys it could not
-// judge (VerifiedShadow.Carried) and covers every other.
+// VerifiedShadow returns the proof that the shadow equals its source, every
+// key but the ones it names in Carried, and whether the pass minted one: a
+// clean pass through the complete watermark does; a clean pass through a
+// partial watermark proves only its prefix and does not. A live pass
+// allowed to leave keys for the swap mints one without being clean: the
+// proof names the keys it could not judge (VerifiedShadow.Carried) and
+// covers every other.
 func (o Outcome) VerifiedShadow() (VerifiedShadow, bool) {
 	return o.verified, o.verified.Table() != ""
 }

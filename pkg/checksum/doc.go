@@ -30,6 +30,10 @@
 // gate while it recopies, with SHARE MODE against any other writer, and
 // settles each repaired chunk the same way. Only a pass that found no
 // difference and repaired nothing mints a CleanWatermark, and a
-// VerifiedShadow when its watermark is complete; the proofs' constructors
-// are private to this package.
+// VerifiedShadow when its watermark is complete. A live pass the caller
+// allowed to leave keys for the swap (LiveOptions.CarryKeys) also mints a
+// VerifiedShadow, with no CleanWatermark, when only those keys kept
+// changing; that proof names them (VerifiedShadow.Carried) and says
+// nothing about them. The proofs' constructors are private to this
+// package.
 package checksum

@@ -50,7 +50,9 @@ type Report struct {
 	// when the pass was allowed to leave that many (LiveOptions.CarryKeys)
 	// and minted a proof naming them. The chunks stay counted in Unsettled
 	// and the report is still not clean. It is zero for every pass that
-	// mints no such proof.
+	// mints no such proof. A pass that returns no error with Carried
+	// non-zero is not verified for any purpose but the swap's own
+	// comparison of those keys: show it as unfinished, not as verified.
 	Carried int
 }
 
