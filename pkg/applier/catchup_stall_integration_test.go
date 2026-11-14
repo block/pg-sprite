@@ -62,11 +62,12 @@ func oneInFlight(t *testing.T, key int64) copier.Position {
 // 1's batch collides with row 2's stale shadow row column-wise and again
 // whole-row, is refused, and is requeued. Until row 2's chunk lands the
 // slot is not confirmed past the swap; once it lands both rows flush
-// together and the shadow converges (CO-6, ST-4).
+// together and the shadow converges (CO-6, ST-4). Each refusal is also a
+// warning on the catch-up's logger, shown in the test's output.
 func TestCatchupRequeuesADeferredBatchAndConverges(t *testing.T) {
 	f := newCatchupFixture(t, 20)
 	positions := &switchPosition{pos: oneInFlight(t, 2)}
-	run := startCatchupWith(t, f, catchupSetup{positions: positions})
+	run := startCatchupWith(t, f, catchupSetup{positions: positions, opts: applier.CatchupOptions{Logger: testLogger(t)}})
 
 	q := f.table.Qualified()
 	var two int

@@ -42,10 +42,11 @@ var (
 // The writer rolls its rows back once the flush has been the victim, so
 // the next cycle's flush lands both rows and the shadow converges, with
 // the one deadlock on the record (CO-4). Until then the requeued batch's
-// two entries wait in the buffer and count as deferred.
+// two entries wait in the buffer and count as deferred. The requeue is
+// also a warning on the catch-up's logger, shown in the test's output.
 func TestCatchupRequeuesAFlushRolledBackAsTheDeadlockVictim(t *testing.T) {
 	f := newCatchupFixture(t, 20)
-	run := startCatchupWith(t, f, catchupSetup{positions: &switchPosition{pos: allLanded()}})
+	run := startCatchupWith(t, f, catchupSetup{positions: &switchPosition{pos: allLanded()}, opts: applier.CatchupOptions{Logger: testLogger(t)}})
 	writer := f.holdShadowValue(t, run, rowsOneAndTwo)
 
 	f.moveUniqueValues(t, rowsOneAndTwo)
