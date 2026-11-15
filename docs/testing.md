@@ -155,6 +155,16 @@ sides and both counts, so a test that marks the touched list at an instant compa
 exactly the rows last written before it. The [load proof](#the-load-proof) is built on
 these three.
 
+To hold a copy chunk in flight, a test pins a shadow row: `PinShadowKey` returns a pin
+whose `Clock` the copier takes as its `Options.Clock`. At the clock's first reading,
+at the start of the first chunk, the pin inserts the key into the shadow in a
+transaction it leaves open, so the chunk that holds the key waits on it. The test calls
+`Wait` before relying on the pin, then `Release` (roll back) or `Commit` (publish the
+row). The pin's cleanup rolls back a pin still open, and disarms a clock that was never
+read. A `Wait` that times out means the copier never read its clock, or the pin's
+insert is waiting on another writer. `HookedClock` is the same first-reading hook
+without the pin.
+
 ### TM-6 — Every mutation direction per property
 
 For each object property the diff handles: absent → present, present →
