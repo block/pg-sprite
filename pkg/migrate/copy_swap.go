@@ -241,7 +241,7 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", err)
 	}
-	if err := checkCopySwapPool(pool, opts.CopySwap); err != nil {
+	if err := schemachange.CheckPool(pool, opts.CopySwap.Copier); err != nil {
 		return copySwapPoolVerdict(st, err), fmt.Errorf("migrate: %w", err)
 	}
 	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())

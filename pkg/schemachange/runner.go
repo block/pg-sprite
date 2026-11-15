@@ -262,7 +262,8 @@ type Result struct {
 // checkpoint row through store. It refuses a nil store and options a run
 // could not honour. cfg opens the dedicated connection the table lock
 // session holds for the run; every other statement runs on the pool
-// handed to Run, and store writes through its own pool. All three must
+// handed to Run, which must hold MinPoolConns(opts.Copier) connections,
+// and store writes through its own pool. All three must
 // name one database: each working transaction confirms the table lock
 // from the pool it runs on, and a pool that reaches another database sees
 // no lock and refuses as shadow-lock-unconfirmed before writing anything.
@@ -278,9 +279,12 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 
 // Run carries target through the gated statement st, or resumes the run
 // its checkpoint row records, and returns once the change is complete and
-// the row is in PhaseDone. It takes the table's lock for the whole run
-// (LK-1), makes sure the checkpoint table exists, reads the target's row,
-// and dispatches on what it finds:
+// the row is in PhaseDone. A pool smaller than MinPoolConns for the run's
+// copy options is refused first, with an error wrapping
+// executor.ErrPoolTooSmall, before the lock is taken or anything is read
+// or written. It then takes the table's lock for the whole run (LK-1),
+// makes sure the checkpoint table exists, reads the target's row, and
+// dispatches on what it finds:
 //
 //   - No row: the shadow is built from st and the row saved in
 //     PhaseCopying, with st's text — for a quiesced run with the write
@@ -370,6 +374,9 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // from a stopped run.
 func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, st statement.Statement) (result Result, err error) {
 	if err := checkProof(target); err != nil {
+		return Result{}, err
+	}
+	if err := CheckPool(pool, r.opts.Copier); err != nil {
 		return Result{}, err
 	}
 	lock, err := dbconn.AcquireTableLock(ctx, r.cfg, target.Schema(), target.Table())

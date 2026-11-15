@@ -76,7 +76,9 @@ refusal — never a silently wrong or incomplete result:
   statement the copy cannot carry: a `USING` expression it cannot reproduce,
   a dropped-and-re-added or new column it cannot fill, a key it would not
   keep, or a new identity or `serial` column whose sequence the swap cannot
-  carry.
+  carry. A run on a pool smaller than its copy workers plus two is refused
+  before it creates anything, from every entry point
+  ([the pool floor](docs/limitations.md#the-copy-and-swap-pool-floor)).
 - **Connection poolers**: point pg-sprite directly at the primary; the
   application keeps whatever pooling it uses. pg-sprite's own connection
   through a pooler is unsupported, except Supabase's Supavisor session
