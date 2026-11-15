@@ -288,9 +288,27 @@ func (r *catchupRun) wait(t *testing.T) error {
 		r.done <- err
 		return err
 	case <-time.After(stopDeadline):
+		r.logStuck(t)
 		t.Fatalf("catch-up did not return within %s of its context ending", stopDeadline)
 		return nil
 	}
+}
+
+// logStuck records, for a catch-up that missed its deadline, the last
+// cycle's status and a fresh reading of its slot: a WALEnd that stopped
+// moving says no cycle has completed, and a slot whose unconfirmed WAL is
+// under the ceiling while its retained WAL is over it says the catch-up is
+// waiting out the retained-WAL grace.
+func (r *catchupRun) logStuck(t *testing.T) {
+	t.Helper()
+	s := r.catchup.Status()
+	t.Logf("catch-up status: wal_end=%v confirmed=%v buffered=%d flushes_held=%v",
+		s.WALEnd, s.Confirmed, s.Buffered, s.FlushesHeld)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+	defer cancel()
+	slot, found, err := decode.InspectSlot(ctx, r.f.pool, r.slot)
+	t.Logf("slot %s: found=%v active=%v retained=%+v unconfirmed=%+v read_error=%v",
+		r.slot, found, slot.Active, slot.Retained, slot.Unconfirmed, err)
 }
 
 // catchUpTracker is a tracker mid catch-up step, the way the orchestrator
