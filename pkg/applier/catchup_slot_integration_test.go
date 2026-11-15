@@ -50,6 +50,17 @@ func (r *catchupRun) awaitCycleAfter(t *testing.T, what string) {
 	r.awaitStatus(t, what, func(s applier.Status) bool { return s.WALEnd >= tick })
 }
 
+// awaitConfirmedAfter writes one committed row and waits for the catch-up
+// to confirm a position at or past it: the stream has then decoded every
+// record written before the row, an open transaction's included.
+func (r *catchupRun) awaitConfirmedAfter(t *testing.T, what string) {
+	t.Helper()
+	_, err := r.f.pool.Exec(t.Context(), `UPDATE `+r.f.table.Qualified()+` SET amount = amount + 1 WHERE id = 1`)
+	require.NoError(t, err)
+	tick := r.f.currentWALLSN(t)
+	r.awaitStatus(t, what, func(s applier.Status) bool { return s.Confirmed >= tick })
+}
+
 // A transaction that has written much but not committed pins the slot: the
 // server cannot move the slot's restart position past the transaction's
 // first record until it ends, however much the catch-up confirms, so the
@@ -82,11 +93,21 @@ func TestCatchupEndsWhenTheSlotRetainsMoreThanTheCeiling(t *testing.T) {
 			t.Logf("roll back the pinning transaction: %v", err)
 		}
 	})
-	_, err = tx.Exec(t.Context(), `
-		INSERT INTO `+f.table.Qualified()+` (uniq, amount, label, blob)
-		SELECT -g, 0, 'pinned', repeat('w', 1024)
-		FROM generate_series(1, 4096) AS g`)
-	require.NoError(t, err)
+	// The rows go in in steps, each a fraction of the ceiling, and the
+	// catch-up confirms past each step before the next is written: until
+	// the stream has decoded a step, that step is WAL the stream has not
+	// confirmed, and a cycle reading more than the ceiling of it would end
+	// the run as the stream falling behind, not as retained WAL.
+	const steps, rowsPerStep = 16, 256
+	for step := range steps {
+		_, err = tx.Exec(t.Context(), `
+			INSERT INTO `+f.table.Qualified()+` (uniq, amount, label, blob)
+			SELECT -g, 0, 'pinned', repeat('w', 1024)
+			FROM generate_series($1::int, $2::int) AS g`,
+			step*rowsPerStep+1, (step+1)*rowsPerStep)
+		require.NoError(t, err)
+		run.awaitConfirmedAfter(t, "confirm past a step of the pinned rows")
+	}
 
 	const overDeadline = 10 * time.Second
 	require.Eventually(t, func() bool {
