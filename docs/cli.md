@@ -30,10 +30,13 @@ Commands that read or change a database take a connection URL or a
 export PGSPRITE_URL='postgres://pgsprite:pgsprite@localhost:5432/pgsprite?sslmode=disable'
 ```
 
-Every session pg-sprite opens runs under a bounded `lock_timeout` (3s) and
-`statement_timeout` (30s); `--lock-timeout` and `--statement-timeout` change
-them. For TLS, pass a CA bundle with `--ca-cert` (or `PGSPRITE_CA_CERT`): every
-host in the URL is then verified against it, with no plaintext fallback.
+Every session pg-sprite opens runs under a bounded `lock_timeout` (3s) and,
+for ordinary statements, a `statement_timeout` (30s); `--lock-timeout` and
+`--statement-timeout` change them. The two long steps have budgets of their
+own, which `--statement-timeout` does not extend: a concurrent index build
+(`--index-build-timeout`, 30m) and a `VALIDATE CONSTRAINT`
+(`--validate-timeout`, 30m). For TLS, pass a CA bundle with `--ca-cert` (or
+`PGSPRITE_CA_CERT`): every host in the URL is then verified against it, with no plaintext fallback.
 RDS and Aurora endpoints are verified against an embedded CA bundle without
 any flag.
 
@@ -250,7 +253,17 @@ cannot apply here. The other acknowledgements work the same way:
   support.
 - `--accept-blocking SCHEMA.TABLE` runs a refused `DROP INDEX` or `REINDEX`
   as written under the lock budgets, and exits 3 rather than 0, since pg-sprite
-  does not vouch for it as online. See [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
+  does not vouch for it as online. It also needs an explicit
+  `--statement-timeout` longer than `--lock-timeout`, and a `DROP INDEX` also
+  needs `--allow-destructive` naming the same table:
+
+  ```sh
+  pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' \
+    --accept-blocking public.users --allow-destructive public.users \
+    --lock-timeout 3s --statement-timeout 10m
+  ```
+
+  See [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
 
 ## Rewrite a table online
 
@@ -505,7 +518,7 @@ anything:
 |---|---|
 | 0 | Ran through an online-safe path, or a dry run, `diff`, or `pull` found nothing to refuse |
 | 1 | Failed, or a usage or connection error; a safer sequence that stopped partway keeps its committed steps |
-| 2 | Refused; nothing committed |
+| 2 | Refused; nothing committed, except a `migrate --desired` plan refused partway, which keeps the statements before the refused one (their verdicts are in `verdicts`); plan again before retrying |
 | 3 | Committed under `--accept-blocking`, without the online guarantee |
 
 The full rules, including the one case where a commit's outcome is unknown,

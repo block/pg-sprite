@@ -330,7 +330,7 @@ vouch for it as online-safe.
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
 | 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` or `--allow-destructive` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql`; unknown when the verdict's `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
-| 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no | not applicable |
+| 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no, except a `migrate --desired` plan refused partway: a statement refused at execution keeps the statements before it, listed in `verdicts`, so plan again before retrying | not applicable |
 | 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
 
 A usage error exits 1 and writes the usage and the error to stderr; stdout
@@ -350,7 +350,10 @@ Four rules follow from the table, and one note for embedders:
 - **Exit 2 means nothing *committed*, not nothing ran.** An optimistic
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the
-  refusal is a routing answer (the change needs a different strategy).
+  refusal is a routing answer (the change needs a different strategy). The
+  one exception is a `migrate --desired` plan: each planned statement is
+  checked again as it runs, so one refused partway leaves the statements
+  before it committed, and the result's detail and `verdicts` say which.
 - **A lost `COMMIT` is exit 1, not 0, 2, or 3.** When the connection drops or
   the caller's context ends while a bounded attempt's `COMMIT` is in flight,
   the change may or may not have landed. Exit 0 and 3 would claim it did and
