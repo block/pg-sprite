@@ -38,6 +38,7 @@ linters:
             - "**/pkg/checksum/**"
             - "**/pkg/copier/**"
             - "**/pkg/applier/**"
+            - "**/pkg/change/**"
             - "**/pkg/checkpoint/**"
             - "**/pkg/schemachange/**"
             - "**/pkg/refusal/**"
@@ -53,6 +54,7 @@ linters:
             - github.com/block/pg-sprite/pkg/checksum
             - github.com/block/pg-sprite/pkg/copier
             - github.com/block/pg-sprite/pkg/applier
+            - github.com/block/pg-sprite/pkg/change
             - github.com/block/pg-sprite/pkg/decode
             - github.com/block/pg-sprite/pkg/checkpoint
             - github.com/block/pg-sprite/pkg/schemachange
@@ -77,6 +79,7 @@ linters:
             - github.com/block/pg-sprite/pkg/checksum
             - github.com/block/pg-sprite/pkg/copier
             - github.com/block/pg-sprite/pkg/applier
+            - github.com/block/pg-sprite/pkg/change
             - github.com/block/pg-sprite/pkg/decode
             - github.com/block/pg-sprite/pkg/checkpoint
             - github.com/block/pg-sprite/pkg/schemachange
