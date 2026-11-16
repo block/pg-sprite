@@ -142,8 +142,8 @@ type CopySwapOptions struct {
 	// before anything is read.
 	CheckpointInterval time.Duration
 
-	// SlotLagCeilingBytes is the most WAL, in bytes, a live run's
-	// replication slot may hold before the catch-up stops the run with a
+	// SlotLagCeilingBytes is the WAL, in bytes, a live run's replication
+	// slot may hold before the catch-up stops the run with a
 	// *decode.SlotLagExceededError, leaving the slot and the checkpoint row
 	// for the next run to resume from (applier.CatchupOptions.SlotLagCeiling).
 	// Zero takes decode.DefaultSlotLagCeiling, one GiB; a negative value is

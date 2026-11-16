@@ -131,10 +131,17 @@ it. Until then it stays required.
 ## Slot lag ceiling
 
 A live run's replication slot keeps WAL on the server until pg-sprite has applied the changes
-in it. To keep that WAL from filling the volume, the run stops when the slot holds more than
-the slot lag ceiling: 1 GiB unless you pass `--slot-lag-ceiling SIZE`
-(`CopySwapOptions.SlotLagCeilingBytes` as a library caller). An offline run holds no slot and
-does not read it.
+in it. The run stops when the slot holds more than the slot lag ceiling: 1 GiB unless you pass
+`--slot-lag-ceiling SIZE` (`CopySwapOptions.SlotLagCeilingBytes` as a library caller). An
+offline run holds no slot and does not read it.
+
+The ceiling is a stop threshold pg-sprite checks once per catch-up cycle, not a limit
+PostgreSQL enforces on the slot. The slot can hold more than the ceiling by the time a cycle
+reads it, and retained WAL is allowed over it for a short grace (see `wal-retained` below).
+Stopping frees no WAL: the slot stays so the next run can resume, and it keeps retaining WAL
+for as long as the source takes writes. After a stop, watch the slot's retained WAL
+(`pg_replication_slots`) and either resume soon or drop the slot deliberately, and raise the
+ceiling only with free space on the volume for that much WAL.
 
 `SIZE` is a positive whole number of bytes, optionally followed by a binary unit: `B`, `KiB`,
 `MiB`, `GiB`, or `TiB`, case-insensitive; `KB`, `MB`, `GB`, and `TB` mean the same binary
