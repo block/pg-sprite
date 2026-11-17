@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -414,4 +415,58 @@ func TestRunnerLiveRestartDiscardsAStoppedRunWhole(t *testing.T) {
 	require.NoError(t, err)
 	f.assertLiveDone(t, result)
 	assert.NotEqual(t, stoppedShadowOID, result.Shadow.ShadowOID, "the restart built a shadow of its own")
+}
+
+// hotRowInterval paces the rewrites of the row the live pass cannot judge:
+// fast enough that the row changes between every two of the pass's
+// rereads.
+const hotRowInterval = time.Millisecond
+
+// One row of the table is rewritten from the verifying save until the
+// cutover save, so the live pass reads it changed at every reread. The
+// run is told nothing about it: a Runner leaves the row for the swap by
+// default, and the swap compares it under its lock after the real
+// catch-up's drain has applied the row's last rewrite. Without that
+// default the run would stop in verification with *UnresolvedError.
+func TestRunnerLeavesARowThatNeverHoldsStillForTheSwap(t *testing.T) {
+	const seeded = 2500
+	f := newDecodingFixture(t, seeded)
+
+	hotCtx, stopHot := context.WithCancel(t.Context())
+	var hot sync.WaitGroup
+	var start sync.Once
+	t.Cleanup(func() { stopHot(); hot.Wait() })
+	rewrite := fmt.Sprintf(`UPDATE %s SET amount = amount + 1 WHERE id = 7`, f.table.Qualified())
+	hook := func(_ context.Context, cp checkpoint.Checkpoint) error {
+		switch cp.Phase {
+		case checkpoint.PhaseVerifying:
+			start.Do(func() {
+				hot.Go(func() {
+					tick := time.NewTicker(hotRowInterval)
+					defer tick.Stop()
+					for {
+						select {
+						case <-hotCtx.Done():
+							return
+						case <-tick.C:
+						}
+						if _, err := f.pool.Exec(hotCtx, rewrite); err != nil && hotCtx.Err() == nil {
+							t.Errorf("rewrite the hot row: %v", err)
+							return
+						}
+					}
+				})
+			})
+		case checkpoint.PhaseCutover:
+			stopHot()
+			hot.Wait()
+		}
+		return nil
+	}
+	result, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: hook})
+	require.NoError(t, err)
+
+	f.assertLiveDone(t, result)
+	assert.Equal(t, 1, result.Verification.Carried, "the pass left the one row it could not judge")
+	assert.Equal(t, 1, result.Verification.Unsettled)
 }

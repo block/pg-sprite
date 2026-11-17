@@ -57,9 +57,20 @@ that ran through the complete watermark, confirmed no divergence, left no chunk 
 left no more keys changing than it may, mints a `VerifiedShadow` that names those keys
 (`VerifiedShadow.Carried`) and no `CleanWatermark`. That proof says nothing about a named key;
 comparing each is the swap's, under its lock and after its drain, where no key can change.
-`GateCutover` refuses a proof that names any (`cutover-unverified`), since the swap compares
-none (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
-`TestGateCutoverRefusesAProofThatLeavesKeysForTheSwap`). The rows it judges the keys from are
+`GateCutover` accepts a proof that names at most `MaxCarryKeys` of them and refuses one that
+names more (`cutover-unverified`). `Cutover` then reads every named key on both sides inside
+the swap transaction (`checksum.CompareCarried`), after the drain and the re-run checklist and
+before any name moves, and refuses the swap, rolled back with the source live, when one
+differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
+that differs is a row the live table would hold wrong. The compare refuses a transaction that
+does not hold `ACCESS EXCLUSIVE` on both relations, since without it the two reads are two
+snapshots a writer could commit between (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
+`TestCompareCarriedNamesTheKeysThatDifferUnderTheSwapLock`,
+`TestCompareCarriedRefusesWithoutAccessExclusiveOnBothRelations`,
+`TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft`,
+`TestCutoverRefusesWhenAKeyThePassLeftStillDiffersAfterTheDrain`). `schemachange.Runner` lets
+its pass leave up to `MaxCarryKeys` keys, so a row written faster than the pass can read it
+twice no longer stops the run. The rows it judges the keys from are
 read with the digest's companion statement in the digest's own snapshot, and the chunk digest
 derived from them must equal the one the server aggregated, or the pass fails closed before it
 judges anything from them. The proof such a pass mints says so
