@@ -407,15 +407,23 @@ The copy is the largest writer a live run adds to the source. Every chunk it ins
 shadow is WAL the slot's backend has to read past before it reaches the application's next
 change, so a copy that writes faster than the stream is confirmed carries the slot to the ceiling
 by itself, and the run ends on its own work. Holding the copy back keeps the ceiling for lag the
-copy did not cause.
+copy did not cause. The pace reads only the ceiling's unconfirmed measure, so it guards against a
+`stream-behind` stop. Retained WAL, which the server releases only every
+`RestartReleaseInterval`, is not part of the reading: a copy that writes more than the ceiling's
+worth of WAL per release interval can still end the run `wal-retained` with the stream caught up.
 
 The mark is a quarter of the ceiling, not the ceiling, because a wait holds back only the next
 chunk: the chunks every worker already has in flight still land, the source keeps taking writes,
 and the reading is the catch-up's own, as old as the catch-up cycle in progress. The wait is a
-brake and not a gate: a worker held for the full minute claims its chunk anyway, so lag the copy
-is not the cause of slows the copy and never stops it. Ending the run stays the ceiling's job
-(ST-3). A worker waits before it claims a chunk, never with one open, so a held-back copy keeps
-none of the keys the applier is waiting to write.
+brake and not a gate: a worker held for the full minute claims its chunk anyway. A wait that runs
+out also releases the pace until a reading is back within the mark, because a minute in which
+the held worker wrote nothing and the lag did not fall shows the copy is not its cause. Lag the
+copy did not cause therefore costs the copy one minute, not one per chunk, and never stops it.
+Ending the run stays the ceiling's job (ST-3). The share and the wait are fixed, not options: the
+ceiling is the one bound a host sets, and moving it moves the mark with it, so a host never has a
+pace that waits on lag the ceiling allows or a mark above the point that ends the run. A worker
+waits before it claims a chunk, never with one open, so a held-back copy keeps none of the keys
+the applier is waiting to write.
 
 **Alternative considered → deferred.** Replica-lag-based throttling needs topology-specific
 observation and policy.

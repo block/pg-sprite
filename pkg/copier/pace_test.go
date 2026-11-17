@@ -89,7 +89,27 @@ func TestAwaitPaceClaimsAfterMaxWaitWithTheBacklogStillOver(t *testing.T) {
 	assert.Equal(t, Paced{Waits: 1, Expired: 1, Waited: 100 * time.Millisecond}, c.Paced())
 
 	require.NoError(t, c.awaitPace(t.Context()))
-	assert.Equal(t, Paced{Waits: 2, Expired: 2, Waited: 200 * time.Millisecond}, c.Paced(), "every chunk claimed under the backlog waits its own MaxWait")
+	assert.Equal(t, Paced{Waits: 1, Expired: 1, Waited: 100 * time.Millisecond}, c.Paced(), "a wait that ran out releases the pace, so the next claim does not wait")
+	assert.Len(t, f.slept, 3)
+}
+
+// A released pace arms again on the first reading back within the mark:
+// the backlog then rising over it holds the next claim once more. Here the
+// first wait runs out at 500, a claim at 500 goes straight through, a
+// claim at 100 re-arms the pace, and the next claim at 500 waits again.
+func TestAwaitPaceArmsAgainOnceTheBacklogIsBackWithinTheMark(t *testing.T) {
+	// Each claim reads once before it waits; a wait of 100ms polls at 50ms
+	// and 100ms, reading after each.
+	f := &paceFake{readings: []uint64{500, 500, 500, 500, 100, 500, 500, 100}}
+	c := pacedCopier(t, f, Pace{HighWater: 100, Poll: 50 * time.Millisecond, MaxWait: 100 * time.Millisecond})
+
+	require.NoError(t, c.awaitPace(t.Context()), "first claim: waits 100ms and runs out")
+	require.NoError(t, c.awaitPace(t.Context()), "second claim: the pace is released")
+	require.NoError(t, c.awaitPace(t.Context()), "third claim: the reading is within the mark, which arms the pace")
+	require.NoError(t, c.awaitPace(t.Context()), "fourth claim: over the mark again, so it waits until the reading falls")
+
+	assert.Equal(t, Paced{Waits: 2, Expired: 1, Waited: 200 * time.Millisecond}, c.Paced())
+	assert.Equal(t, 8, f.reads)
 }
 
 // A run that ends while a worker is held back ends the wait: the worker
