@@ -227,7 +227,7 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	if _, err := rowSecurityTableShape(wanted); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("admit the desired table %s: %w: %w", target, ErrRowSecurityRefused, err)
 	}
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(AttemptSearchPath(schema, desired.ExtensionSchemas())...)); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("set create search path for %s: %w", target, err)
 	}
 	if cr.SetsRole() {
@@ -235,7 +235,7 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 			return RowSecurityReport{}, fmt.Errorf("set create owner role %s: %w", cr.Owner(), err)
 		}
 	}
-	report := RowSecurityReport{Schema: schema, Table: table, Statements: []string{}}
+	report := RowSecurityReport{Schema: schema, Table: table, Statements: []string{}, ExtensionSchemas: desired.ExtensionSchemas()}
 	for _, step := range admitted {
 		if _, err := tx.Exec(ctx, step.statement.SQL()); err != nil {
 			return RowSecurityReport{}, fmt.Errorf("create %s: %w", target, asCreateCollision(err))

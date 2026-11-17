@@ -11,8 +11,8 @@ PostgreSQL has **no** `ALGORITHM={INSTANT,INPLACE,COPY}` knob. What matters inst
 
 These are exactly the two dimensions MySQL lets authors *assert* with `ALGORITHM=` and
 `LOCK=` (failing closed when either can't be honored). PostgreSQL offers no such clause —
-pg-sprite's `diff` and `migrate --dry-run` are that missing declaration today: they classify
-and route the change. Routed execution lands with the Phase 3 executor.
+pg-sprite's `diff` and `migrate --dry-run` are that missing declaration: they classify
+and route the change, and `migrate` executes it on the route they report.
 
 The rest of this document breaks down both dimensions per operation.
 
@@ -30,7 +30,7 @@ above (lock × work done) gives exactly three buckets every DDL in this referenc
 | --- | --- | --- | --- | --- | --- |
 | **Catalog-only** | none — a catalog entry changes; no row is read or written | brief `ACCESS EXCLUSIVE` (milliseconds once acquired) | `ALGORITHM=INSTANT` | `ADD COLUMN` (nullable or constant default), `DROP COLUMN`, `SET/DROP DEFAULT`, `DROP NOT NULL`, renames, [binary-coercible type changes](binary-coercible-type-changes.md) | native, as written |
 | **Full scan, no rewrite** | every row is *read* (to validate or to build an index); the heap is not rewritten | native online forms hold `SHARE UPDATE EXCLUSIVE` for the scan; the as-written forms hold a blocking lock for the whole scan | `ALGORITHM=INPLACE` | `SET NOT NULL`, `ADD CONSTRAINT … CHECK/FOREIGN KEY`, `ADD CONSTRAINT … UNIQUE`, `CREATE INDEX` | native, **safer sequence** substituted (`NOT VALID` + `VALIDATE`, `CONCURRENTLY` + `USING INDEX`) |
-| **Full rewrite** | every row is *written* into a new heap; all indexes rebuilt | `ACCESS EXCLUSIVE` for the whole rewrite | `ALGORITHM=COPY` | `ALTER COLUMN TYPE` (non-coercible), `ADD COLUMN … DEFAULT <volatile>`, `ADD COLUMN … GENERATED … STORED`, `SET TABLESPACE`, `VACUUM FULL`/`CLUSTER` | **copy-and-swap** (typed refusal until the executor lands) |
+| **Full rewrite** | every row is *written* into a new heap; all indexes rebuilt | `ACCESS EXCLUSIVE` for the whole rewrite | `ALGORITHM=COPY` | `ALTER COLUMN TYPE` (non-coercible), `ADD COLUMN … DEFAULT <volatile>`, `ADD COLUMN … GENERATED … STORED`, `SET TABLESPACE`, `VACUUM FULL`/`CLUSTER` | **copy-and-swap** — runs a general `ALTER COLUMN TYPE` when the run opens the preview route with `--copy-and-swap`; the other rewrites refuse `backend-unavailable` ([copy-and-swap.md](copy-and-swap.md)) |
 
 Two things fall out of this. For a coarse "does this cost scale with table size?" question,
 the last two buckets answer alike — only the first is free. For deciding *how* to run the
@@ -138,9 +138,8 @@ online path, so the heavy **shadow-copy + atomic cutover** path is required ·
 
 > **`Needs copy-and-swap? = No` does not mean "don't use the engine".** The engine still
 > helps on the ➖ and ❌ rows — it classifies the change and shows the correct *native*
-> sequence; automated execution of routed sequences lands with the Phase 3 executor. Only the
-> ✅ rows force a full copy. See
-> 03-why-build-this-engine.md § The engine helps on every change, not just rewrites.
+> sequence, and `migrate` executes it under bounded lock and statement timeouts. Only the
+> ✅ rows force a full copy.
 
 > GitHub-rendered markdown tables are not interactively sortable (no client-side JS). The
 > two collapsible views below are the same column operations **pre-sorted** by `Table
@@ -400,10 +399,13 @@ adding the column does not rewrite it.
 |---|---|---|---|
 | runs as written | brief `ACCESS EXCLUSIVE` | none — column relabeled in place | 0 |
 
-PostgreSQL refuses the statement outright when a view or rule, or a `STORED` generated
-column, depends on the altered column (`cannot alter type of a column used by a generated
-column`). The planner cannot see these dependencies because `Facts` carries only column
-types, so dry run still reports `binary-coercible`; see
+PostgreSQL refuses the statement outright when a view, a row-level security policy, a
+trigger's `UPDATE OF` list or `WHEN` condition, a `STORED` generated column, or a partition
+key depends on the altered column. The planner reads those dependents from the catalog and
+refuses the change as [`dependent-view`](#dependent-view),
+[`dependent-policy`](#dependent-policy), [`dependent-trigger`](#dependent-trigger),
+[`dependent-generated-column`](#dependent-generated-column), or
+[`partition-key`](#partition-key) instead; a rule is left to the server's own refusal. See
 [No rewrite is not no cost](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost).
 
 The type change is binary-coercible (for example `varchar(50)` → `varchar(100)`,
@@ -491,7 +493,9 @@ backend.
 The column type change is not binary-coercible (for example `int` → `bigint`,
 `text` → `jsonb`), or carries a `USING` expression, so PostgreSQL would rewrite
 the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend,
-which executes it: the changed shape is built as a shadow table, filled in
+which executes it when the run opens the preview route with `--copy-and-swap`
+(without it, `migrate` refuses `copy-and-swap-refused`, cause
+`copy-and-swap-not-enabled`): the changed shape is built as a shadow table, filled in
 chunks while writes stream through a replication slot, verified, and swapped in
 under the source's name. The route's own preflight can still refuse the run
 (`copy-and-swap-refused`) for a table shape or environment it cannot run

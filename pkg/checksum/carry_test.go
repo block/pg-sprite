@@ -82,3 +82,14 @@ func TestSettledChunksCarryKeysOnlyForACompletePassWithNoDivergence(t *testing.T
 	assert.Nil(t, settledChunks{unsettled: 1, hot: left}.carried(copier.NewWatermark(5000)), "a pass through key 5000 only")
 	assert.Nil(t, settledChunks{unsettled: 1, hot: left, mismatches: []Mismatch{{}}}.carried(complete), "a divergence confirmed alongside")
 }
+
+// The keys a proof names are the caller's to keep: sorting or editing the
+// slice Carried returns leaves the proof's own keys as they were.
+func TestCarriedIsTheCallersToKeep(t *testing.T) {
+	proof := VerifiedShadow{carried: []int64{7, 9}}
+
+	got := proof.Carried()
+	got[0] = 99
+
+	assert.Equal(t, []int64{7, 9}, proof.Carried())
+}

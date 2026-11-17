@@ -23,8 +23,7 @@ const (
 // Retryable reports whether err is transient: a bounded lock wait that timed
 // out, a deadlock or serialization failure, or a connection-level error.
 func Retryable(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
 		case codeLockNotAvailable, codeDeadlockDetected, codeSerializationFailure:
 			return true

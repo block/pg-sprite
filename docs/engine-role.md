@@ -31,10 +31,10 @@ applies):
 
 - **An index belongs to the table's owner**, regardless of which member role created it —
   the native index path is ownership-correct automatically.
-- **A new table belongs to the role that created it.** The copy-and-swap design therefore
-  calls for `SET LOCAL ROLE <owner>` before creating shadow objects so they are born with the
-  correct owner rather than repaired afterward. That path is planned; greenfield creation
-  with a create owner (below) is the first path that actually runs `SET LOCAL ROLE`.
+- **A new table belongs to the role that created it.** The copy-and-swap shadow builder
+  therefore runs `SET LOCAL ROLE <owner>` before creating shadow objects so they are born with
+  the correct owner rather than repaired afterward; greenfield creation with a create owner
+  (below) does the same.
 
 ## The tiers
 
@@ -63,7 +63,7 @@ requires no additional grant in any tier. Naming the holder of a contended lock 
 | Tier | Capability | Required access | Preflight check |
 | --- | --- | --- | --- |
 | 0 | Connect and resolve the target | `LOGIN`; `CONNECT` on the database; `USAGE` on the target schema (directly or via membership) | `has_database_privilege`, `has_schema_privilege(..., 'USAGE')` |
-| 1 | In-place `ALTER TABLE` (the instant and fast native paths) | Inheritable **membership in the owning role**; an `ADD COLUMN` also needs `TEMPORARY` on the database, which PostgreSQL grants to `PUBLIC` by default | `pg_has_role(current_user, <owner>, 'USAGE')` |
+| 1 | In-place `ALTER TABLE` (the instant and fast native paths), `ALTER INDEX ... RENAME TO`, and `ALTER TYPE ... ADD VALUE` | Inheritable **membership in the owning role** — the table's, or for `ADD VALUE` the enum type's; an `ADD COLUMN` also needs `TEMPORARY` on the database, which PostgreSQL grants to `PUBLIC` by default | `pg_has_role(current_user, <owner>, 'USAGE')` |
 | 2 | Index builds: `CREATE INDEX [CONCURRENTLY]`, and the `ALTER TABLE` shapes that build one — `ADD CONSTRAINT UNIQUE` / `PRIMARY KEY` / `EXCLUDE` without `USING INDEX`, or `ADD COLUMN` with an inline `UNIQUE` / `PRIMARY KEY` | Tier 1 + **`CREATE` on the target schema** — table ownership alone is refused with `permission denied for schema` | `has_schema_privilege(..., 'CREATE')` |
 | 3 | Copy-and-swap | Tier 2 + membership usable with `SET ROLE` (for owner-correct shadow objects); for logical-decoding CDC: `rds_replication` membership (Aurora/RDS) or the `REPLICATION` attribute (self-managed) | `pg_has_role(..., 'SET')` (16+; on 14–15 the Tier 1 `USAGE` check already proves `SET ROLE` access — membership options arrive in 16); `pg_has_role(current_user, 'rds_replication', 'MEMBER')` |
 
@@ -132,9 +132,9 @@ Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are 
 has minted its `CopySwapShape`; the environment check is what mints the `CopySwapTarget`
 every writing step requires: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
 static parameter requiring a reboot), one free slot under `max_replication_slots`, and two free
-senders under `max_wal_senders` — the run creates the slot on one replication connection,
-closes it once the checkpoint row naming the slot commits, and later decodes on a connection of
-its own, so it holds one sender at a time and the second is headroom. Both apply only to a run
+senders under `max_wal_senders` (the run holds one at a time;
+[D11](copy-and-swap-design.md#d11--bound-and-reap-logical-decoding-state) says why the second
+is headroom). Both apply only to a run
 that decodes WAL; a run that blocks writes skips them. The same check compares the free disk the
 caller measured on the database volume — PostgreSQL has no function that reports it —
 against the shadow copy's headroom, and
@@ -151,8 +151,8 @@ between the copy and a full volume. Each refusal carries its own cause
 
 Creating a new table sits outside the ladder. By default the engine role creates and owns it;
 this owner-less mode deliberately preserves the original behavior. When the embedding caller
-names a create owner (`migrate.Options.CreateOwner`; the CLI has no declarative apply command
-yet), each bounded create step runs `SET LOCAL ROLE <owner>` before its SQL. Preflight proves the
+names a create owner (`migrate.Options.CreateOwner`; the CLI has no flag for it), each
+bounded create step runs `SET LOCAL ROLE <owner>` before its SQL. Preflight proves the
 engine can assume that role — membership (`pg_has_role(..., 'MEMBER')`, which is what `SET ROLE`
 consults; a `NOINHERIT` member qualifies), plus the `SET` membership option on PostgreSQL 16+ —
 that the owner has `USAGE` and `CREATE` on the schema, and that the engine has `CONNECT`.
@@ -195,7 +195,7 @@ ALTER ROLE pgsprite_engine WITH REPLICATION;       -- self-managed
 --                                 another managed service's own switch for it is not detected)
 --   no slot of the name derived for the table held by another database or as a physical slot
 --   one free slot under max_replication_slots and two free senders under max_wal_senders
---                                 (the slot's snapshot connection and the decoding stream)
+--                                 (one in use at a time; the second is headroom)
 ```
 
 The contract covers the target table's own access. A `FOREIGN KEY` that references a

@@ -57,6 +57,7 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
   - [Real execution — exit 0](#real-execution--exit-0)
   - [Accepted blocking refusal (`index-statement`) — exit 3](#accepted-blocking-refusal-index-statement--exit-3)
   - [Failed mid-sequence (`execution-failed`) — exit 1](#failed-mid-sequence-execution-failed--exit-1)
+  - [Data fault in a copy-and-swap run (`data-fault`) — exit 1](#data-fault-in-a-copy-and-swap-run-data-fault--exit-1)
   - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
   - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
   - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
@@ -83,7 +84,7 @@ canonical statement of the ladder; a wording fix lands there first.
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
 | 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` or `--allow-destructive` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in `executed_sql`; unknown when `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
-| 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no | not applicable |
+| 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no, except a `migrate --desired` plan refused partway, which keeps the statements before it, listed in `verdicts` | not applicable |
 | 3 | Committed through the accepted-blocking passthrough, under bounded budgets, without an online-safety guarantee | yes | no |
 
 A usage error exits 1 and writes the usage and the error to stderr; stdout
@@ -700,9 +701,10 @@ output was captured from the compose database after loading `demo/seed.sql`:
 
 ```console
 $ pg-sprite pull --schema public --out /tmp/pg-sprite-pull-example
+PULLED  contacts -> /tmp/pg-sprite-pull-example/contacts.sql
 PULLED  orders -> /tmp/pg-sprite-pull-example/orders.sql
 PULLED  users -> /tmp/pg-sprite-pull-example/users.sql
-Summary: 2 pulled, 0 refused, 0 errors
+Summary: 3 pulled, 0 refused, 0 errors
 ```
 
 See [pull.md](pull.md) for the refusal and exit-code contract and the

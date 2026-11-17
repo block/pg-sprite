@@ -64,9 +64,12 @@ type Config struct {
 	// socket. A URL that selects sslmode=disable alongside it is refused with
 	// ErrCACertWithSSLModeDisable. Unset, RDS/Aurora endpoints in
 	// the partitions the embedded bundle covers are auto-verified with it
-	// (see rds.go); an RDS/Aurora endpoint in any other partition (GovCloud)
-	// refuses to open with ErrRDSBundleDoesNotCoverHost unless its
-	// connection string selects an sslmode that needs no roots.
+	// (see rds.go), each host of a multi-host URL against its own name; an
+	// RDS/Aurora endpoint in any other partition (GovCloud) refuses to open
+	// with ErrRDSBundleDoesNotCoverHost unless its connection string selects
+	// an sslmode that needs no roots, and a URL with no sslmode that lists an
+	// RDS/Aurora endpoint beside another host refuses with
+	// ErrMixedRDSAndOtherHosts.
 	CACertPath string
 
 	// Pool sizing and lifecycle. Zero values keep pgxpool's defaults.
@@ -363,9 +366,8 @@ func (l slogTraceLogger) Log(ctx context.Context, level tracelog.LogLevel, msg s
 	l.logger.Log(ctx, slogLevel, msg, attrs...)
 }
 
-// caTLSConfig builds a verify-full TLS config trusting only the given CA
-// bundle, verifying the server certificate against host.
-func caTLSConfig(caCertPath, host string) (*tls.Config, error) {
+// loadCABundle reads the CA bundle at caCertPath into a cert pool.
+func loadCABundle(caCertPath string) (*x509.CertPool, error) {
 	pem, err := os.ReadFile(caCertPath)
 	if err != nil {
 		return nil, fmt.Errorf("read CA bundle: %w", err)
@@ -374,11 +376,7 @@ func caTLSConfig(caCertPath, host string) (*tls.Config, error) {
 	if !roots.AppendCertsFromPEM(pem) {
 		return nil, fmt.Errorf("CA bundle %s contains no usable certificates", caCertPath)
 	}
-	return &tls.Config{
-		RootCAs:    roots,
-		ServerName: host,
-		MinVersion: tls.VersionTLS12,
-	}, nil
+	return roots, nil
 }
 
 // configureTLS decides the pool's TLS setup: an explicit CA bundle wins;
@@ -386,40 +384,33 @@ func caTLSConfig(caCertPath, host string) (*tls.Config, error) {
 // global bundle (see rds.go); everything else keeps whatever the connection
 // string asked for.
 //
-// An RDS/Aurora endpoint the embedded bundle cannot verify never falls
-// through to pgx's default, which is encrypted-but-unauthenticated with a
-// plaintext fallback: without an sslmode of its own, or with one that asks
-// for verification the bundle cannot supply, it is an error naming the
-// remedy. An explicit sslmode that needs no roots is honored on every
-// RDS/Aurora endpoint alike.
+// Every host of a multi-host connection string is judged, not just the
+// first. An RDS/Aurora endpoint the embedded bundle cannot verify never
+// falls through to pgx's default, which is encrypted-but-unauthenticated
+// with a plaintext fallback: without an sslmode of its own, or with one that
+// asks for verification the bundle cannot supply, it is an error naming the
+// host and the remedy, and so is a host beside an RDS/Aurora endpoint that
+// is not one when no sslmode is named. An explicit sslmode that needs no
+// roots is honored on every attempt alike.
 func configureTLS(pc *pgxpool.Config, cfg Config) error {
-	host := pc.ConnConfig.Host
+	cc := &pc.ConnConfig.Config
 	switch {
 	case cfg.CACertPath != "":
 		return pinToCABundle(pc, cfg)
-	case !IsRDSHost(host):
-		// Not a managed endpoint: the connection string's choice stands.
+	case !listsRDSHost(cc):
+		// No managed endpoint: the connection string's choice stands.
+		return nil
 	case dsnNamesSSLMode(cfg.URL):
-		// The caller chose an sslmode; honor it — but when verification
+		// The caller chose an sslmode; honor it — but where verification
 		// was requested without a root bundle, supply the embedded RDS
 		// roots, which are not in system trust stores.
-		if !requestsVerificationWithoutRoots(pc.ConnConfig.TLSConfig) {
-			return nil
-		}
-		if !RDSBundleCovers(host) {
-			return uncoveredRDSHostError(host)
-		}
-		pc.ConnConfig.TLSConfig.RootCAs = rdsRootPool()
-	case !RDSBundleCovers(host):
-		return uncoveredRDSHostError(host)
+		return supplyRDSRoots(cc)
 	default:
-		// No explicit sslmode on an RDS/Aurora endpoint: auto-enable
-		// verify-full with the embedded bundle, and drop the plaintext
-		// fallbacks the default sslmode would otherwise allow.
-		pc.ConnConfig.TLSConfig = rdsTLSConfig(host)
-		pc.ConnConfig.Fallbacks = nil
+		// No explicit sslmode: auto-enable verify-full with the embedded
+		// bundle on every host, dropping the plaintext fallbacks the
+		// default sslmode would otherwise allow.
+		return pinToRDSBundle(cc)
 	}
-	return nil
 }
 
 // requestsVerificationWithoutRoots reports whether a parsed TLS config asks

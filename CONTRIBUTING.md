@@ -4,8 +4,8 @@ Thanks for your interest in pg-sprite!
 
 **We are not accepting external contributions yet.** The project is in
 early-stage development (see the warning in the [README](README.md)): the
-design is still settling, interfaces change without notice, and there is no
-released version to contribute against. PRs opened at this stage will likely
+design is still settling, and interfaces change without notice, even between
+pre-1.0 releases. PRs opened at this stage will likely
 be closed without review.
 
 If you've found something that looks like a safety problem — a path where the

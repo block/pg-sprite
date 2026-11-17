@@ -68,7 +68,7 @@ func AcceptedRefusal(ack string, v verdict.Verdict) (verdict.Refusal, bool) {
 // statement the executor or server will not run on this path is refused as
 // unsupported.
 func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
-	refused verdict.Verdict, proof verdict.Refusal, opts Options) (verdict.Verdict, error) {
+	refused verdict.Verdict, proof verdict.Refusal, opts Options, step int) (verdict.Verdict, error) {
 	locked, err := lockedTable(ctx, pool, st.IndexRelation())
 	if err != nil {
 		return verdict.Verdict{}, err
@@ -103,6 +103,7 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	}
 	auditAcceptBlocking(opts.audit(), st, table, proof, budget)
 
+	opts.startStep(step, st.SQL())
 	start := time.Now()
 	_, err = executor.ExecuteAcceptedBlocking(ctx, pool, st.SQL(), locked.preLock(), budget)
 	elapsed := time.Since(start)
@@ -137,8 +138,7 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 		// counted.
 		v := failureVerdict(st, err, executor.SequenceReport{}, false)
 		v.Table = table
-		var unknownErr *executor.BlockingOutcomeUnknownError
-		if errors.As(err, &unknownErr) {
+		if _, ok := errors.AsType[*executor.BlockingOutcomeUnknownError](err); ok {
 			// The client lost the transaction at or after submission, so the
 			// verdict cannot claim the rollback a failed attempt normally
 			// gets: the statement may have committed.

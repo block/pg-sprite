@@ -206,8 +206,7 @@ func (c *Copier) confirmLock(ctx context.Context, conn dbconn.AdvisoryLockHolder
 	if errors.Is(err, dbconn.ErrTableLockNotHeld) {
 		return refuse(CauseLockUnconfirmed, []error{err}, "confirming the table lock from the copy transaction")
 	}
-	var heldElsewhere *dbconn.TableLockHeldError
-	if errors.As(err, &heldElsewhere) {
+	if _, ok := errors.AsType[*dbconn.TableLockHeldError](err); ok {
 		return refuse(CauseLockHeldElsewhere, []error{err}, "the copy transaction sees the table lock held by another backend, not the lock session's backend %d", c.lock.BackendPID())
 	}
 	return fmt.Errorf("confirm the table lock from the copy transaction: %w", err)

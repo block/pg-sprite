@@ -110,8 +110,9 @@ anchor. The mapping:
 | `blocking-idiom` | `safer-idiom` |
 | `table-rewrite`, `possible-table-rewrite` | the specific rewrite cause: `volatile-default`, `generated-stored`, `type-rewrite`, or `relocation` |
 | `app-breaking-rename` | `app-breaking-rename` |
-| `unsupported-operation` | `unsupported-operation` |
+| `unsupported-operation` | `unsupported-operation`, or `cascading-drop` for a drop with `CASCADE` |
 | `destructive` | none — destructiveness is a property of the operation, not a routing cause |
+| `concurrent-in-transaction`, `validate-in-transaction` | none — a property of the script's transaction blocks, not a routing cause |
 
 ## Severities (`severity`)
 

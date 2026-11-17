@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -43,6 +44,23 @@ type RunOptions struct {
 	// shadow while the copy and the verification pass run. Its Tracker is
 	// the caller's to set.
 	Catchup applier.CatchupOptions
+	// Tracker, when set, is the tracker of a longer run this one is step
+	// Step of: the caller has called Start and calls Finish, and the Runner
+	// reports its phases to it as that step. The copy is reported as
+	// progress.OperationCopy with the copier as the work source, a live
+	// run's wait for its capture to catch up to the marker as
+	// progress.OperationCatchUp with the run's catch-up as the work source,
+	// and the verification pass as progress.OperationChecksum with the
+	// verifier as the work source; each phase starts the step again with
+	// its own operation, so the step's elapsed time is the phase's. The
+	// statement is left empty: no one statement is what a phase runs. It
+	// replaces Copier.Tracker, Checksum.Tracker and Catchup.Tracker, which
+	// must be left nil when it is set: a tracker reads one work source at
+	// a time, and the Runner hands it the one the phase in progress owns.
+	Tracker *progress.Tracker
+	// Step is the 1-based step of the caller's run that Tracker reports
+	// this run as; zero when Tracker is nil.
+	Step int
 	// Live bounds how the verification pass settles a chunk the stream was
 	// still carrying changes for. Its Confirmed source is the run's own
 	// catch-up and must be left nil. So must Flushes: the run's pass
@@ -137,7 +155,7 @@ func (o RunOptions) validate() error {
 	if o.Live.CarryKeys < 0 || o.Live.CarryKeys > checksum.MaxCarryKeys {
 		return fmt.Errorf("%w: live carry keys %d is outside 0 to %d; use zero for the default", ErrInvalidOptions, o.Live.CarryKeys, checksum.MaxCarryKeys)
 	}
-	return nil
+	return o.validateTracker()
 }
 
 func (o RunOptions) checkpointInterval() time.Duration {
@@ -249,7 +267,8 @@ type Result struct {
 // checkpoint row through store. It refuses a nil store and options a run
 // could not honour. cfg opens the dedicated connection the table lock
 // session holds for the run; every other statement runs on the pool
-// handed to Run, and store writes through its own pool. All three must
+// handed to Run, which must hold MinPoolConns(opts.Copier) connections,
+// and store writes through its own pool. All three must
 // name one database: each working transaction confirms the table lock
 // from the pool it runs on, and a pool that reaches another database sees
 // no lock and refuses as shadow-lock-unconfirmed before writing anything.
@@ -265,9 +284,12 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 
 // Run carries target through the gated statement st, or resumes the run
 // its checkpoint row records, and returns once the change is complete and
-// the row is in PhaseDone. It takes the table's lock for the whole run
-// (LK-1), makes sure the checkpoint table exists, reads the target's row,
-// and dispatches on what it finds:
+// the row is in PhaseDone. A pool smaller than MinPoolConns for the run's
+// copy options is refused first, with an error wrapping
+// executor.ErrPoolTooSmall, before the lock is taken or anything is read
+// or written. It then takes the table's lock for the whole run (LK-1),
+// makes sure the checkpoint table exists, reads the target's row, and
+// dispatches on what it finds:
 //
 //   - No row: the shadow is built from st and the row saved in
 //     PhaseCopying, with st's text — for a quiesced run with the write
@@ -357,6 +379,9 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // from a stopped run.
 func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, st statement.Statement) (result Result, err error) {
 	if err := checkProof(target); err != nil {
+		return Result{}, err
+	}
+	if err := CheckPool(pool, r.opts.Copier); err != nil {
 		return Result{}, err
 	}
 	lock, err := dbconn.AcquireTableLock(ctx, r.cfg, target.Schema(), target.Table())
@@ -521,10 +546,11 @@ func (r *Runner) verifyWith(ctx context.Context, lock *dbconn.TableLockSession, 
 		// INV: CO-4
 		return checksum.VerifiedShadow{}, checksum.Report{}, fmt.Errorf("%w (CO-4): checkpoint row for %s.%s is in phase %s with a watermark short of the key space", ErrInvariantViolation, state.cp.Schema, state.cp.Table, state.cp.Phase)
 	}
-	verifier, err := checksum.NewVerifier(target, state.built, lock, r.opts.Checksum)
+	verifier, err := checksum.NewVerifier(target, state.built, lock, r.checksumOptions())
 	if err != nil {
 		return checksum.VerifiedShadow{}, checksum.Report{}, err
 	}
+	r.startPhase(progress.OperationChecksum)
 	outcome, err := pass(ctx, verifier)
 	if err != nil {
 		return checksum.VerifiedShadow{}, outcome.Report, err

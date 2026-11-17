@@ -86,6 +86,57 @@ func TestParseOneKinds(t *testing.T) {
 				indexRelation: IndexRelation{Schema: "app", Name: "users_email_idx", Kind: IndexRelationIndex}, renamedTo: "users_email_key"},
 		},
 		{
+			// An enum value add names a type, not a table: no table
+			// target, and the type and the label it adds.
+			name: "alter type add value names the type, not a table",
+			sql:  "ALTER TYPE mood ADD VALUE 'calm' AFTER 'happy'",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Name: "mood"}, enumValue: "calm"},
+		},
+		{
+			name: "alter type add value schema-qualified keeps the type's schema",
+			sql:  "ALTER TYPE app.mood ADD VALUE IF NOT EXISTS 'calm'",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Schema: "app", Name: "mood"}, enumValue: "calm"},
+		},
+		{
+			name: "alter type rename value is not an enum value add",
+			sql:  "ALTER TYPE mood RENAME VALUE 'sad' TO 'blue'",
+			want: Statement{kind: KindOther},
+		},
+		{
+			// The parse tree spells an empty old label as no old label,
+			// so the form is told apart by its keywords.
+			name: "alter type renaming the empty label is not an enum value add",
+			sql:  "ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+			want: Statement{kind: KindOther},
+		},
+		{
+			name: "alter type renaming the empty label of a type named add is not an enum value add",
+			sql:  `ALTER TYPE "add" RENAME VALUE '' TO 'blue'`,
+			want: Statement{kind: KindOther},
+		},
+		{
+			// The tree spells BEFORE '' as no position, so no rendering
+			// would carry where the value goes.
+			name: "alter type add value next to the empty label is not admitted",
+			sql:  "ALTER TYPE mood ADD VALUE 'calm' BEFORE ''",
+			want: Statement{kind: KindOther},
+		},
+		{
+			name: "alter type adding the empty label is an enum value add",
+			sql:  "ALTER TYPE mood ADD VALUE ''",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Name: "mood"}, enumValue: ""},
+		},
+		{
+			name: "alter type add value on a type named rename is an enum value add",
+			sql:  "ALTER TYPE app.rename /* the type */ ADD VALUE 'calm'",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Schema: "app", Name: "rename"}, enumValue: "calm"},
+		},
+		{
+			name: "alter type add value naming the database is not an enum value add",
+			sql:  "ALTER TYPE db.app.mood ADD VALUE 'calm'",
+			want: Statement{kind: KindOther},
+		},
+		{
 			name: "alter sequence set schema is not a table target",
 			sql:  "ALTER SEQUENCE s SET SCHEMA archive",
 			want: Statement{kind: KindOther},

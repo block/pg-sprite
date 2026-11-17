@@ -52,6 +52,13 @@ func TestLiveOptionsRefuseUnboundedValues(t *testing.T) {
 	}
 }
 
+// The carry limit's range is inclusive: a pass may be told to leave exactly
+// MaxCarryKeys keys, and only one more is refused.
+func TestLiveOptionsAcceptTheCarryCeiling(t *testing.T) {
+	live := LiveOptions{Confirmed: confirmedAt(0), CarryKeys: MaxCarryKeys}.withDefaults()
+	assert.NoError(t, live.validate(DivergenceAbort))
+}
+
 // pauseNever is a FlushGate whose hold is a no-op, for options tests that
 // only need the field set.
 type pauseNever struct{}

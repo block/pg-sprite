@@ -66,6 +66,35 @@ var migrateClaims = map[string]migrateClaim{
 			CREATE INDEX accounts_email_idx ON %[1]s.accounts (email)`,
 		statements: []string{`ALTER INDEX %[1]s.accounts_email_idx RENAME TO accounts_contact_email_idx`},
 	},
+	// Adding a label locks only the enum type; the statement names no
+	// table, so migrate resolves the type and checks its owner.
+	"alter-type-add-value": {
+		setup: `
+			CREATE TYPE %[1]s.account_state AS ENUM ('open', 'closed');
+			CREATE TABLE %[1]s.accounts (
+				id    bigint PRIMARY KEY,
+				state %[1]s.account_state NOT NULL
+			)`,
+		statements: []string{
+			`ALTER TYPE %[1]s.account_state ADD VALUE 'frozen' BEFORE 'closed'`,
+			`ALTER TYPE %[1]s.account_state ADD VALUE IF NOT EXISTS 'frozen'`,
+		},
+	},
+	// An enum column is an ordinary column to the native routes: the add
+	// with a constant default, the default change, and the index each run
+	// as they would for a built-in type.
+	"enum-typed-columns-on-plain-tables": {
+		setup: `
+			CREATE TYPE %[1]s.account_state AS ENUM ('open', 'closed');
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY
+			)`,
+		statements: []string{
+			`ALTER TABLE %[1]s.accounts ADD COLUMN state %[1]s.account_state NOT NULL DEFAULT 'open'`,
+			`ALTER TABLE %[1]s.accounts ALTER COLUMN state SET DEFAULT 'closed'`,
+			`CREATE INDEX CONCURRENTLY accounts_state_idx ON %[1]s.accounts (state)`,
+		},
+	},
 	"drop-column": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (

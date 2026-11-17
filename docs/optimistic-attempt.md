@@ -71,8 +71,10 @@ Every DDL statement enters through one gate and leaves through a typed exit. Fou
 lanes cover every change type: **A** — planner-proven online work (what MySQL would
 call in-place with long work), **B** — the bounded attempt, whose success means the
 change was effectively *instant* (catalog-only), **C** — proven table rewrites, which
-route to copy-and-swap (executed when the engine carries the operation, refused
-`backend-unavailable` when it does not yet — [capabilities.md](capabilities.md) says which), and
+route to copy-and-swap (executed when the engine carries the operation and the run opened the
+preview route with `--copy-and-swap`, refused `copy-and-swap-refused` when the run did not open
+it, refused `backend-unavailable` when the engine does not carry the operation yet —
+[capabilities.md](capabilities.md) says which), and
 **F** — the operator's forced override, which rejoins lane B. The walkthrough below
 narrates each gate; the [exit inventory](#exit-inventory) catalogs the endings.
 
@@ -182,7 +184,10 @@ What happens to one statement, in order:
      with `USING`, …): the statement runs through copy-and-swap — a shadow table,
      a chunked copy, a checksum, and a cutover — when the engine carries the
      operation, and the walk ends at plan time with a typed `backend-unavailable`
-     refusal when it does not yet ([capabilities.md](capabilities.md)).
+     refusal when it does not yet ([capabilities.md](capabilities.md)). The route is in
+     preview: a run that does not open it (`--copy-and-swap`, `CopySwapOptions.Enabled`)
+     is refused `copy-and-swap-refused`, cause `copy-and-swap-not-enabled`, before the
+     route's preflight runs or anything is written.
    - **Lane F**, the operator's force acknowledgement (`Options.Force`, the CLI's
      `--force`), overrides the routing but not the guards: it re-enters lane B as one
      blind bounded attempt, audited and recorded in the verdict's `Forced` field.
@@ -242,7 +247,7 @@ failed sequence.
 | 3a | Lock not granted within `lock_timeout` on any attempt | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03`; executor code `budget-lock-exceeded`) | No — nothing executed |
 | 3b | Statement ran past `statement_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: statement-budget` (SQLSTATE `57014`; executor code `budget-statement-exceeded`) | No — rolled back cleanly |
 | 4 | Table exceeds the size limit | `reason: not-native-safe-table-too-large` (a typed `*preflight.SizeError` underneath) | No — refused before any DDL, no lock taken |
-| 5 | Shape routes to an unimplemented strategy, or is refused by a plan/partition/tier gate | Typed plan refusal | No |
+| 5 | Shape routes to an unimplemented strategy or to a copy-and-swap route the run did not open, or is refused by a plan/partition/tier gate | Typed plan refusal | No |
 | 6 | Copy-and-swap rewrite completes online | `outcome: executed-via-copy-and-swap` | Yes — shadow table + cutover |
 | 7 | Sequence stopped mid-flight (step failed, external cancellation) | `outcome: failed` + executor `code`, exit code 1 | **Partially** — the committed prefix remains ([execution-model.md](execution-model.md)) |
 
@@ -262,7 +267,7 @@ Per refusal, the operational move an orchestrator makes
 | `not-native-safe-budget-exceeded`, `cause: statement-budget` | Terminal today; not yet routed into copy-and-swap |
 | `not-native-safe-table-too-large` | Policy — an operator raises the threshold deliberately |
 | `insufficient-privileges` | Operator action — `detail` names the exact `GRANT` |
-| `destructive-change`, `plan-fingerprint-mismatch`, `backend-unavailable` | Human decision — never auto-retried |
+| `destructive-change`, `plan-fingerprint-mismatch`, `backend-unavailable`, `copy-and-swap-refused` | Human decision — never auto-retried |
 
 ## The size guard knob
 
@@ -380,23 +385,13 @@ runtime.
 
 ### Aren't all native-safe changes online-safe by design, without a limit?
 
-Only the shapes whose *executed form* is already online. The size guard is keyed on
-what executes, not on how confident the classifier is:
-
-- **Exempt** — the statement's submitted form is already the safe native shape
-  (`online-idiom`), or the planner substituted its own known-safe sequence
-  (`safer-idiom`). What runs is online by construction, so table size is irrelevant
-  and these pass `NoSizeLimit`.
-- **Guarded** — every other executing shape, *including* `metadata-only`. However
-  confident the classification, the engine still runs the submitted DDL as one blind
-  statement under budgets; the classification is a prediction, not an assertion
-  PostgreSQL honours. The guard hedges against the classifier being wrong, and the
-  cost of being wrong grows with table size.
-
-So the terse version: **exemption comes from what executes — an already-online
-submitted form or a substituted safe sequence — never from classification
-confidence. Everything else that executes is size-checked.** Above the limit the
-attempt is not even made — the typed `SizeError` is returned before any DDL runs.
+Only the shapes whose *executed form* is already online. **Exemption comes from what
+executes — an already-online submitted form (`online-idiom`) or a substituted safe
+sequence (`safer-idiom`) — never from classification confidence. Everything else that
+executes is size-checked, `metadata-only` included.** Above the limit the attempt is not
+even made — the typed `SizeError` is returned before any DDL runs. The full rule, per
+execution shape and per planner `reason`, is
+[who gets size-checked](#who-gets-size-checked).
 
 ### Why gamble at all? Do pg_osc and the other online tools do this?
 
@@ -440,9 +435,10 @@ transactional DDL makes the failed probe genuinely free.
 
 **What copy-and-swap changes today:** the shapes the planner *proves* are rewrites
 (lane C) now have an online path. The router sends them to the copy-and-swap backend,
-which runs them through a shadow table when the engine carries the operation and
-refuses them `backend-unavailable` when it does not yet
-([capabilities.md](capabilities.md) says which); the size guard does not apply there.
+which runs them through a shadow table when the engine carries the operation and the
+run opened the preview route, and refuses them `backend-unavailable` when it does not
+carry it yet ([capabilities.md](capabilities.md) says which); the size guard does not
+apply there.
 
 **What has not changed yet:** the *meaning* of a refused attempt. When the size guard
 or the budget refuses a lane B attempt, that is still a dead end — the caller sees a
@@ -530,7 +526,7 @@ effect, at the cost of briefly queueing other waiters behind the lock request.)
 
 | Tool | Model | Cost of uncertainty |
 |---|---|---|
-| **pg-sprite** | Proof, then bounded attempt, then (planned) copy-and-swap | Cheap probe; wrong guess bounded by budget and size guard |
+| **pg-sprite** | Proof, then bounded attempt; proven rewrites run through copy-and-swap | Cheap probe; wrong guess bounded by budget and size guard |
 | **pg-osc** (PostgreSQL) | Always copy-and-swap (shadow table + triggers/logical replay + cutover) | Maximum: full copy even for a metadata-only change |
 | **pgroll** (PostgreSQL) | Expand/contract: versioned views over an evolving physical schema | No gamble, but the application must participate in the two-phase workflow |
 | **pt-osc / gh-ost** (MySQL) | Always copy-and-swap | Same maximum-cost answer; built for a world without transactional DDL |
@@ -556,7 +552,7 @@ page rests on:
 4. **Typed outcomes, SQLSTATE matching.** Budget overruns map `55P03`/`57014` to
    stable codes; automation never branches on error prose.
 5. **A budget refusal is not a failure.** Budget and size errors are refusal inputs
-   that become not-native-safe verdicts; today they are terminal, and once
-   copy-and-swap lands they become routing signals.
+   that become not-native-safe verdicts; they are terminal, not routing signals into
+   copy-and-swap ([why](#is-the-gamble-temporary-until-copy-and-swap-exists)).
 6. **The limit must be runnable.** `Options.MaxTableSizeBytes` must be positive;
    misconfiguration is rejected at the front door, before any database work.

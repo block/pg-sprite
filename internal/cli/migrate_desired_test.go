@@ -107,10 +107,10 @@ func TestMigrateAlterRejectsExtensionSchemaFlag(t *testing.T) {
 	require.EqualError(t, err, "migrate: --extension-schema requires --desired; qualify extension names in --alter instead")
 }
 
-// --extension-schema is refused before connecting when the file declares
-// row security, which does not resolve names against extension schemas, or
-// when it names a schema that cannot hold one; the port refuses every
-// connection, so reaching it would fail differently.
+// --extension-schema is refused before connecting when it names a schema
+// that cannot hold an extension, whether or not the file declares row
+// security; the port refuses every connection, so reaching it would fail
+// differently.
 func TestMigrateDesiredRefusesExtensionSchemaBeforeConnecting(t *testing.T) {
 	for name, tc := range map[string]struct {
 		sql, schema, want string
@@ -118,8 +118,8 @@ func TestMigrateDesiredRefusesExtensionSchemaBeforeConnecting(t *testing.T) {
 		"row security": {
 			sql: `CREATE TABLE documents (id int PRIMARY KEY, email citext);
  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`,
-			schema: "extensions",
-			want:   "--extension-schema is not supported for a file that declares row security",
+			schema: "pg_toast",
+			want:   `--extension-schema: invalid extension schema: "pg_toast" is a system schema`,
 		},
 		"system schema": {
 			sql:    "CREATE TABLE documents (id int PRIMARY KEY, email citext);",

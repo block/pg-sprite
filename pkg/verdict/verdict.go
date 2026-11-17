@@ -568,6 +568,13 @@ type Verdict struct {
 	// already existed. Detail says the same for a reader. False for every
 	// other verdict.
 	TableCreated bool `json:"table_created,omitempty"`
+	// ExtensionSchemas is set on a verdict whose run created the table
+	// from a desired file that named extension schemas: the schemas the
+	// create's unqualified names also resolved against, in search order
+	// after the table's schema and public. ExecutedSQL ran under that
+	// search path, so a reader replaying or auditing it needs them. Empty
+	// for every other verdict.
+	ExtensionSchemas []string `json:"extension_schemas,omitempty"`
 	// Abandoned is true on a failed copy-and-swap verdict whose run the
 	// engine abandoned on a data fault: the shadow is dropped, the hold on
 	// the source — write fence or replication slot — is released, and the
@@ -806,6 +813,9 @@ func (v Verdict) String() string {
 	}
 	if v.SQLState != "" {
 		fmt.Fprintf(&b, "\n  server:    %s (SQLSTATE %s)", v.ServerError, v.SQLState)
+	}
+	if len(v.ExtensionSchemas) > 0 {
+		fmt.Fprintf(&b, "\n  extension: schemas searched after the table's schema and public: %s", strings.Join(v.ExtensionSchemas, ", "))
 	}
 	if len(v.ExecutedSQL) > 0 {
 		if v.Outcome == OutcomeFailed {

@@ -76,8 +76,8 @@ var migrateRefusals = map[string]migrateClaim{
 			`REINDEX INDEX CONCURRENTLY %[1]s.accounts_email_idx`,
 		},
 	},
-	// The imperative door takes only ALTER TABLE and CREATE INDEX, so an
-	// ALTER TYPE is refused at the gate.
+	// The only ALTER TYPE form the imperative door takes is ADD VALUE, so a
+	// RENAME VALUE is refused at the gate.
 	"enum-value-rename-removal": {
 		setup: `CREATE TYPE %[1]s.mood AS ENUM ('happy', 'sad')`,
 		statements: []string{

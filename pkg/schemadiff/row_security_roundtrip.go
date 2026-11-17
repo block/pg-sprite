@@ -18,13 +18,14 @@ import (
 // this never provisions authentication or changes the live table. schema is
 // the target schema the table lives in: the table's own definition resolves
 // that schema's types and functions by the bare names live introspection
-// prints, as IntrospectDesired does. Policy expressions still resolve nothing
-// but the scratch schema, so their helpers must be qualified.
+// prints, as IntrospectDesired does, and the extension schemas the
+// declaration names as well. Policy expressions still resolve nothing but
+// the scratch schema, so their helpers must be qualified.
 func IntrospectDesiredWithRowSecurity(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) (Model, error) {
 	if desired.Table() == "" {
 		return Model{}, statement.ErrRowSecurityDeclaration
 	}
-	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema}, nil)
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema}, desired.ExtensionSchemas())
 }
 
 // IntrospectDesiredWithRowSecurityTx materializes the declaration in a nested
@@ -38,7 +39,7 @@ func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, schema s
 	if err != nil {
 		return Model{}, fmt.Errorf("begin desired row security savepoint: %w", err)
 	}
-	return introspectDesiredTransaction(ctx, scratch, desired.Table(), desired.Statements(), referencedFrom{schema: schema}, nil)
+	return introspectDesiredTransaction(ctx, scratch, desired.Table(), desired.Statements(), referencedFrom{schema: schema}, desired.ExtensionSchemas())
 }
 
 // RenderWithRowSecurity exports the complete table-local RLS definition,

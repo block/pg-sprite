@@ -1,7 +1,6 @@
 package dbconn
 
 import (
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"os"
@@ -98,14 +97,6 @@ func TestEmbeddedRDSBundleCoversOnlyCommercialRegions(t *testing.T) {
 	}
 }
 
-func TestRDSTLSConfig(t *testing.T) {
-	tc := rdsTLSConfig("mydb.abc123.us-east-1.rds.amazonaws.com")
-	assert.Equal(t, "mydb.abc123.us-east-1.rds.amazonaws.com", tc.ServerName)
-	assert.NotNil(t, tc.RootCAs)
-	assert.Equal(t, uint16(tls.VersionTLS12), tc.MinVersion)
-	assert.False(t, tc.InsecureSkipVerify)
-}
-
 func TestConfigureTLS(t *testing.T) {
 	const rdsURL = "postgres://user@mydb.abc123.us-east-1.rds.amazonaws.com:5432/app"
 	const govCloudURL = "postgres://user@mydb.abc123.us-gov-west-1.rds.amazonaws.com:5432/app"
@@ -145,6 +136,15 @@ func TestConfigureTLS(t *testing.T) {
 		// selected; a templated `?sslmode=${PGSSLMODE}` with the variable
 		// unset must not silently lose verification.
 		url := rdsURL + "?sslmode="
+		pc := parse(t, url)
+		require.NoError(t, configureTLS(pc, Config{URL: url}))
+		assertAutoTLS(t, pc)
+	})
+
+	t.Run("RDS host whose last repeated sslmode is empty is treated as choosing nothing and gets auto-TLS", func(t *testing.T) {
+		// pgx keeps the last occurrence of a repeated query key, so the
+		// earlier sslmode=disable is not what pgx applies.
+		url := rdsURL + "?sslmode=disable&sslmode="
 		pc := parse(t, url)
 		require.NoError(t, configureTLS(pc, Config{URL: url}))
 		assertAutoTLS(t, pc)

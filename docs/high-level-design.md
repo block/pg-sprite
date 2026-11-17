@@ -10,8 +10,8 @@ interfaces and packages.
 Working name: **`pg-sprite`**. It is a **separate, purpose-built PostgreSQL tool**, not "Spirit with
 PostgreSQL support" — Spirit stays MySQL-only (too many MySQL-isms to retrofit cleanly). pg-sprite
 instead **derives design practices** from several proven tools — Spirit (MySQL), pg-osc,
-pg_repack, and pgroll — and adapts them to PostgreSQL. It builds on the
-reasons to build.
+pg_repack, and pgroll — and adapts them to PostgreSQL. Why it is built rather than assembled
+from those tools is in [vision.md](vision.md#where-the-existing-ecosystem-stops).
 
 ## Table of contents
 
@@ -35,9 +35,9 @@ some changes take an `ACCESS EXCLUSIVE` lock that, behind a long transaction, ca
 whole application (the lock queue);
 and some changes **rewrite the entire table**, which a single `ALTER` cannot do online. The
 engine's job is to take the change the user wants and run it **safely** — using the cheap native
-PostgreSQL idiom when one exists, and a clear **not native-safe** refusal when one doesn't —
-without the user having to know which case they are in. Later phases add an in-house controlled
-table-copy path for those refused rewrites.
+PostgreSQL idiom when one exists, an in-house controlled table copy (copy-and-swap, in preview)
+for a rewrite it carries, and a clear refusal otherwise — without the user having to know which
+case they are in.
 
 ## The core idea: one planner, many executors
 
@@ -72,39 +72,40 @@ not choose one pattern globally. We route each migration to the pattern whose tr
                                 │ per-change strategy
 ╭───────────────────────────────▼─────────────────────────────--╮
 │ EXECUTORS decide HOW (interchangeable)                        │
-│   native DDL · later: copy-and-swap / expand-contract · refuse│
+│   native DDL · copy-and-swap · later: expand-contract · refuse│
 ╰─────────────────────────────────────────────────────────────--╯
 ```
 
 - **Planner** — decides *what* must change. It has no idea how any executor works.
 - **Router** — decides *which* strategy, from policy and cluster facts. The single home for
   migration policy.
-- **Executors** — decide *how*, behind one common contract, so a new strategy slots in without
-  reworking the front-end.
+- **Executors** — decide *how*, behind one common contract (planned), so a new strategy slots in
+  without reworking the front-end.
 
 The classifier, declarative diff, dry-run, and status reporting are written **once** and shared
-by every executor. Linting is part of this shared front-end design but is not built yet.
+by every executor. The offline `lint` command reports the same classifier's decisions as typed
+findings without a database.
 
 ## Two migration front doors: optimistic vs classified
 
-The current CLI has two migration front doors; the optimistic path is not an implementation of
-the planner's classifier:
+`migrate` combines two ways of deciding how a change runs; the optimistic attempt is not an
+implementation of the planner's classifier, but the classifier decides when it is used:
 
-- **Bounded optimistic migrate path (Phase 1).** No schema model and no
-  classification logic — just a cheap **statement-type gate** (`ALTER TABLE` only — the
-  statements the instant path can help; index/constraint statements are refused with the
-  safe-idiom pointer rather than run as risky literals) and a **table-size guard**, then **attempt the
-  change directly** under a tight lock/time budget. If it completes within budget it was
-  effectively an instant / in-place change and we are done; if it can't (the lock isn't granted
-  quickly, or the work would exceed the budget) we **cancel and treat it as needing a rewrite**.
-  This mirrors Spirit's original front door, which simply tried `ALGORITHM=INSTANT` and handled
-  the errors (then tried known-safe `INPLACE` options). It ships an end-to-end useful tool with
-  almost no parsing logic. This path lives at the `migrate` front door.
-- **Classified planning path (Phases 2.1–2.4).** Parse the statement and introspect the live schema to
+- **Bounded optimistic attempt.** No schema model behind it — a cheap **statement-type gate**
+  (`ALTER TABLE`, `CREATE INDEX`, `ALTER INDEX ... RENAME TO`, and `ALTER TYPE ... ADD VALUE` proceed; `DROP INDEX` and
+  `REINDEX` are refused with the concurrent-idiom pointer rather than run as risky literals) and
+  a **table-size guard**, then **attempt the change directly** under a tight lock/time budget.
+  If it completes within budget it was effectively an instant / in-place change and we are done;
+  if it can't (the lock isn't granted quickly, or the work would exceed the budget) we **cancel
+  and refuse it**. This mirrors Spirit's original front door, which simply tried
+  `ALGORITHM=INSTANT` and handled the errors (then tried known-safe `INPLACE` options). It runs
+  every executing shape the planner neither proved online nor routed to copy-and-swap,
+  `metadata-only` included.
+- **Classified planning path.** Parse the statement and introspect the live schema to
   **predict the path up front** — native-safe, needs-rewrite, or refuse — without trial
   execution. *Needs-rewrite* refers to a **table rewrite**: PostgreSQL would rebuild the
   whole table (a full-table copy under `ACCESS EXCLUSIVE`), so executing the change online
-  is the future copy-and-swap executor's job — it does not mean the submitted SQL merely
+  is the copy-and-swap executor's job — it does not mean the submitted SQL merely
   needs rewording (that is the planner's safer-sequence substitution, which stays on the
   native-safe path). The planner drives `diff` and `migrate --dry-run`, and its classified route drives
   `migrate`'s execution: a blocking submitted form is substituted with the planner's safer
@@ -116,8 +117,8 @@ the planner's classifier:
 > bounded attempt is not a free probe. Optimistic classification therefore bounds the attempt
 > with a tight `lock_timeout` **and** `statement_timeout`, and **skips the attempt entirely above
 > a table-size threshold** (`pg_total_relation_size`: heap, indexes, and TOAST, all
-> partitions), classifying the change as a rewrite — **refused
-> with the reason** until the in-house copy engine lands (see the build plan).
+> partitions) — **refused with the reason**; a size or budget refusal is terminal, not a
+> routing signal into the copy engine.
 
 The deep treatment of the bounded attempt — the full entry-to-exit map every statement
 walks, which routes are size-guarded and which are exempt, and why the bounded attempt
@@ -148,7 +149,7 @@ is the right design on PostgreSQL specifically — is
         ▼                ▼                ▼               ▼
    native DDL      copy-and-swap    expand/contract     refuse with
    CONCURRENTLY    (Pattern A,      via pgroll          not-native-safe
-   NOT VALID …     later)           (Pattern B, later)  verdict
+   NOT VALID …     preview)         (Pattern B, later)  verdict
    fast default
         ╰────────────────┴────────────────╯
                          │ cross-cutting: connection mgmt,
@@ -168,9 +169,9 @@ The package-level version of this diagram (with the concrete components for each
 | Pattern | When the router picks it | Key property | Tradeoff |
 | --- | --- | --- | --- |
 | **native DDL** | The change has a safe online PostgreSQL idiom (most changes) | Cheapest correct path; no copy | None beyond bounding the brief lock |
-| **copy-and-swap** (Pattern A, later) | A genuine table rewrite with **no** native online path (`int→bigint`, repack, volatile-default add) | **Transparent** — same table name, no app changes | Not yet available; needs logical replication for the low-overhead mode |
+| **copy-and-swap** (Pattern A, preview) | A genuine table rewrite with **no** native online path (`int→bigint`, repack, volatile-default add) | **Transparent** — same table name, no app changes | In preview, carrying a column type rewrite today; needs logical replication for the low-overhead mode |
 | **expand/contract** via pgroll (Pattern B, later) | A **breaking** change where instant reversibility / two live schema versions matter | **Reversible** within the rollout window | Requires the **app to be schema-version aware** |
-| **refuse** | Not native-safe, unsafe, or unsupported | First-class verdict with the reason, later-phase copy-and-swap note, and a safer native alternative where one exists | n/a — it is the safe outcome |
+| **refuse** | Not native-safe, unsafe, or unsupported | First-class verdict with the reason and a safer native alternative where one exists | n/a — it is the safe outcome |
 
 The crucial point: **reversibility and transparency are properties of the pattern, not features
 you toggle.** copy-and-swap is transparent but not reversible-by-design; pgroll is reversible but
@@ -268,7 +269,7 @@ for the surfacing/approval mechanics.
 
 ## The copy-and-swap path, conceptually
 
-When a later phase adds the in-house copy-and-swap executor, its lifecycle is:
+The in-house copy-and-swap executor (in preview) runs this lifecycle:
 
 ```diagram
  build a shadow table  ─▶  capture concurrent writes  ─▶  bulk-copy existing rows
@@ -281,12 +282,13 @@ When a later phase adds the in-house copy-and-swap executor, its lifecycle is:
     bounded + retried)       before cutover)
 ```
 
-Two things define this path and distinguish it from existing PostgreSQL tools:
+Two things define this path:
 
 - **The checksum is a mandatory gate** — the engine refuses to cut over unless the shadow
   provably equals the source.
-- **Cutover timing is controllable** — the swap can be deferred until an operator signal, with a
-  continuous re-verification loop while it waits.
+- **Cutover follows the gate** — v1 swaps as soon as the gate passes; deferring the swap until
+  an operator signal, with continuous re-verification while it waits, is a possible later mode
+  ([D10](copy-and-swap-design.md#d10--cut-over-as-soon-as-the-gate-passes)).
 
 The mechanism (logical decoding, chunking, the transactional swap, checkpoint/resume) and the
 MySQL→PostgreSQL primitive mapping are in the [low-level design](low-level-design.md#copy-and-swap-executor-lifecycle) and
@@ -306,7 +308,8 @@ a high level, v1 targets:
   it**, **no PK change**, and **no lossy conversion** — intentionally close to Spirit's supported
   surface.
 - **Capture:** logical decoding; a cluster without logical replication receives a typed refusal
-  in v1, and trigger-based capture (which inherits the overheads of pg_osc-style tools) stays a
+  in v1 unless the operator blocks the table's writes for the run instead (offline mode), and
+  trigger-based capture (which inherits the overheads of pg_osc-style tools) stays a
   documented, deferred alternative.
 
 The full deployment/precondition/schema matrices, the per-constraint *reasons*, and the

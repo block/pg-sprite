@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,8 +35,8 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
-		if err := refuseExtensionSchemasWithRowSecurity(c.ExtensionSchema); err != nil {
-			return err
+		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
+			return fmt.Errorf("--extension-schema: %w", err)
 		}
 		return c.runRowSecurityDiff(ctx, out, rowSecurity, migrate.DefaultOptions().Budget.Brief)
 	}
@@ -66,17 +65,6 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"disposition", string(report.Disposition))
 
 	return c.writeDiffReport(out, report)
-}
-
-// refuseExtensionSchemasWithRowSecurity refuses --extension-schema for a
-// file that declares row security: that path does not resolve names
-// against extension schemas, and ignoring the flag would plan the file as
-// if it had not been passed.
-func refuseExtensionSchemasWithRowSecurity(schemas []string) error {
-	if len(schemas) == 0 {
-		return nil
-	}
-	return errors.New("--extension-schema is not supported for a file that declares row security; qualify extension names in the file instead, such as extensions.citext")
 }
 
 func (c *DiffCmd) writeDiffReport(out io.Writer, report plan.Report) error {
@@ -248,11 +236,11 @@ func annotate(ps plan.Statement) string {
 }
 
 // runFmt canonicalizes a desired-state schema file: every statement is
-// parsed through the PostgreSQL grammar, admitted by ParseDesired's rules,
-// and printed back in the deparser's canonical form. Offline — no database.
-// A file that declares row security is refused here even though diff and
-// migrate --desired accept it, because fmt has no canonical form for
-// row-security statements yet.
+// parsed through the PostgreSQL grammar, admitted by ParseDesiredFile — the
+// same front door diff and migrate --desired use, so a file that declares row
+// security is accepted too — and printed back in the deparser's canonical
+// form, in the order the admitted file reports its statements (policy
+// comments last). Offline — no database.
 // Commented input is refused (statement.ErrCommentLoss): the parser drops
 // comments, and a formatter must never silently discard content.
 func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
@@ -268,11 +256,11 @@ func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 	if err := statement.CheckNoComments(string(src)); err != nil {
 		return err
 	}
-	ds, err := statement.ParseDesired(string(src))
+	file, err := statement.ParseDesiredFile(string(src))
 	if err != nil {
 		return err
 	}
-	for _, st := range ds.Statements() {
+	for _, st := range file.Statements() {
 		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL()); err != nil {
 			return fmt.Errorf("write formatted schema: %w", err)
 		}

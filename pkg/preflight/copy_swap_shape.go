@@ -144,12 +144,10 @@ func (c CopySwapRefusalCause) Class() refusal.Class {
 // or environment refusal anywhere in err's chain, or the zero cause when
 // err is neither.
 func CopySwapRefusalCauseOf(err error) CopySwapRefusalCause {
-	var shape *UnsupportedCopySwapShapeError
-	if errors.As(err, &shape) {
+	if shape, ok := errors.AsType[*UnsupportedCopySwapShapeError](err); ok {
 		return shape.Cause
 	}
-	var env *CopySwapEnvironmentError
-	if errors.As(err, &env) {
+	if env, ok := errors.AsType[*CopySwapEnvironmentError](err); ok {
 		return env.Cause
 	}
 	return ""

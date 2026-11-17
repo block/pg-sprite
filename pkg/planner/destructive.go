@@ -65,7 +65,8 @@ func classifyDestructive(kind statement.OpKind) (destructive, classified bool) {
 		statement.OpAttachPartition,
 		statement.OpDetachPartition,
 		statement.OpCreateIndex,
-		statement.OpReindex:
+		statement.OpReindex,
+		statement.OpAddEnumValue:
 		return false, true
 	default:
 		return true, false

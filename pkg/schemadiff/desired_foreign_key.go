@@ -55,8 +55,7 @@ func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema st
 		sql := "CREATE TABLE " + pgx.Identifier{scratch, table}.Sanitize() +
 			" (LIKE " + pgx.Identifier{schema, table}.Sanitize() + " INCLUDING INDEXES)"
 		if _, err := tx.Exec(ctx, sql); err != nil {
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) {
+			if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 				switch pgErr.Code {
 				case sqlstateUndefinedTable:
 					return fmt.Errorf("%w: %s.%s", ErrReferencedTableNotFound, schema, table)

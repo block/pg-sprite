@@ -972,6 +972,13 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	case statement.OpCreateIndex, statement.OpDropIndex, statement.OpReindex:
 		d = concurrentlyDecision(d, op.Concurrent, sql, single)
 
+	case statement.OpAddEnumValue:
+		// Adding a label writes one catalog row under a lock on the type
+		// alone: no table that uses the type is locked, scanned, or
+		// rewritten, and the existing labels keep their order. Sessions
+		// can use the new label once the statement commits.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+
 	default:
 		d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 	}

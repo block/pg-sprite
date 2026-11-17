@@ -430,8 +430,7 @@ func (g *LoadGenerator) committed(latency time.Duration) {
 }
 func (g *LoadGenerator) recordFailure(err error) {
 	failure := Failure{At: time.Now(), Err: err}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		failure.Code = pgErr.Code
 	}
 	g.mu.Lock()

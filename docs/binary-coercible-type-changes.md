@@ -481,8 +481,9 @@ clause so the verdict can be read from the report.
 
 Everything else — including changes PostgreSQL would relabel, such as `varbit` or temporal
 precision widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔
-timestamptz` case — is treated as `type-rewrite` and routed to the copy-and-swap path (a
-typed refusal until that executor lands). The bias is intentional: a false "free" verdict
+timestamptz` case — is treated as `type-rewrite` and routed to the copy-and-swap path, which
+runs it only when the run opens that route with `--copy-and-swap`
+([copy-and-swap.md](copy-and-swap.md)). The bias is intentional: a false "free" verdict
 would run a blocking rewrite on a hot table; a false "rewrite" verdict costs a slower but
 safe path. The rule set grows only when a new row has been proven against the reference
 table in [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md).

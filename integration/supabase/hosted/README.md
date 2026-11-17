@@ -100,7 +100,7 @@ rejection of plaintext connections.
 | `TestHostedCLIAddIndex` | The new index is valid; table identity, rows, policies, and grants remain unchanged |
 | `TestHostedCLIFailedNotNull` | Failed validation preserves NULL data and tenant access, leaves the column nullable, and reports the retained unvalidated helper constraint |
 | `TestHostedCLIRefuseDropColumn` | Destructive preview and apply are refused without dropping a column |
-| `TestHostedCLIRefuseCopySwap` | The unavailable copy-and-swap plan is refused before its safe prefix can run |
+| `TestHostedCLIRefuseCopySwap` | A desired volatile-default plan, which copy-and-swap does not carry, is refused `backend-unavailable` before its safe prefix can run |
 | `TestHostedCLIRLSLockFailure` | A lock-budget failure leaves existing policies and tenant access intact |
 | `TestHostedRealtimeContinuity/initialize` | An active reader and a delivered baseline for both tenants precede all pg-sprite DDL |
 | `TestHostedRealtimeContinuity/no_DDL_control` | Both tenants receive updates before schema changes |

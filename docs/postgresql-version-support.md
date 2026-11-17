@@ -93,10 +93,9 @@ Why 14 is the right floor:
   important, **PostgreSQL 14 added streaming of in-progress transactions** (`pgoutput`
   protocol v2): before 14, a large transaction is buffered/spilled to disk and only emitted to
   the consumer *at commit*, which adds apply lag and inflates slot/WAL retention for exactly the
-  big batch writes a long migration runs alongside. PG 14 streams those changes incrementally,
+  big batch writes a long schema change runs alongside. PG 14 streams those changes incrementally,
   and PG 16 adds *parallel apply* (protocol v4). The serialized, commit-ordered apply stream is a
-  real throughput ceiling for CDC catch-up (see
-  risks-and-mitigations); 14+ is where the worst
+  real throughput ceiling for CDC catch-up; 14+ is where the worst
   of that is mitigated, which is an independent reason the floor is 14 and not 12/13.
 
 What this *excludes* and why it's fine:
@@ -105,7 +104,7 @@ What this *excludes* and why it's fine:
   still cover those engines if a one-off change is ever needed there, so we lose nothing by
   not targeting them ourselves.
 - **`security_invoker`-dependent RLS on PG 14.** Only affects the optional pgroll backend on
-  exactly PG 14; the planned native and copy-and-swap executors would be unaffected, and PG 15+ removes the
+  exactly PG 14; the native and copy-and-swap executors are unaffected, and PG 15+ removes the
   limitation entirely.
 
 See [vision.md](vision.md) for why we reuse these tools as executors rather than replace

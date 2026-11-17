@@ -81,7 +81,7 @@ func renamedIndexFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Sta
 // is the one that owns the index, read from the catalog. A plain index
 // rename runs natively; a rename of an index that backs a constraint
 // renames the constraint and is refused as rewrite-required.
-func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, logger *slog.Logger) (verdict.Verdict, error) {
+func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
 	if opts.Force != "" {
 		return verdict.Verdict{}, fmt.Errorf("%w: force names a table, and this statement names an index; nothing was executed",
 			ErrIndexRenameAcknowledgement)
@@ -113,7 +113,7 @@ func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 
 	switch rs.Disposition {
 	case router.DispositionExecute:
-		return executeIndexRename(ctx, pool, st, facts, rs.Plan, opts, logger)
+		return executeIndexRename(ctx, pool, st, facts, rs.Plan, opts, step, logger)
 	case router.DispositionRewriteRequired:
 		v, err := rewriteRequiredVerdict(st, rs)
 		v.Table = table
@@ -132,15 +132,14 @@ func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 // rename as one bounded attempt, which re-checks under the table's lock
 // that the name still resolves to a plain index of that table.
 func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, facts Facts,
-	plan planner.Plan, opts Options, logger *slog.Logger) (verdict.Verdict, error) {
+	plan planner.Plan, opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
 	table := facts.Schema + "." + facts.Table
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, false) {
 		limit = preflight.NoSizeLimit
 	}
 	pt, err := preflight.CheckTable(ctx, pool, facts.Schema, facts.Table, limit)
-	var sizeErr *preflight.SizeError
-	if errors.As(err, &sizeErr) {
+	if sizeErr, ok := errors.AsType[*preflight.SizeError](err); ok {
 		v := sizeGuardVerdict(st, sizeErr, false)
 		v.Table = table
 		return v, nil
@@ -153,8 +152,7 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, st statement.St
 		return verdict.Verdict{}, err
 	}
 	_, err = preflight.CheckPrivileges(ctx, pool, facts.Schema, facts.Table, preflight.Requirement{Tier: tier})
-	var privErr *preflight.PrivilegeError
-	if errors.As(err, &privErr) {
+	if privErr, ok := errors.AsType[*preflight.PrivilegeError](err); ok {
 		v := privilegeVerdict(st, privErr, false)
 		v.Table = table
 		return v, nil
@@ -163,6 +161,7 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, st statement.St
 		return verdict.Verdict{}, err
 	}
 
+	opts.startStep(step, st.SQL())
 	start := time.Now()
 	err = executor.ExecuteIndexRename(ctx, pool, pt, st, opts.Budget.Brief, opts.retry())
 	elapsed := time.Since(start)

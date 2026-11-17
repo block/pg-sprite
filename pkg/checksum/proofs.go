@@ -7,10 +7,13 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 )
 
-// VerifiedShadow proves a full checksum pass found source and shadow equal.
-// Its zero value is forgeable; consumers must reject a proof whose Table is empty.
-// Only a pass that compared every key, found no difference, and repaired
-// nothing mints one (CO-1, CO-2): Check, over a quiesced source, and
+// VerifiedShadow proves a full checksum pass found source and shadow equal,
+// except for any keys it names in Carried. Its zero value is forgeable;
+// consumers must reject a proof whose Table is empty, and must not treat a
+// proof whose Carried is non-empty as covering those keys. Only a pass
+// that found no difference and repaired nothing mints one (CO-1, CO-2),
+// and only a live pass the caller allowed to leave keys (LiveOptions.CarryKeys)
+// mints one that names any: Check, over a quiesced source, and
 // CheckLive, over a source the stream is carrying to the shadow. The proof
 // says which (Live), because the two do not mean the same thing to the
 // swap: a quiesced proof is the shadow equal to the source as it stands,

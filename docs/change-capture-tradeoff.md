@@ -1,13 +1,14 @@
 # Change-capture trade-off: triggers vs logical decoding (copy-and-swap)
 
-Both approaches build the **same** copy-and-swap migration (shadow table → chunked copy →
+Both approaches build the **same** copy-and-swap schema change (shadow table → chunked copy →
 catch-up → checksum → atomic swap). They differ only in **how concurrent writes are captured**
 during the copy, and that single choice cascades into very different operational properties. This
 doc is the canonical comparison; **any doc that proposes logical-decoding copy-and-swap as the
 default must point here**, because the right default is cluster-dependent, not absolute.
 
 > TL;DR: **logical decoding is the default** (near-zero source overhead) and **triggers are the
-> robustness fallback** (survive failover, work anywhere). Neither lets us drop the **mandatory
+> designed robustness fallback** (survive failover, work anywhere), not built yet; where logical
+> decoding is unavailable today, the offline `--block-writes` run is the alternative. Neither lets us drop the **mandatory
 > checksum**; triggers do let us drop the fragile replication-slot checkpoint, but not the
 > copy-watermark checkpoint.
 
@@ -34,7 +35,7 @@ default must point here**, because the right default is cluster-dependent, not a
 | --- | --- | --- |
 | **Source write overhead** | ✅ ~none — capture is off the WAL, outside the write txn | ❌ write amplification — every write does extra work *inside* the txn, plus lock/deadlock risk on hot tables |
 | **Prerequisites** | `rds.logical_replication=1` (**reboot**), `rds_replication` role, a replication-protocol connection (no RDS Proxy), `REPLICA IDENTITY` | none — ordinary `TRIGGER` privilege; works on any cluster, no reboot, no params |
-| **Survives Aurora failover?** | ⚠️ **no, not guaranteed** — the slot lives on the writer and Aurora doesn't sync it; failover can lose it (see slot loss on failover) | ✅ **yes** — the trigger + queue/shadow are ordinary data, replicated by Aurora storage |
+| **Survives Aurora failover?** | ⚠️ **no, not guaranteed** — the slot lives on the writer and Aurora doesn't sync it; failover can lose it (see [slot loss on failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt)) | ✅ **yes** — the trigger + queue/shadow are ordinary data, replicated by Aurora storage |
 | **WAL / disk-retention risk** | ❌ an abandoned/slow slot pins WAL and can fill the volume | ✅ none (queue-table bloat is a normal, vacuumable concern) |
 | **Capture completeness** | ⚠️ wrinkles: an unchanged TOASTed column arrives as an unchanged-TOAST marker, not its value, under every replica identity (`FULL` enlarges only the old tuple) — the applier must skip it column-wise ([D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values), CO-8); generated cols arrive NULL; DDL not decoded (must lock out concurrent DDL) | ✅ trigger sees the **full new row** synchronously — no TOAST/generated-col gaps |
 | **Snapshot ↔ position coordination** | ❌ must seed the copy from the slot's exported snapshot and replay strictly from that LSN | ✅ sidestepped — trigger captures from creation; copy + capture reconcile |
@@ -67,7 +68,7 @@ This is the crux, and the honest answer is **no for the checksum, partly yes for
   reconciliation (see [low-level-design's failover analysis](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt)).
 - With **triggers**, the capture is *durable by construction*: a queue table's drain position is
   ordinary data, and a direct-to-shadow trigger keeps the shadow continuously live. There is no
-  slot LSN to checkpoint and **no slot-loss-on-failover restart risk** — the migration simply
+  slot LSN to checkpoint and **no slot-loss-on-failover restart risk** — the schema change simply
   resumes. That removes the scariest part of the checkpoint design.
 - **But** the **copy-watermark checkpoint is still needed** in both cases: a multi-hour copy of a
   large table must resume from where it stopped rather than re-copy from row 0.
@@ -80,16 +81,17 @@ failover), at the cost of source write overhead — and they do **not** buy you 
 | Situation | Prefer |
 | --- | --- |
 | Hot, write-heavy table where trigger amplification is unacceptable; logical replication is enabled | **Logical decoding** |
-| Cluster where `rds.logical_replication` can't be enabled (no reboot window) or the role/connection constraints can't be met | **Triggers** — not built in v1; preflight refuses with `copy-and-swap-logical-decoding-unavailable` until then |
-| Multi-day migration on a cluster with realistic failover/maintenance exposure | **Triggers** (failover-safe) once built — in v1, logical decoding *with* a tested checksum-repair resume |
-| Short migration on a quiet table | either; logical decoding has less footprint |
-| Sharded fleet running N migrations at once (slot/WAL pressure per cluster) | weigh per-cluster slot budget — see sharded-aurora-postgresql |
+| Cluster where `rds.logical_replication` can't be enabled (no reboot window) or the role/connection constraints can't be met | **Triggers** — not built in v1; a live run is refused with `copy-and-swap-logical-decoding-unavailable`, and the offline run (`--block-writes`, [copy-and-swap.md](copy-and-swap.md#live-or-offline)) needs no logical decoding because it refuses the table's writes until the swap |
+| Multi-day schema change on a cluster with realistic failover/maintenance exposure | **Triggers** (failover-safe) once built — in v1, logical decoding *with* a tested checksum-repair resume |
+| Short schema change on a quiet table | either; logical decoding has less footprint |
+| Sharded fleet running N schema changes at once (slot/WAL pressure per cluster) | weigh per-cluster slot budget |
 
 ## Decision: primary + fallback, behind one interface
 
-The copy-and-swap backend defines one change-capture abstraction. v1 implements **logical
-decoding** (the low-overhead differentiator); **triggers remain the first-class documented
-alternative** (the failover-safe, runs-anywhere path), but their implementation is deferred.
-Either implementation shares the rest of the pipeline: chunked copy, **mandatory checksum**,
+v1 implements **logical decoding** (the low-overhead differentiator): the catch-up reads a
+`decode.Stream` directly, with no change-capture interface in front of it yet. **Triggers remain
+the first-class documented alternative** (the failover-safe, runs-anywhere path), but their
+implementation is deferred, and adding them introduces that interface. Either implementation
+shares the rest of the pipeline: chunked copy, **mandatory checksum**,
 copy-watermark checkpoint, and atomic cutover. See
 [the change-capture decision in low-level-design](low-level-design.md#1-cdc-mechanism--logical-decoding-with-trigger-fallback).
