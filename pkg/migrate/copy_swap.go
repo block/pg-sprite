@@ -86,7 +86,8 @@ type CopySwapOptions struct {
 	// write that reaches the fence fails, so the table is offline for
 	// writes until the swap. It must name the resolved target table as
 	// SCHEMA.TABLE, the same way Restart does, so the declaration cannot be
-	// left on a script and fence another table by accident. Empty runs the
+	// left on a script and fence another table by accident; a value naming
+	// any other table returns [ErrBlockWritesMismatch]. Empty runs the
 	// live path: slot, stream, and catch-up. Run takes it; RunDesired
 	// rejects any value with ErrBlockWritesNotSupported.
 	BlockWrites string
@@ -97,8 +98,8 @@ type CopySwapOptions struct {
 	// is discarded under the run's own lock session before a fresh shadow
 	// is built (schemachange.RunOptions.Restart). It must name the
 	// resolved target table as SCHEMA.TABLE, the same way Options.Force
-	// does, so the acknowledgement cannot be left on a script by accident.
-	// A leftover whose swap already committed is not discarded: the
+	// does, so the acknowledgement cannot be left on a script by accident;
+	// a value naming any other table returns [ErrRestartMismatch]. A leftover whose swap already committed is not discarded: the
 	// change is past the point of starting over, and the run is refused
 	// so it can be finished without the acknowledgement. Empty resumes a
 	// leftover, as every run does. Run takes it; RunDesired rejects any

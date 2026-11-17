@@ -77,6 +77,16 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 		"restart":           migrate.ErrRestartNotSupported,
 		"block-writes":      migrate.ErrBlockWritesNotSupported,
 	}
+	// Every acknowledgement also refuses one that names another table with
+	// a sentinel of its own, so an embedder can tell which input to send
+	// back; TestEachMismatchHasItsOwnSentinel pins that each is distinct.
+	mismatches := map[string]error{
+		"force":             migrate.ErrForceMismatch,
+		"accept-blocking":   migrate.ErrAcceptBlockingMismatch,
+		"allow-destructive": migrate.ErrAllowDestructiveMismatch,
+		"restart":           migrate.ErrRestartMismatch,
+		"block-writes":      migrate.ErrBlockWritesMismatch,
+	}
 	fields := map[string]string{
 		"force":             "Options.Force",
 		"accept-blocking":   "Options.AcceptBlocking",
@@ -92,6 +102,8 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 	require.ElementsMatch(t, slices.Collect(maps.Keys(sentinels)), names,
 		"a SCHEMA.TABLE flag on migrate is a typed acknowledgement: give a new one its "+
 			"sentinel and field in this test and an entry in the engine's irreversible-operations registry")
+	require.ElementsMatch(t, slices.Collect(maps.Keys(mismatches)), names,
+		"a SCHEMA.TABLE flag on migrate refuses another table with its own Err…Mismatch sentinel: name it in this test")
 
 	desired := filepath.Join(t.TempDir(), "orders.sql")
 	require.NoError(t, os.WriteFile(desired, []byte("CREATE TABLE orders (id bigint PRIMARY KEY);"), 0o600))
