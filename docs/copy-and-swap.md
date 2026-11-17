@@ -85,7 +85,9 @@ The fence and why it also covers replication apply workers are described in
 
 Both:
 
-- a table shape copy-and-swap carries: a usable primary key, and none of the shapes the
+- a table shape copy-and-swap carries: a usable primary key (one `smallint`, `integer`, or
+  `bigint` column; [primary-keys.md](primary-keys.md) covers adding one to a table without
+  it), and none of the shapes the
   [copy-and-swap row in limitations.md](limitations.md) lists, such as foreign keys,
   triggers, dependent views, or partitioning. The preflight refuses anything else with a
   typed `copy-and-swap-refused` cause before it builds anything;
