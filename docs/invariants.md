@@ -51,7 +51,26 @@ OIDs the pass compared, and a shadow dropped and rebuilt under the same derived 
 relation the pass never read, so the gate refuses it (`cutover-unverified`). A pass that runs
 while the stream writes the shadow (`CheckLive`) counts a chunk clean only when, for every key
 of it, the stream has provably delivered what the pass's read saw on the source; anything it
-cannot prove is unsettled, never clean, and mints nothing. The rows it judges the keys from are
+cannot prove is unsettled, never clean, and mints nothing. The one exception is stated by the
+caller and by the proof: a pass told it may leave keys for the swap (`LiveOptions.CarryKeys`),
+that ran through the complete watermark, confirmed no divergence, left no chunk lagging, and
+left no more keys changing than it may, mints a `VerifiedShadow` that names those keys
+(`VerifiedShadow.Carried`) and no `CleanWatermark`. That proof says nothing about a named key;
+comparing each is the swap's, under its lock and after its drain, where no key can change.
+`GateCutover` accepts a proof that names at most `MaxCarryKeys` of them and refuses one that
+names more (`cutover-unverified`). `Cutover` then reads every named key on both sides inside
+the swap transaction (`checksum.CompareCarried`), after the drain and the re-run checklist and
+before any name moves, and refuses the swap, rolled back with the source live, when one
+differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
+that differs is a row the live table would hold wrong. The compare refuses a transaction that
+does not hold `ACCESS EXCLUSIVE` on both relations, since without it the two reads are two
+snapshots a writer could commit between (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
+`TestCompareCarriedNamesTheKeysThatDifferUnderTheSwapLock`,
+`TestCompareCarriedRefusesWithoutAccessExclusiveOnBothRelations`,
+`TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft`,
+`TestCutoverRefusesWhenAKeyThePassLeftStillDiffersAfterTheDrain`). `schemachange.Runner` lets
+its pass leave up to `MaxCarryKeys` keys, so a row written faster than the pass can read it
+twice no longer stops the run. The rows it judges the keys from are
 read with the digest's companion statement in the digest's own snapshot, and the chunk digest
 derived from them must equal the one the server aggregated, or the pass fails closed before it
 judges anything from them. The proof such a pass mints says so
@@ -1305,8 +1324,9 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
-`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
+`migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
+`MinPoolConns`; inside the
 shadow build's transaction, `pkg/schemachange`
 `readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
 gives the shadow an identity or sequence-owned column the source does not have

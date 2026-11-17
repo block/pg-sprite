@@ -66,6 +66,10 @@ type Options struct {
 	CollisionBackoff time.Duration
 	// Clock times each chunk for the chunker's chunk-time throttling
 	// feedback (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
+	// Its first reading comes at the start of the first chunk, after the
+	// resume clear and the first claim; tests hook that reading to place a
+	// concurrent shadow writer (testutil.ShadowPin), so a clock reading
+	// added earlier in Run moves every such test's writer ahead of the clear.
 	Clock progress.Clock
 	// Pace holds the workers back before a chunk while a backlog the
 	// caller measures is over a mark; the zero Pace paces nothing.
@@ -181,6 +185,9 @@ type Copier struct {
 	paceWaits   atomic.Int64
 	paceExpired atomic.Int64
 	paceWaited  atomic.Int64
+	// paceReleased is set when a pace wait runs out and cleared by the next
+	// reading at or below the mark; while it is set no worker waits.
+	paceReleased atomic.Bool
 }
 
 // NewCopier prepares a copy of target into shadow that resumes after from

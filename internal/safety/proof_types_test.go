@@ -119,6 +119,16 @@ func (inv *inventory) record(file *ast.File) {
 				inv.declared[pkg][decl.Name.Name] = true
 			}
 		case *ast.GenDecl:
+			if decl.Tok == token.VAR || decl.Tok == token.CONST {
+				for _, spec := range decl.Specs {
+					for _, name := range spec.(*ast.ValueSpec).Names {
+						if name.IsExported() {
+							inv.declared[pkg][name.Name] = true
+						}
+					}
+				}
+				continue
+			}
 			if decl.Tok != token.TYPE {
 				continue
 			}
@@ -197,8 +207,8 @@ func TestRegistriesNameEveryProofType(t *testing.T) {
 // Type.Method pairs are neither.
 func TestStaleMentions(t *testing.T) {
 	inv := inventoryOf(t, "../../pkg")
-	prose := "`statement.Statement`, `statement.Classified`, `time.Sleep`, `runner.go`, `Tracker.CancelBuild`"
-	assert.Equal(t, []string{"statement.Classified"}, inv.staleMentions(prose))
+	prose := "`statement.Statement`, `statement.Classified`, `executor.ErrPoolTooSmall`, `executor.ErrPoolTooLarge`, `time.Sleep`, `runner.go`, `Tracker.CancelBuild`"
+	assert.Equal(t, []string{"statement.Classified", "executor.ErrPoolTooLarge"}, inv.staleMentions(prose))
 }
 
 // A proof type is mintable only inside its package when no field can be
