@@ -2,6 +2,7 @@ package schemachange_test
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/schemachange"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // rewritingPosition stands in for the catch-up's position: it claims
@@ -141,4 +143,56 @@ func TestCutoverRefusesWhenAKeyThePassLeftStillDiffersAfterTheDrain(t *testing.T
 		FROM `+f.table.Qualified()+`
 		WHERE id = $1`, carriedKey).Scan(&got))
 	assert.Equal(t, want, got, "the source row is as it was")
+}
+
+// A swap that cannot compare the keys a pass left must not rename. The
+// statement converts a column with USING, and after the gate an operator
+// planted in the table's schema changes what `*` in the expression
+// resolves to, so reading the source through the expression would no
+// longer reproduce the copy. The compare refuses with ErrConversionDrift,
+// and Cutover returns that error and rolls back with the source live under
+// its name.
+func TestCutoverRefusesWhenTheConversionOfACarriedKeyDriftedSinceTheBuild(t *testing.T) {
+	f := newReconcileFixture(t, 300)
+	alter, err := statement.ParseOne(fmt.Sprintf(`
+		ALTER TABLE %s
+		ALTER COLUMN uniq TYPE bigint USING (uniq * 1)::bigint`, f.table.Qualified()))
+	require.NoError(t, err)
+	shadow, err := schemachange.BuildShadow(t.Context(), f.pool, f.lock, f.target, alter, schemachange.Options{})
+	require.NoError(t, err)
+	require.NotEmpty(t, shadow.Conversions())
+	ready, _ := leaveKeyForSwap(t, f, shadow)
+
+	schema := pgx.Identifier{f.table.Schema}.Sanitize()
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %s.times_zero(integer, integer)
+		RETURNS integer
+		LANGUAGE sql IMMUTABLE
+		AS 'SELECT 0'`, schema))
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE OPERATOR %s.* (
+		    LEFTARG = integer,
+		    RIGHTARG = integer,
+		    FUNCTION = %s.times_zero
+		)`, schema, schema))
+	require.NoError(t, err)
+
+	// The drain levels the key, so a swap that skipped the failed compare
+	// would find nothing to refuse and rename.
+	drain := func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			UPDATE `+shadowName(f, shadow)+` AS held
+			SET amount = source.amount
+			FROM `+f.table.Qualified()+` AS source
+			WHERE source.id = held.id
+			  AND held.id = $1`, carriedKey)
+		return err
+	}
+	_, err = schemachange.Cutover(t.Context(), f.pool, f.lock, ready, drain, schemachange.CutoverOptions{})
+	require.ErrorIs(t, err, checksum.ErrConversionDrift)
+
+	var live bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT to_regclass($1)::oid = $2`, f.table.Qualified(), shadow.SourceOID()).Scan(&live))
+	assert.True(t, live, "the source still bears its name")
 }

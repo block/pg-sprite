@@ -23,7 +23,9 @@ import (
 // also name keys the pass could not judge because they never held still
 // (Carried): it proves every other key, and the swap must compare the
 // named ones itself once its lock and its drain have stilled them, and
-// refuse the proof if it cannot. It names the two
+// refuse the proof if it cannot: a proof with Carried keys is not finished
+// until CompareCarried has run inside the swap transaction, and a caller
+// that runs its own swap rather than schemachange.Cutover must call it. It names the two
 // relations by OID as well as by name: the shadow's name is derived from
 // the source's, so a shadow rebuilt after this proof was minted wears the
 // same name while holding none of the rows the pass compared.

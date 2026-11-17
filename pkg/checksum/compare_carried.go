@@ -43,7 +43,8 @@ import (
 // The caller's transaction already carries its budgets and role, so none
 // are set here. The compare pins the output settings the digests pin,
 // chunksql.Rendering, so a conversion renders a value as the copy did,
-// and sets the search_path the pass's reads run under. It restores the
+// and sets the search_path the pass's reads run under; it checks the lock
+// before it changes any of them. It restores the
 // caller's extra_float_digits and bytea_output before it returns and
 // leaves the search_path for the caller to set back as its own statements
 // need. A proof that carries no key touches nothing, not even the session
@@ -70,11 +71,11 @@ func CompareCarried(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTar
 		// INV: CO-1
 		return nil, fmt.Errorf("%w (CO-1): verified shadow proof for %s.%s leaves %d keys for the swap, more than the %d a pass may leave", ErrInvariantViolation, shadow.Schema(), shadow.SourceTable(), len(keys), MaxCarryKeys)
 	}
-	digits, byteaOutput, err := pinCompareSettings(ctx, tx, chunksql.SearchPath(shadow.Schema(), len(shadow.Conversions()) > 0))
-	if err != nil {
+	if err := confirmStilled(ctx, tx, shadow); err != nil {
 		return nil, err
 	}
-	if err := confirmStilled(ctx, tx, shadow); err != nil {
+	digits, byteaOutput, err := pinCompareSettings(ctx, tx, chunksql.SearchPath(shadow.Schema(), len(shadow.Conversions()) > 0))
+	if err != nil {
 		return nil, err
 	}
 	if err := confirmProvenRelations(ctx, tx, shadow); err != nil {

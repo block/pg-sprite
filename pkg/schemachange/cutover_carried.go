@@ -18,9 +18,12 @@ import (
 // left to wait for and a key that differs is a row the live table would
 // hold wrong. The refusal rolls the swap back with the source live.
 //
-// The compare reads under the verification pass's settings, so it restores
-// the search_path the rest of the swap's statements run under before it
-// returns. A proof that carries no key costs the swap no statement.
+// The compare reads under the verification pass's search_path, so the
+// swap's own is set back as soon as the compare returns, before the keys
+// it found are judged, so the path does not depend on which way the
+// judgement goes. Only a compare that fails leaves it unset, and that
+// error rolls the swap back. A proof that carries no key costs the swap
+// no statement.
 func compareCarried(ctx context.Context, tx pgx.Tx, ready CutoverReady) error {
 	built := ready.built
 	carried := len(ready.verified.Carried())
@@ -31,10 +34,13 @@ func compareCarried(ctx context.Context, tx pgx.Tx, ready CutoverReady) error {
 	if err != nil {
 		return fmt.Errorf("compare the %d keys the verification pass left for the swap of %s.%s: %w", carried, built.Schema(), built.SourceTable(), err)
 	}
+	if err := setSearchPath(ctx, tx, built.Schema()); err != nil {
+		return err
+	}
 	if len(differing) > 0 {
 		// INV: CO-1
 		return refuse(CauseCarriedDiverged, nil, "%d of the %d keys the verification pass left for the swap differ between %s.%s and its shadow %s under the swap lock, after the drain; the first is %d",
 			len(differing), carried, built.Schema(), built.SourceTable(), built.ShadowTable(), differing[0])
 	}
-	return setSearchPath(ctx, tx, built.Schema())
+	return nil
 }

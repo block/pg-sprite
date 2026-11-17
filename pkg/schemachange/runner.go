@@ -70,7 +70,12 @@ type RunOptions struct {
 	// them on both sides under its lock, after its drain; zero is
 	// checksum.MaxCarryKeys, and a smaller value shortens what the swap
 	// may read under ACCESS EXCLUSIVE at the cost of stopping, as
-	// *checksum.UnresolvedError, a pass that leaves more.
+	// *checksum.UnresolvedError, a pass that leaves more. Zero means the
+	// opposite on checksum.LiveOptions, where it leaves no key, and a Runner
+	// cannot be asked to leave none: the smallest bound is one. A run that
+	// left no key would stop on a row the application keeps rewriting, and
+	// stop the same way on every retry, so the Runner always lets its swap
+	// finish the proof.
 	Live checksum.LiveOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
