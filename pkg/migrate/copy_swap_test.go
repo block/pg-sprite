@@ -241,7 +241,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 		assert.Contains(t, v.Detail, "resumes from the row")
-		assert.Contains(t, v.Detail, "CopySwapOptions.SlotLagCeilingBytes, --slot-lag-ceiling SIZE on the CLI")
+		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
 	})
 
 	t.Run("a stream behind the ceiling resumes without naming the ceiling", func(t *testing.T) {

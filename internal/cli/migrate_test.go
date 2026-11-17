@@ -201,6 +201,25 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 			assert.Contains(t, err.Error(), "cannot be combined with --dry-run")
 		})
 	}
+
+	// An offline run holds no replication slot, so a ceiling typed with
+	// --block-writes would bound nothing; the grammar refuses it rather than
+	// let the operator believe a WAL bound is in force.
+	t.Run("rejects --slot-lag-ceiling with --block-writes", func(t *testing.T) {
+		c := New("test")
+		k, err := kong.New(c, kong.Vars{"version": "test"})
+		require.NoError(t, err)
+		_, err = k.Parse([]string{
+			"migrate",
+			"--url", "postgres://user@localhost:5432/app",
+			"--alter", "ALTER TABLE t ALTER COLUMN c TYPE bigint",
+			"--copy-and-swap", "--free-disk=1GiB",
+			"--block-writes=public.t",
+			"--slot-lag-ceiling=2GiB",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--slot-lag-ceiling cannot be combined with --block-writes")
+	})
 }
 
 // --restart acknowledges discarding a copy-and-swap leftover, so it wires

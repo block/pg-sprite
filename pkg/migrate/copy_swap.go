@@ -403,13 +403,14 @@ func runAbandoned(err error) bool {
 // other stop is resumed by running the statement again; a live run the
 // slot-lag ceiling stopped because its slot retained too much WAL also
 // names the ceiling to raise, since a resume under the same ceiling meets
-// the same write rate. In each case the
-// detail names the hold the run keeps or kept on the source, since that is
-// what the operator is paying for in the meantime: the write fence of a
-// run that blocked writes, or the replication slot of a live run, which
-// pins WAL on the server until it is dropped. A blocked-writes run that
-// stopped before its fence went on left neither, and saved no row to
-// resume from, so the detail says the table kept taking writes.
+// the same write rate. In each case the detail names the hold the run
+// keeps or kept on the source, since that is what the operator is paying
+// for in the meantime: the write fence of a run that blocked writes, or the
+// replication slot of a live run, which pins WAL on the server until it is
+// dropped. A blocked-writes run that stopped before its fence went on left
+// neither, and saved no row to resume from, so the detail says the table
+// kept taking writes. The detail is written for the CLI operator and names
+// CLI flags; a host routes on the returned error instead.
 func copySwapStoppedRemedy(hold sourceHold, err error) string {
 	if hold == holdNone {
 		return "the run stopped before it fenced the source, so the table kept taking writes and no checkpoint row was saved; running the same statement again starts from the beginning"
@@ -435,7 +436,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 	resume := "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
 	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause == decode.SlotLagWALRetained {
 		return resume + "; when no open or prepared write transaction on the source holds the WAL back, the write rate is the cause, " +
-			"so resume with a slot-lag ceiling above the WAL the slot retained (CopySwapOptions.SlotLagCeilingBytes, --slot-lag-ceiling SIZE on the CLI)"
+			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE)"
 	}
 	return resume
 }
