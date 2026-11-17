@@ -230,6 +230,7 @@ Three mechanisms turn non-atomicity from a hazard into a contract:
    | --- | --- | --- | --- |
    | `SET NOT NULL` (4 steps) | The NOT VALID CHECK scaffold | Resume at the failed step; a leftover scaffold is removed by running the DROP CONSTRAINT step alone | Yes — a committed step refuses to double-apply (`duplicate_object`) |
    | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | `RebuildAbandonedIndex` removes the entry under proof and re-runs the build — see [invalid-index-recovery.md](invalid-index-recovery.md) | **Only as an explicit recovery call**: the sequence itself never drops; the recovery drops only what it has proven abandoned under the table lock, and refuses an in-flight or another table's entry |
+   | `ADD PRIMARY KEY` / `UNIQUE USING INDEX`, failed at the attach (step 2) | A valid unique index; the attach failed, for example on a null in the key column (SQLSTATE `23502`) or its lock budget | Fix the cause, then attach the existing index with `ADD CONSTRAINT <name> PRIMARY KEY USING INDEX <name>` (or `UNIQUE USING INDEX`). Re-running the original statement fails at step 1, because the index already exists | Yes — the attach is a single statement, and it fails rather than doubles if the constraint already exists |
    | `ADD CONSTRAINT ... NOT VALID` + `VALIDATE` | The NOT VALID constraint, enforcing for new writes | Re-run VALIDATE — it is safe to repeat | Yes — VALIDATE is idempotent |
 
    Nothing resumes automatically — deliberately. The engine never picks up
