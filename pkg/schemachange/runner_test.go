@@ -26,18 +26,19 @@ func TestNewRunnerRefusesANilStore(t *testing.T) {
 // cannot build a shadow and then stop at its first save or its swap over
 // a value it could have refused up front. The live pass reads the run's
 // own catch-up, so a confirmed source or a flush gate handed in is refused
-// too, and its swap compares no key the pass leaves it, so a pass told it
-// may leave some is refused rather than stopped at the gate after the
-// whole copy.
+// too, and its swap reads every key the pass leaves it under ACCESS
+// EXCLUSIVE, so a cap outside what a pass may leave is refused here rather
+// than by the pass, after the whole copy.
 func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 	store := &checkpoint.Store{}
 	for name, opts := range map[string]schemachange.RunOptions{
-		"negative checkpoint interval":            {CheckpointInterval: -time.Second},
-		"shadow lock timeout below a millisecond": {Shadow: schemachange.Options{LockTimeout: time.Microsecond}},
-		"negative cutover lock attempts":          {Cutover: schemachange.CutoverOptions{LockAttempts: -1}},
-		"a confirmed source for the live pass":    {Live: checksum.LiveOptions{Confirmed: (*applier.Catchup)(nil)}},
-		"a flush gate for the live pass":          {Live: checksum.LiveOptions{Flushes: (*applier.Catchup)(nil)}},
-		"keys left for the swap by the live pass": {Live: checksum.LiveOptions{CarryKeys: 1}},
+		"negative checkpoint interval":                      {CheckpointInterval: -time.Second},
+		"shadow lock timeout below a millisecond":           {Shadow: schemachange.Options{LockTimeout: time.Microsecond}},
+		"negative cutover lock attempts":                    {Cutover: schemachange.CutoverOptions{LockAttempts: -1}},
+		"a confirmed source for the live pass":              {Live: checksum.LiveOptions{Confirmed: (*applier.Catchup)(nil)}},
+		"a flush gate for the live pass":                    {Live: checksum.LiveOptions{Flushes: (*applier.Catchup)(nil)}},
+		"more keys left for the swap than a pass may leave": {Live: checksum.LiveOptions{CarryKeys: checksum.MaxCarryKeys + 1}},
+		"a negative count of keys left for the swap":        {Live: checksum.LiveOptions{CarryKeys: -1}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := schemachange.NewRunner(dbconn.Config{}, store, opts)
