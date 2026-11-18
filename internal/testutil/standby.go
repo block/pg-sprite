@@ -33,6 +33,10 @@ set -e
 echo "host replication all all scram-sha-256" >> "$PGDATA/pg_hba.conf"
 `
 
+// StandbySlotName is the physical slot on the primary the standby streams
+// through.
+const StandbySlotName = "pg_sprite_standby"
+
 // PrimaryStandby is a primary and a hot standby streaming from it, each
 // in a container of its own.
 type PrimaryStandby struct {
@@ -45,7 +49,8 @@ type PrimaryStandby struct {
 // connection URL for each. settings (each "name=value") go on both
 // servers' command lines, so a setting the standby checks against its own
 // configuration, such as wal_level for logical decoding, holds on both.
-// It returns once the standby reports it is in recovery and has replayed
+// The standby streams through the physical slot StandbySlotName on the
+// primary. It returns once the standby reports it is in recovery and has replayed
 // the primary's write position as it stood once the standby was up, so a
 // caller reads a standby that is in recovery and current.
 //
@@ -105,18 +110,24 @@ func StartPrimaryWithStandby(t *testing.T, settings ...string) PrimaryStandby {
 		},
 		Started: true,
 	})
-	require.NoError(t, err, "start the primary postgres container")
+	// A container whose start failed is returned with the error, so its
+	// cleanup is registered before the error is checked.
 	t.Cleanup(func() {
 		if err := testcontainers.TerminateContainer(primary); err != nil {
 			t.Logf("terminate the primary postgres container: %v", err)
 		}
 	})
+	require.NoError(t, err, "start the primary postgres container")
 
 	// pg_basebackup -R writes the standby.signal file and the
 	// primary_conninfo the server then streams from, so the clone starts
-	// as a hot standby of the primary.
+	// as a hot standby of the primary. --create-slot makes a physical slot
+	// on the primary and -R names it in primary_slot_name, so with
+	// hot_standby_feedback on the primary keeps the catalog rows a logical
+	// slot on the standby still needs.
 	clone := "pg_basebackup --host=" + alias + " --username=" + user +
 		" --pgdata=" + dataDir + " --write-recovery-conf --wal-method=stream --checkpoint=fast" +
+		" --create-slot --slot=" + StandbySlotName +
 		` && exec postgres -D ` + dataDir + ` "$@"`
 	standby, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
@@ -137,12 +148,12 @@ func StartPrimaryWithStandby(t *testing.T, settings ...string) PrimaryStandby {
 		},
 		Started: true,
 	})
-	require.NoError(t, err, "start the standby postgres container")
 	t.Cleanup(func() {
 		if err := testcontainers.TerminateContainer(standby); err != nil {
 			t.Logf("terminate the standby postgres container: %v", err)
 		}
 	})
+	require.NoError(t, err, "start the standby postgres container")
 
 	pair := PrimaryStandby{
 		PrimaryURL: containerURL(t, primary, "5432", user, password, database),

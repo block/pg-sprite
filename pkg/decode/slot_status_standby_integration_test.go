@@ -34,7 +34,9 @@ const (
 // one from PostgreSQL 16.
 func TestInspectSlotOnAStandbyReadsBothMeasuresAsUnknown(t *testing.T) {
 	major, err := strconv.Atoi(testutil.PGVersion())
-	require.NoError(t, err, "PG_VERSION is a major version number")
+	if err != nil {
+		t.Skipf("PG_VERSION %q is not a major version number; this test needs 16 or later", testutil.PGVersion())
+	}
 	if major < 16 {
 		t.Skipf("a standby can hold a logical slot from PostgreSQL 16; running %d", major)
 	}
@@ -60,6 +62,30 @@ func TestInspectSlotOnAStandbyReadsBothMeasuresAsUnknown(t *testing.T) {
 	watch, err := decode.NewSlotLagWatch(decode.DefaultSlotLagCeiling, decode.RestartReleaseInterval)
 	require.NoError(t, err)
 	assert.ErrorIs(t, watch.Judge(status, time.Now()), decode.ErrSlotLagUnknown)
+}
+
+// The same rule on every supported major: a physical slot, which a standby
+// can hold on any version, has no write position to measure its retained
+// WAL to on a server in recovery, so the measure reads as unknown rather
+// than the read failing. A physical slot has no confirmed position, so
+// its unconfirmed measure is unknown on any server; the logical test above
+// covers that measure on a standby.
+func TestInspectPhysicalSlotOnAStandbyReadsRetainedAsUnknown(t *testing.T) {
+	pair := testutil.StartPrimaryWithStandby(t)
+	standby, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: pair.StandbyURL})
+	require.NoError(t, err)
+	t.Cleanup(standby.Close)
+	const name = "pg_sprite_standby_physical"
+	_, err = standby.Exec(t.Context(), `SELECT pg_catalog.pg_create_physical_replication_slot($1, true)`, name)
+	require.NoError(t, err)
+
+	status, found, err := decode.InspectSlot(t.Context(), standby, name)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.False(t, status.Logical)
+	assert.NotZero(t, status.RestartLSN, "the slot reserved WAL when it was created")
+	assert.Equal(t, decode.RetainedWAL{}, status.Retained, "no write position to measure the retained WAL to")
+	assert.Equal(t, decode.RetainedWAL{}, status.Unconfirmed)
 }
 
 // createSlotOnStandby creates a logical slot of the standby's database on

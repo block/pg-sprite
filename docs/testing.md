@@ -235,11 +235,13 @@ collide — which also means every integration test runs against a
 **non-`public` schema**, an axis some peer tools (pgroll) treat as a separate
 matrix dimension. `StartPostgresTLS` starts a TLS-only server with a
 generated CA for verify-full tests. `StartPrimaryWithStandby` starts a
-primary and a hot standby streaming from it, and returns once the standby
-is in recovery and has replayed the primary's position, for tests of what
-the engine reads on a server in recovery. The harness has its own tests proving
-the version selected by `PG_VERSION` is the version actually running, and
-that throwaway schemas are isolated.
+primary and a hot standby streaming from it through a physical slot on the
+primary, applies its settings to both, and returns once the standby is in
+recovery and has replayed the primary's position, for tests of what the engine
+reads on a server in recovery. The harness has its own tests proving the
+version selected by `PG_VERSION` is the version actually running, that
+throwaway schemas are isolated, and that the replication pair applies its
+settings to both servers and streams through the primary's slot.
 
 Event triggers are database-global, and under `make test-db` every package
 shares one database, so a test installs one only through
