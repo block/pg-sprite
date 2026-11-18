@@ -57,7 +57,9 @@ func (f DesiredFile) Table() string {
 }
 
 // Statements returns the admitted statements in the order the admitted
-// value's Statements reports them. The slice is a copy.
+// value's Statements reports them. For a row-security file that is the
+// table and its indexes, then the settings and policies in the order the
+// file wrote them, then the policy comments. The slice is a copy.
 func (f DesiredFile) Statements() []Statement {
 	if f.hasRLS {
 		return f.rowSecurity.Statements()
