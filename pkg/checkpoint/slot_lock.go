@@ -66,8 +66,10 @@ func (s *Store) WithSlotLock(ctx context.Context, cfg dbconn.Config, name string
 }
 
 // databaseIdentitySQL names the cluster and the database a session is on.
+// It runs on the store's pool too, whatever its search_path, so its cast
+// is pg_catalog-qualified (CO-9).
 const databaseIdentitySQL = `
-	SELECT s.system_identifier::text, pg_catalog.current_database()
+	SELECT s.system_identifier::pg_catalog.text, pg_catalog.current_database()
 	FROM pg_catalog.pg_control_system() s`
 
 // proveSameDatabase refuses a lock connection that is not on the store's
