@@ -35,7 +35,9 @@ var ErrSlotActive = errors.New("replication slot is held by another process")
 // one CreateSlot would have created, are refused with a *ForeignStateError
 // and left as found — a foreign slot leaves the publication of the name in
 // place too, since the whole name is then in dispute. A name outside the
-// engine's shape is an invariant violation.
+// engine's shape is an invariant violation. The reads that judge the slot,
+// the server, and the publication do not consult pool's search_path, so a
+// caller need not pin it.
 func DropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string) error {
 	return dropSlotAndPublication(ctx, cfg, pool, name, true)
 }

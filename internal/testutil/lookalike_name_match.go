@@ -14,8 +14,10 @@ import (
 // lists that schema ahead of pg_catalog. On that pool an unqualified
 // comparison of a slot's database or name matches every slot on the
 // cluster, so a read that judges a slot by its database or name through
-// it is proven to spell its operators OPERATOR(pg_catalog.…). The pool
-// is asserted to reach both lookalikes before it is returned.
+// it is proven to spell its operators OPERATOR(pg_catalog.…). It covers
+// name-typed comparisons only: a read comparing text, oid, or another type
+// needs a lookalike of that type, or AssertCatalogQualified for the text.
+// The pool is asserted to reach both lookalikes before it is returned.
 func NewLookalikeNameMatchPool(t *testing.T, databaseURL string, owner *pgxpool.Pool) *pgxpool.Pool {
 	t.Helper()
 	schema := NewSchema(t, owner)

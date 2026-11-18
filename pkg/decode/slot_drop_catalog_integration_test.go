@@ -2,6 +2,7 @@ package decode_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,4 +46,34 @@ func TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals(t *testing
 	require.NoError(t, err)
 	assert.True(t, found, "another database's slot is left alone")
 	assert.True(t, status.Own, "the slot is its own database's")
+}
+
+// A publication of the engine's derived name that publishes every table is
+// someone else's, and the drop refuses it and leaves it (ST-3). The drop
+// reads the publication by its name with OPERATOR(pg_catalog.=), so a
+// caller's pool whose search_path lists a lookalike = on name that answers
+// true for everything still reads that publication and not the decoy, the
+// engine-shaped one created first: the drop is refused as foreign and the
+// FOR ALL TABLES publication stays (CO-9). A bare = would match every
+// publication, judge the decoy's shape instead, pass it as the route's,
+// and drop the FOR ALL TABLES publication by name.
+func TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals(t *testing.T) {
+	f := newSlotFixture(t)
+	name := f.target.DecodingName()
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf(`CREATE PUBLICATION aaa_decoy FOR TABLE %s.ledger`, f.schema))
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(`CREATE PUBLICATION %s FOR ALL TABLES`, name))
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, name)
+	require.NoError(t, err)
+	lookalike := testutil.NewLookalikeNameMatchPool(t, f.databaseURL, f.pool)
+
+	err = decode.DropIdleSlot(t.Context(), f.cfg, lookalike, name)
+
+	require.ErrorIs(t, err, decode.ErrForeignDecodingState)
+	var foreign *decode.ForeignStateError
+	require.ErrorAs(t, err, &foreign)
+	assert.Equal(t, decode.ForeignObjectPublication, foreign.Object)
+	assert.True(t, f.publicationExists(t, name), "someone else's publication is left alone")
+	assert.True(t, f.publicationExists(t, "aaa_decoy"), "the decoy is not the drop's either")
 }

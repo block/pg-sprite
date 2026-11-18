@@ -95,7 +95,9 @@ type candidateSlot struct {
 //
 // A database where Ensure has never run has no rows to speak for its
 // slots, so the pass is refused with ErrTableMissing rather than read every
-// slot as an orphan.
+// slot as an orphan. The reads that decide a slot's fate, the drop's
+// included, do not consult the store pool's search_path, so a caller need
+// not pin it.
 func (s *Store) ReapOrphanSlots(ctx context.Context, cfg dbconn.Config) (Reaped, error) {
 	candidates, err := s.candidateSlots(ctx)
 	if err != nil {

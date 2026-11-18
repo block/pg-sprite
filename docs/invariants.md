@@ -571,13 +571,21 @@ that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the
 by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot reaper's slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
-`= ANY`, and `NOT IN` as `<> ALL` — and so does `pkg/decode`'s drop-side ownership check
-(`slotIsOwn`): a lookalike `name = name` and `name ~~ text` that answer true, on a shadowing
-`<schema>, pg_catalog` path, would otherwise list another database's slot as this database's
-orphan and let the drop take it, `TestReaperLeavesAnotherDatabasesSlotUnderALookalikeEquals`
-and `TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`, and the text is held by
+`= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
+ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
+and the publication reads that judge whether the publication of the name is the route's, the
+create-side database guard included: a lookalike `name = name` and `name ~~ text` that answer
+true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
+as this database's orphan and let the drop take it, or match every publication and let the drop
+take someone else's `FOR ALL TABLES` one, and a lookalike `text = text` and `text <> text` that
+answer false would read a live row as terminal and let the reaper drop its slot,
+`TestReaperLeavesAnotherDatabasesSlotUnderALookalikeEquals`,
+`TestReaperKeepsALiveRowsSlotUnderLookalikeTextComparisons`,
+`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`, and
+`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`, and the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
-`TestSlotIsOwnQualifiesEveryRelationFunctionCastAndOperator`), and `pkg/checksum` (the column-type read, the relation check,
+`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
+character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,

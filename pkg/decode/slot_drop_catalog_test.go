@@ -1,44 +1,30 @@
 package decode
 
 import (
-	"regexp"
-	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/block/pg-sprite/internal/testutil"
 )
 
-// The drop's ownership check runs on whatever pool the caller passes, so
-// its read cannot rely on the session's search_path: every relation,
-// function, cast, and operator it spells is pg_catalog-qualified (CO-9).
-// This pins the SQL text itself; the integration test proves the
-// behaviour under a lookalike = on name.
-func TestSlotIsOwnQualifiesEveryRelationFunctionCastAndOperator(t *testing.T) {
-	relation := regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+(\S+)`)
-	call := regexp.MustCompile(`([A-Za-z_][A-Za-z_.0-9]*)\(`)
-	cast := regexp.MustCompile(`::([A-Za-z_][A-Za-z_.0-9]*)`)
-	qualifiedOperator := regexp.MustCompile(`OPERATOR\(pg_catalog\.[^)]+\)`)
-	bareSymbol := regexp.MustCompile(`[=<>!~|]`)
-	bareWord := regexp.MustCompile(`(?i)\b(?:LIKE|ILIKE|SIMILAR|IN|BETWEEN|DISTINCT)\b`)
-
-	for _, match := range relation.FindAllStringSubmatch(slotIsOwnSQL, -1) {
-		assert.True(t, strings.HasPrefix(match[1], "pg_catalog."),
-			"relation %q is not qualified with pg_catalog in:\n%s", match[1], slotIsOwnSQL)
+// The drop runs on whatever pool the caller passes, so the reads it decides
+// on cannot rely on the session's search_path: the ownership check, the
+// server proof before every slot command, and the publication reads that
+// judge whether the publication of the name is the route's all spell every
+// relation, function, cast, and operator through pg_catalog (CO-9). This
+// pins the SQL text itself; the integration tests prove the behaviour
+// under lookalike operators.
+func TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator(t *testing.T) {
+	for name, query := range map[string]string{
+		"slotIsOwnSQL":                   slotIsOwnSQL,
+		"catalogIdentitySQL":             catalogIdentitySQL,
+		"onTargetDatabaseSQL":            onTargetDatabaseSQL,
+		"publicationShapeSQL":            publicationShapeSQL,
+		"publishedTablesSQL(no filters)": publishedTablesSQL(false),
+		"publishedTablesSQL(filters)":    publishedTablesSQL(true),
+		"publishedSchemasSQL":            publishedSchemasSQL,
+	} {
+		t.Run(name, func(t *testing.T) {
+			testutil.AssertCatalogQualified(t, query)
+		})
 	}
-	for _, match := range call.FindAllStringSubmatch(slotIsOwnSQL, -1) {
-		if match[1] == "OPERATOR" {
-			continue
-		}
-		assert.True(t, strings.HasPrefix(match[1], "pg_catalog."),
-			"function %q is not qualified with pg_catalog in:\n%s", match[1], slotIsOwnSQL)
-	}
-	for _, match := range cast.FindAllStringSubmatch(slotIsOwnSQL, -1) {
-		assert.True(t, strings.HasPrefix(match[1], "pg_catalog."),
-			"cast to %q is not qualified with pg_catalog in:\n%s", match[1], slotIsOwnSQL)
-	}
-	bare := qualifiedOperator.ReplaceAllString(slotIsOwnSQL, "")
-	assert.Empty(t, bareSymbol.FindAllString(bare, -1),
-		"an operator is not spelled OPERATOR(pg_catalog.…) in:\n%s", slotIsOwnSQL)
-	assert.Empty(t, bareWord.FindAllString(bare, -1),
-		"a keyword comparison resolves its operator through the path in:\n%s", slotIsOwnSQL)
 }
