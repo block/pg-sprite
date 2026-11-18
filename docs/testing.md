@@ -155,6 +155,16 @@ sides and both counts, so a test that marks the touched list at an instant compa
 exactly the rows last written before it. The [load proof](#the-load-proof) is built on
 these three.
 
+To hold a copy chunk in flight, a test pins a shadow row: `PinShadowKey` returns a pin
+whose `Clock` the copier takes as its `Options.Clock`. At the clock's first reading,
+at the start of the first chunk, the pin inserts the key into the shadow in a
+transaction it leaves open, so the chunk that holds the key waits on it. The test calls
+`Wait` before relying on the pin, then `Release` (roll back) or `Commit` (publish the
+row). The pin's cleanup rolls back a pin still open, and disarms a clock that was never
+read. A `Wait` that times out means the copier never read its clock, or the pin's
+insert is waiting on another writer. `HookedClock` is the same first-reading hook
+without the pin.
+
 ### TM-6 — Every mutation direction per property
 
 For each object property the diff handles: absent → present, present →
@@ -300,14 +310,18 @@ slot; the target passes `3h`. The record, `results.json` in the package director
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
 mutation, and the verdict.
 
-Copy-and-swap under the default load is not supported yet, and the default run ends in
-`execution-failed`. Uniform writes at 8 × 100 a second keep changing the chunks the live
-verify pass rereads, and the pass stops on a chunk that changed on every reread; with
-`LOAD_PROOF_HOT=0.2` the applier falls behind during the verify pass until the slot-lag
-ceiling stops the run. The defaults stay at this load so the engine fixes are proven by
-the same command. A light load passes:
-`make load-proof LOAD_PROOF_ROWS=20000 LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5 LOAD_PROOF_FREE_DISK=10GiB`.
-A load much lighter than that can commit no delete before the mark, and the run then
+Copy-and-swap at the default table size is not supported yet, and the default run ends in
+`execution-failed`. The table size stops it, not the writes: by the time the copy of a
+table of about 1 GiB ends (`LOAD_PROOF_ROWS=100000` is enough) the slot retains more WAL
+than the slot-lag ceiling allows, and the catch-up stops the run, with or without
+`LOAD_PROOF_HOT`. The defaults stay at this size so the engine fixes are proven by the
+same command. Half that size passes at the default 8 × 100 writes a second, uniform or
+with a fifth of the updates on ten keys:
+`make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_HOT=0.2 LOAD_PROOF_FREE_DISK=10GiB`.
+The hottest of those keys change at every reread of the live verify pass, which leaves
+them for the swap to compare under its lock.
+A load much lighter than `LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5` can commit no delete
+before the mark, and the run then
 fails as one that judged no stream.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
@@ -465,7 +479,7 @@ same package cover the rest of it.
 | CLI grammar / config | [internal/cli](../internal/cli/cli_test.go) |
 | Pool config, bounded session timeouts | [pkg/dbconn](../pkg/dbconn/pool_config_test.go), [integration](../pkg/dbconn/dbconn_integration_test.go) |
 | Retry classification and behavior | [pkg/dbconn/retry_test.go](../pkg/dbconn/retry_test.go) |
-| RDS/Aurora TLS (unit) | [pkg/dbconn/rds_test.go](../pkg/dbconn/rds_test.go) |
+| RDS/Aurora TLS (unit), every host of a multi-host URL included | [pkg/dbconn/rds_test.go](../pkg/dbconn/rds_test.go), [multi-host (unit)](../pkg/dbconn/rds_tls_test.go) |
 | Verify-full TLS against a live TLS-only server; a CA bundle never falls back to plaintext against a server that accepts both (`TestTLSIntegrationNoPlaintextFallback`, `StartPostgresTLSOrPlaintext`) | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go), [CA pinning (unit)](../pkg/dbconn/ca_tls_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |

@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,6 +61,8 @@ func setEveryField(t *testing.T, v reflect.Value, path string) {
 		v.SetBool(true)
 	case reflect.Int, reflect.Int32, reflect.Int64:
 		v.SetInt(7)
+	case reflect.Uint64:
+		v.SetUint(7)
 	case reflect.Pointer:
 		v.Set(reflect.New(v.Type().Elem()))
 	case reflect.Func:
@@ -244,53 +247,43 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 		require.ErrorIs(t, err, ErrForceNotSupported)
 	})
 
-	// Every string or bool field on the policy either carries one of the
-	// acknowledgements or is listed here as not one. A string field is an
+	// Every string or bool reachable from the policy, through nested
+	// structs and pointers to a string or bool, either carries one of the
+	// acknowledgements or is listed here as not one. A string is an
 	// acknowledgement when one of them reads it; a bool cannot name its
 	// table, so it is never one and must be listed. A new acknowledgement
 	// field, or a switch that opens a new irreversible step, added without
 	// a registry entry would otherwise reach every statement a
 	// desired-state plan derives.
-	t.Run("every string or bool field on the policy is an acknowledgement or declared not one", func(t *testing.T) {
+	t.Run("every string or bool reachable from the policy is an acknowledgement or declared not one", func(t *testing.T) {
 		notAcks := map[string]bool{
 			// The role a greenfield table is created as: who owns the result.
 			"Options.CreateOwner": true,
+			// A concurrent index build whose statement_timeout the caller
+			// owns: a bound on the build, not a loss.
+			"Options.Budget.Concurrent.CallerOwned": true,
 			// Opens the copy-and-swap route; each irreversible step on it
 			// has its own acknowledgement.
-			"CopySwapOptions.Enabled": true,
+			"Options.CopySwap.Enabled": true,
 			// Keeps the retained source, so it loses less, not more.
-			"CopySwapOptions.KeepOld": true,
+			"Options.CopySwap.KeepOld": true,
+			// Where the route's own sessions connect, and how they verify TLS.
+			"Options.CopySwap.Connection.URL":        true,
+			"Options.CopySwap.Connection.CACertPath": true,
 		}
 		var unaccounted, walked []string
-		check := func(typ reflect.Type, field func(opts *Options) reflect.Value) {
-			for f := range typ.Fields() {
-				kind := f.Type.Kind()
-				if kind != reflect.String && kind != reflect.Bool {
-					continue
-				}
-				name := typ.Name() + "." + f.Name
-				walked = append(walked, name)
-				opts := DefaultOptions()
-				if kind == reflect.Bool {
-					field(&opts).FieldByName(f.Name).SetBool(true)
-				} else {
-					field(&opts).FieldByName(f.Name).SetString("app.orders")
-				}
-				if notAcks[name] {
-					assert.Empty(t, opts.Acknowledgements(), "%s is declared not an acknowledgement", name)
-					continue
-				}
-				if kind == reflect.Bool || len(opts.Acknowledgements()) != 1 {
-					unaccounted = append(unaccounted, name)
-				}
+		for _, sw := range policySwitches(reflect.TypeFor[Options](), "Options", nil) {
+			walked = append(walked, sw.name)
+			opts := DefaultOptions()
+			sw.set(reflect.ValueOf(&opts).Elem().FieldByIndex(sw.index))
+			if notAcks[sw.name] {
+				assert.Empty(t, opts.Acknowledgements(), "%s is declared not an acknowledgement", sw.name)
+				continue
+			}
+			if sw.isBool || len(opts.Acknowledgements()) != 1 {
+				unaccounted = append(unaccounted, sw.name)
 			}
 		}
-		check(reflect.TypeFor[Options](), func(opts *Options) reflect.Value {
-			return reflect.ValueOf(opts).Elem()
-		})
-		check(reflect.TypeFor[CopySwapOptions](), func(opts *Options) reflect.Value {
-			return reflect.ValueOf(&opts.CopySwap).Elem()
-		})
 		assert.Empty(t, unaccounted, "string or bool fields that are neither an acknowledgement nor declared not one")
 		for name := range notAcks {
 			assert.Contains(t, walked, name, "declared not an acknowledgement but no such string or bool field")
@@ -381,4 +374,56 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ackKinds hands back a slice no caller can use to change the registry:
+// writing to one result leaves the next call's answer unchanged.
+func TestAckKindsIsNotShared(t *testing.T) {
+	ackKinds()[0] = "app.orders"
+	assert.Equal(t, ackForce, ackKinds()[0])
+}
+
+// policySwitch is one string or bool reachable from a policy type, with how
+// to set it to a non-zero value.
+type policySwitch struct {
+	name   string
+	index  []int
+	isBool bool
+	set    func(reflect.Value)
+}
+
+// policySwitches lists every exported string or bool reachable from typ,
+// recursing through nested structs and following pointers to a string or a
+// bool.
+func policySwitches(typ reflect.Type, path string, index []int) []policySwitch {
+	var out []policySwitch
+	for f := range typ.Fields() {
+		if !f.IsExported() {
+			continue
+		}
+		name := path + "." + f.Name
+		idx := append(slices.Clone(index), f.Index...)
+		switch f.Type.Kind() {
+		case reflect.String:
+			out = append(out, policySwitch{name, idx, false, func(v reflect.Value) { v.SetString("app.orders") }})
+		case reflect.Bool:
+			out = append(out, policySwitch{name, idx, true, func(v reflect.Value) { v.SetBool(true) }})
+		case reflect.Struct:
+			out = append(out, policySwitches(f.Type, name, idx)...)
+		case reflect.Pointer:
+			switch f.Type.Elem().Kind() {
+			case reflect.String:
+				out = append(out, policySwitch{name, idx, false, func(v reflect.Value) {
+					v.Set(reflect.New(v.Type().Elem()))
+					v.Elem().SetString("app.orders")
+				}})
+			case reflect.Bool:
+				out = append(out, policySwitch{name, idx, true, func(v reflect.Value) {
+					v.Set(reflect.New(v.Type().Elem()))
+					v.Elem().SetBool(true)
+				}})
+			}
+		}
+	}
+	return out
 }

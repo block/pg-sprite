@@ -237,62 +237,6 @@ func TestRunnerResumesFromCutoverAfterTheOldTableWasDropped(t *testing.T) {
 	assert.Equal(t, schemachange.SwapProof{}, result.Swapped, "the swap's renames cannot be re-derived once the retained source is gone")
 }
 
-// hookedClock runs hook on its first reading. The copier reads its clock
-// after the first claim and before the first chunk transaction, so a hook
-// there meets the copy as a concurrent writer.
-type hookedClock struct {
-	once sync.Once
-	hook func()
-}
-
-func (c *hookedClock) Now() time.Time {
-	c.once.Do(c.hook)
-	return time.Now()
-}
-
-// pinShadowKey inserts key into the shadow in a transaction left open at
-// the copier's first clock reading, so the chunk holding key waits on the
-// primary key and every other chunk lands around it. The returned func
-// waits for the pin and rolls it back. The cleanup first disarms the
-// hook, so a test that fails before the copier reads its clock ends with
-// no pin to roll back instead of waiting on a reading that never comes.
-func (f runnerFixture) pinShadowKey(t *testing.T, key int64) (clock *hookedClock, release func()) {
-	t.Helper()
-	pinned := make(chan struct{})
-	shadow := pgx.Identifier{f.schema, schemachange.ShadowName(f.schema, "orders")}.Sanitize()
-	var tx pgx.Tx
-	var pinErr error
-	clock = &hookedClock{hook: func() {
-		defer close(pinned)
-		tx, pinErr = f.pool.Begin(t.Context())
-		if pinErr != nil {
-			return
-		}
-		if _, pinErr = tx.Exec(t.Context(), "INSERT INTO "+shadow+" (id, qty) VALUES ($1, 0)", key); pinErr != nil {
-			// A failed insert leaves the transaction holding its pooled
-			// connection, and the package's pool.Close waits on it, so it
-			// is rolled back here, before release reports pinErr.
-			_ = tx.Rollback(context.WithoutCancel(t.Context()))
-			tx = nil
-		}
-	}}
-	var once sync.Once
-	release = func() {
-		once.Do(func() {
-			<-pinned
-			require.NoError(t, pinErr)
-			if tx != nil {
-				assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
-			}
-		})
-	}
-	t.Cleanup(func() {
-		clock.once.Do(func() { close(pinned) })
-		release()
-	})
-	return clock, release
-}
-
 // A run stopped in the middle of its copy resumes from the watermark its
 // periodic save recorded, not from the start. One chunk is pinned by a
 // concurrent writer so the watermark cannot pass it; the injected sleep is
@@ -303,7 +247,7 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 	f := newRunnerFixture(t)
 	f.createOrders(t)
 	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
-	clock, release := f.pinShadowKey(t, 150)
+	pin := testutil.PinShadowKey(t, f.pool, pgx.Identifier{f.schema, schemachange.ShadowName(f.schema, "orders")}, 150, 0)
 	const belowPin = 100
 
 	ticks := make(chan struct{})
@@ -334,7 +278,7 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 		Copier: copier.Options{
 			Workers:     2,
 			LockTimeout: pinnedChunkWait,
-			Clock:       clock,
+			Clock:       pin.Clock(),
 			Chunker:     copier.ChunkerOptions{InitialRows: 100, MinRows: 100, MaxRows: 100},
 		},
 		Checksum:           checksum.Options{Chunker: gateChunks},
@@ -380,7 +324,7 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 	row := f.inspectRow(t, "orders")
 	assert.Equal(t, checkpoint.PhaseCopying, row.Phase)
 	assert.Equal(t, copier.NewWatermark(belowPin), row.Watermark, "the row carries the last save")
-	release()
+	pin.Release(t)
 
 	// While nothing runs the source stays fenced: a writer that reaches it
 	// is refused, so no change can slip in between the stop and the
@@ -427,7 +371,7 @@ func TestRunnerRecordsTheWorkACancelledCopyLanded(t *testing.T) {
 	f := newRunnerFixture(t)
 	f.createOrders(t)
 	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
-	clock, release := f.pinShadowKey(t, 2450)
+	pin := testutil.PinShadowKey(t, f.pool, pgx.Identifier{f.schema, schemachange.ShadowName(f.schema, "orders")}, 2450, 0)
 	const landedBelowPin = 2400
 
 	const pinnedChunkWait = time.Minute
@@ -435,7 +379,7 @@ func TestRunnerRecordsTheWorkACancelledCopyLanded(t *testing.T) {
 		Copier: copier.Options{
 			Workers:     2,
 			LockTimeout: pinnedChunkWait,
-			Clock:       clock,
+			Clock:       pin.Clock(),
 			Chunker:     copier.ChunkerOptions{InitialRows: 100, MinRows: 100, MaxRows: 100},
 		},
 		Checksum:           checksum.Options{Chunker: gateChunks},
@@ -477,7 +421,7 @@ func TestRunnerRecordsTheWorkACancelledCopyLanded(t *testing.T) {
 	row := f.inspectRow(t, "orders")
 	assert.Equal(t, checkpoint.PhaseCopying, row.Phase)
 	assert.Equal(t, copier.NewWatermark(landedBelowPin), row.Watermark, "the row records the watermark the committed chunks reached")
-	release()
+	pin.Release(t)
 
 	second := &stopAfter{}
 	f.assertResumedToDone(t, alter, schemachange.RunOptions{AfterCheckpoint: second.hook})

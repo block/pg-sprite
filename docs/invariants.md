@@ -51,7 +51,26 @@ OIDs the pass compared, and a shadow dropped and rebuilt under the same derived 
 relation the pass never read, so the gate refuses it (`cutover-unverified`). A pass that runs
 while the stream writes the shadow (`CheckLive`) counts a chunk clean only when, for every key
 of it, the stream has provably delivered what the pass's read saw on the source; anything it
-cannot prove is unsettled, never clean, and mints nothing. The rows it judges the keys from are
+cannot prove is unsettled, never clean, and mints nothing. The one exception is stated by the
+caller and by the proof: a pass told it may leave keys for the swap (`LiveOptions.CarryKeys`),
+that ran through the complete watermark, confirmed no divergence, left no chunk lagging, and
+left no more keys changing than it may, mints a `VerifiedShadow` that names those keys
+(`VerifiedShadow.Carried`) and no `CleanWatermark`. That proof says nothing about a named key;
+comparing each is the swap's, under its lock and after its drain, where no key can change.
+`GateCutover` accepts a proof that names at most `MaxCarryKeys` of them and refuses one that
+names more (`cutover-unverified`). `Cutover` then reads every named key on both sides inside
+the swap transaction (`checksum.CompareCarried`), after the drain and the re-run checklist and
+before any name moves, and refuses the swap, rolled back with the source live, when one
+differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
+that differs is a row the live table would hold wrong. The compare refuses a transaction that
+does not hold `ACCESS EXCLUSIVE` on both relations, since without it the two reads are two
+snapshots a writer could commit between (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
+`TestCompareCarriedNamesTheKeysThatDifferUnderTheSwapLock`,
+`TestCompareCarriedRefusesWithoutAccessExclusiveOnBothRelations`,
+`TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft`,
+`TestCutoverRefusesWhenAKeyThePassLeftStillDiffersAfterTheDrain`). `schemachange.Runner` lets
+its pass leave up to `MaxCarryKeys` keys, so a row written faster than the pass can read it
+twice no longer stops the run. The rows it judges the keys from are
 read with the digest's companion statement in the digest's own snapshot, and the chunk digest
 derived from them must equal the one the server aggregated, or the pass fails closed before it
 judges anything from them. The proof such a pass mints says so
@@ -1305,8 +1324,9 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
-`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
+`migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
+`MinPoolConns`; inside the
 shadow build's transaction, `pkg/schemachange`
 `readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
 gives the shadow an identity or sequence-owned column the source does not have
@@ -1650,7 +1670,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   reason, except the restart: without `--restart` a stopped run resumes and nothing is
   discarded, and a leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
-  nothing. Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
+  nothing, typed by its own sentinel so an embedder tells it from any other error.
+  Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
   own sentinel before any database work, and `migrate --desired` rejects each flag. A new
   string or bool field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a
   new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI
@@ -1667,12 +1688,15 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
   refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and a CLI flag with
+  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel its wrong-target check wraps;
+  a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
   (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
-  `ErrBlockWritesNotSupported`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
+  `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`),
+  `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
   registry's shape and the desired-state rejections;
   `TestEveryOpKindIsClassifiedForDestructiveness` and

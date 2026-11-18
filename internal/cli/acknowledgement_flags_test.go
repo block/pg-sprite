@@ -72,6 +72,16 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 		"restart":           migrate.ErrRestartNotSupported,
 		"block-writes":      migrate.ErrBlockWritesNotSupported,
 	}
+	// Every acknowledgement also refuses one that names another table with
+	// a sentinel of its own, so an embedder can tell which input to send
+	// back; TestEachMismatchHasItsOwnSentinel pins that each is distinct.
+	mismatches := map[string]error{
+		"force":             migrate.ErrForceMismatch,
+		"accept-blocking":   migrate.ErrAcceptBlockingMismatch,
+		"allow-destructive": migrate.ErrAllowDestructiveMismatch,
+		"restart":           migrate.ErrRestartMismatch,
+		"block-writes":      migrate.ErrBlockWritesMismatch,
+	}
 	fields := map[string]string{
 		"force":             "Options.Force",
 		"accept-blocking":   "Options.AcceptBlocking",
@@ -91,12 +101,15 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 		// Native-route policy: the size guard, step bounds, and lock retry.
 		"max-table-size", "index-build-timeout", "validate-timeout",
 		"lock-attempts", "lock-backoff", "lock-backoff-max",
-		// Copy-and-swap policy: opening the route, the disk preflight, and
-		// keeping the retained source, which loses less, not more.
-		"copy-and-swap", "free-disk", "keep-old",
+		// Copy-and-swap policy: opening the route, the disk preflight, the
+		// slot lag a live run stops at, and keeping the retained source,
+		// which loses less, not more.
+		"copy-and-swap", "free-disk", "slot-lag-ceiling", "keep-old",
 	}
 	require.ElementsMatch(t, migrate.Acknowledgements(), slices.Collect(maps.Keys(sentinels)),
 		"every acknowledgement the engine takes needs a migrate flag, with its sentinel and field in this test")
+	require.ElementsMatch(t, migrate.Acknowledgements(), slices.Collect(maps.Keys(mismatches)),
+		"every acknowledgement refuses another table with its own Err…Mismatch sentinel: name it in this test")
 
 	_, all := migrateFlags(t)
 	var ackFlags []int
@@ -113,16 +126,23 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 			unclassified = append(unclassified, f.Name)
 			continue
 		}
-		c, fresh := migrateFlags(t)
+		// A bool flag is probed both ways: one whose default is true would
+		// only reveal an acknowledgement when turned off.
+		var probes []func(reflect.Value)
 		switch f.Target.Kind() {
 		case reflect.Bool:
-			fresh[i].Target.SetBool(true)
+			probes = []func(reflect.Value){
+				func(v reflect.Value) { v.SetBool(true) },
+				func(v reflect.Value) { v.SetBool(false) },
+			}
 		case reflect.String:
-			fresh[i].Target.SetString("public.orders")
-		default:
-			continue
+			probes = []func(reflect.Value){func(v reflect.Value) { v.SetString("public.orders") }}
 		}
-		assert.Empty(t, c.options(nil).Acknowledgements(), "--%s is declared not an acknowledgement", f.Name)
+		for _, probe := range probes {
+			c, fresh := migrateFlags(t)
+			probe(fresh[i].Target)
+			assert.Empty(t, c.options(nil).Acknowledgements(), "--%s is declared not an acknowledgement", f.Name)
+		}
 	}
 	require.Empty(t, unclassified,
 		"a migrate flag is a typed acknowledgement or declared not one: give a new acknowledgement its "+
