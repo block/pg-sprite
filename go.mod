@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/rds v1.132.2
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.11
 	github.com/gorilla/websocket v1.5.3
-	github.com/jackc/pglogrepl v0.0.0-20261003132456-662581bb6bb6
+	github.com/jackc/pglogrepl v0.0.0-20261111174325-d50336b09c47
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
