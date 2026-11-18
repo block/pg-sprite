@@ -303,9 +303,22 @@ and the preflight refuses the run when twice the table would not fit. A target o
 than this machine (`localhost`, a loopback address, or a Unix socket) is refused unless
 `LOAD_PROOF_ALLOW_REMOTE=1` says that server is disposable; overriding
 `LOAD_PROOF_DSN` also skips starting the compose database. The test refuses to start
-when `go test`'s `-timeout` would end it before the binary's own two-hour budget,
-because a test the deadline ends skips the cleanup that drops the run's replication
-slot; the target passes `3h`. The record, `results.json` in the package directory
+when `go test`'s `-timeout` would end it before the binary's own two-hour budget and
+the cleanup's budget have run out, because a test the deadline ends skips the cleanup
+that drops the run's replication slot; the target passes `3h`. An interrupt (Ctrl-C,
+or SIGTERM sent to the test binary) does not skip it: the test kills the binary, waits
+for it, and fails, and its cleanups drop the slot and publication — under the names
+the checkpoint row records and the name the engine derives for the table, so a run
+killed before it saved its row is covered too — the checkpoint row, and the seeded
+schema; a second interrupt while they run is ignored so they finish. `go test` does not
+pass SIGTERM on to the test binary it runs, so a supervisor that stops the proof must
+signal the test binary's own process or its whole process group (`kill -TERM -<pgid>`);
+Ctrl-C reaches it because the terminal signals the group. The slot cleanup waits the
+server's own `wal_sender_timeout` (the default when it is zero) plus 30 seconds for the
+server to let go of the slot the killed binary held, and fails, leaving the slot, when
+something still holds it after that; the whole leftover cleanup is bounded by that wait
+plus a minute. SIGQUIT ends the test at once, leaving what the cleanups have not
+removed. The record, `results.json` in the package directory
 (`LOAD_PROOF_RESULTS` moves it), is written whether the run passed or failed: phase
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
 mutation, and the verdict.
