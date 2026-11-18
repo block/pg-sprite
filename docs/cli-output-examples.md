@@ -84,7 +84,7 @@ canonical statement of the ladder; a wording fix lands there first.
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
 | 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` or `--allow-destructive` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in `executed_sql`; unknown when `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
-| 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no | not applicable |
+| 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no, except a `migrate --desired` plan refused partway, which keeps the statements before it, listed in `verdicts` | not applicable |
 | 3 | Committed through the accepted-blocking passthrough, under bounded budgets, without an online-safety guarantee | yes | no |
 
 A usage error exits 1 and writes the usage and the error to stderr; stdout
