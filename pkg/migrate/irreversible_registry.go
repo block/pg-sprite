@@ -20,8 +20,9 @@ import (
 // Options.WithoutAcknowledgements clears the same set. The destructive operation
 // shapes are not listed here but derived from the planner, the one answer
 // both destructive gates use. TestIrreversibleOperationRegistryIsComplete
-// fails when an acknowledgement, a string or bool field on Options or
-// CopySwapOptions that could carry one, or a destructive shape arrives
+// fails when an acknowledgement, a string or bool field reachable from
+// Options (nested structs and pointers included) that could carry one, or a
+// destructive shape arrives
 // without an entry, and when a listed entry names the wrong acknowledgement
 // or refusal. Acknowledgements exports the set by name.
 
@@ -77,7 +78,9 @@ func (a ackKind) value(opts Options) (string, bool) {
 // Acknowledgements returns the name of every typed acknowledgement the
 // engine takes, in the order [RunDesired] rejects them: "force",
 // "accept-blocking", "allow-destructive", "restart", "block-writes", and
-// any added later. Each name is also the migrate command's flag for it.
+// any added later. Each name is also the migrate command's flag for it, so
+// renaming a flag changes this list; before v1 it carries no compatibility
+// promise.
 // An orchestrator that maps its own approval switches onto the engine's
 // acknowledgements can assert every one is reachable. Each call returns a
 // fresh slice, so changing it changes nothing else.

@@ -529,7 +529,8 @@ fence goes on. `RunDesired` rejects both `BlockWrites` and `Restart`, as it reje
 acknowledgement ([below](#rundesired-takes-no-acknowledgement)). A stopped desired-plan copy is
 resumed by running the plan again, or started over by running the stopped statement through
 `Run` with `CopySwap.Restart`. An adapter that builds one `Options` for both front doors passes
-`RunDesired` `opts.WithoutAcknowledgements()`, which clears both. Three further
+`RunDesired` `opts.WithoutAcknowledgements()`, which clears both, and reads which ones it
+set aside from `opts.Acknowledgements()` ([below](#rundesired-takes-no-acknowledgement)). Three further
 fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults, and its `Pace` left zero, since a
@@ -753,7 +754,10 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   acknowledgement the engine takes — `force`, `accept-blocking`, `allow-destructive`,
   `restart`, `block-writes`, each also the `migrate` command's flag for it — so an adapter
   that maps its own approval switches onto them can assert in its tests that every one is
-  reachable, and learns of one added in a later release. Both return a fresh slice. The
+  reachable, and learns of one added in a later release. The names are the CLI's flag names,
+  so renaming a flag changes them; before v1 there is no compatibility promise. Both return a
+  fresh slice, and a policy carrying no acknowledgement returns nil, which `encoding/json`
+  writes as `null`. The
   desired-state door's own refusals still apply to the view, so a destructive plan is still
   refused whole.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so

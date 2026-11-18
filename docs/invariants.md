@@ -1673,7 +1673,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   nothing, typed by its own sentinel so an embedder tells it from any other error.
   Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
   own sentinel before any database work, and `migrate --desired` rejects each flag. A new
-  string or bool field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a
+  string or bool field reachable from `Options`, nested structs and pointers included, not
+  declared as no acknowledgement, a
   new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI
   until it has a registry entry and a desired-state decision, and a registry acknowledgement
   with no `migrate` flag fails too. `Acknowledgements` exports the set by name and
