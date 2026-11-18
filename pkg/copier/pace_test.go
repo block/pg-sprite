@@ -3,6 +3,7 @@ package copier
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -19,6 +20,9 @@ type paceFake struct {
 	slept    []time.Duration
 	// sleepErr, when set, is what the wait returns instead of waiting.
 	sleepErr error
+	// onSleep, when set, runs during every wait: what other workers do
+	// while this one is held back.
+	onSleep func()
 }
 
 func (f *paceFake) backlog() uint64 {
@@ -32,18 +36,21 @@ func (f *paceFake) sleep(_ context.Context, d time.Duration) error {
 		return f.sleepErr
 	}
 	f.slept = append(f.slept, d)
+	if f.onSleep != nil {
+		f.onSleep()
+	}
 	return nil
 }
 
 // pacedCopier is a copier holding only what awaitPace reads: the pace,
-// with its defaults, over the fake.
+// with its defaults, over the fake, and a chunker with chunks left to cut.
 func pacedCopier(t *testing.T, f *paceFake, pace Pace) *Copier {
 	t.Helper()
 	pace.Backlog = f.backlog
 	pace.Sleep = f.sleep
 	opts := Options{Pace: pace}.withDefaults()
 	require.NoError(t, opts.validate())
-	return &Copier{opts: opts}
+	return &Copier{opts: opts, chunker: &Chunker{}}
 }
 
 // A copy with no pace, and a paced copy whose backlog reads at the mark,
@@ -110,6 +117,57 @@ func TestAwaitPaceArmsAgainOnceTheBacklogIsBackWithinTheMark(t *testing.T) {
 
 	assert.Equal(t, Paced{Waits: 2, Expired: 1, Waited: 200 * time.Millisecond}, c.Paced())
 	assert.Equal(t, 8, f.reads)
+}
+
+// A backlog that falls during a wait but is still over the mark when the
+// wait runs out is draining, so the copy is its cause: the worker claims
+// one chunk, but the pace stays armed and the next claim waits again. Here
+// the first wait falls from 900 to 500 against a mark of 100, and the
+// second claim, reading 500, waits rather than going straight through.
+func TestAwaitPaceStaysArmedWhileTheBacklogFalls(t *testing.T) {
+	f := &paceFake{readings: []uint64{900, 700, 500}}
+	c := pacedCopier(t, f, Pace{HighWater: 100, Poll: 50 * time.Millisecond, MaxWait: 100 * time.Millisecond})
+
+	require.NoError(t, c.awaitPace(t.Context()), "first claim: waits 100ms, the backlog falls to 500 and the wait runs out")
+	require.NoError(t, c.awaitPace(t.Context()), "second claim: the pace is still armed, so it waits")
+
+	assert.Equal(t, Paced{Waits: 2, Expired: 2, Waited: 200 * time.Millisecond}, c.Paced())
+	assert.Len(t, f.slept, 4)
+}
+
+// A reading within the mark arms the pace even when it ends a wait that
+// another worker's expiry released meanwhile: here a second worker's wait
+// runs out while this one polls, this one then reads 100 and claims, and
+// the next claim at 500 waits instead of going straight through.
+func TestAwaitPaceArmsOnAReadingWithinTheMarkDuringAWait(t *testing.T) {
+	f := &paceFake{readings: []uint64{500, 100, 500, 100}}
+	c := pacedCopier(t, f, Pace{HighWater: 100, Poll: 50 * time.Millisecond, MaxWait: time.Second})
+	f.onSleep = func() { c.paceReleased.Store(true) }
+
+	require.NoError(t, c.awaitPace(t.Context()), "first claim: another worker's wait runs out during this one's poll")
+	f.onSleep = nil
+	require.NoError(t, c.awaitPace(t.Context()), "second claim: the reading of 100 armed the pace, so 500 waits")
+
+	assert.Equal(t, Paced{Waits: 2, Waited: 100 * time.Millisecond}, c.Paced())
+}
+
+// A worker held back stops waiting once every chunk has been claimed,
+// since there is nothing left for it to hold back: here the last chunk is
+// claimed by another worker during this one's first poll, and the wait
+// ends there instead of running to MaxWait. A worker that finds every
+// chunk claimed before it would wait does not wait at all.
+func TestAwaitPaceStopsWaitingOnceEveryChunkIsClaimed(t *testing.T) {
+	f := &paceFake{readings: []uint64{500}}
+	c := pacedCopier(t, f, Pace{HighWater: 100, Poll: 50 * time.Millisecond, MaxWait: time.Second})
+	f.onSleep = func() { c.chunker.advance(math.MaxInt64) }
+
+	require.NoError(t, c.awaitPace(t.Context()))
+	assert.Equal(t, []time.Duration{50 * time.Millisecond}, f.slept)
+	assert.Equal(t, Paced{Waits: 1, Waited: 50 * time.Millisecond}, c.Paced(), "a wait the drained chunker ended is not expired")
+
+	require.NoError(t, c.awaitPace(t.Context()))
+	assert.Len(t, f.slept, 1, "with every chunk claimed the next claim does not wait")
+	assert.Equal(t, int64(1), c.Paced().Waits)
 }
 
 // A run that ends while a worker is held back ends the wait: the worker

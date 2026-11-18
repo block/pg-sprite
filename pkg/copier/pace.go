@@ -25,13 +25,17 @@ const (
 // in flight, so a held-back copy has no chunk open: nothing it has claimed
 // keeps the applier from writing, and the backlog can fall. The wait is a
 // brake and not a gate — a worker held for MaxWait claims its chunk with
-// the backlog still over the mark. A wait that runs out also releases the
-// pace: the backlog stayed over the mark for MaxWait with that worker
-// writing nothing, so the copy is not what holds it up, and every worker
-// claims without waiting until a reading at or below the mark arms the
-// pace again. A backlog the copy is not the cause of therefore costs the
-// copy one MaxWait, not one per chunk, and never stops it; stopping the run
-// is left to whoever owns the backlog's hard limit.
+// the backlog still over the mark. A wait that runs out with the backlog no
+// lower than when it began also releases the pace: the backlog did not fall
+// in MaxWait with that worker writing nothing, so the copy is not what
+// holds it up, and every worker claims without waiting until a reading at
+// or below the mark arms the pace again. A backlog the copy is not the
+// cause of therefore costs the copy one MaxWait, not one per chunk, and
+// never stops it; stopping the run is left to whoever owns the backlog's
+// hard limit. A backlog that fell during the wait is draining, so the pace
+// stays armed and each worker claims one chunk per MaxWait until a reading
+// is back within the mark. A worker stops waiting once every chunk has
+// been claimed, since there is nothing left for it to hold back.
 type Pace struct {
 	// Backlog reads the backlog as it stands, in the caller's unit. It is
 	// called from every worker, so it must be safe to call concurrently and
@@ -102,23 +106,20 @@ func (p Pace) validate() error {
 	return nil
 }
 
-// over reports whether the backlog as it reads now is above the mark.
-func (p Pace) over() bool {
-	return p.Backlog() > p.HighWater
-}
-
 // awaitPace holds the calling worker back while the backlog is over the
 // mark, reading it every Poll, for MaxWait at the most. It returns nil when
-// the worker may claim its chunk — at once when the copy is not paced, the
-// backlog is at or below the mark, or an earlier wait ran out and no
-// reading has been back within the mark since — and ctx's error when ctx
-// ended the wait.
+// the worker may claim its chunk — at once when the copy is not paced,
+// every chunk has been claimed, the backlog is at or below the mark, or an
+// earlier wait ran out and no reading has been back within the mark since
+// — and ctx's error when ctx ended the wait. Every reading at or below the
+// mark arms the pace, whichever worker takes it.
 func (c *Copier) awaitPace(ctx context.Context) error {
 	pace := c.opts.Pace
-	if pace.Backlog == nil {
+	if pace.Backlog == nil || c.chunker.Cut().Complete() {
 		return nil
 	}
-	if !pace.over() {
+	start := pace.Backlog()
+	if start <= pace.HighWater {
 		c.paceReleased.Store(false)
 		return nil
 	}
@@ -126,6 +127,7 @@ func (c *Copier) awaitPace(ctx context.Context) error {
 		return nil
 	}
 	c.paceWaits.Add(1)
+	last := start
 	for waited := time.Duration(0); waited < pace.MaxWait; {
 		step := min(pace.Poll, pace.MaxWait-waited)
 		if err := pace.Sleep(ctx, step); err != nil {
@@ -133,12 +135,18 @@ func (c *Copier) awaitPace(ctx context.Context) error {
 		}
 		waited += step
 		c.paceWaited.Add(int64(step))
-		if !pace.over() {
+		if c.chunker.Cut().Complete() {
+			return nil
+		}
+		if last = pace.Backlog(); last <= pace.HighWater {
+			c.paceReleased.Store(false)
 			return nil
 		}
 	}
 	c.paceExpired.Add(1)
-	c.paceReleased.Store(true)
+	if last >= start {
+		c.paceReleased.Store(true)
+	}
 	return nil
 }
 
