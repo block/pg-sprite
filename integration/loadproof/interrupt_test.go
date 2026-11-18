@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -36,8 +38,9 @@ func interruptible(t *testing.T) context.Context {
 // subprocess TestInterruptKillsTheBinaryAndRunsTheCleanups starts.
 const interruptHelperDir = "LOAD_PROOF_INTERRUPT_HELPER_DIR"
 
-// Markers the interrupted run writes: started just before it runs the
-// binary, cleanedUp from its cleanup.
+// Markers of the interrupted run: started, holding its process ID, written
+// by the stand-in binary itself once it runs, and cleanedUp, written by the
+// run's cleanup.
 const (
 	startedMarker   = "started"
 	cleanedUpMarker = "cleaned-up"
@@ -60,19 +63,31 @@ const (
 )
 
 // An interrupt sent to the proof alone — not to the binary it runs, as a
-// SIGTERM from a process supervisor is — kills the binary, waits for it,
-// and runs the test's cleanups, which is where the run's replication slot
-// and seeded table are removed. The run is a subprocess of this test, so
-// the signal reaches no other test, and its binary is a sleep that only a
-// kill ends in time.
+// SIGTERM to the test binary's own process is — kills the binary, waits for
+// it, and runs the test's cleanups, which is where the run's replication
+// slot and seeded table are removed. Both signals the proof catches are
+// sent. The run is a subprocess of this test, so the signal reaches no
+// other test, and its binary is a sleep that only a kill ends in time.
 func TestInterruptKillsTheBinaryAndRunsTheCleanups(t *testing.T) {
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) { interruptRun(t, sig) })
+	}
+}
+
+// interruptRun starts the interrupted run, waits for its stand-in binary to
+// be running, sends sig to the run, and checks that the run failed its test,
+// killed the binary, and ran its cleanups.
+func interruptRun(t *testing.T, sig os.Signal) {
 	dir := t.TempDir()
-	sleep, err := exec.LookPath("sleep")
+	shell, err := exec.LookPath("sh")
 	require.NoError(t, err)
-	// The test's context ending kills the run, so the goroutine waiting on
-	// it ends with the test whatever the test does first.
+	// The test's context ending kills the run's whole process group, the
+	// stand-in binary included, so the goroutine waiting on it ends with
+	// the test whatever the test does first, and no sleep outlives it.
 	run := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestInterruptedRun$", "-test.count=1")
-	run.Env = append(os.Environ(), interruptHelperDir+"="+dir, "LOAD_PROOF_BIN="+sleep)
+	run.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	run.Cancel = func() error { return syscall.Kill(-run.Process.Pid, syscall.SIGKILL) }
+	run.Env = append(os.Environ(), interruptHelperDir+"="+dir, "LOAD_PROOF_BIN="+shell)
 	var output bytes.Buffer
 	run.Stdout = &output
 	run.Stderr = &output
@@ -82,11 +97,16 @@ func TestInterruptKillsTheBinaryAndRunsTheCleanups(t *testing.T) {
 	wg.Go(func() { exited <- run.Wait() })
 	t.Cleanup(wg.Wait)
 
+	var binary int
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(filepath.Join(dir, startedMarker))
+		pid, err := os.ReadFile(filepath.Join(dir, startedMarker))
+		if err != nil {
+			return false
+		}
+		binary, err = strconv.Atoi(strings.TrimSpace(string(pid)))
 		return err == nil
-	}, helperStartDeadline, helperPollInterval, "the run never reached its binary")
-	require.NoError(t, run.Process.Signal(os.Interrupt))
+	}, helperStartDeadline, helperPollInterval, "the run's binary never started")
+	require.NoError(t, run.Process.Signal(sig))
 
 	timer := time.NewTimer(helperExitDeadline)
 	defer timer.Stop()
@@ -99,6 +119,7 @@ func TestInterruptKillsTheBinaryAndRunsTheCleanups(t *testing.T) {
 		t.Fatalf("the interrupted run had not exited after %s: its binary was not killed", helperExitDeadline)
 	}
 	assert.FileExists(t, filepath.Join(dir, cleanedUpMarker), "the run's cleanups ran after the interrupt")
+	assert.ErrorIs(t, syscall.Kill(binary, 0), syscall.ESRCH, "the binary that was running when the interrupt landed is gone")
 }
 
 // TestInterruptedRun is the run TestInterruptKillsTheBinaryAndRunsTheCleanups
@@ -113,6 +134,9 @@ func TestInterruptedRun(t *testing.T) {
 	t.Cleanup(func() {
 		assert.NoError(t, os.WriteFile(filepath.Join(dir, cleanedUpMarker), nil, 0o600))
 	})
-	require.NoError(t, os.WriteFile(filepath.Join(dir, startedMarker), nil, 0o600))
-	runBinary(t, ctx, config{Binary: os.Getenv("LOAD_PROOF_BIN")}, interruptedBinaryArg)
+	// The stand-in writes the started marker itself, with its process ID,
+	// and becomes the sleep, so the marker proves the binary is running.
+	started := filepath.Join(dir, startedMarker)
+	runBinary(t, ctx, config{Binary: os.Getenv("LOAD_PROOF_BIN")},
+		"-c", `echo $$ > "$1" && exec sleep "$2"`, "stand-in", started, interruptedBinaryArg)
 }

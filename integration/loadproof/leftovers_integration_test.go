@@ -15,6 +15,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // heldSlot is a logical replication slot a walsender is streaming from, as
@@ -122,4 +123,75 @@ func TestDropSlotIfLeftRefusesASlotStillHeldAtTheDeadline(t *testing.T) {
 	dropped, err = dropSlotIfLeft(t.Context(), slot.pool, slot.name)
 	require.NoError(t, err)
 	assert.True(t, dropped, "the slot is dropped once nothing holds it")
+}
+
+// A slot that is already gone, as it is once the engine has dropped it on a
+// run that finished, is not an error and is not reported as dropped.
+func TestDropSlotIfLeftReportsAGoneSlotAsNotDropped(t *testing.T) {
+	slot := newHeldSlot(t)
+	slot.release()
+	dropped, err := dropSlotIfLeft(t.Context(), slot.pool, slot.name)
+	require.NoError(t, err)
+	require.True(t, dropped)
+
+	dropped, err = dropSlotIfLeft(t.Context(), slot.pool, slot.name)
+	require.NoError(t, err)
+	assert.False(t, dropped, "a slot that no longer exists is not reported as dropped")
+}
+
+// A run killed after it made its slot and publication and before it saved
+// the checkpoint row that names them leaves state no row knows. The
+// cleanup also looks under the name the engine derives for the table, so
+// it removes both even with no checkpoint table at all.
+func TestLeftoverCleanupRemovesTheDerivedSlotWithNoCheckpointRow(t *testing.T) {
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical")
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.NewDatabase(t, serverURL)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	table := testutil.WorkloadTable{Schema: "public", Table: "orders"}
+	var database string
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_database()`).Scan(&database))
+	name := preflight.CopySwapDecodingName(database, table.Schema, table.Table)
+	_, err = pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, name)
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), `CREATE PUBLICATION `+pgx.Identifier{name}.Sanitize())
+	require.NoError(t, err)
+
+	t.Run("run", func(t *testing.T) {
+		removeLeftoversOnCleanup(t, pool, table, slotHeldDeadline)
+	})
+
+	_, found := slotActive(t, pool, name)
+	assert.False(t, found, "the slot under the derived name is dropped")
+	var publication bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, name).Scan(&publication))
+	assert.False(t, publication, "the publication under the derived name is dropped")
+}
+
+// The wait for a held slot is the server's own wal_sender_timeout plus the
+// margin, so a server that gives a vanished client longer to be noticed
+// gets a longer wait; a timeout of zero turns the server's check off and
+// is waited on as the default.
+func TestSlotReleaseDeadlineFollowsTheServersWALSenderTimeout(t *testing.T) {
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_sender_timeout=5min")
+	databaseURL := testutil.NewDatabase(t, serverURL)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	deadline, err := slotReleaseDeadline(t.Context(), pool)
+	require.NoError(t, err)
+	assert.Equal(t, 5*time.Minute+30*time.Second, deadline)
+
+	off, err := pgxpool.ParseConfig(databaseURL)
+	require.NoError(t, err)
+	off.ConnConfig.RuntimeParams["wal_sender_timeout"] = "0"
+	offPool, err := pgxpool.NewWithConfig(t.Context(), off)
+	require.NoError(t, err)
+	t.Cleanup(offPool.Close)
+
+	deadline, err = slotReleaseDeadline(t.Context(), offPool)
+	require.NoError(t, err)
+	assert.Equal(t, time.Minute+30*time.Second, deadline, "a timeout of zero waits as the default does")
 }

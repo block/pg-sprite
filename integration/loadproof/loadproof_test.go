@@ -109,16 +109,19 @@ func readConfig(t *testing.T) config {
 }
 
 // requireTimeForTheRun fails the test at its start when go test would end
-// it before runBudget: a test the go test deadline ends is killed without
-// its cleanups, which leaves the binary, its replication slot, and the
-// seeded table behind. `make load-proof` passes a deadline that fits.
-func requireTimeForTheRun(t *testing.T) {
+// it before runBudget and the leftover cleanup's own budget have run out: a
+// test the go test deadline ends is killed without its cleanups, which
+// leaves the binary, its replication slot, and the seeded table behind.
+// release is the cleanup's wait for a held slot. `make load-proof` passes a
+// deadline that fits.
+func requireTimeForTheRun(t *testing.T, release time.Duration) {
 	t.Helper()
 	deadline, ok := t.Deadline()
 	if !ok {
 		return
 	}
-	require.Greater(t, time.Until(deadline), runBudget, "go test would stop the proof before the binary's own budget runs out and skip its cleanup; run it with -timeout above %s", runBudget)
+	need := runBudget + leftoversBudget(release)
+	require.Greater(t, time.Until(deadline), need, "go test would stop the proof before the binary's own budget and the cleanup's run out, and skip its cleanup; run it with -timeout above %s", need)
 }
 
 func envFloat(t *testing.T, name string, fallback float64) float64 {
@@ -203,7 +206,6 @@ const alterTemplate = `ALTER TABLE %s ALTER COLUMN id TYPE bigint`
 // under the new type and the load keeps writing it.
 func TestLoadProof(t *testing.T) {
 	c := readConfig(t)
-	requireTimeForTheRun(t)
 	ctx := interruptible(t)
 	res := newResults(c)
 	t.Cleanup(func() {
@@ -215,13 +217,16 @@ func TestLoadProof(t *testing.T) {
 	})
 
 	pool := newPool(t, c)
+	release, err := slotReleaseDeadline(ctx, pool)
+	require.NoError(t, err)
+	requireTimeForTheRun(t, release)
 	require.NoError(t, pool.QueryRow(ctx, `SHOW server_version`).Scan(&res.ServerVersion))
 	t.Logf("load proof server version %s", res.ServerVersion)
 	res.Binary.SHA256 = fileSHA256(t, c.Binary)
 
 	shape := testutil.WorkloadShape{IDType: "integer"}
 	table := testutil.NewWorkloadTableOf(t, pool, shape)
-	removeLeftoversOnCleanup(t, pool, table)
+	removeLeftoversOnCleanup(t, pool, table, release)
 	t.Logf("seeding %d rows into %s", c.Rows, table.Qualified())
 	require.NoError(t, table.SeedRows(ctx, c.Rows))
 
