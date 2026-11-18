@@ -70,7 +70,8 @@ type Options struct {
 	// overriding a safer-sequence substitution or a rewrite-required /
 	// backend-unavailable refusal. It must name the resolved
 	// schema-qualified target table exactly; empty means the engine's
-	// routing decides. Planner refusals (no known safe path) and gated
+	// routing decides. A value naming any other table returns
+	// [ErrForceMismatch]. Planner refusals (no known safe path) and gated
 	// statement kinds cannot be forced.
 	Force string
 
@@ -80,7 +81,8 @@ type Options struct {
 	// single-relation DROP INDEX, REINDEX INDEX, or REINDEX TABLE the
 	// statement-kind gate refuses. It must name the schema-qualified table
 	// whose lock the operator accepts — the index's owning table, resolved
-	// from the catalog — exactly; empty means every refusal stands.
+	// from the catalog — exactly; empty means every refusal stands. A
+	// value naming any other table returns [ErrAcceptBlockingMismatch].
 	// Ineligible refusals stand regardless. Force and AcceptBlocking are
 	// mutually exclusive: a statement reaches one routing decision, and
 	// one acknowledgement names it. An accepted DROP INDEX also needs
@@ -93,7 +95,8 @@ type Options struct {
 	// anything runs, with reason destructive-change, on every route it
 	// could take. It must name the resolved schema-qualified target table
 	// exactly — for a DROP INDEX, the index's owning table; empty means
-	// destructive statements are refused. It acknowledges only the loss:
+	// destructive statements are refused. A value naming any other table
+	// returns [ErrAllowDestructiveMismatch]. It acknowledges only the loss:
 	// the statement still meets every other gate, so a statement that also
 	// needs Force or AcceptBlocking needs both. [RunDesired] rejects it.
 	AllowDestructive string
@@ -479,6 +482,10 @@ func qualifyStatement(st statement.Statement, schema string) (statement.Statemen
 	return statement.ParseOne(sql)
 }
 
+// ErrForceMismatch means the force acknowledgement named a table other than
+// the statement's resolved target. Nothing has executed.
+var ErrForceMismatch = errors.New("the force acknowledgement must name the resolved target table")
+
 // checkForceAck validates the force acknowledgement: it must name the
 // resolved schema-qualified target table exactly, proving the operator
 // names the relation whose lock they are accepting. A mismatch is a usage
@@ -487,8 +494,7 @@ func checkForceAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("the force acknowledgement must name the resolved target table %q, got %q; nothing was executed",
-		qualified(st), ack)
+	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrForceMismatch, qualified(st), ack)
 }
 
 // auditForce records the override decision before anything executes: the

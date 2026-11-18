@@ -45,17 +45,10 @@ type irreversibleScenario struct {
 	leftover bool
 }
 
-// mismatchIs and mismatchNamed pin a mismatched acknowledgement's usage
-// error to its sentinel, or to the message of an acknowledgement that has
-// none.
+// mismatchIs pins a mismatched acknowledgement's usage error to its
+// sentinel, the typed error an embedder branches on.
 func mismatchIs(want error) func(*testing.T, error) {
 	return func(t *testing.T, err error) { assert.ErrorIs(t, err, want) }
-}
-
-func mismatchNamed(ack string) func(*testing.T, error) {
-	return func(t *testing.T, err error) {
-		assert.ErrorContains(t, err, "the "+ack+" acknowledgement must name the resolved target table")
-	}
 }
 
 // irreversibleScenarios maps every registry key to its scenario. Each SQL
@@ -133,7 +126,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.Force = ack
 				return opts
 			},
-			mismatch: mismatchNamed("force"),
+			mismatch: mismatchIs(ErrForceMismatch),
 		},
 		// Writes are blocked, so the server needs no logical decoding and
 		// only the restart is left to acknowledge. Without it a run resumes;
@@ -147,7 +140,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				opts.CopySwap.Restart = ack
 				return opts
 			},
-			mismatch: mismatchNamed("restart"),
+			mismatch: mismatchIs(ErrRestartMismatch),
 			leftover: true,
 		},
 		// The test server runs with wal_level=replica, so without blocked
@@ -161,7 +154,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				return opts
 			},
 			cause:    verdict.Cause(preflight.CopySwapCauseLogicalDecodingUnavailable),
-			mismatch: mismatchNamed("block-writes"),
+			mismatch: mismatchIs(ErrBlockWritesMismatch),
 		},
 	}
 }
