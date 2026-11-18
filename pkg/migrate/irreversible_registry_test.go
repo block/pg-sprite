@@ -60,6 +60,8 @@ func setEveryField(t *testing.T, v reflect.Value, path string) {
 		v.SetBool(true)
 	case reflect.Int, reflect.Int32, reflect.Int64:
 		v.SetInt(7)
+	case reflect.Uint64:
+		v.SetUint(7)
 	case reflect.Pointer:
 		v.Set(reflect.New(v.Type().Elem()))
 	case reflect.Func:
