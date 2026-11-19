@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"testing"
@@ -133,6 +134,58 @@ type catchupSetup struct {
 	// copierClock, when set, is the copier's clock, which it reads as each
 	// chunk attempt starts and as each one commits.
 	copierClock progress.Clock
+}
+
+// requeueRecords keeps the level and attributes of every record the
+// catch-up logs, and writes each to the test's output for a reader of a
+// failed run. Tests read the attributes, never the message text.
+type requeueRecords struct {
+	mu      sync.Mutex
+	records []loggedRecord
+	out     slog.Handler
+}
+
+type loggedRecord struct {
+	level slog.Level
+	attrs map[string]any
+}
+
+func newRequeueRecords(t *testing.T) *requeueRecords {
+	t.Helper()
+	return &requeueRecords{out: slog.NewTextHandler(t.Output(), nil)}
+}
+
+func (r *requeueRecords) logger() *slog.Logger { return slog.New(r) }
+
+func (r *requeueRecords) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *requeueRecords) Handle(ctx context.Context, rec slog.Record) error {
+	attrs := map[string]any{}
+	rec.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	r.mu.Lock()
+	r.records = append(r.records, loggedRecord{level: rec.Level, attrs: attrs})
+	r.mu.Unlock()
+	return r.out.Handle(ctx, rec)
+}
+
+func (r *requeueRecords) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *requeueRecords) WithGroup(string) slog.Handler { return r }
+
+// withKey is every record so far that carries key.
+func (r *requeueRecords) withKey(key string) []loggedRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []loggedRecord
+	for _, rec := range r.records {
+		if _, ok := rec.attrs[key]; ok {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
 
 func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *catchupRun {

@@ -186,7 +186,8 @@ type CopySwapOptions struct {
 // choices, the host's sizing, slot-lag ceiling, and progress hook, and the
 // one setting the route fixes — a done row from an earlier run is
 // replaced, since a second change on the table is the next statement, not
-// a rollback window.
+// a rollback window. The catch-up's requeue warnings go to the call's
+// diagnostics logger.
 func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions {
 	return schemachange.RunOptions{
 		Copier:             o.Copier,
@@ -194,7 +195,7 @@ func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions
 		ReplaceDone:        true,
 		Restart:            o.Restart != "",
 		CheckpointInterval: o.CheckpointInterval,
-		Catchup:            applier.CatchupOptions{SlotLagCeiling: o.SlotLagCeilingBytes},
+		Catchup:            applier.CatchupOptions{Logger: logger, SlotLagCeiling: o.SlotLagCeilingBytes},
 		AfterCheckpoint: func(ctx context.Context, cp checkpoint.Checkpoint) error {
 			logger.Debug("copy-and-swap checkpoint saved",
 				"schema", cp.Schema, "table", cp.Table, "phase", cp.Phase.String())

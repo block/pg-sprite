@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"testing"
 	"time"
@@ -30,14 +31,18 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 	assert.Equal(t, progress.WallClock{}, opts.Clock)
 	assert.Equal(t, decode.DefaultSlotLagCeiling, opts.SlotLagCeiling)
 	assert.Equal(t, DefaultDeadlockAttempts, opts.DeadlockAttempts)
+	require.NotNil(t, opts.Logger, "a caller that wired no logger gets a discarding one")
+	assert.Equal(t, slog.DiscardHandler, opts.Logger.Handler())
 	assert.Equal(t, DefaultDeadlockBackoff, opts.DeadlockBackoff)
 	require.NoError(t, opts.validate())
 
-	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20, DeadlockAttempts: 3, DeadlockBackoff: time.Minute}.withDefaults()
+	logger := slog.New(slog.DiscardHandler)
+	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20, DeadlockAttempts: 3, DeadlockBackoff: time.Minute, Logger: logger}.withDefaults()
 	assert.Equal(t, time.Second, given.Interval)
 	assert.Equal(t, 5, given.MaxChanges)
 	assert.Equal(t, int64(1<<20), given.SlotLagCeiling)
 	assert.Equal(t, 3, given.DeadlockAttempts)
+	assert.Same(t, logger, given.Logger)
 	assert.Equal(t, time.Minute, given.DeadlockBackoff)
 }
 

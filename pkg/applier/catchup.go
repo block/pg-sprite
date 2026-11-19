@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -95,6 +96,18 @@ type CatchupOptions struct {
 	// constraint instead, resets the count. Each attempt waits up to the
 	// server's deadlock_timeout to be chosen as the victim.
 	DeadlockAttempts int
+	// Logger receives a record when a cycle requeues its batch, so a
+	// caller that does not poll Status sees the condition while it lasts;
+	// nil discards them. A batch a constraint refused
+	// (Status.BatchesDeferred) waits for the copy by design, so it logs at
+	// Info and only as the run's count reaches 1, 2, 4, 8, and so on. A
+	// flush the server rolled back as a deadlock victim
+	// (Status.BatchesDeadlocked) logs at Warn every time. The records carry
+	// schema, table, entries (the batch's size), and batches_deferred, or
+	// batches_deadlocked with consecutive_deadlocks and deadlock_attempts;
+	// never row data. pg-sprite migrate shows them on stderr only with
+	// --debug.
+	Logger *slog.Logger
 	// DeadlockBackoff is the wait, on Clock, between a flush the server
 	// rolled back as a deadlock victim and the first retry of its batch;
 	// each later retry in the same run of deadlocks waits one backoff
@@ -126,6 +139,9 @@ func (o CatchupOptions) withDefaults() CatchupOptions {
 	}
 	if o.DeadlockAttempts == 0 {
 		o.DeadlockAttempts = DefaultDeadlockAttempts
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	if o.DeadlockBackoff == 0 {
 		o.DeadlockBackoff = DefaultDeadlockBackoff
@@ -459,7 +475,7 @@ func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return err
 	}
-	c.record(outcome, walEnd)
+	c.logRequeue(outcome, c.record(outcome, walEnd))
 	return c.checkSlot(ctx, pool)
 }
 
@@ -688,8 +704,8 @@ func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) (decode
 // its flush back as a deadlock victim; a committed flush's images and
 // deletes count as applied. A paused cycle drained nothing, so the last
 // drain's count of deferred entries stands and only the buffer and the
-// positions move.
-func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
+// positions move. It returns the status as recorded.
+func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch {
@@ -718,6 +734,7 @@ func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 	c.status.Delivered = c.stream.Delivered()
 	c.status.Confirmed = c.stream.Confirmed()
 	c.status.WALEnd = walEnd
+	return c.status
 }
 
 // recordRequeued folds a drained batch that went back into the buffer

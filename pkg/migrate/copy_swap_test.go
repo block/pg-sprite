@@ -337,6 +337,7 @@ func TestCopySwapRunOptionsCarryTheHostsPolicy(t *testing.T) {
 		assert.True(t, got.ReplaceDone)
 		assert.Equal(t, 3, got.Copier.Workers)
 		assert.Equal(t, 2*time.Second, got.CheckpointInterval)
+		assert.Same(t, logger, got.Catchup.Logger, "the catch-up's requeue warnings reach the call's diagnostics")
 		assert.Equal(t, int64(3<<30), got.Catchup.SlotLagCeiling, "the ceiling reaches the catch-up that enforces it")
 	})
 
