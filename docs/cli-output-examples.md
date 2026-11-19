@@ -483,7 +483,9 @@ position is in the retained source and was carried into the new table;
 writes after it exist only in the new table. Compare it with another
 position as `pg_lsn`. A run that resumed after its swap had committed, or
 learned of the commit from the catalog after losing its connection, has no
-position from inside the swap and leaves `swap_lsn` out:
+position from inside the swap and leaves `swap_lsn` out. The field is for
+programs that line the run up with other WAL positions, so only `--json`
+carries it; the text verdict does not print it:
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy-and-swap --free-disk 20GiB --json

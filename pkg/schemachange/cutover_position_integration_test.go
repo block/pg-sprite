@@ -70,6 +70,54 @@ func TestCutoverReportsTheWALPositionThatSeparatesTheSourcesWritesFromTheLiveTab
 	assert.Zero(t, inspected.SwapPosition(), "a re-derived proof cannot know where the WAL stood inside the swap")
 }
 
+// A write that lands while the swap waits for its lock, in a transaction
+// that began before the swap, commits before the lock is granted, so the
+// position the swap reads under the lock lies above the write's. A swap
+// that read its position before taking the lock would read below it, and
+// the load proof would leave out a write the retained source holds.
+func TestSwapPositionIsReadAfterTheLockIsGranted(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	orders := pgx.Identifier{f.schema, "orders"}.Sanitize()
+	s := f.stage(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+
+	writer, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = writer.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = writer.Exec(t.Context(), `INSERT INTO `+orders+` (qty, sku) VALUES (1, 'first')`)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	var swapped schemachange.SwappedTable
+	var swapErr error
+	wg.Go(func() {
+		swapped, swapErr = schemachange.Cutover(t.Context(), f.pool, s.lock, ready, nil, schemachange.CutoverOptions{})
+	})
+	require.Eventually(t, func() bool {
+		var waiting bool
+		require.NoError(t, f.pool.QueryRow(t.Context(), `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_catalog.pg_locks
+				WHERE NOT granted AND mode = 'AccessExclusiveLock'
+			)`).Scan(&waiting))
+		return waiting
+	}, queuedWriterDeadline, 10*time.Millisecond, "the swap queues for its lock behind the open writer")
+
+	var text string
+	require.NoError(t, writer.QueryRow(t.Context(), `
+		INSERT INTO `+orders+` (qty, sku)
+		VALUES (2, 'second')
+		RETURNING pg_current_wal_insert_lsn()::text`).Scan(&text))
+	require.NoError(t, writer.Commit(t.Context()))
+	wg.Wait()
+	require.NoError(t, swapErr)
+	written, err := decode.ParseLSN(text)
+	require.NoError(t, err)
+	assert.Greater(t, swapped.SwapPosition(), written, "a write that committed before the lock was granted lies below the swap's position")
+}
+
 // walInsertPosition reads the server's current WAL insert position.
 func walInsertPosition(t *testing.T, f shadowFixture) decode.LSN {
 	t.Helper()

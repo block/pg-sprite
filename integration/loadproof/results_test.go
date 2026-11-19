@@ -94,8 +94,8 @@ type rowsInfo struct {
 	// above the swap's WAL position and those of writes whose outcome it
 	// never heard.
 	Excluded int `json:"excluded"`
-	// Ambiguous is how many keys writes that ran out their client-side
-	// deadline named, each of them among Excluded.
+	// Ambiguous is how many distinct keys writes that ran out their
+	// client-side deadline named, each of them among Excluded.
 	Ambiguous int `json:"ambiguous"`
 }
 

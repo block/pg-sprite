@@ -36,6 +36,13 @@ func excludedKeys(s testutil.Summary, swap decode.LSN) []int64 {
 	return slices.Sorted(maps.Keys(out))
 }
 
+// ambiguousKeys is how many distinct keys the writes whose outcome the
+// load never heard named: two such writes to one key count it once, as
+// excludedKeys leaves it out once.
+func ambiguousKeys(s testutil.Summary) int {
+	return len(slices.Compact(slices.Sorted(slices.Values(s.Ambiguous))))
+}
+
 // judgeRows compares the retained source with the live table over every
 // key excludedKeys does not leave out, returning the report and the keys
 // left out.
@@ -83,4 +90,13 @@ func TestExcludedKeysLeavesOutAWriteThatRanOutItsDeadline(t *testing.T) {
 		Ambiguous: []int64{9, 2},
 	}
 	assert.Equal(t, []int64{2, 9}, excludedKeys(summary, 400))
+}
+
+// Two writes to one key that both ran out their deadline name the key
+// twice; the report counts keys, so it counts that key once, the same
+// once excludedKeys leaves it out.
+func TestAmbiguousKeysCountsARepeatedKeyOnce(t *testing.T) {
+	summary := testutil.Summary{Ambiguous: []int64{9, 2, 9}}
+	assert.Equal(t, 2, ambiguousKeys(summary))
+	assert.Len(t, excludedKeys(summary, 400), ambiguousKeys(summary), "every ambiguous key is among the excluded, once")
 }

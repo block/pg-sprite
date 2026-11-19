@@ -154,9 +154,9 @@ position the mutation read inside its write, and `Progress` reads the counts and
 list's length without copying it. Every mutation names its keys before it writes, so a
 write that runs out its client-side deadline, which the server may still commit, lists
 its keys in `Ambiguous` instead. The oracle's `ExcludeKeys` leaves keys out of both
-sides and both counts, so a test that marks the touched list at an instant compares
-exactly the rows last written before it. The [load proof](#the-load-proof) is built on
-these.
+sides and both counts, so a test can leave out every key a write touched after a
+boundary it chose. The [load proof](#the-load-proof) is built on these, with the
+swap's WAL position as its boundary.
 
 To hold a copy chunk in flight, a test pins a shadow row: `PinShadowKey` returns a pin
 whose `Clock` the copier takes as its `Options.Clock`. At the clock's first reading,

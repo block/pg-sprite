@@ -1,9 +1,11 @@
 package schemachange_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
@@ -32,6 +34,19 @@ func cutoverProof() schemachange.SwapProof {
 		Attempts:     2,
 		SwapPosition: 0x16B3748,
 	}
+}
+
+// A stored proof leaves the swap's WAL position out: the verdict carries
+// it as pg_lsn text, and a stored proof is only compared through SameSwap,
+// which ignores it, so encoding it as a bare integer here would give one
+// value a second rendering.
+func TestSwapProofLeavesTheSwapPositionOutOfItsJSON(t *testing.T) {
+	encoded, err := json.Marshal(cutoverProof())
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.NotContains(t, fields, "swap_position")
+	assert.Contains(t, fields, "attempts", "the rest of the proof is still encoded")
 }
 
 // A proof re-derived after the fact differs from the cutover's in exactly

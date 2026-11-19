@@ -40,8 +40,11 @@ type SwapProof struct {
 	// zero in a proof re-derived after the fact.
 	Attempts int `json:"attempts"`
 	// SwapPosition is the WAL position the swap transaction read under its
-	// lock before committing; zero in a proof re-derived after the fact.
-	SwapPosition decode.LSN `json:"swap_position,omitempty"`
+	// lock before committing; zero in a proof re-derived after the fact. It
+	// is not encoded: a stored proof is only ever compared through SameSwap,
+	// which ignores it, and the verdict reports it as pg_lsn text
+	// (swap_lsn), so one value has one rendering.
+	SwapPosition decode.LSN `json:"-"`
 }
 
 // Proof returns the plain view of the swapped table: each field is what

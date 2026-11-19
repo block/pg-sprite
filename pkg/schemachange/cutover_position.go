@@ -17,6 +17,14 @@ import (
 // the swap lies above it. The insert position, not the write or flush
 // position, is read because a transaction committed without waiting for
 // its flush (synchronous_commit off) may sit past the flushed position.
+//
+// The position is reporting only, yet a failed read rolls the swap back
+// rather than committing without it. A statement that fails on the server
+// aborts the transaction, so the swap could not commit after it anyway, and
+// a read that fails there (a statement timeout, a lost connection) says the
+// session is failing at the moment it would commit. A text the parser
+// rejects would mean the server answered something other than a pg_lsn.
+// Either way the rollback leaves the source live and the run resumable.
 func readSwapPosition(ctx context.Context, tx pgx.Tx) (decode.LSN, error) {
 	var text string
 	// INV: CO-9

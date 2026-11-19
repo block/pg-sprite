@@ -174,6 +174,66 @@ func TestLoadGeneratorCountsExpectedRaces(t *testing.T) {
 // ticks suffice.
 const ambiguousDeadline = 4 * MutationTimeout
 
+// A table lock that refuses writes but not reads leaves each mutation's
+// pick and key draw free to run and parks its write, so an insert, a
+// delete, and a key move each run out their client-side deadline after
+// naming their keys, and each lists them: one key, one key, and the old
+// and new key of the move.
+func TestLoadGeneratorListsTheKeysOfEveryKindOfWriteThatRanOutItsDeadline(t *testing.T) {
+	dsn := StartPostgres(t)
+	pool, err := pgxpool.New(t.Context(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	for name, tc := range map[string]struct {
+		mix  Mix
+		keys int
+	}{
+		"insert":   {Mix{Insert: 1}, 1},
+		"delete":   {Mix{Delete: 1}, 1},
+		"key move": {Mix{KeyMove: 1}, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			table := NewWorkloadTable(t, pool)
+			require.NoError(t, table.SeedRows(t.Context(), 3))
+			holder, err := pool.Begin(t.Context())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+			_, err = holder.Exec(t.Context(), `LOCK TABLE `+table.Qualified()+` IN SHARE MODE`)
+			require.NoError(t, err)
+
+			generator := StartLoad(t, pool, table, LoadSpec{Seed: 5, Workers: 1, RatePerSecond: 5, Mix: tc.mix, RecordFailures: true})
+			require.Eventually(t, func() bool { return len(generator.Snapshot().Ambiguous) >= tc.keys },
+				ambiguousDeadline, 50*time.Millisecond, "a write parked behind the table lock runs out its deadline")
+			require.NoError(t, holder.Rollback(t.Context()))
+			summary, err := generator.Stop()
+			require.NoError(t, err)
+			assert.NotEmpty(t, summary.Ambiguous)
+			assert.Zero(t, len(summary.Ambiguous)%tc.keys, "each write that ran out its deadline lists its %d key(s)", tc.keys)
+		})
+	}
+}
+
+// Every touch of a key move carries the WAL position its write read, so a
+// move committed after the swap is left out of the oracle's comparison
+// rather than judged as a difference.
+func TestLoadGeneratorKeyMoveTouchesCarryPositions(t *testing.T) {
+	dsn := StartPostgres(t)
+	pool, err := pgxpool.New(t.Context(), dsn)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	table := NewWorkloadTable(t, pool)
+	require.NoError(t, table.SeedRows(t.Context(), 50))
+	generator := StartLoad(t, pool, table, LoadSpec{Seed: 9, Workers: 2, RatePerSecond: 40, Mix: Mix{KeyMove: 1}})
+	require.Eventually(t, func() bool { return generator.Snapshot().KeyMoves >= 3 }, 10*time.Second, 50*time.Millisecond)
+	summary, err := generator.Stop()
+	require.NoError(t, err)
+	require.NotEmpty(t, summary.Touches)
+	for _, touch := range summary.Touches {
+		assert.Positive(t, touch.Position, "key %d carries the WAL position its key move read", touch.ID)
+	}
+}
+
 // An update whose row another session holds locked waits past its
 // client-side deadline. The client gives up without hearing whether the
 // write committed, so the update is not counted or touched; its key is
