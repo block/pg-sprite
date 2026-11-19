@@ -20,6 +20,13 @@ type serverIdentity struct {
 	database string
 }
 
+// catalogIdentitySQL names the cluster and the database the catalog
+// session is on. The session is the caller's, whatever its search_path,
+// so its cast is pg_catalog-qualified (CO-9).
+const catalogIdentitySQL = `
+		SELECT s.system_identifier::pg_catalog.text, pg_catalog.current_database()
+		FROM pg_catalog.pg_control_system() s`
+
 // proveSameServer proves that the replication connection and the catalog
 // session — a pool, or one connection of the caller's — are sessions of
 // one database on one cluster, so a slot command issued on the connection
@@ -34,9 +41,7 @@ func proveSameServer(ctx context.Context, conn *pgconn.PgConn, catalog dbconn.Ro
 		return serverIdentity{}, fmt.Errorf("identify the replication connection's server: %w", err)
 	}
 	var catalogued serverIdentity
-	err = catalog.QueryRow(ctx, `
-		SELECT s.system_identifier::text, pg_catalog.current_database()
-		FROM pg_catalog.pg_control_system() s`).Scan(&catalogued.systemID, &catalogued.database)
+	err = catalog.QueryRow(ctx, catalogIdentitySQL).Scan(&catalogued.systemID, &catalogued.database)
 	if err != nil {
 		return serverIdentity{}, fmt.Errorf("identify the catalog session's server: %w", err)
 	}

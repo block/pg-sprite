@@ -109,16 +109,19 @@ func readConfig(t *testing.T) config {
 }
 
 // requireTimeForTheRun fails the test at its start when go test would end
-// it before runBudget: a test the go test deadline ends is killed without
-// its cleanups, which leaves the binary, its replication slot, and the
-// seeded table behind. `make load-proof` passes a deadline that fits.
-func requireTimeForTheRun(t *testing.T) {
+// it before runBudget and the leftover cleanup's own budget have run out: a
+// test the go test deadline ends is killed without its cleanups, which
+// leaves the binary, its replication slot, and the seeded table behind.
+// release is the cleanup's wait for a held slot. `make load-proof` passes a
+// deadline that fits.
+func requireTimeForTheRun(t *testing.T, release time.Duration) {
 	t.Helper()
 	deadline, ok := t.Deadline()
 	if !ok {
 		return
 	}
-	require.Greater(t, time.Until(deadline), runBudget, "go test would stop the proof before the binary's own budget runs out and skip its cleanup; run it with -timeout above %s", runBudget)
+	need := runBudget + leftoversBudget(release)
+	require.Greater(t, time.Until(deadline), need, "go test would stop the proof before the binary's own budget and the cleanup's run out, and skip its cleanup; run it with -timeout above %s", need)
 }
 
 func envFloat(t *testing.T, name string, fallback float64) float64 {
@@ -203,8 +206,7 @@ const alterTemplate = `ALTER TABLE %s ALTER COLUMN id TYPE bigint`
 // under the new type and the load keeps writing it.
 func TestLoadProof(t *testing.T) {
 	c := readConfig(t)
-	requireTimeForTheRun(t)
-	ctx := t.Context()
+	ctx := interruptible(t)
 	res := newResults(c)
 	t.Cleanup(func() {
 		res.Passed = !t.Failed()
@@ -215,13 +217,16 @@ func TestLoadProof(t *testing.T) {
 	})
 
 	pool := newPool(t, c)
+	release, err := slotReleaseDeadline(ctx, pool)
+	require.NoError(t, err)
+	requireTimeForTheRun(t, release)
 	require.NoError(t, pool.QueryRow(ctx, `SHOW server_version`).Scan(&res.ServerVersion))
 	t.Logf("load proof server version %s", res.ServerVersion)
 	res.Binary.SHA256 = fileSHA256(t, c.Binary)
 
 	shape := testutil.WorkloadShape{IDType: "integer"}
 	table := testutil.NewWorkloadTableOf(t, pool, shape)
-	removeLeftoversOnCleanup(t, pool, table)
+	removeLeftoversOnCleanup(t, pool, table, release)
 	t.Logf("seeding %d rows into %s", c.Rows, table.Qualified())
 	require.NoError(t, table.SeedRows(ctx, c.Rows))
 
@@ -242,7 +247,7 @@ func TestLoadProof(t *testing.T) {
 	atStart := load.Progress()
 	started := time.Now()
 	res.StartedAt = started
-	output, diagnostic, code := runBinary(t, c, "migrate",
+	output, diagnostic, code := runBinary(t, ctx, c, "migrate",
 		"--copy-and-swap",
 		"--keep-old",
 		"--free-disk", c.FreeDisk,
@@ -273,7 +278,7 @@ func TestLoadProof(t *testing.T) {
 	require.NoError(t, err)
 	res.recordLoad(summary, atExit)
 
-	assertRowsConverged(t, pool, table, summary, w.Mark, res)
+	assertRowsConverged(t, ctx, pool, table, summary, w.Mark, res)
 	assertCatalogMatchesNative(t, pool, table, shape)
 	window := swapWindow{opened: w.MarkAt, closed: exited}
 	for _, f := range summary.Failures {
@@ -318,16 +323,19 @@ func newPool(t *testing.T, c config) *pgxpool.Pool {
 // runBinary runs the binary under proof with args and returns its stdout,
 // stderr, and exit code; a binary that cannot be started fails the test.
 // The connection string reaches the binary through PGSPRITE_URL rather than
-// --url, so its password is not on the process's command line.
-func runBinary(t *testing.T, c config, args ...string) (output []byte, diagnostic string, code int) {
+// --url, so its password is not on the process's command line. When ctx
+// ends — the operator interrupted the proof — the binary is killed and
+// waited for, and the test fails so its cleanups run.
+func runBinary(t *testing.T, ctx context.Context, c config, args ...string) (output []byte, diagnostic string, code int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), runBudget)
+	runCtx, cancel := context.WithTimeout(ctx, runBudget)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Binary, args...)
+	cmd := exec.CommandContext(runCtx, c.Binary, args...)
 	cmd.Env = append(os.Environ(), "PGSPRITE_URL="+c.DSN)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
+	require.NoError(t, context.Cause(ctx), "the proof was interrupted: the binary was killed, and the cleanups remove its replication slot and the seeded table")
 	if err != nil {
 		var exit *exec.ExitError
 		require.True(t, errors.As(err, &exit), "the binary could not run: %v", err)
@@ -350,10 +358,10 @@ func waitForLoad(t *testing.T, load *testutil.LoadGenerator, reached func(testut
 // swap had not happened is in both relations, and a later write may be in
 // the live table alone, so those keys are taken out of the comparison on
 // both sides rather than judged.
-func assertRowsConverged(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, summary testutil.Summary, mark testutil.Progress, res *results) {
+func assertRowsConverged(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table testutil.WorkloadTable, summary testutil.Summary, mark testutil.Progress, res *results) {
 	t.Helper()
 	excluded := summary.TouchedIDs[mark.Touched:]
-	report, err := testutil.Diff(t.Context(), pool,
+	report, err := testutil.Diff(ctx, pool,
 		testutil.RelationRef{Schema: table.Schema, Table: schemachange.OldName(table.Schema, table.Table)},
 		testutil.RelationRef{Schema: table.Schema, Table: table.Table},
 		testutil.ConvergeOptions{ExcludeKeys: excluded})

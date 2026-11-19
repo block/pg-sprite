@@ -22,6 +22,10 @@ import (
 var ErrRestartNotSupported = errors.New(
 	"the restart acknowledgement applies to the imperative front door only; desired-state execution resumes a stopped run and never starts one over")
 
+// ErrRestartMismatch means the restart acknowledgement named a table other
+// than the statement's resolved target. Nothing has executed.
+var ErrRestartMismatch = errors.New("the restart acknowledgement must name the resolved target table")
+
 // checkRestartAck confirms that the restart acknowledgement names the
 // resolved target table, exactly as the force acknowledgement must: a
 // typed table name is what stops the flag from being left on a script and
@@ -30,8 +34,7 @@ func checkRestartAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("the restart acknowledgement must name the resolved target table %q, got %q; nothing was executed",
-		qualified(st), ack)
+	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrRestartMismatch, qualified(st), ack)
 }
 
 // checkRestartRoute confirms that a statement acknowledged for a restart

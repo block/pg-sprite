@@ -42,7 +42,7 @@ const privilegeCreateOnDatabase = "CREATE"
 // the slot is not named for.
 func ensurePublication(ctx context.Context, pool *pgxpool.Pool, name string, target preflight.CopySwapTarget) error {
 	var onTargetDatabase bool
-	err := pool.QueryRow(ctx, `SELECT pg_catalog.current_database() = $1`, target.Database()).Scan(&onTargetDatabase)
+	err := pool.QueryRow(ctx, onTargetDatabaseSQL, target.Database()).Scan(&onTargetDatabase)
 	if err != nil {
 		return fmt.Errorf("create publication %s: %w", name, err)
 	}
@@ -137,15 +137,55 @@ type publishedTable struct {
 // publication can carry a row filter, a column list, or a whole schema.
 const publicationFiltersSince = 150000
 
+// The publication reads run on the caller's pool, whatever its
+// search_path, and decide whether the drop takes a publication of the
+// derived name, so every comparison and cast is spelled through
+// pg_catalog: a lookalike = on name would otherwise match every
+// publication and let the drop judge, then take, someone else's (CO-9,
+// ST-3).
+
+// onTargetDatabaseSQL reads whether the session is on the named database.
+const onTargetDatabaseSQL = `SELECT pg_catalog.current_database() OPERATOR(pg_catalog.=) $1`
+
+// publicationShapeSQL reads the named publication's flags and the
+// server's version.
+const publicationShapeSQL = `
+		SELECT p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
+		       pg_catalog.current_setting('server_version_num')::pg_catalog.int4
+		FROM pg_catalog.pg_publication p
+		WHERE p.pubname OPERATOR(pg_catalog.=) $1`
+
+// publishedTablesSQL lists the named publication's table memberships. The
+// filter columns exist only on a server that can express filters, so the
+// older server's query reports none.
+func publishedTablesSQL(filters bool) string {
+	filterColumns := `false, false`
+	if filters {
+		filterColumns = `r.prqual IS NOT NULL, r.prattrs IS NOT NULL`
+	}
+	return `
+		SELECT n.nspname, c.relname, ` + filterColumns + `
+		FROM pg_catalog.pg_publication_rel r
+		JOIN pg_catalog.pg_publication p ON p.oid OPERATOR(pg_catalog.=) r.prpubid
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) r.prrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE p.pubname OPERATOR(pg_catalog.=) $1
+		ORDER BY n.nspname, c.relname`
+}
+
+// publishedSchemasSQL counts the named publication's FOR TABLES IN SCHEMA
+// memberships.
+const publishedSchemasSQL = `
+		SELECT pg_catalog.count(*)
+		FROM pg_catalog.pg_publication_namespace pn
+		JOIN pg_catalog.pg_publication p ON p.oid OPERATOR(pg_catalog.=) pn.pnpubid
+		WHERE p.pubname OPERATOR(pg_catalog.=) $1`
+
 // readPublicationShape reads the named publication's shape; found is false
 // when there is no publication of the name.
 func readPublicationShape(ctx context.Context, pool *pgxpool.Pool, name string) (shape publicationShape, found bool, err error) {
 	var version int
-	err = pool.QueryRow(ctx, `
-		SELECT p.puballtables, p.pubinsert, p.pubupdate, p.pubdelete, p.pubtruncate, p.pubviaroot,
-		       pg_catalog.current_setting('server_version_num')::int
-		FROM pg_catalog.pg_publication p
-		WHERE p.pubname = $1`, name).
+	err = pool.QueryRow(ctx, publicationShapeSQL, name).
 		Scan(&shape.allTables, &shape.insert, &shape.update, &shape.delete, &shape.truncate, &shape.viaRoot, &version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return publicationShape{}, false, nil
@@ -166,21 +206,8 @@ func readPublicationShape(ctx context.Context, pool *pgxpool.Pool, name string) 
 }
 
 // readPublishedTables lists the publication's explicit table memberships.
-// The filter columns exist only on a server that can express filters, so
-// the older server's query reports none.
 func readPublishedTables(ctx context.Context, pool *pgxpool.Pool, name string, filters bool) ([]publishedTable, error) {
-	filterColumns := `false, false`
-	if filters {
-		filterColumns = `r.prqual IS NOT NULL, r.prattrs IS NOT NULL`
-	}
-	rows, err := pool.Query(ctx, `
-		SELECT n.nspname, c.relname, `+filterColumns+`
-		FROM pg_catalog.pg_publication_rel r
-		JOIN pg_catalog.pg_publication p ON p.oid = r.prpubid
-		JOIN pg_catalog.pg_class c ON c.oid = r.prrelid
-		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE p.pubname = $1
-		ORDER BY n.nspname, c.relname`, name)
+	rows, err := pool.Query(ctx, publishedTablesSQL(filters), name)
 	if err != nil {
 		return nil, fmt.Errorf("read published tables: %w", err)
 	}
@@ -199,11 +226,7 @@ func readPublishedTables(ctx context.Context, pool *pgxpool.Pool, name string, f
 // memberships.
 func readPublishedSchemas(ctx context.Context, pool *pgxpool.Pool, name string) (int64, error) {
 	var schemas int64
-	err := pool.QueryRow(ctx, `
-		SELECT pg_catalog.count(*)
-		FROM pg_catalog.pg_publication_namespace pn
-		JOIN pg_catalog.pg_publication p ON p.oid = pn.pnpubid
-		WHERE p.pubname = $1`, name).Scan(&schemas)
+	err := pool.QueryRow(ctx, publishedSchemasSQL, name).Scan(&schemas)
 	if err != nil {
 		return 0, fmt.Errorf("read published schemas: %w", err)
 	}

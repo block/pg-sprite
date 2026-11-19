@@ -65,8 +65,19 @@ type RunOptions struct {
 	// still carrying changes for. Its Confirmed source is the run's own
 	// catch-up and must be left nil. So must Flushes: the run's pass
 	// recopies nothing (a divergence aborts it), and the flush gate a
-	// repair needs is the run's own catch-up too. CarryKeys must be left
-	// zero: the run's swap compares no key the pass leaves it.
+	// repair needs is the run's own catch-up too. CarryKeys is the most
+	// keys the pass may leave for the run's swap, which compares each of
+	// them on both sides under its lock, after its drain; zero is
+	// checksum.MaxCarryKeys, and a smaller value shortens what the swap
+	// may read under ACCESS EXCLUSIVE at the cost of stopping, as
+	// *checksum.UnresolvedError, a pass that leaves more. Zero means the
+	// opposite on checksum.LiveOptions, where it leaves no key, and a Runner
+	// cannot be asked to leave none: the smallest bound is one. A run that
+	// left no key would stop on a row the application keeps rewriting, and
+	// stop the same way on every retry, so the Runner always lets its swap
+	// finish the proof. Poll also sets how often a copy the stream's lag
+	// holds back reads the lag again, so a longer Poll is also a slower
+	// release of a held copy once the lag falls.
 	Live checksum.LiveOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
@@ -105,8 +116,11 @@ type RunOptions struct {
 	CheckpointInterval time.Duration
 	// Sleep waits between periodic saves, and in a live run between the
 	// polls that wait for the catch-up to pass a marker and for a stopped
-	// stream's backend to leave; nil waits on the wall clock. Tests inject
-	// one to drive the waits without real time passing.
+	// stream's backend to leave, and between the readings of the stream's
+	// lag while the copy is held back by it; nil waits on the wall clock.
+	// Tests inject one to drive the waits without real time passing; one
+	// that returns at once lets a held-back copy's whole wait pass with no
+	// time elapsed, so the copy is in effect not paced.
 	Sleep func(ctx context.Context, d time.Duration) error
 	// AfterCheckpoint, when set, is called after every successful save of
 	// the checkpoint row with the row as saved, and is the run's one
@@ -125,9 +139,12 @@ type RunOptions struct {
 // options, since every phase uses them, and the copier's, since a value
 // the copier refuses would otherwise stop the run only once the shadow is
 // built and the source fenced or its slot made (ST-6). A copier refusal
-// wraps both ErrInvalidOptions and the copier's own sentinel. The
-// verifier's options are validated where they are consumed, by its
-// constructor.
+// wraps both ErrInvalidOptions and the copier's own sentinel. A copier
+// pace is refused as well: a live run sets its own, from its catch-up's
+// lag, and a quiesced run has no stream to fall behind. The verifier's
+// options are validated where they are consumed, by its constructor,
+// except the cap on the keys a live pass may leave for the swap, which
+// the pass would otherwise refuse only after the whole copy.
 func (o RunOptions) validate() error {
 	if err := o.Shadow.validate(); err != nil {
 		return err
@@ -138,6 +155,9 @@ func (o RunOptions) validate() error {
 	if err := o.Copier.Validate(); err != nil {
 		return fmt.Errorf("%w: copier: %w", ErrInvalidOptions, err)
 	}
+	if o.Copier.Pace.Backlog != nil {
+		return fmt.Errorf("%w: a live run paces its copy by its own catch-up's lag and a quiesced run has none; leave Copier.Pace zero", ErrInvalidOptions)
+	}
 	if o.CheckpointInterval < 0 {
 		return fmt.Errorf("%w: checkpoint interval %s is negative; use zero for the default", ErrInvalidOptions, o.CheckpointInterval)
 	}
@@ -147,8 +167,8 @@ func (o RunOptions) validate() error {
 	if o.Live.Flushes != nil {
 		return fmt.Errorf("%w: the live verification pass holds the run's own catch-up's flushes; leave Live.Flushes nil", ErrInvalidOptions)
 	}
-	if o.Live.CarryKeys != 0 {
-		return fmt.Errorf("%w: the run's swap compares no key the live verification pass leaves it; leave Live.CarryKeys zero", ErrInvalidOptions)
+	if o.Live.CarryKeys < 0 || o.Live.CarryKeys > checksum.MaxCarryKeys {
+		return fmt.Errorf("%w: live carry keys %d is outside 0 to %d; use zero for the default", ErrInvalidOptions, o.Live.CarryKeys, checksum.MaxCarryKeys)
 	}
 	return o.validateTracker()
 }
@@ -169,7 +189,8 @@ func (o RunOptions) sleep() func(context.Context, time.Duration) error {
 
 // livePoll is how often a live run reads the catch-up's confirmed
 // position while it waits for the marker that ends catching up: the same
-// pace the live verification pass polls at, so one option sets both.
+// pace the live verification pass polls at and the copy, when its stream's
+// lag holds it back, reads the lag again at, so one option sets all three.
 func (o RunOptions) livePoll() time.Duration {
 	if o.Live.Poll == 0 {
 		return checksum.DefaultSettlePoll
@@ -256,13 +277,19 @@ type Result struct {
 	// Outcome when nothing had landed to recopy.
 	Reconciled     bool
 	Reconciliation checksum.Outcome
+	// CopyPaced is how far a live run's copy was held back by the WAL its
+	// stream had yet to confirm: the zero Paced for a quiesced run, for a
+	// run that resumed past the copy, and for a copy the stream kept up
+	// with. It counts this run's copy alone, not a stopped run's before it.
+	CopyPaced copier.Paced
 }
 
 // NewRunner prepares runs over the database cfg names, writing the
 // checkpoint row through store. It refuses a nil store and options a run
 // could not honour. cfg opens the dedicated connection the table lock
 // session holds for the run; every other statement runs on the pool
-// handed to Run, and store writes through its own pool. All three must
+// handed to Run, which must hold MinPoolConns(opts.Copier) connections,
+// and store writes through its own pool. All three must
 // name one database: each working transaction confirms the table lock
 // from the pool it runs on, and a pool that reaches another database sees
 // no lock and refuses as shadow-lock-unconfirmed before writing anything.
@@ -278,9 +305,12 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 
 // Run carries target through the gated statement st, or resumes the run
 // its checkpoint row records, and returns once the change is complete and
-// the row is in PhaseDone. It takes the table's lock for the whole run
-// (LK-1), makes sure the checkpoint table exists, reads the target's row,
-// and dispatches on what it finds:
+// the row is in PhaseDone. A pool smaller than MinPoolConns for the run's
+// copy options is refused first, with an error wrapping
+// executor.ErrPoolTooSmall, before the lock is taken or anything is read
+// or written. It then takes the table's lock for the whole run (LK-1),
+// makes sure the checkpoint table exists, reads the target's row, and
+// dispatches on what it finds:
 //
 //   - No row: the shadow is built from st and the row saved in
 //     PhaseCopying, with st's text — for a quiesced run with the write
@@ -372,6 +402,9 @@ func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.C
 	if err := checkProof(target); err != nil {
 		return Result{}, err
 	}
+	if err := CheckPool(pool, r.opts.Copier); err != nil {
+		return Result{}, err
+	}
 	lock, err := dbconn.AcquireTableLock(ctx, r.cfg, target.Schema(), target.Table())
 	if err != nil {
 		return Result{}, err
@@ -418,6 +451,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 	}
 	result.Reconciled = state.reconciled
 	result.Reconciliation = state.reconciliation
+	result.CopyPaced = state.copyPaced
 	if target.DecodesWAL() {
 		// The swap has committed, so the slot has carried its last change;
 		// a run resumed on a swapped row drops the slot it left too.
