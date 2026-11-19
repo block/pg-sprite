@@ -3,6 +3,8 @@ package schemachange
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,4 +92,76 @@ func TestPacedCopierPacesByTheRunsOwnLag(t *testing.T) {
 	assert.Equal(t, uint64(125), opts.Pace.Backlog(), "the catch-up named after the options were made")
 
 	assert.Nil(t, r.opts.Copier.Pace.Backlog, "the run's own options are left unpaced for a quiesced copy")
+}
+
+// A run with no hook reads its own catch-up's lag: paceSource hands the
+// copy the catch-up it was given, unwrapped.
+func TestPaceSourceIsTheCatchupWhenNoHookIsSet(t *testing.T) {
+	r, err := NewRunner(dbconn.Config{}, &checkpoint.Store{}, RunOptions{})
+	require.NoError(t, err)
+	catchup := &applier.Catchup{}
+	got, ok := r.paceSource(catchup).(*applier.Catchup)
+	require.True(t, ok, "the copy reads the catch-up itself")
+	assert.Same(t, catchup, got)
+}
+
+// PaceOverMark reads the lag one byte over the run's pace mark for exactly
+// the readings it is given, calling onOver at each, and the catch-up's own
+// lag after them.
+func TestPaceOverMarkReadsOverTheMarkForItsReadingsOnly(t *testing.T) {
+	r, err := NewRunner(dbconn.Config{}, &checkpoint.Store{}, RunOptions{
+		Catchup: applier.CatchupOptions{SlotLagCeiling: 200},
+	})
+	require.NoError(t, err)
+	var over atomic.Int64
+	PaceOverMark(r, 3, func() { over.Add(1) })
+	mark := copyPaceMark(200)
+	require.Equal(t, uint64(50), mark)
+
+	lag := &streamLag{}
+	lag.follow(r.paceWrap(fixedStatus{status: applier.Status{Confirmed: 1000, WALEnd: 1010}}))
+	for i := range 3 {
+		assert.Equal(t, mark+1, lag.bytes(), "reading %d is one byte over the mark", i+1)
+	}
+	assert.Equal(t, uint64(10), lag.bytes(), "the catch-up's own lag once the readings are used")
+	assert.Equal(t, uint64(10), lag.bytes())
+	assert.Equal(t, int64(3), over.Load())
+}
+
+// Workers read the lag concurrently, so the readings over the mark are
+// handed out once each, however many workers race for them.
+func TestPaceOverMarkHandsOutEachReadingOnce(t *testing.T) {
+	r, err := NewRunner(dbconn.Config{}, &checkpoint.Store{}, RunOptions{
+		Catchup: applier.CatchupOptions{SlotLagCeiling: 200},
+	})
+	require.NoError(t, err)
+	PaceOverMark(r, 3, nil)
+	lag := &streamLag{}
+	lag.follow(r.paceWrap(fixedStatus{}))
+	var wg sync.WaitGroup
+	var over atomic.Int64
+	for range 8 {
+		wg.Go(func() {
+			for range 50 {
+				if lag.bytes() > copyPaceMark(200) {
+					over.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	assert.Equal(t, int64(3), over.Load())
+}
+
+// A run with the hook set reads its catch-up through it, and each run's
+// catch-up gets readings of its own, so a second run on the same Runner is
+// held as the first was.
+func TestPaceOverMarkGivesEachRunItsOwnReadings(t *testing.T) {
+	r, err := NewRunner(dbconn.Config{}, &checkpoint.Store{}, RunOptions{})
+	require.NoError(t, err)
+	PaceOverMark(r, 1, nil)
+	first, second := r.paceSource(&applier.Catchup{}), r.paceSource(&applier.Catchup{})
+	assert.Positive(t, first.Status().Lag())
+	assert.Positive(t, second.Status().Lag())
+	assert.Zero(t, first.Status().Lag())
 }
