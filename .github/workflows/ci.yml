@@ -217,6 +217,8 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      - name: Test the image pin check
+        run: make test-image-pins
       # Compose pulls by digest and ignores the tag, so only a registry
       # lookup shows that each pinned tag still names the image tested.
       - name: Check image pins resolve their tags

@@ -17,7 +17,7 @@ REPLAY_PROJECT ?= buzz
 # Compose file whose image pins check-image-pins verifies.
 PINS_FILE ?= compose/supabase.yml
 
-.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -143,7 +143,12 @@ check-vulnerabilities:
 # pulls by digest and ignores the tag, so only a registry lookup catches a
 # wrong tag. PINS_FILE selects the compose file.
 check-image-pins:
-	@scripts/check-image-pins.sh $(PINS_FILE)
+	@scripts/check-image-pins.sh "$(PINS_FILE)"
+
+# Drive check-image-pins through each outcome against a stand-in docker: no
+# registry, no Docker daemon.
+test-image-pins:
+	@scripts/check-image-pins_test.sh
 
 # Configure git hooks (relative path so worktrees work too).
 setup:

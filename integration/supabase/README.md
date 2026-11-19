@@ -107,6 +107,9 @@ Handle unrelated upgrades in a separate follow-up. When making an upgrade:
 This check is triggered by agent work, not a scheduled update bot. Fresh CI
 runners pull the pinned images on each run, which also exposes unavailable pins,
 and the Supabase job runs `make check-image-pins` before starting the services.
+If that step fails on a PR that did not change `compose/supabase.yml`, the PR is
+not the cause: exit 1 means a publisher moved a tag, so re-pin it in a separate
+PR as described above; exit 2 means a registry lookup failed, so re-run the job.
 
 ## Hosted projects
 
