@@ -225,6 +225,29 @@ func TestCheckLiveReportsAChunkThatKeepsChangingAsUnresolved(t *testing.T) {
 	assert.Equal(t, uint64(6000), work.SettleRowsRead, "the sweep's read and two rereads of a 1000-row chunk, both sides")
 }
 
+// With one attempt the first reread judges every key of the chunk, so the
+// error must name only the keys that were still changing, not every key it
+// judged.
+func TestCheckLiveHotKeysAreTheKeysLeftHotNotTheKeysJudged(t *testing.T) {
+	f := newLiveFixture(t)
+	f.holdShadow(t)
+	touch := "UPDATE " + f.table.Qualified() + " SET amount = amount + 1 WHERE id = 1"
+	f.exec(t, touch)
+	rewrite := confirmedFunc(func() decode.LSN {
+		f.exec(t, touch)
+		return math.MaxUint64
+	})
+
+	v := f.verifier(t, checksum.Options{})
+	_, err := f.checkLive(t, v, checksum.DivergenceAbort, checksum.LiveOptions{Confirmed: rewrite, Attempts: 1})
+	var unresolved *checksum.UnresolvedError
+	require.ErrorAs(t, err, &unresolved)
+	assert.Equal(t, 1, unresolved.Rereads)
+	assert.Equal(t, 1, unresolved.Keys)
+	assert.Equal(t, []int64{1}, unresolved.HotKeys)
+	assert.Contains(t, err.Error(), "1 key still changing (key 1),")
+}
+
 // A key settled at one reread is concluded as of that read, so the rereads
 // after it judge only the keys left hot. The shadow is held still and the
 // catch-up's position stands in claiming everything is confirmed. Key 1
