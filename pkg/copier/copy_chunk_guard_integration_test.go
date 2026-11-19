@@ -28,7 +28,7 @@ func TestCopierRefusesAShadowReplacedAfterTheClaim(t *testing.T) {
 	shadowName := pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()
 
 	var replaceErr error
-	clock := &hookedClock{hook: func() {
+	clock := testutil.NewHookedClock(func() {
 		if _, err := f.pool.Exec(t.Context(), "DROP TABLE "+shadowName); err != nil {
 			replaceErr = fmt.Errorf("drop the shadow: %w", err)
 			return
@@ -36,7 +36,7 @@ func TestCopierRefusesAShadowReplacedAfterTheClaim(t *testing.T) {
 		if _, err := f.pool.Exec(t.Context(), "CREATE TABLE "+shadowName+" (id bigint PRIMARY KEY, qty integer NOT NULL)"); err != nil {
 			replaceErr = fmt.Errorf("create the impostor: %w", err)
 		}
-	}}
+	})
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{Workers: 1, Clock: clock})
 	require.NoError(t, err)
 	err = c.Run(t.Context(), f.pool)

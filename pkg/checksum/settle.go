@@ -84,6 +84,7 @@ func (v *Verifier) settle(ctx context.Context, pool *pgxpool.Pool, stmts stateme
 				Chunk: now.chunk, Cause: CauseHot, Rereads: rereads, Keys: len(hot),
 				Source: source, Shadow: shadow,
 				Captured: now.lsn, Confirmed: live.Confirmed.Confirmed(),
+				hot: hot,
 			}
 		}
 		pending = hot

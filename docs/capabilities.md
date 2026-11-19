@@ -163,7 +163,9 @@ engine:
   (`copy-and-swap-refused`, cause `copy-and-swap-not-enabled`); native rows are unaffected. Open, a ✅ row on this path
   executes; a 🟡 row is a typed refusal (`backend-unavailable`) for an operation the engine
   does not carry yet (see [optimistic-attempt.md](optimistic-attempt.md) for how the router
-  proves the rewrite).
+  proves the rewrite). A run on a pool smaller than its copy workers plus two is refused
+  with `pool-too-small` before it creates anything, from every entry point, the library's
+  `schemachange.Runner.Run` included ([the pool floor](limitations.md#the-copy-and-swap-pool-floor)).
 - **—** — no engine path: either the job belongs to another tool class (⚪ / 🔵) or
   there is no online mechanism pg-sprite will drive (❌): PostgreSQL has none, or the
   only online form is a direct statement the operator runs.

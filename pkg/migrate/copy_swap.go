@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
@@ -87,7 +88,8 @@ type CopySwapOptions struct {
 	// write that reaches the fence fails, so the table is offline for
 	// writes until the swap. It must name the resolved target table as
 	// SCHEMA.TABLE, the same way Restart does, so the declaration cannot be
-	// left on a script and fence another table by accident. Empty runs the
+	// left on a script and fence another table by accident; a value naming
+	// any other table returns [ErrBlockWritesMismatch]. Empty runs the
 	// live path: slot, stream, and catch-up. Run takes it; RunDesired
 	// rejects any value with ErrBlockWritesNotSupported.
 	BlockWrites string
@@ -98,8 +100,8 @@ type CopySwapOptions struct {
 	// is discarded under the run's own lock session before a fresh shadow
 	// is built (schemachange.RunOptions.Restart). It must name the
 	// resolved target table as SCHEMA.TABLE, the same way Options.Force
-	// does, so the acknowledgement cannot be left on a script by accident.
-	// A leftover whose swap already committed is not discarded: the
+	// does, so the acknowledgement cannot be left on a script by accident;
+	// a value naming any other table returns [ErrRestartMismatch]. A leftover whose swap already committed is not discarded: the
 	// change is past the point of starting over, and the run is refused
 	// so it can be finished without the acknowledgement. Empty resumes a
 	// leftover, as every run does. Run takes it; RunDesired rejects any
@@ -111,8 +113,9 @@ type CopySwapOptions struct {
 	// transaction, and the progress tracker the copier reports to while it
 	// runs. Zero values take the copier's defaults. A value the copier
 	// would refuse is a wiring error refused before the preflight, like a
-	// negative CheckpointInterval. The workers set the pool size the route
-	// admits: CopySwapMinConns(Copier).
+	// negative CheckpointInterval; so is a Copier.Pace, which a live run
+	// sets itself from its stream's lag. The workers set the pool size the
+	// route admits: CopySwapMinConns(Copier).
 	//
 	// Options.Progress is the way to observe the whole run: it reports the
 	// copy, a live run's catch-up, and the verification pass, each as the
@@ -140,6 +143,15 @@ type CopySwapOptions struct {
 	// copy. Zero means the Runner's default; a negative value is refused
 	// before anything is read.
 	CheckpointInterval time.Duration
+
+	// SlotLagCeilingBytes is the WAL, in bytes, a live run's replication
+	// slot may hold before the catch-up stops the run with a
+	// *decode.SlotLagExceededError, leaving the slot and the checkpoint row
+	// for the next run to resume from (applier.CatchupOptions.SlotLagCeiling).
+	// Zero takes decode.DefaultSlotLagCeiling, one GiB; a negative value is
+	// refused before anything is read. A run that blocks writes holds no
+	// slot and does not read it. The CLI sets it from --slot-lag-ceiling.
+	SlotLagCeilingBytes int64
 
 	// OnCheckpoint, when set, is the run's progress signal: it is called
 	// after every successful save of the checkpoint row with the row as
@@ -171,18 +183,19 @@ type CopySwapOptions struct {
 }
 
 // runOptions is the Runner's policy for the route: the operator's two
-// choices, the host's sizing and progress hook, and the one setting the
-// route fixes — a done row from an earlier run is replaced, since a second
-// change on the table is the next statement, not a rollback window. The
-// catch-up's requeue warnings go to the call's diagnostics logger.
+// choices, the host's sizing, slot-lag ceiling, and progress hook, and the
+// one setting the route fixes — a done row from an earlier run is
+// replaced, since a second change on the table is the next statement, not
+// a rollback window. The catch-up's requeue warnings go to the call's
+// diagnostics logger.
 func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions {
 	return schemachange.RunOptions{
 		Copier:             o.Copier,
-		Catchup:            applier.CatchupOptions{Logger: logger},
 		KeepOld:            o.KeepOld,
 		ReplaceDone:        true,
 		Restart:            o.Restart != "",
 		CheckpointInterval: o.CheckpointInterval,
+		Catchup:            applier.CatchupOptions{Logger: logger, SlotLagCeiling: o.SlotLagCeilingBytes},
 		AfterCheckpoint: func(ctx context.Context, cp checkpoint.Checkpoint) error {
 			logger.Debug("copy-and-swap checkpoint saved",
 				"schema", cp.Schema, "table", cp.Table, "phase", cp.Phase.String())
@@ -244,7 +257,7 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", err)
 	}
-	if err := checkCopySwapPool(pool, opts.CopySwap); err != nil {
+	if err := schemachange.CheckPool(pool, opts.CopySwap.Copier); err != nil {
 		return copySwapPoolVerdict(st, err), fmt.Errorf("migrate: %w", err)
 	}
 	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
@@ -390,13 +403,17 @@ func runAbandoned(err error) bool {
 // started over, and the detail says how: the restart acknowledgement
 // (CopySwapOptions.Restart, `--restart SCHEMA.TABLE` on the CLI) discards
 // what the stopped run left and runs the change from the start. Every
-// other stop is resumed by running the statement again. In each case the
-// detail names the hold the run keeps or kept on the source, since that is
-// what the operator is paying for in the meantime: the write fence of a
-// run that blocked writes, or the replication slot of a live run, which
-// pins WAL on the server until it is dropped. A blocked-writes run that
-// stopped before its fence went on left neither, and saved no row to
-// resume from, so the detail says the table kept taking writes.
+// other stop is resumed by running the statement again; a live run the
+// slot-lag ceiling stopped because its slot retained too much WAL also
+// names the ceiling to raise, since a resume under the same ceiling meets
+// the same write rate. In each case the detail names the hold the run
+// keeps or kept on the source, since that is what the operator is paying
+// for in the meantime: the write fence of a run that blocked writes, or the
+// replication slot of a live run, which pins WAL on the server until it is
+// dropped. A blocked-writes run that stopped before its fence went on left
+// neither, and saved no row to resume from, so the detail says the table
+// kept taking writes. The detail is written for the CLI operator and names
+// CLI flags; a host routes on the returned error instead.
 func copySwapStoppedRemedy(hold sourceHold, err error) string {
 	if hold == holdNone {
 		return "the run stopped before it fenced the source, so the table kept taking writes and no checkpoint row was saved; running the same statement again starts from the beginning"
@@ -419,7 +436,12 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 	if schemachange.IsDataFault(err) {
 		return "the server rejected the rows as the statement would shape them and the run could not be abandoned, so running the same statement again would copy the same rows and stop here again; " + startOver
 	}
-	return "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
+	resume := "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
+	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause == decode.SlotLagWALRetained {
+		return resume + "; when no open or prepared write transaction on the source holds the WAL back, the write rate is the cause, " +
+			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE)"
+	}
+	return resume
 }
 
 // copySwapFailureCode names the executor outcome code for an error out of
