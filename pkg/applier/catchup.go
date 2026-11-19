@@ -90,12 +90,17 @@ type CatchupOptions struct {
 	// count. Each attempt waits up to the server's deadlock_timeout to be
 	// chosen as the victim.
 	DeadlockAttempts int
-	// Logger receives a warning each time a cycle requeues its batch — a
-	// constraint refused it (Status.BatchesDeferred) or the server rolled
-	// its flush back as a deadlock victim (Status.BatchesDeadlocked) — so
-	// a caller that does not poll Status sees the condition while it
-	// lasts; nil discards them. The records carry the target and counts,
-	// never row data.
+	// Logger receives a record when a cycle requeues its batch, so a
+	// caller that does not poll Status sees the condition while it lasts;
+	// nil discards them. A batch a constraint refused
+	// (Status.BatchesDeferred) waits for the copy by design, so it logs at
+	// Info and only as the run's count reaches 1, 2, 4, 8, and so on. A
+	// flush the server rolled back as a deadlock victim
+	// (Status.BatchesDeadlocked) logs at Warn every time. The records carry
+	// schema, table, entries (the batch's size), and batches_deferred, or
+	// batches_deadlocked with consecutive_deadlocks and deadlock_attempts;
+	// never row data. pg-sprite migrate shows them on stderr only with
+	// --debug.
 	Logger *slog.Logger
 }
 

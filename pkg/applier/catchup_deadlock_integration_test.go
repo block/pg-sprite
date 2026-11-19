@@ -2,6 +2,7 @@ package applier_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -43,10 +44,12 @@ var (
 // the next cycle's flush lands both rows and the shadow converges, with
 // the one deadlock on the record (CO-4). Until then the requeued batch's
 // two entries wait in the buffer and count as deferred. The requeue is
-// also a warning on the catch-up's logger, shown in the test's output.
+// also one Warn record on the catch-up's logger, with the consecutive count
+// against the bound.
 func TestCatchupRequeuesAFlushRolledBackAsTheDeadlockVictim(t *testing.T) {
 	f := newCatchupFixture(t, 20)
-	run := startCatchupWith(t, f, catchupSetup{positions: &switchPosition{pos: allLanded()}, opts: applier.CatchupOptions{Logger: testLogger(t)}})
+	logs := newRequeueRecords(t)
+	run := startCatchupWith(t, f, catchupSetup{positions: &switchPosition{pos: allLanded()}, opts: applier.CatchupOptions{Logger: logs.logger()}})
 	writer := f.holdShadowValue(t, run, rowsOneAndTwo)
 
 	f.moveUniqueValues(t, rowsOneAndTwo)
@@ -68,6 +71,15 @@ func TestCatchupRequeuesAFlushRolledBackAsTheDeadlockVictim(t *testing.T) {
 	assert.Equal(t, uint64(2), s.Applied, "both images land on the flush after it")
 	assert.Zero(t, s.BatchesDeferred, "a deadlock is not a refusal")
 	assert.Zero(t, s.Deferred, "the flush that committed left nothing deferred")
+	records := logs.withKey("batches_deadlocked")
+	require.Len(t, records, 1, "one record for the one flush the server rolled back")
+	assert.Equal(t, slog.LevelWarn, records[0].level)
+	assert.Equal(t, uint64(1), records[0].attrs["batches_deadlocked"])
+	assert.Equal(t, int64(1), records[0].attrs["consecutive_deadlocks"])
+	assert.Equal(t, int64(applier.DefaultDeadlockAttempts), records[0].attrs["deadlock_attempts"])
+	assert.Equal(t, int64(2), records[0].attrs["entries"], "rows 1 and 2, requeued together")
+	assert.Equal(t, f.table.Table, records[0].attrs["table"])
+	assert.Empty(t, logs.withKey("batches_deferred"), "a deadlock is not a refusal")
 	run.stop(t)
 	f.assertConverged(t, run.shadow)
 }
