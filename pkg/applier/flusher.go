@@ -38,9 +38,9 @@ var (
 	// server picks one to roll back, and this is the flush picked. The
 	// transaction committed nothing and the shadow is as it was; the stream
 	// owner puts the batch back with Buffer.Requeue and flushes it again
-	// after a backoff. A retry that waits on the other writer past the
-	// flush session's lock_timeout fails with the server's lock-timeout
-	// error.
+	// after a backoff (CatchupOptions.DeadlockBackoff). A retry that waits
+	// on the other writer past the flush session's lock_timeout fails with
+	// the server's lock-timeout error.
 	ErrBatchDeadlocked = errors.New("batch deadlocked: the server rolled the flush back to break a deadlock")
 )
 

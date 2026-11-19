@@ -99,10 +99,15 @@ type CatchupOptions struct {
 	// rolled back as a deadlock victim and the first retry of its batch;
 	// each later retry in the same run of deadlocks waits one backoff
 	// longer than the one before, so the n-th retry waits n backoffs and
-	// the longest wait is DeadlockAttempts-1 backoffs. The cycles while it
-	// waits still read, buffer, and confirm the stream, as under a Pause,
-	// but neither drain nor flush. Zero takes DefaultDeadlockBackoff; a
-	// negative value is refused.
+	// the longest wait is DeadlockAttempts-1 backoffs, and the waits of a
+	// whole run of deadlocks add up to DeadlockAttempts*(DeadlockAttempts-1)/2
+	// backoffs. A cycle reads the clock only after its Interval of reading
+	// the stream, so every wait ends at the first cycle that ends after it:
+	// a backoff below Interval does not bring the first retry any earlier.
+	// The cycles while it waits still read, buffer, and confirm the stream,
+	// as under a Pause, but neither drain nor flush, and Status.BackingOff
+	// says so. Zero takes DefaultDeadlockBackoff; a negative value is
+	// refused.
 	DeadlockBackoff time.Duration
 }
 
@@ -216,8 +221,13 @@ type Status struct {
 	// flush runs. Unlike the fields above it is not a cycle's record: it
 	// moves the moment the hold is taken or given back. Under the hold Lag
 	// grows and Applied stands still on purpose, so a caller watching for
-	// a stalled catch-up reads FlushesHeld first.
+	// a stalled catch-up reads FlushesHeld and BackingOff first.
 	FlushesHeld bool
+	// BackingOff is set when the last cycle waited out a deadlocked batch's
+	// backoff (CatchupOptions.DeadlockBackoff) instead of draining and
+	// flushing. As under a Pause, Lag grows and Applied stands still while
+	// it is set, and the requeued entries stay in Buffered and Deferred.
+	BackingOff bool
 }
 
 // Lag is how far the confirmed position trails the server's write position
@@ -702,6 +712,7 @@ func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 			c.status.Fallbacks++
 		}
 	}
+	c.status.BackingOff = outcome.backingOff
 	c.status.Buffered = c.buffer.Len()
 	c.status.Held = c.buffer.Held()
 	c.status.Delivered = c.stream.Delivered()

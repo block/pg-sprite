@@ -64,6 +64,42 @@ func TestCatchupWaitsOneBackoffLongerBeforeEachDeadlockRetry(t *testing.T) {
 	f.assertConverged(t, run.shadow)
 }
 
+// While a deadlocked batch waits out its backoff, the status says the
+// catch-up is backing off and keeps saying its entries wait: Deferred
+// counts them, Buffered holds them, Applied stands still, and the confirmed
+// position stays below them while the stream delivers past it. A cancel
+// inside an hour-long backoff still ends the catch-up within the stop
+// deadline, since a backing-off cycle waits on nothing but its Interval.
+func TestCatchupStatusKeepsTheRequeuedEntriesWhileBackingOff(t *testing.T) {
+	f := newCatchupFixture(t, 20)
+	clock := &shiftedClock{}
+	run := startCatchupWith(t, f, catchupSetup{
+		positions: &switchPosition{pos: allLanded()},
+		opts:      applier.CatchupOptions{Clock: clock, DeadlockBackoff: deadlockTestBackoff},
+	})
+	writer := f.holdShadowValue(t, run, rowsOneAndTwo)
+	f.moveUniqueValues(t, rowsOneAndTwo)
+
+	writer.deadlockWithTheFlush(t)
+	run.awaitStatus(t, "record the flush the server rolled back", func(s applier.Status) bool {
+		return s.BatchesDeadlocked == 1
+	})
+	rolledBack := run.status(t)
+	require.NoError(t, writer.release(t.Context()))
+	run.awaitCyclesWithoutAFlush(t, writer, "inside the first backoff")
+
+	s := run.status(t)
+	assert.True(t, s.BackingOff, "the cycle waited out the backoff instead of flushing")
+	assert.False(t, s.FlushesHeld, "no Pause holds the flushes; the backoff does")
+	assert.Equal(t, 2, s.Buffered, "the two requeued entries wait in the buffer")
+	assert.Equal(t, 2, s.Deferred, "the two requeued entries still count as waiting")
+	assert.Zero(t, s.Applied)
+	assert.Equal(t, rolledBack.Confirmed, s.Confirmed, "the confirmed position stays below the requeued batch")
+	assert.Greater(t, s.Delivered, s.Confirmed, "the stream delivered the marks past the requeued batch")
+	run.stop(t)
+	require.NoError(t, writer.tx.Rollback(t.Context()))
+}
+
 // awaitCyclesWithoutAFlush waits for the catch-up to complete a whole cycle
 // after the call, failing the test the moment a flush waits on the writer
 // instead. Each mark is a WAL record written outside the published table,
