@@ -35,8 +35,9 @@ const copySwapWALSenders = 2
 
 // copySwapDiskHeadroomFactor is the multiple of the source's total size
 // (heap, indexes, TOAST) the volume must have free: the shadow grows to the
-// source's size, and the retained WAL, the old table kept until the
-// post-commit drop, and index-build spill all need room beyond it.
+// source's size, and the old table kept until the post-commit drop and
+// index-build spill need room beyond it. A run that decodes WAL needs its
+// slot lag ceiling on top (CopySwapEnvironment.SlotLagCeilingBytes).
 const copySwapDiskHeadroomFactor = 2
 
 // walLevelLogical is the wal_level value that enables logical decoding.
@@ -77,6 +78,12 @@ type CopySwapEnvironment struct {
 	// reports it. A value that is not positive is refused as unmeasured
 	// rather than treated as unlimited.
 	FreeDiskBytes int64
+	// SlotLagCeilingBytes is the WAL, in bytes, a run that decodes WAL lets
+	// its slot retain before it stops: the caller's effective ceiling, with
+	// any default already resolved. A run that decodes WAL needs it free on
+	// the volume beside the shadow copy, so it is added to the disk
+	// requirement; a quiesced run holds no slot, and the value is ignored.
+	SlotLagCeilingBytes int64
 }
 
 // CopySwapEnvironmentError reports that the cluster or the volume cannot
@@ -91,6 +98,13 @@ type CopySwapEnvironmentError struct {
 	Setting CopySwapSetting
 	// Detail is the measurement behind the cause.
 	Detail string
+	// The disk figures a measured disk-headroom refusal was decided on, and
+	// zero for every other refusal: the free space the caller passed, the
+	// space the shadow copy needs, and the slot lag ceiling counted beside
+	// it, which is zero for a quiesced run.
+	FreeDiskBytes       int64
+	ShadowBytes         int64
+	SlotLagCeilingBytes int64
 }
 
 // Error implements the error interface.
@@ -120,7 +134,8 @@ type copySwapEnvironmentFacts struct {
 // logical decoding is enabled, no other database holds the slot name the
 // route derives for the target, and a slot and the WAL senders for the
 // route's two replication connections are free; in every run the
-// caller-measured free disk covers the shadow copy. A run
+// caller-measured free disk covers the shadow copy, and in a run that
+// decodes WAL it covers the slot lag ceiling beside it. A run
 // that decodes WAL must present a shape whose privilege proof verified
 // replication access, or it is a proof mismatch, as is a pool on any
 // database other than the one the shape was proven in. On success it mints the
@@ -186,11 +201,30 @@ func refuseCopySwapEnvironment(f copySwapEnvironmentFacts, env CopySwapEnvironme
 			Detail: fmt.Sprintf("free disk space was not measured (%d bytes reported); the volume's free space must be passed in", env.FreeDiskBytes),
 		}
 	}
-	required := f.totalBytes * copySwapDiskHeadroomFactor
-	if env.FreeDiskBytes < required {
+	shadow := f.totalBytes * copySwapDiskHeadroomFactor
+	if env.FreeDiskBytes < shadow {
 		return &CopySwapEnvironmentError{
-			Cause:  CopySwapCauseDiskHeadroom,
-			Detail: fmt.Sprintf("%d bytes are free; %d bytes (%d× the table's %d bytes of heap, indexes, and TOAST) are required", env.FreeDiskBytes, required, copySwapDiskHeadroomFactor, f.totalBytes),
+			Cause:         CopySwapCauseDiskHeadroom,
+			Detail:        fmt.Sprintf("%d bytes are free; %d bytes (%d× the table's %d bytes of heap, indexes, and TOAST) are required", env.FreeDiskBytes, shadow, copySwapDiskHeadroomFactor, f.totalBytes),
+			FreeDiskBytes: env.FreeDiskBytes,
+			ShadowBytes:   shadow,
+		}
+	}
+	if !env.LogicalDecoding {
+		return nil
+	}
+	// The WAL the ceiling lets the slot retain lands on the same volume as
+	// the shadow, so a run that decodes WAL needs room for both. The
+	// remainder is compared rather than the sum, which a ceiling near the
+	// int64 limit would overflow.
+	if env.FreeDiskBytes-shadow < env.SlotLagCeilingBytes {
+		return &CopySwapEnvironmentError{
+			Cause: CopySwapCauseDiskHeadroom,
+			Detail: fmt.Sprintf("%d bytes are free; a live run needs %d bytes (%d× the table's %d bytes of heap, indexes, and TOAST) for the shadow copy plus the slot lag ceiling of %d bytes of WAL its replication slot may retain; lower the ceiling or free space on the volume",
+				env.FreeDiskBytes, shadow, copySwapDiskHeadroomFactor, f.totalBytes, env.SlotLagCeilingBytes),
+			FreeDiskBytes:       env.FreeDiskBytes,
+			ShadowBytes:         shadow,
+			SlotLagCeilingBytes: env.SlotLagCeilingBytes,
 		}
 	}
 	return nil

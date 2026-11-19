@@ -363,6 +363,23 @@ func TestCopySwapRunOptionsCarryTheHostsPolicy(t *testing.T) {
 	})
 }
 
+// The preflight's disk check counts the ceiling the catch-up will enforce:
+// the host's when it set one, decode.DefaultSlotLagCeiling when it left it
+// zero, so an unset ceiling is not counted as no WAL at all.
+func TestCopySwapEnvironmentCountsTheEffectiveSlotLagCeiling(t *testing.T) {
+	t.Run("a set ceiling is counted as given", func(t *testing.T) {
+		got := CopySwapOptions{FreeDiskBytes: 8 << 30, SlotLagCeilingBytes: 3 << 30}.environment()
+		assert.True(t, got.LogicalDecoding)
+		assert.Equal(t, int64(8<<30), got.FreeDiskBytes)
+		assert.Equal(t, int64(3<<30), got.SlotLagCeilingBytes)
+	})
+
+	t.Run("an unset ceiling is counted as the default", func(t *testing.T) {
+		got := CopySwapOptions{FreeDiskBytes: 8 << 30}.environment()
+		assert.Equal(t, decode.DefaultSlotLagCeiling, got.SlotLagCeilingBytes)
+	})
+}
+
 // The detail names what the run proved; the kept-old wording and the
 // dropped wording are never both present, and the quiesced wording appears
 // exactly when the run fenced the source's writes, since the outcome's

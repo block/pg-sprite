@@ -116,9 +116,15 @@ without writes for the run.
 ## Free disk space
 
 The shadow table is a full second copy of the table and its indexes, so the preflight requires
-free space of at least twice the table's heap, indexes, and TOAST. PostgreSQL cannot report the
+free space of at least twice the table's heap, indexes, and TOAST. A live run also needs room
+for the WAL its replication slot may retain, so its preflight adds the
+[slot lag ceiling](#slot-lag-ceiling) to that figure: 1 GiB unless you pass
+`--slot-lag-ceiling`. A live run on a 10 GiB table therefore needs 21 GiB free by default; an
+offline run (`--block-writes`) holds no slot and needs 20 GiB. PostgreSQL cannot report the
 free space on its own volume over SQL, so you pass it with `--free-disk` (binary units: `MiB`,
-`GiB`, `TiB`). A run without it is refused with cause `copy-and-swap-disk-headroom`.
+`GiB`, `TiB`). A run without it, or with less than it needs, is refused with cause
+`copy-and-swap-disk-headroom`; for a live run the detail names both the shadow's figure and
+the ceiling's.
 
 - **Self-managed PostgreSQL:** run `df -h` on the volume holding the data directory.
 - **Amazon RDS for PostgreSQL:** read the instance's `FreeStorageSpace` metric in CloudWatch.
@@ -135,7 +141,10 @@ it. Until then it stays required.
 A live run's replication slot keeps WAL on the server until pg-sprite has applied the changes
 in it. The run stops when the slot holds more than the slot lag ceiling: 1 GiB unless you pass
 `--slot-lag-ceiling SIZE` (`CopySwapOptions.SlotLagCeilingBytes` as a library caller). An
-offline run holds no slot, so the flag is refused with `--block-writes`.
+offline run holds no slot, so the flag is refused with `--block-writes`. The ceiling, the
+1 GiB default included, counts against `--free-disk` beside the shadow (see
+[Free disk space](#free-disk-space)), so a ceiling the volume cannot hold is refused with cause
+`copy-and-swap-disk-headroom` before anything is built.
 
 The ceiling is a stop threshold pg-sprite checks once per catch-up cycle, not a limit
 PostgreSQL enforces on the slot. The slot can hold more than the ceiling by the time a cycle

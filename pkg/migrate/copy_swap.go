@@ -74,7 +74,9 @@ type CopySwapOptions struct {
 
 	// FreeDiskBytes is the free space the operator reports on the volume
 	// the table lives on; the preflight refuses the run when the shadow and
-	// its indexes would not fit. Zero means no space, and refuses.
+	// its indexes would not fit, or, for a live run, when they and
+	// SlotLagCeilingBytes of retained WAL would not fit together. Zero means
+	// no space, and refuses.
 	FreeDiskBytes int64
 
 	// KeepOld leaves the retained source under its derived _old name after
@@ -149,8 +151,10 @@ type CopySwapOptions struct {
 	// *decode.SlotLagExceededError, leaving the slot and the checkpoint row
 	// for the next run to resume from (applier.CatchupOptions.SlotLagCeiling).
 	// Zero takes decode.DefaultSlotLagCeiling, one GiB; a negative value is
-	// refused before anything is read. A run that blocks writes holds no
-	// slot and does not read it. The CLI sets it from --slot-lag-ceiling.
+	// refused before anything is read. The preflight counts the ceiling,
+	// the default included, against FreeDiskBytes beside the shadow. A run
+	// that blocks writes holds no slot and does not read it. The CLI sets
+	// it from --slot-lag-ceiling.
 	SlotLagCeilingBytes int64
 
 	// OnCheckpoint, when set, is the run's progress signal: it is called
@@ -208,11 +212,18 @@ func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions
 
 // environment is what the operator declared about the run's surroundings,
 // in the form the preflight reads: a quiesced run decodes no WAL, so it
-// needs none of the server's logical-decoding facilities.
+// needs none of the server's logical-decoding facilities. The slot lag
+// ceiling is the one the catch-up will enforce, the default when none is
+// set, so the disk check counts the WAL the slot may actually retain.
 func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
+	ceiling := o.SlotLagCeilingBytes
+	if ceiling == 0 {
+		ceiling = decode.DefaultSlotLagCeiling
+	}
 	return preflight.CopySwapEnvironment{
-		LogicalDecoding: o.BlockWrites == "",
-		FreeDiskBytes:   o.FreeDiskBytes,
+		LogicalDecoding:     o.BlockWrites == "",
+		FreeDiskBytes:       o.FreeDiskBytes,
+		SlotLagCeilingBytes: ceiling,
 	}
 }
 

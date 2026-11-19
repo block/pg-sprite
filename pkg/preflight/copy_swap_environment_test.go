@@ -1,6 +1,7 @@
 package preflight
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,10 +10,10 @@ import (
 
 // sufficientCopySwapEnvironment is a logical-decoding cluster with one free
 // slot, exactly the free senders the route's replication connections need,
-// and a volume holding exactly the required headroom for a 1 MiB table:
-// every refusal below is one fact away from it.
+// and a volume holding exactly the required headroom for a 1 MiB table and
+// a 1 MiB slot lag ceiling: every refusal below is one fact away from it.
 func sufficientCopySwapEnvironment() (copySwapEnvironmentFacts, CopySwapEnvironment) {
-	const tableBytes = 1 << 20
+	const tableBytes, ceilingBytes = 1 << 20, 1 << 20
 	facts := copySwapEnvironmentFacts{
 		walLevel:            "logical",
 		maxReplicationSlots: 4,
@@ -22,7 +23,11 @@ func sufficientCopySwapEnvironment() (copySwapEnvironmentFacts, CopySwapEnvironm
 		slotName:            CopySwapDecodingName("app", "public", "orders"),
 		totalBytes:          tableBytes,
 	}
-	env := CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: copySwapDiskHeadroomFactor * tableBytes}
+	env := CopySwapEnvironment{
+		LogicalDecoding:     true,
+		FreeDiskBytes:       copySwapDiskHeadroomFactor*tableBytes + ceilingBytes,
+		SlotLagCeilingBytes: ceilingBytes,
+	}
 	return facts, env
 }
 
@@ -113,12 +118,14 @@ func TestRefuseCopySwapEnvironmentCountsSendersAsSlotHeadroom(t *testing.T) {
 }
 
 // A quiesced run decodes nothing, so a replica-level cluster with no free
-// slot is sufficient for it; disk headroom is required either way.
+// slot is sufficient for it; disk headroom for the shadow is required
+// either way.
 func TestRefuseCopySwapEnvironmentSkipsDecodingFactsWithoutLogicalDecoding(t *testing.T) {
 	facts, env := sufficientCopySwapEnvironment()
 	facts.walLevel = "replica"
 	facts.usedSlots = facts.maxReplicationSlots
 	env.LogicalDecoding = false
+	env.FreeDiskBytes = facts.totalBytes * copySwapDiskHeadroomFactor
 	assert.Nil(t, refuseCopySwapEnvironment(facts, env))
 
 	env.FreeDiskBytes--
@@ -141,8 +148,43 @@ func TestRefuseCopySwapEnvironmentRequiresMeasuredDisk(t *testing.T) {
 		assert.NotEmpty(t, refusal.Detail)
 	}
 
-	env.FreeDiskBytes = facts.totalBytes * copySwapDiskHeadroomFactor
+	env.FreeDiskBytes = facts.totalBytes*copySwapDiskHeadroomFactor + env.SlotLagCeilingBytes
 	require.Nil(t, refuseCopySwapEnvironment(facts, env))
+}
+
+// A live run's slot may retain up to its lag ceiling of WAL on the same
+// volume the shadow fills, so the ceiling counts against the free disk
+// beside the shadow: here the shadow fits alone but not with the ceiling,
+// and the refusal carries both figures. An offline run holds no slot, so
+// the same sizes admit it; and a ceiling near the int64 limit is refused
+// rather than overflowing the sum into a pass.
+func TestRefuseCopySwapEnvironmentCountsTheSlotLagCeilingForALiveRun(t *testing.T) {
+	facts, env := sufficientCopySwapEnvironment()
+	shadow := facts.totalBytes * copySwapDiskHeadroomFactor
+	env.SlotLagCeilingBytes = 1 << 30
+	env.FreeDiskBytes = shadow + 512<<20
+
+	refusal := refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal, "the shadow fits in the free space alone, but not with a 1 GiB ceiling beside it")
+	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+	assert.Empty(t, refusal.Setting)
+	assert.Equal(t, shadow+512<<20, refusal.FreeDiskBytes)
+	assert.Equal(t, shadow, refusal.ShadowBytes)
+	assert.Equal(t, int64(1<<30), refusal.SlotLagCeilingBytes)
+
+	env.LogicalDecoding = false
+	assert.Nil(t, refuseCopySwapEnvironment(facts, env), "an offline run holds no slot, so the ceiling is not counted")
+
+	env.LogicalDecoding = true
+	env.FreeDiskBytes = shadow + env.SlotLagCeilingBytes
+	assert.Nil(t, refuseCopySwapEnvironment(facts, env), "exactly the shadow plus the ceiling is admitted")
+
+	env.FreeDiskBytes = math.MaxInt64
+	env.SlotLagCeilingBytes = math.MaxInt64
+	refusal = refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal, "a ceiling the volume cannot hold beside the shadow is refused, not overflowed")
+	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+	assert.Equal(t, int64(math.MaxInt64), refusal.SlotLagCeilingBytes)
 }
 
 // Enablement is decided before the slot name, the slot name before

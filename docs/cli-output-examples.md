@@ -369,7 +369,7 @@ statement and rerun with `--restart SCHEMA.TABLE`. A consumer branches on the
 ([execution model](execution-model.md)):
 
 ```console
-$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)' --copy-and-swap --free-disk 1GiB --json
+$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)' --copy-and-swap --free-disk 2GiB --json
 {
   "outcome": "failed",
   "code": "data-fault",
@@ -472,7 +472,8 @@ the run (the route is in preview; without the flag the front door refuses with
 `copy-and-swap-refused` / cause `copy-and-swap-not-enabled` before the route's
 preflight runs or anything is written), `--free-disk` (the preflight refuses with `copy-and-swap-refused` /
 cause `copy-and-swap-disk-headroom` when the shadow and its indexes would not
-fit the declared space), and either logical decoding on the server or
+fit the declared space, or, for a live run, would not fit beside the slot lag
+ceiling), and either logical decoding on the server or
 `--block-writes SCHEMA.TABLE`, which names the table whose writes it blocks
 until the swap. The verdict's outcome is distinct
 from `executed-natively`, and `detail` says what the verification pass
