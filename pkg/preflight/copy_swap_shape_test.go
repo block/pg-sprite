@@ -142,6 +142,34 @@ func TestRefuseCopySwapShapeDecidesWholeTableFactsFirst(t *testing.T) {
 	assert.Equal(t, CopySwapCauseForceRLS, cause)
 }
 
+// Only a table with no primary key at all is marked NoPrimaryKey: adding a
+// key is its online way forward. A uuid key is refused under the same cause
+// but is not marked, since a table has one primary key and no online route
+// replaces it; nor is a keyless UNLOGGED table, which is refused for its
+// persistence first.
+func TestCopySwapShapeErrorMarksOnlyAKeylessTable(t *testing.T) {
+	keyless := supportedCopySwapShape()
+	keyless.pkColumns = 0
+	var shapeErr *UnsupportedCopySwapShapeError
+	require.ErrorAs(t, copySwapShapeError(keyless), &shapeErr)
+	assert.Equal(t, CopySwapCausePKUnsupported, shapeErr.Cause)
+	assert.True(t, shapeErr.NoPrimaryKey)
+
+	uuidKeyed := supportedCopySwapShape()
+	uuidKeyed.pkType = "uuid"
+	require.ErrorAs(t, copySwapShapeError(uuidKeyed), &shapeErr)
+	assert.Equal(t, CopySwapCausePKUnsupported, shapeErr.Cause)
+	assert.False(t, shapeErr.NoPrimaryKey)
+
+	unloggedKeyless := keyless
+	unloggedKeyless.relpersistence = "u"
+	require.ErrorAs(t, copySwapShapeError(unloggedKeyless), &shapeErr)
+	assert.Equal(t, CopySwapCauseUnlogged, shapeErr.Cause)
+	assert.False(t, shapeErr.NoPrimaryKey)
+
+	assert.NoError(t, copySwapShapeError(supportedCopySwapShape()))
+}
+
 // Every copy-and-swap cause routes to the class docs/refusal-classes.md
 // decides for it: a replica identity the operator can set and every cluster
 // and volume cause are environmental, since the same table is admitted once

@@ -211,6 +211,49 @@ func TestCopyAndSwapRefusesAnUnsupportedShapeWithItsCause(t *testing.T) {
 	assert.Equal(t, "copy-and-swap-unlogged", wire.Cause)
 }
 
+// A table with no primary key is refused under the key cause, and the
+// verdict's JSON carries the add-integer-primary-key guidance: adding a key
+// online is the way to a copy-and-swap run. A uuid-keyed table is refused
+// under the same cause with no guidance, since a table has one primary key
+// and no online route replaces it.
+func TestCopyAndSwapKeyRefusalCarriesGuidanceOnlyForAKeylessTable(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.exec(t, `
+		CREATE TABLE {schema}.audit_log (
+			note   text,
+			amount integer
+		)`)
+	f.exec(t, `
+		CREATE TABLE {schema}.sessions (
+			id     uuid PRIMARY KEY,
+			amount integer
+		)`)
+
+	type wire struct {
+		Cause    string `json:"cause"`
+		Guidance string `json:"guidance"`
+	}
+	refusalOf := func(t *testing.T, sql string) wire {
+		t.Helper()
+		v, err := f.run(t, sql, f.options())
+		require.NoError(t, err, "a refusal is a verdict, not an error")
+		require.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		encoded, err := v.JSON()
+		require.NoError(t, err)
+		var w wire
+		require.NoError(t, json.Unmarshal([]byte(encoded), &w))
+		return w
+	}
+
+	keyless := refusalOf(t, `ALTER TABLE {schema}.audit_log ALTER COLUMN amount TYPE bigint`)
+	assert.Equal(t, "copy-and-swap-pk-unsupported", keyless.Cause)
+	assert.Equal(t, "add-integer-primary-key", keyless.Guidance)
+
+	uuidKeyed := refusalOf(t, `ALTER TABLE {schema}.sessions ALTER COLUMN amount TYPE bigint`)
+	assert.Equal(t, "copy-and-swap-pk-unsupported", uuidKeyed.Cause)
+	assert.Empty(t, uuidKeyed.Guidance)
+}
+
 // The environment the operator describes is checked before the shadow is
 // built: no free space on the volume is an environmental refusal with the
 // disk-headroom cause, and the table is untouched.

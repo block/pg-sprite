@@ -596,8 +596,10 @@ type Verdict struct {
 	// Guidance is the typed manual path for a rewrite-required refusal,
 	// drawn from the suggest contract's Guidance vocabulary
 	// (docs/suggest-report.md), the same value the plan report's statement
-	// carries, or for a destructive-change refusal whose statement drops a
-	// column and adds it back under the same name. Detail states the steps
+	// carries, for a destructive-change refusal whose statement drops a
+	// column and adds it back under the same name, or for a
+	// copy-and-swap-pk-unsupported refusal of a table with no primary key
+	// (add-integer-primary-key). Detail states the steps
 	// for a human; Guidance is the key an automated caller branches on.
 	// Empty for every other verdict.
 	Guidance suggest.Guidance `json:"guidance,omitempty"`

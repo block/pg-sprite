@@ -704,7 +704,10 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the operator did not acknowledge. The refusal maps to `engine.ExecutionModeBlocked` until
   then; on `migrate --alter` the reason always means the acknowledgement would lift it, and
   a statement that drops a column and adds it back carries `guidance`
-  `alter-column-type-in-place`, the in-place retype that keeps the values. A mismatched
+  `alter-column-type-in-place`, the in-place retype that keeps the values. (A
+  `copy-and-swap-pk-unsupported` refusal of a table with no primary key also carries
+  `guidance`: `add-integer-primary-key`, the online key addition that lets the change run;
+  a host that shows only `cause` and `detail` should render it too.) A mismatched
   acknowledgement is `migrate.ErrAllowDestructiveMismatch` with a zero verdict and nothing
   executed. An acknowledged run's verdict carries `allowed_destructive: true`, the
   machine-readable audit record to store beside the operator's consent. The acknowledgement
