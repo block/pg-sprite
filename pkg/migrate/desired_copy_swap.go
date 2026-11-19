@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -68,7 +69,7 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 		}
 		return stopped("the route's connection could not be checked against the pool", err)
 	}
-	if err := checkCopySwapPool(pool, opts.CopySwap); err != nil {
+	if err := schemachange.CheckPool(pool, opts.CopySwap.Copier); err != nil {
 		return stopped("the pool is too small for the route", err)
 	}
 	_, err := preflight.CheckCopySwap(ctx, pool, report.Schema, report.Table, opts.CopySwap.environment())

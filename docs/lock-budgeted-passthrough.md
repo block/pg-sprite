@@ -395,7 +395,7 @@ produced it; exit 3 is produced by `migrate` alone, because no other command exe
 |------|---------|---------------------|--------------|
 | 0 | Executed through an online-safe path, or a dry run found every statement executable | yes (dry run: nothing runs) | yes |
 | 1 | Failure: a PostgreSQL error after execution started (attempted, rolled back), or an operational or usage error before it, including a mismatched or unresolvable acknowledgement (nothing ran). On this path only, a statement-budget cancellation is also a failure | no; a sequence that stopped mid-flight keeps its committed prefix in `executed_sql` | not applicable |
-| 2 | Refused: ineligible, no acknowledgement supplied, the lock budget was exhausted, or any other command's typed refusal | no | not applicable |
+| 2 | Refused: ineligible, no acknowledgement supplied, the lock budget was exhausted, or any other command's typed refusal | no, except a `migrate --desired` plan refused partway, which keeps the statements before it, listed in `verdicts` | not applicable |
 | 3 | Committed through the accepted blocking passthrough | yes | no |
 
 The third column asks what committed, not what ran: the optimistic attempt's statement-budget

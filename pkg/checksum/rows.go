@@ -64,11 +64,12 @@ func confirmDigest(side string, server Digest, rows rowSet) error {
 	return fmt.Errorf("%w (CO-1): %s rows of the chunk digest as %d rows %s, the chunk's digest is %d rows %s", ErrInvariantViolation, side, derived.Rows, derived.Hash, server.Rows, server.Hash)
 }
 
-// readRows runs one side's rows statement for the closed range [lower,
-// upper] and returns every row it holds there, in key order. A hash that is
-// not a SHA-256 is a statement that is not the one the pass froze.
-func readRows(ctx context.Context, tx pgx.Tx, sql string, lower, upper int64) (rowSet, error) {
-	rows, err := tx.Query(ctx, sql, lower, upper)
+// readRows runs one side's rows statement with args — the closed range
+// [lower, upper] of a chunk, or the list of keys of a keyed read — and
+// returns every row it selects, in key order. A hash that is not a SHA-256
+// is a statement that is not one this package renders.
+func readRows(ctx context.Context, tx pgx.Tx, sql string, args ...any) (rowSet, error) {
+	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
