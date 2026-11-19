@@ -39,15 +39,46 @@ func (c *shiftedClock) advance(d time.Duration) {
 // few MiB of rows to cross it.
 const slotLagTestCeiling = int64(1 << 20)
 
-// awaitCycleAfter writes one committed row and waits for a cycle to record
-// a WAL end at or past it: every cycle that began before the write has by
-// then judged the slot.
-func (r *catchupRun) awaitCycleAfter(t *testing.T, what string) {
+// walInsertLSN is the server's WAL insert position: unlike the write
+// position, it counts an open transaction's records still in the WAL
+// buffers.
+func walInsertLSN(t *testing.T, f catchupFixture) decode.LSN {
+	t.Helper()
+	var text string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT pg_current_wal_insert_lsn()::text`).Scan(&text))
+	lsn, err := decode.ParseLSN(text)
+	require.NoError(t, err)
+	return lsn
+}
+
+// awaitTickPast writes one committed row and waits for the catch-up's
+// status to reach its position by the caller's measure.
+func (r *catchupRun) awaitTickPast(t *testing.T, what string, reached func(s applier.Status, tick decode.LSN) bool) {
 	t.Helper()
 	_, err := r.f.pool.Exec(t.Context(), `UPDATE `+r.f.table.Qualified()+` SET amount = amount + 1 WHERE id = 1`)
 	require.NoError(t, err)
 	tick := r.f.currentWALLSN(t)
-	r.awaitStatus(t, what, func(s applier.Status) bool { return s.WALEnd >= tick })
+	r.awaitStatus(t, what, func(s applier.Status) bool { return reached(s, tick) })
+}
+
+// awaitCycleAfter waits for a cycle to record a WAL end at or past a fresh
+// committed row: every cycle that began before the write has by then
+// judged the slot.
+func (r *catchupRun) awaitCycleAfter(t *testing.T, what string) {
+	t.Helper()
+	r.awaitTickPast(t, what, func(s applier.Status, tick decode.LSN) bool { return s.WALEnd >= tick })
+}
+
+// awaitConfirmedAfter waits for the catch-up to confirm a position at or
+// past a fresh committed row. An open transaction's records are not
+// decoded until it commits, but the walsender reads past them and reports
+// its read position in keepalives, so the confirmation moves past them
+// too: the WAL the stream has yet to confirm shrinks while the slot's
+// restart position, pinned by the open transaction, keeps the retained WAL
+// growing.
+func (r *catchupRun) awaitConfirmedAfter(t *testing.T, what string) {
+	t.Helper()
+	r.awaitTickPast(t, what, func(s applier.Status, tick decode.LSN) bool { return s.Confirmed >= tick })
 }
 
 // A transaction that has written much but not committed pins the slot: the
@@ -82,11 +113,29 @@ func TestCatchupEndsWhenTheSlotRetainsMoreThanTheCeiling(t *testing.T) {
 			t.Logf("roll back the pinning transaction: %v", err)
 		}
 	})
-	_, err = tx.Exec(t.Context(), `
-		INSERT INTO `+f.table.Qualified()+` (uniq, amount, label, blob)
-		SELECT -g, 0, 'pinned', repeat('w', 1024)
-		FROM generate_series(1, 4096) AS g`)
-	require.NoError(t, err)
+	// The rows go in in steps, each measured to be under the ceiling, and
+	// the catch-up confirms past each step before the next is written:
+	// until the stream has read past a step, that step is WAL the stream
+	// has not confirmed, and a cycle reading more than the ceiling of it
+	// would end the run as the stream falling behind, not as retained WAL.
+	// Once the retained WAL crosses the ceiling the grace runs on the
+	// catch-up's clock, which follows wall time until the test advances
+	// it, so the remaining steps spend real time out of the grace: few,
+	// large steps keep that short.
+	const steps, rowsPerStep = 8, 512
+	for step := range steps {
+		before := walInsertLSN(t, f)
+		_, err = tx.Exec(t.Context(), `
+			INSERT INTO `+f.table.Qualified()+` (uniq, amount, label, blob)
+			SELECT -g, 0, 'pinned', repeat('w', 1024)
+			FROM generate_series($1::int, $2::int) AS g`,
+			step*rowsPerStep+1, (step+1)*rowsPerStep)
+		require.NoError(t, err)
+		written := int64(walInsertLSN(t, f) - before)
+		require.Less(t, written, slotLagTestCeiling,
+			"one step of the pinned rows must write less WAL than the ceiling, or the stream falls behind it")
+		run.awaitConfirmedAfter(t, "confirm past a step of the pinned rows")
+	}
 
 	const overDeadline = 10 * time.Second
 	require.Eventually(t, func() bool {

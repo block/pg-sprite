@@ -218,11 +218,13 @@ func (r *catchupRun) copy(t *testing.T) {
 }
 
 // status is the catch-up's status, failing the test if Run has returned,
-// since a status after that would never move again.
+// since a status after that would never move again. The result is put
+// back, as wait does, so the cleanup's wait sees it at once.
 func (r *catchupRun) status(t *testing.T) applier.Status {
 	t.Helper()
 	select {
 	case err := <-r.done:
+		r.done <- err
 		t.Fatalf("catch-up returned while the test still needs it running: %v", err)
 	default:
 	}
