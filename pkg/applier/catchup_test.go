@@ -33,20 +33,23 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 	assert.Equal(t, DefaultDeadlockAttempts, opts.DeadlockAttempts)
 	require.NotNil(t, opts.Logger, "a caller that wired no logger gets a discarding one")
 	assert.Equal(t, slog.DiscardHandler, opts.Logger.Handler())
+	assert.Equal(t, DefaultDeadlockBackoff, opts.DeadlockBackoff)
 	require.NoError(t, opts.validate())
 
 	logger := slog.New(slog.DiscardHandler)
-	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20, DeadlockAttempts: 3, Logger: logger}.withDefaults()
+	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20, DeadlockAttempts: 3, DeadlockBackoff: time.Minute, Logger: logger}.withDefaults()
 	assert.Equal(t, time.Second, given.Interval)
 	assert.Equal(t, 5, given.MaxChanges)
 	assert.Equal(t, int64(1<<20), given.SlotLagCeiling)
 	assert.Equal(t, 3, given.DeadlockAttempts)
 	assert.Same(t, logger, given.Logger)
+	assert.Equal(t, time.Minute, given.DeadlockBackoff)
 }
 
 // An interval the clock cannot time, a change bound that would never let
 // a cycle end, a slot lag ceiling that would abort every slot, or a
-// deadlock bound below one, which counts no cycles at all, is refused
+// deadlock bound below one, which counts no flushes at all, or a negative
+// deadlock backoff, which would retry before the deadlock, is refused
 // rather than defaulted; the ceiling cannot be switched off. Zero takes
 // the default deadlock bound, and one, the least, is accepted.
 func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
@@ -55,6 +58,7 @@ func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
 		"negative max changes":         {MaxChanges: -1},
 		"negative slot lag ceiling":    {SlotLagCeiling: -1},
 		"negative deadlock attempts":   {DeadlockAttempts: -1},
+		"negative deadlock backoff":    {DeadlockBackoff: -time.Millisecond},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
