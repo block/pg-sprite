@@ -1105,7 +1105,10 @@ ceiling aborts the schema change before an abandoned slot can fill the volume. T
 hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
 may stand over it for a bounded grace (the server's release interval plus one cycle) while the
 server releases what the stream confirmed, so the volume needs headroom above the ceiling of
-about the source's write rate times that grace. No exit path
+about the source's write rate times that grace. The ceiling must hold that much of the
+source's writes as well: with a transaction in progress at a running-transactions record the
+server releases the slot only to the record before, so a busy source's slot keeps between one
+and two release intervals of writes while the stream keeps up. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
 attempt to reuse — and drops a slot the server created but did not describe usably;

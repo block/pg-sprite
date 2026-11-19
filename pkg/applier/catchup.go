@@ -130,7 +130,12 @@ func (o CatchupOptions) validate() error {
 // slotLagGrace is how long the slot's retained WAL may stand over the
 // ceiling while the server releases what the stream confirmed: a release
 // waits for the server's next running-transactions record and then for
-// the cycle that confirms past it.
+// the cycle that confirms past it. On a busy source a release moves the
+// slot only to the record before, so it leaves the slot holding a release
+// interval and a cycle of writes: a ceiling that holds that much is back
+// within at every release, and the grace outlasts each stretch over it in
+// between; a lower ceiling stays crossed through every release and ends
+// the run once the grace has passed.
 func slotLagGrace(o CatchupOptions) time.Duration {
 	return decode.RestartReleaseInterval + o.Interval
 }

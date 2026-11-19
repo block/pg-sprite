@@ -14,7 +14,9 @@ import (
 // reading. The WAL the slot retains may stand over it for a grace while
 // the server releases what the stream confirmed, so the volume needs
 // headroom above the ceiling of about the source's write rate times that
-// grace (see SlotLagWatch).
+// grace (see SlotLagWatch), and the ceiling itself must hold that much of
+// the source's writes, since a release on a busy source keeps about that
+// much back (see RestartReleaseInterval).
 const DefaultSlotLagCeiling int64 = 1 << 30
 
 // RestartReleaseInterval is the longest the server goes between the
@@ -24,7 +26,12 @@ const DefaultSlotLagCeiling int64 = 1 << 30
 // confirmed past one, so WAL the consumer has confirmed is released in
 // steps at most this far apart: a slot that retains more than its
 // consumer has yet to confirm has not necessarily been left behind by
-// anyone until this long has passed.
+// anyone until this long has passed. While a transaction is in progress
+// at a record, the server moves the restart position only to the record
+// before, where that transaction can be decoded from again; a busy source
+// has one in progress at nearly every record, so its slot retains between
+// one and two of these intervals of writes even while the consumer keeps
+// up.
 const RestartReleaseInterval = 15 * time.Second
 
 // ErrSlotLagCeiling is the sentinel a SlotLagExceededError unwraps to: the
@@ -57,8 +64,10 @@ const (
 	// stayed over the ceiling for longer than the server takes to release
 	// what its consumer confirmed, while the unconfirmed WAL itself is
 	// within it: the server is keeping WAL back, as for a transaction
-	// still open on the source, or the source writes WAL faster than the
-	// ceiling allows for the server's release interval.
+	// still open on the source, or the source writes more WAL in the
+	// server's release interval and the consumer's cycle than the ceiling
+	// holds, so that a release, which keeps that much back, leaves the
+	// slot still over it.
 	SlotLagWALRetained SlotLagCause = "wal-retained"
 )
 
@@ -182,8 +191,8 @@ func (w *SlotLagWatch) Judge(s SlotStatus, now time.Time) error {
 	}
 	// INV: ST-3 — retained WAL is the one measure let stand over the
 	// ceiling, and only for the grace: it includes WAL the stream already
-	// confirmed, which the server releases at its next running-transactions
-	// record. A stream that stops confirming is caught above, with no grace.
+	// confirmed, which the server releases at its running-transactions
+	// records. A stream that stops confirming is caught above, with no grace.
 	if now.Sub(w.overSince) < w.grace {
 		return nil
 	}

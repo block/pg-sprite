@@ -165,8 +165,11 @@ slot and the saved progress stay, so running the same command again resumes the 
   it back first: an open write transaction (`pg_stat_activity` where `backend_xid IS NOT
   NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`). End it, then
   resume. If there is none, the source writes more WAL per release interval than the ceiling
-  allows: resume with a higher ceiling, above the retained WAL the detail reports, and with
-  room on the volume for that much WAL:
+  allows. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a busy source
+  each step stops one step short, so the slot keeps between 15 and 30 seconds of the source's
+  writes even while pg-sprite keeps up; the ceiling must hold more than 15 seconds of them. Resume with
+  a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
+  that much WAL:
 
 ```sh
 pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
