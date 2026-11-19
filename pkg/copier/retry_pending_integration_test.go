@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
@@ -33,13 +34,13 @@ func (f copierFixture) startSeats(t *testing.T, attempts int, backoff time.Durat
 	target, lock, shadow := f.prepareSeats(t, 300)
 	name := pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()
 	began := new(time.Time)
-	clock := &hookedClock{hook: func() {
+	clock := testutil.NewHookedClock(func() {
 		*began = time.Now()
 		for key, slot := range held {
 			_, err := f.pool.Exec(t.Context(), "INSERT INTO "+name+" (id, slot) VALUES ($1, $2)", key, slot)
 			assert.NoError(t, err)
 		}
-	}}
+	})
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:           1,
 		Chunker:           copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},

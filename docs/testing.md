@@ -158,6 +158,16 @@ sides and both counts, so a test that marks the touched list at an instant compa
 exactly the rows last written before it. The [load proof](#the-load-proof) is built on
 these.
 
+To hold a copy chunk in flight, a test pins a shadow row: `PinShadowKey` returns a pin
+whose `Clock` the copier takes as its `Options.Clock`. At the clock's first reading,
+at the start of the first chunk, the pin inserts the key into the shadow in a
+transaction it leaves open, so the chunk that holds the key waits on it. The test calls
+`Wait` before relying on the pin, then `Release` (roll back) or `Commit` (publish the
+row). The pin's cleanup rolls back a pin still open, and disarms a clock that was never
+read. A `Wait` that times out means the copier never read its clock, or the pin's
+insert is waiting on another writer. `HookedClock` is the same first-reading hook
+without the pin.
+
 ### TM-6 — Every mutation direction per property
 
 For each object property the diff handles: absent → present, present →
@@ -218,6 +228,7 @@ capability no peer suite has.
 | `make demo-check` | The demo tour in check mode against the built `bin/pg-sprite` and the compose database — CI's artifact smoke test (TM-8). Needs Docker and `jq`. |
 | `make check-capabilities` | Regenerates the generated regions of [capabilities.md](capabilities.md) from `pkg/capabilities/capabilities.yaml` and fails if the committed page differs. CI runs it; no Docker. |
 | `make check-vulnerabilities` | Scans the module with a pinned `govulncheck` and fails if the code calls into a known vulnerability. CI runs it as the `Vulnerability Scan` workflow on every pull request, on every push to `main`, and daily on `main`; the workflow is not part of `all-green`. Exit 3 means reachable findings; any other failure means the scan itself could not run. No Docker. |
+| `make check-image-pins` | Asks each image's registry whether every `image: repo:tag@sha256:…` pin in `compose/supabase.yml` still names its digest (the index digest or one platform manifest in it), and fails naming each pin whose tag resolves elsewhere. Docker pulls by digest and ignores the tag, so a wrong tag otherwise passes CI and misstates the tested versions. `PINS_FILE` selects another compose file. The script, `scripts/check-image-pins.sh [compose-file]`, exits 1 for a mismatched or missing tag and 2 when an image could not be checked — a registry lookup failed twice (unreachable, rate-limited, or not authorized) or an `image:` line is not a pin it can read — so the check is incomplete; through `make` both are a failure. CI's Supabase job runs it before starting the services; on a PR that did not touch `compose/supabase.yml`, exit 1 means a publisher moved a tag (re-pin in a separate PR) and exit 2 is usually the registry (re-run the job). Needs `docker buildx` and network access; no login for public images, `docker login` first for private ones. `make test-image-pins` drives the script through each outcome against a stand-in docker, with no network. |
 | `make replay` / `make replay-refresh` / `make replay-down` | Corpus replay ([replay/README.md](../replay/README.md)): drive the built binary through a pinned real-project schema-change history, asserting each statement's typed outcome. Operator-run, not a CI gate. |
 | `make load-proof LOAD_PROOF_FREE_DISK=…` | The [load proof](#the-load-proof): the built binary carries a copy-and-swap over a large table while a concurrent workload writes it, and writes `results.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF=1`, which the target sets. |
 
@@ -227,9 +238,14 @@ and `NewSchema` gives each test a throwaway schema so parallel tests never
 collide — which also means every integration test runs against a
 **non-`public` schema**, an axis some peer tools (pgroll) treat as a separate
 matrix dimension. `StartPostgresTLS` starts a TLS-only server with a
-generated CA for verify-full tests. The harness has its own tests proving
-the version selected by `PG_VERSION` is the version actually running, and
-that throwaway schemas are isolated.
+generated CA for verify-full tests. `StartPrimaryWithStandby` starts a
+primary and a hot standby streaming from it through a physical slot on the
+primary, applies its settings to both, and returns once the standby is in
+recovery and has replayed the primary's position, for tests of what the engine
+reads on a server in recovery. The harness has its own tests proving the
+version selected by `PG_VERSION` is the version actually running, that
+throwaway schemas are isolated, and that the replication pair applies its
+settings to both servers and streams through the primary's slot.
 
 Event triggers are database-global, and under `make test-db` every package
 shares one database, so a test installs one only through
@@ -300,21 +316,38 @@ and the preflight refuses the run when twice the table would not fit. A target o
 than this machine (`localhost`, a loopback address, or a Unix socket) is refused unless
 `LOAD_PROOF_ALLOW_REMOTE=1` says that server is disposable; overriding
 `LOAD_PROOF_DSN` also skips starting the compose database. The test refuses to start
-when `go test`'s `-timeout` would end it before the binary's own two-hour budget,
-because a test the deadline ends skips the cleanup that drops the run's replication
-slot; the target passes `3h`. The record, `results.json` in the package directory
+when `go test`'s `-timeout` would end it before the binary's own two-hour budget and
+the cleanup's budget have run out, because a test the deadline ends skips the cleanup
+that drops the run's replication slot; the target passes `3h`. An interrupt (Ctrl-C,
+or SIGTERM sent to the test binary) does not skip it: the test kills the binary, waits
+for it, and fails, and its cleanups drop the slot and publication — under the names
+the checkpoint row records and the name the engine derives for the table, so a run
+killed before it saved its row is covered too — the checkpoint row, and the seeded
+schema; a second interrupt while they run is ignored so they finish. `go test` does not
+pass SIGTERM on to the test binary it runs, so a supervisor that stops the proof must
+signal the test binary's own process or its whole process group (`kill -TERM -<pgid>`);
+Ctrl-C reaches it because the terminal signals the group. The slot cleanup waits the
+server's own `wal_sender_timeout` (the default when it is zero) plus 30 seconds for the
+server to let go of the slot the killed binary held, and fails, leaving the slot, when
+something still holds it after that; the whole leftover cleanup is bounded by that wait
+plus a minute. SIGQUIT ends the test at once, leaving what the cleanups have not
+removed. The record, `results.json` in the package directory
 (`LOAD_PROOF_RESULTS` moves it), is written whether the run passed or failed: phase
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
 mutation, and the verdict.
 
-Copy-and-swap under the default load is not supported yet, and the default run ends in
-`execution-failed`. Uniform writes at 8 × 100 a second keep changing the chunks the live
-verify pass rereads, and the pass stops on a chunk that changed on every reread; with
-`LOAD_PROOF_HOT=0.2` the applier falls behind during the verify pass until the slot-lag
-ceiling stops the run. The defaults stay at this load so the engine fixes are proven by
-the same command. A light load passes:
-`make load-proof LOAD_PROOF_ROWS=20000 LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5 LOAD_PROOF_FREE_DISK=10GiB`.
-A load much lighter than that can commit no delete before the mark, and the run then
+Copy-and-swap at the default table size is not supported yet, and the default run ends in
+`execution-failed`. The table size stops it, not the writes: by the time the copy of a
+table of about 1 GiB ends (`LOAD_PROOF_ROWS=100000` is enough) the slot retains more WAL
+than the slot-lag ceiling allows, and the catch-up stops the run, with or without
+`LOAD_PROOF_HOT`. The defaults stay at this size so the engine fixes are proven by the
+same command. Half that size passes at the default 8 × 100 writes a second, uniform or
+with a fifth of the updates on ten keys:
+`make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_HOT=0.2 LOAD_PROOF_FREE_DISK=10GiB`.
+The hottest of those keys change at every reread of the live verify pass, which leaves
+them for the swap to compare under its lock.
+A load much lighter than `LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5` can commit no delete
+before the mark, and the run then
 fails as one that judged no stream.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
@@ -472,7 +505,7 @@ same package cover the rest of it.
 | CLI grammar / config | [internal/cli](../internal/cli/cli_test.go) |
 | Pool config, bounded session timeouts | [pkg/dbconn](../pkg/dbconn/pool_config_test.go), [integration](../pkg/dbconn/dbconn_integration_test.go) |
 | Retry classification and behavior | [pkg/dbconn/retry_test.go](../pkg/dbconn/retry_test.go) |
-| RDS/Aurora TLS (unit) | [pkg/dbconn/rds_test.go](../pkg/dbconn/rds_test.go) |
+| RDS/Aurora TLS (unit), every host of a multi-host URL included | [pkg/dbconn/rds_test.go](../pkg/dbconn/rds_test.go), [multi-host (unit)](../pkg/dbconn/rds_tls_test.go) |
 | Verify-full TLS against a live TLS-only server; a CA bundle never falls back to plaintext against a server that accepts both (`TestTLSIntegrationNoPlaintextFallback`, `StartPostgresTLSOrPlaintext`) | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go), [CA pinning (unit)](../pkg/dbconn/ca_tls_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |

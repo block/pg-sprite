@@ -693,7 +693,7 @@ pkg/capabilities/     -> embedded, validated support matrix
 
 Copy-and-swap (preview):
 pkg/decode/           -> logical-decoding stream, slot lifecycle, slot-lag ceiling
-pkg/copier/           -> PK-range chunker, chunk-time sizing, parallel chunked copy
+pkg/copier/           -> PK-range chunker, chunk-time sizing, slot-lag pacing, parallel chunked copy
 pkg/internal/chunksql/ -> the chunk insert statement the copier and the checksum repair share
 pkg/applier/          -> captured-change buffer, flush, catch-up loop
 pkg/checksum/         -> chunked verification, divergence policy, cutover proofs

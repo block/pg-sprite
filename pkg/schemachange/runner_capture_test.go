@@ -64,6 +64,7 @@ func TestCaptureFailedReadsEveryFailureThroughTheStop(t *testing.T) {
 		"stream ended":          decode.ErrStreamEnded,
 		"slot lost":             decode.ErrSlotLost,
 		"slot lag ceiling":      decode.ErrSlotLagCeiling,
+		"slot lag unknown":      fmt.Errorf("%w: slot pg_sprite_orders", decode.ErrSlotLagUnknown),
 		"unsupported change":    decode.ErrUnsupportedChange,
 		"source shape changed":  decode.ErrSourceShapeChanged,
 		"slot lost, typed":      &decode.SlotLostError{Slot: "pg_sprite_orders"},

@@ -19,28 +19,27 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
-	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// The tests here prove that the copy-and-swap route's pool needs a
-// connection beyond its copy workers. Each copy worker holds a pool
-// connection for as long as its chunk transaction lasts, and a chunk whose
-// insert meets an uncommitted shadow row under one of its keys lasts until
-// that row's transaction ends. With every worker held that way, a pool of
-// CopySwapMinConns still has a connection for the catch-up's flush, so a
-// write to the source lands in the shadow while the copy stands still; a
-// pool of only the workers has none, and the same write waits in the stream
-// until a worker frees its connection. What they pin is that one connection
-// beyond the workers is required: while every worker is held the watermark
+// The test here proves that a copy-and-swap pool at CopySwapMinConns keeps
+// a connection for the catch-up's flush beyond its copy workers. Each copy
+// worker holds a pool connection for as long as its chunk transaction
+// lasts, and a chunk whose insert meets an uncommitted shadow row under one
+// of its keys lasts until that row's transaction ends. With every worker
+// held that way, the floor still has a connection for the flush, so a
+// write to the source lands in the shadow while the copy stands still. A
+// pool of only the workers would leave the flush queued behind them, which
+// is why no entry point admits one: Run, RunDesired, and the Runner itself
+// refuse a pool below the floor. While every worker is held the watermark
 // does not move, so no checkpoint save is due and the floor's second spare
-// connection has nothing to serve. That second connection is headroom for
-// the flush and the saves to proceed independently, and its count is pinned
-// by TestCopySwapMinConnsIsTheWorkersAndTwo. The tests stand the workers
-// still by holding shadow rows themselves: a transaction inserts, and does
-// not commit, a shadow row for one key of each held chunk, and the chunk's
-// insert waits on that transaction's id.
+// connection has nothing to serve; that connection is headroom for the
+// flush and the saves to proceed independently, and its count is pinned by
+// schemachange's TestMinPoolConnsIsTheWorkersAndTwo. The test stands the
+// workers still by holding shadow rows itself: a transaction inserts, and
+// does not commit, a shadow row for one key of each held chunk, and the
+// chunk's insert waits on that transaction's id.
 
 // poolFloorWorkers is how many copy workers the runs here use, so the floor
 // they are held to is this many plus the two the route reserves.
@@ -63,9 +62,6 @@ const (
 	// poolFloorDeadline bounds each wait for the run to reach a state: the
 	// workers blocking, a save landing, a flushed row appearing.
 	poolFloorDeadline = 30 * time.Second
-	// poolStarvedWindow is how long the test watches a write that has no
-	// connection to be flushed on stay out of the shadow.
-	poolStarvedWindow = 1500 * time.Millisecond
 	// poolHoldTimeout bounds the lock waits inside a chunk transaction while
 	// a test holds its keys, in place of the copier's default: the wait is
 	// the test's own doing and ends when the test releases the hold, so the
@@ -409,67 +405,5 @@ func TestRunCopySwapFlushesAtThePoolFloorWhileEveryWorkerWaits(t *testing.T) {
 	waitForRun()
 	require.NoError(t, runErr)
 	require.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome, "%s: %s", v.Reason, v.Detail)
-	f.assertZeroDiff(t, shape, alter)
-}
-
-// Below the floor, the same write waits behind the copy. Run refuses a
-// pool of only the workers before anything is read, so the test drives
-// the Runner directly with one, the way a host that sized its own pool
-// wrongly would reach it. With the four workers standing on the held
-// chunks, the source write to key 1 stays out of the shadow for the whole
-// watched window: the catch-up's flush and its progress reads are queued
-// on the pool behind the workers. The catch-up reads, and so answers, no
-// keepalive while it waits there, and the server ends a replication
-// connection that leaves a keepalive unanswered past wal_sender_timeout.
-// The watched window and the waits around it come close to the live
-// fixture's short timeout, so this server allows a minute and the test
-// stays about the pool rather than the stream. Releasing the hold frees
-// the workers, the write lands, and the run finishes.
-func TestRunnerCopySwapFlushWaitsBehindTheCopyWhenThePoolHoldsOnlyTheWorkers(t *testing.T) {
-	shape := testutil.WorkloadShape{IDType: "integer"}
-	f := newLiveFixtureOn(t, shape, "wal_sender_timeout=60s")
-	const alter = `ALTER TABLE %s ALTER COLUMN id TYPE bigint`
-	copyOpts := poolFloorCopier()
-	pool := f.runPool(t, poolFloorWorkers)
-
-	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.table.Schema, f.table.Table,
-		preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk})
-	require.NoError(t, err)
-	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
-	require.NoError(t, err)
-	runner, err := schemachange.NewRunner(dbconn.Config{URL: f.url}, store, schemachange.RunOptions{
-		Copier:             copyOpts,
-		KeepOld:            true,
-		CheckpointInterval: 50 * time.Millisecond,
-	})
-	require.NoError(t, err)
-
-	var (
-		result schemachange.Result
-		// runErr is set once waitForRun returns.
-		runErr error
-	)
-	waitForRun := startRun(t, func() {
-		result, runErr = runner.Run(context.WithoutCancel(t.Context()), pool, target, parseOne(t, fmt.Sprintf(alter, f.table.Qualified())))
-	})
-
-	f.waitForCopyWriting(t)
-	hold := f.holdShadowRows(t, heldKeys(firstHeldChunk, poolFloorChunks))
-
-	// Four blocked workers means the first half landed: each worker stands
-	// on a held chunk only after landing a chunk of the first half.
-	f.waitForBlockedWorkers(t, poolFloorWorkers)
-
-	f.writeSource(t, 1, flushedLabel)
-	pollNever(t, f.shadowHasLabel(1, flushedLabel), poolStarvedWindow,
-		"the write to a landed key reached the shadow with no connection free for the flush")
-	f.assertBlockedWorkers(t, poolFloorWorkers)
-
-	release(t, hold)
-	pollUntil(t, f.shadowHasLabel(1, flushedLabel),
-		"the write is flushed once the workers free their connections")
-	waitForRun()
-	require.NoError(t, runErr)
-	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
 	f.assertZeroDiff(t, shape, alter)
 }

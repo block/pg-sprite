@@ -61,7 +61,7 @@ type databaseIdentity struct {
 
 // databaseIdentitySQL names the cluster and the database a session is on.
 const databaseIdentitySQL = `
-	SELECT s.system_identifier::text, pg_catalog.current_database()
+	SELECT s.system_identifier::pg_catalog.text, pg_catalog.current_database()
 	FROM pg_catalog.pg_control_system() s`
 
 // readDatabaseIdentity reads the identity of the database session reaches.
