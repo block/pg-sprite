@@ -87,7 +87,7 @@ func checkBlockWritesAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrBlockWritesMismatch, qualified(st), ack)
+	return ackBlockWrites.mismatch(qualified(st), ack)
 }
 
 // auditBlockWrites records, before the fence goes on, that the operator took

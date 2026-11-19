@@ -725,7 +725,12 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   a usage error with a zero verdict and nothing executed, carrying its own sentinel:
   `ErrForceMismatch`, `ErrAcceptBlockingMismatch`, `ErrAllowDestructiveMismatch`,
   `ErrRestartMismatch`, `ErrBlockWritesMismatch`. Branch on them with `errors.Is`, not on the
-  message; a retry with the same input fails the same way. Where the table came from decides
+  message; a retry with the same input fails the same way. Each is a
+  `*migrate.AcknowledgementMismatchError`, so one `errors.As` answers whether the error is
+  any wrong-table acknowledgement, and its fields carry what to show: `Acknowledgement`
+  (the name as `migrate.Acknowledgements()` spells it, such as `force`), `Table` (the table
+  the acknowledgement must name), and `Given` (the value it carried). Its `errors.Is` answers
+  its own sentinel and no other. Where the table came from decides
   the action. An acknowledgement the operator typed goes back to the operator, with the
   message, which carries the resolved table and the one given. One the adapter filled in from
   its own plan means the plan and the live schema disagree — a renamed table, a different

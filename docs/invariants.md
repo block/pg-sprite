@@ -1706,7 +1706,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
   refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel its wrong-target check wraps;
+  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel, a case for it in
+  `mismatchErr`, and a wrong-target check returning `AcknowledgementMismatchError`;
   a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`

@@ -192,6 +192,22 @@ func TestRunAcceptBlockingRejectsFalseAcknowledgements(t *testing.T) {
 		assert.True(t, indexExists(t, pool, schema, "orders_id_idx"), "a mismatched acknowledgement must execute nothing")
 	})
 
+	// An adapter reads the locked table and the one given from the typed
+	// error rather than the message, which names the statement kind too.
+	t.Run("the mismatch carries the locked table and the one given", func(t *testing.T) {
+		_, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("DROP INDEX %s.orders_id_idx", schema)),
+			acceptBlockingOptions(schema+".customers"))
+		var mismatch *migrate.AcknowledgementMismatchError
+		require.ErrorAs(t, err, &mismatch)
+		assert.Equal(t, "accept-blocking", mismatch.Acknowledgement)
+		assert.Equal(t, schema+".orders", mismatch.Table)
+		assert.Equal(t, schema+".customers", mismatch.Given)
+		assert.EqualError(t, err, fmt.Sprintf(
+			`the accept-blocking acknowledgement must name the table the statement locks: DROP INDEX locks "%s.orders", got "%s.customers"; nothing was executed`,
+			schema, schema))
+	})
+
 	t.Run("naming a table for an index that does not exist", func(t *testing.T) {
 		v, err := migrate.Run(t.Context(), pool,
 			parseOne(t, fmt.Sprintf("DROP INDEX %s.no_such_idx", schema)),

@@ -40,7 +40,7 @@ func checkAllowDestructiveAck(table, ack string) error {
 	if ack == table {
 		return nil
 	}
-	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrAllowDestructiveMismatch, table, ack)
+	return ackAllowDestructive.mismatch(table, ack)
 }
 
 // destructiveOperations returns the labels of the routed statement's

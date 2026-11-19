@@ -34,7 +34,7 @@ func checkRestartAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrRestartMismatch, qualified(st), ack)
+	return ackRestart.mismatch(qualified(st), ack)
 }
 
 // checkRestartRoute confirms that a statement acknowledged for a restart

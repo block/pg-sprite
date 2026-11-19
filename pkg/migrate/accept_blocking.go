@@ -75,8 +75,9 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	}
 	table := locked.qualified()
 	if table != opts.AcceptBlocking {
-		return verdict.Verdict{}, fmt.Errorf("%w: %s locks %q, got %q; nothing was executed",
-			ErrAcceptBlockingMismatch, st.Kind(), table, opts.AcceptBlocking)
+		mismatch := ackAcceptBlocking.mismatch(table, opts.AcceptBlocking)
+		mismatch.locks = st.Kind()
+		return verdict.Verdict{}, mismatch
 	}
 	if opts.AllowDestructive != "" {
 		if err := checkAllowDestructiveAck(table, opts.AllowDestructive); err != nil {

@@ -494,7 +494,7 @@ func checkForceAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrForceMismatch, qualified(st), ack)
+	return ackForce.mismatch(qualified(st), ack)
 }
 
 // auditForce records the override decision before anything executes: the
