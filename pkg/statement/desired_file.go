@@ -2,6 +2,7 @@ package statement
 
 import (
 	"fmt"
+	"strings"
 
 	pgquery "github.com/wasilibs/go-pgquery"
 )
@@ -45,6 +46,28 @@ func ParseDesiredFile(sql string) (DesiredFile, error) {
 		return DesiredFile{}, err
 	}
 	return DesiredFile{schema: schema}, nil
+}
+
+// FormatDesired returns the canonical text of a desired-state schema file:
+// sql is admitted by [ParseDesiredFile] and every admitted statement is
+// printed in the deparser's canonical form followed by ";\n", in the order
+// [DesiredFile.Statements] reports them. Commented input is refused with
+// [ErrCommentLoss] before parsing: the parser drops comments, and formatting
+// must never silently discard content. On any refusal the text is empty.
+func FormatDesired(sql string) (string, error) {
+	if err := CheckNoComments(sql); err != nil {
+		return "", err
+	}
+	file, err := ParseDesiredFile(sql)
+	if err != nil {
+		return "", err
+	}
+	var out strings.Builder
+	for _, st := range file.Statements() {
+		out.WriteString(st.SQL())
+		out.WriteString(";\n")
+	}
+	return out.String(), nil
 }
 
 // Table returns the unqualified desired table, the same name the admitted

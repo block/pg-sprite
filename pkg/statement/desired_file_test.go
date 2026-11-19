@@ -243,3 +243,23 @@ func TestZeroDesiredFileOffersNoPlannerInput(t *testing.T) {
 	assert.False(t, isSchema)
 	assert.False(t, isRowSecurity)
 }
+
+// FormatDesired refuses a commented row-security file with ErrCommentLoss and
+// no text. ParseDesiredFile alone admits this file and drops the comment, so
+// the refusal comes from FormatDesired's own comment check: an importer that
+// formats through it cannot lose the comment.
+func TestFormatDesiredRefusesACommentedRowSecurityFile(t *testing.T) {
+	sql := `
+CREATE TABLE documents (
+    id bigint PRIMARY KEY,
+    team_id bigint NOT NULL -- owning team
+);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY documents_team_read ON documents
+    FOR SELECT
+    USING (team_id = 1);
+`
+	formatted, err := FormatDesired(sql)
+	require.ErrorIs(t, err, ErrCommentLoss)
+	assert.Empty(t, formatted)
+}
