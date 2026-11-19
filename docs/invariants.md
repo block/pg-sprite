@@ -574,15 +574,19 @@ caller's pool, qualify every function, relation, cast, and operator too — `=`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
 ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
 and the publication reads that judge whether the publication of the name is the route's, the
-create-side database guard included: a lookalike `name = name` and `name ~~ text` that answer
+create-side database guard included, and the slot inspection (`InspectSlot`) the catch-up's lag
+watch reads: a lookalike `name = name` and `name ~~ text` that answer
 true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
-as this database's orphan and let the drop take it, or match every publication and let the drop
-take someone else's `FOR ALL TABLES` one, and a lookalike `text = text` and `text <> text` that
+as this database's orphan and let the drop take it, match every publication and let the drop
+take someone else's `FOR ALL TABLES` one, or read another database's slot as `Own` and a
+missing slot as found, and a lookalike `text = text` and `text <> text` that
 answer false would read a live row as terminal and let the reaper drop its slot,
 `TestReaperLeavesAnotherDatabasesSlotUnderALookalikeEquals`,
 `TestReaperKeepsALiveRowsSlotUnderLookalikeTextComparisons`,
-`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`, and
-`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`, and the text is held by
+`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`,
+`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
+`TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
+`TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals`, and the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
 `TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
 character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,

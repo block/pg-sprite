@@ -10,7 +10,8 @@ import (
 // on cannot rely on the session's search_path: the ownership check, the
 // server proof before every slot command, and the publication reads that
 // judge whether the publication of the name is the route's all spell every
-// relation, function, cast, and operator through pg_catalog (CO-9). This
+// relation, function, cast, and operator through pg_catalog (CO-9), and so
+// does the slot inspection, which runs on the caller's pool too. This
 // pins the SQL text itself; the integration tests prove the behaviour
 // under lookalike operators.
 func TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator(t *testing.T) {
@@ -22,6 +23,7 @@ func TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator(t *testing.T) 
 		"publishedTablesSQL(no filters)": publishedTablesSQL(false),
 		"publishedTablesSQL(filters)":    publishedTablesSQL(true),
 		"publishedSchemasSQL":            publishedSchemasSQL,
+		"inspectSlotSQL":                 inspectSlotSQL,
 	} {
 		t.Run(name, func(t *testing.T) {
 			testutil.AssertCatalogQualified(t, query)

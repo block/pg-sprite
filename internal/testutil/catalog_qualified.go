@@ -35,6 +35,12 @@ func AssertCatalogQualified(t *testing.T, query string, own ...string) {
 		if slices.Contains(own, match[1]) {
 			continue
 		}
+		// A subquery in FROM or JOIN, LATERAL or not, names no relation
+		// itself; the relations and functions inside it are matched on
+		// their own.
+		if strings.HasPrefix(match[1], "(") || strings.EqualFold(match[1], "LATERAL") {
+			continue
+		}
 		assert.True(t, strings.HasPrefix(match[1], "pg_catalog."),
 			"relation %q is not qualified with pg_catalog in:\n%s", match[1], query)
 	}

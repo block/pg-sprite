@@ -40,7 +40,9 @@ type SlotStatus struct {
 	// Own is true for a logical slot of the pool's current database, the
 	// only kind this route creates, decodes from, drops, or replaces (ST-3).
 	// A physical slot or another database's logical slot of the name is
-	// foreign, whatever else the catalog says of it.
+	// foreign, whatever else the catalog says of it. The read judges this
+	// through pg_catalog's own operators and never consults the pool's
+	// search_path, so a lookalike = cannot make a foreign slot read as Own.
 	Own bool
 	// Active is true while a walsender or a backend holds the slot;
 	// ActivePID is that process, zero when inactive.
@@ -146,18 +148,22 @@ type RetainedWAL struct {
 // point and the retained WAL exceeds the unconfirmed by exactly the span
 // from the restart position to the confirmed one; a subquery whose output
 // is volatile is not flattened into the outer query, so it is evaluated
-// once.
+// once. The read runs on the caller's pool, whatever its search_path, so
+// every function, cast, and operator is spelled through pg_catalog: a
+// lookalike = on name would otherwise find a slot for a name nobody holds
+// and call another database's slot this one's (CO-9).
 const inspectSlotSQL = `
-	SELECT s.database, s.slot_type = 'logical',
-	       s.slot_type = 'logical' AND s.database = pg_catalog.current_database(),
+	SELECT s.database, s.slot_type OPERATOR(pg_catalog.=) 'logical',
+	       s.slot_type OPERATOR(pg_catalog.=) 'logical'
+	           AND s.database OPERATOR(pg_catalog.=) pg_catalog.current_database(),
 	       s.active, s.active_pid, s.wal_status,
-	       s.restart_lsn::text, s.confirmed_flush_lsn::text,
-	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.restart_lsn)::bigint,
-	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.confirmed_flush_lsn)::bigint,
-	       (extra.rendered ->> 'conflicting')::boolean,
-	       extra.rendered ? 'invalidation_reason',
-	       extra.rendered ->> 'invalidation_reason',
-	       (extra.rendered ->> 'inactive_since')::timestamptz
+	       s.restart_lsn::pg_catalog.text, s.confirmed_flush_lsn::pg_catalog.text,
+	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.restart_lsn)::pg_catalog.int8,
+	       pg_catalog.pg_wal_lsn_diff(pos.write_lsn, s.confirmed_flush_lsn)::pg_catalog.int8,
+	       (extra.rendered OPERATOR(pg_catalog.->>) 'conflicting')::pg_catalog.bool,
+	       extra.rendered OPERATOR(pg_catalog.?) 'invalidation_reason',
+	       extra.rendered OPERATOR(pg_catalog.->>) 'invalidation_reason',
+	       (extra.rendered OPERATOR(pg_catalog.->>) 'inactive_since')::pg_catalog.timestamptz
 	FROM pg_catalog.pg_replication_slots s
 	CROSS JOIN (
 	       SELECT CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
@@ -165,7 +171,7 @@ const inspectSlotSQL = `
 	              END AS write_lsn
 	       ) AS pos
 	CROSS JOIN LATERAL (SELECT pg_catalog.to_jsonb(s) AS rendered) AS extra
-	WHERE s.slot_name = $1`
+	WHERE s.slot_name OPERATOR(pg_catalog.=) $1`
 
 // InspectSlot reads the named slot from pg_replication_slots on db, a pool
 // or one connection of the caller's. found
