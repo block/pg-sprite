@@ -25,7 +25,7 @@ func (c *Catchup) logRequeue(outcome cycleOutcome, status Status) {
 			"batches_deferred", status.BatchesDeferred,
 			"entries", len(outcome.batch.Entries))
 	case outcome.deadlocked:
-		c.opts.Logger.Warn("catch-up flush rolled back as a deadlock victim; the batch will be flushed again next cycle",
+		c.opts.Logger.Warn("catch-up flush rolled back as a deadlock victim; the batch will be flushed again once its backoff has passed",
 			"schema", c.flusher.target.Schema(),
 			"table", c.flusher.target.Table(),
 			"batches_deadlocked", status.BatchesDeadlocked,
