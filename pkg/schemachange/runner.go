@@ -281,6 +281,8 @@ type Result struct {
 	// stream had yet to confirm: the zero Paced for a quiesced run, for a
 	// run that resumed past the copy, and for a copy the stream kept up
 	// with. It counts this run's copy alone, not a stopped run's before it.
+	// A run the slot lag ceiling stopped carries the same count on the
+	// *decode.SlotLagExceededError it returns.
 	CopyPaced copier.Paced
 }
 

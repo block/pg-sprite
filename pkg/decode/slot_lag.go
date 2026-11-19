@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/block/pg-sprite/pkg/copier"
 )
 
 // DefaultSlotLagCeiling is the most WAL a slot may hold before the route
@@ -73,6 +75,12 @@ type SlotLagExceededError struct {
 	Retained    int64
 	Unconfirmed int64
 	Ceiling     int64
+	// CopyPaced is how far the stopped run's copy was held back by the WAL
+	// its stream had yet to confirm, as schemachange.Runner records it on
+	// a live run's stop. It is the zero Paced for a run that made no copy,
+	// for a copy the stream kept up with, and for an abort from a catch-up
+	// no Runner drives.
+	CopyPaced copier.Paced
 }
 
 func (e *SlotLagExceededError) Error() string {

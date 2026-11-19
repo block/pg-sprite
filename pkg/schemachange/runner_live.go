@@ -63,7 +63,7 @@ func (r *Runner) swapLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	ready, report, fillErr := r.fillLive(liveCtx, pool, lock, target, state, fill, cap)
 	endErr := cap.end(ctx, pool, r.opts.sleep())
 	if err := captureOutcome(ctx, cap, fillErr, endErr); err != nil {
-		return report, err
+		return report, recordCopyPaced(err, state.copyPaced)
 	}
 	// INV: ST-4 — the position the drain reopens from is the one the
 	// capture confirmed: everything below it is in the shadow.
