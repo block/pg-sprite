@@ -1,6 +1,8 @@
 package dbconn_test
 
 import (
+	"net"
+	neturl "net/url"
 	"strings"
 	"testing"
 
@@ -98,6 +100,56 @@ func TestTLSIntegrationNoPlaintextFallback(t *testing.T) {
 			"SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&sslInUse))
 		assert.True(t, sslInUse, "session must actually be TLS-encrypted")
 	})
+}
+
+// TestTLSIntegrationFailsOverToAVerifiedHost proves the per-host attempts
+// pinEveryAttempt builds survive pgx's real dial and handshake: with the
+// first host unreachable, the pool fails over to the second host and
+// verifies it, and a second host whose certificate the CA did not sign is
+// refused rather than reached over plaintext. The server accepts plaintext
+// too, so a fallback that skipped verification would connect.
+func TestTLSIntegrationFailsOverToAVerifiedHost(t *testing.T) {
+	pg := testutil.StartPostgresTLSOrPlaintext(t)
+	url := withUnreachableFirstHost(t, pg.URL)
+
+	t.Run("trusted CA connects to the second host over TLS", func(t *testing.T) {
+		pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
+			URL:        url,
+			CACertPath: pg.CACertPath,
+		})
+		require.NoError(t, err, "the pool must fail over past the unreachable host")
+		t.Cleanup(pool.Close)
+
+		var sslInUse bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&sslInUse))
+		assert.True(t, sslInUse, "the failed-over session must be TLS-encrypted")
+	})
+
+	t.Run("untrusted CA is refused on the second host", func(t *testing.T) {
+		_, err := dbconn.NewPool(t.Context(), dbconn.Config{
+			URL:        url,
+			CACertPath: pg.UntrustedCACertPath,
+		})
+		require.Error(t, err, "failover must not reach the second host unverified or over plaintext")
+		assert.Contains(t, err.Error(), "certificate",
+			"failure must be a certificate verification error, got: %v", err)
+	})
+}
+
+// withUnreachableFirstHost puts a closed local port in front of the host of
+// a connection URL, so pgx's first attempt is refused and it fails over.
+func withUnreachableFirstHost(t *testing.T, raw string) string {
+	t.Helper()
+	l, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	closed := l.Addr().String()
+	require.NoError(t, l.Close())
+
+	u, err := neturl.Parse(raw)
+	require.NoError(t, err)
+	u.Host = closed + "," + u.Host
+	return u.String()
 }
 
 // withParam appends a query parameter to a connection URL regardless of

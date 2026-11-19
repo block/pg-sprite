@@ -51,7 +51,26 @@ OIDs the pass compared, and a shadow dropped and rebuilt under the same derived 
 relation the pass never read, so the gate refuses it (`cutover-unverified`). A pass that runs
 while the stream writes the shadow (`CheckLive`) counts a chunk clean only when, for every key
 of it, the stream has provably delivered what the pass's read saw on the source; anything it
-cannot prove is unsettled, never clean, and mints nothing. The rows it judges the keys from are
+cannot prove is unsettled, never clean, and mints nothing. The one exception is stated by the
+caller and by the proof: a pass told it may leave keys for the swap (`LiveOptions.CarryKeys`),
+that ran through the complete watermark, confirmed no divergence, left no chunk lagging, and
+left no more keys changing than it may, mints a `VerifiedShadow` that names those keys
+(`VerifiedShadow.Carried`) and no `CleanWatermark`. That proof says nothing about a named key;
+comparing each is the swap's, under its lock and after its drain, where no key can change.
+`GateCutover` accepts a proof that names at most `MaxCarryKeys` of them and refuses one that
+names more (`cutover-unverified`). `Cutover` then reads every named key on both sides inside
+the swap transaction (`checksum.CompareCarried`), after the drain and the re-run checklist and
+before any name moves, and refuses the swap, rolled back with the source live, when one
+differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
+that differs is a row the live table would hold wrong. The compare refuses a transaction that
+does not hold `ACCESS EXCLUSIVE` on both relations, since without it the two reads are two
+snapshots a writer could commit between (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
+`TestCompareCarriedNamesTheKeysThatDifferUnderTheSwapLock`,
+`TestCompareCarriedRefusesWithoutAccessExclusiveOnBothRelations`,
+`TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft`,
+`TestCutoverRefusesWhenAKeyThePassLeftStillDiffersAfterTheDrain`). `schemachange.Runner` lets
+its pass leave up to `MaxCarryKeys` keys, so a row written faster than the pass can read it
+twice no longer stops the run. The rows it judges the keys from are
 read with the digest's companion statement in the digest's own snapshot, and the chunk digest
 derived from them must equal the one the server aggregated, or the pass fails closed before it
 judges anything from them. The proof such a pass mints says so
@@ -299,12 +318,16 @@ cycle by rolling one back. The rolled-back pass committed nothing and leaves the
 unchanged, so the chunk takes its next pass, on every path including the `DEFERRABLE` rerun
 below. Both sides of the cycle are retried: when the server picks the flush as the victim, the
 flush returns `applier.ErrBatchDeadlocked` with the shadow unchanged, the catch-up requeues the
-batch whole and flushes it again on the catch-up's next cycle, with no wait beyond the cycle's
-own, and `Status.BatchesDeadlocked` counts the requeue. A retry that waits on the copier's pass
-past the flush session's `lock_timeout` ends the catch-up with the server's lock-timeout error
-(SQLSTATE `55P03`). A flush rolled back as the victim
-`applier.CatchupOptions.DeadlockAttempts` cycles in a row ends the catch-up with that error,
-since the flush is losing every round and another cycle would hold the slot's WAL for nothing.
+batch whole and flushes it again once `applier.CatchupOptions.DeadlockBackoff` has passed on
+the catch-up's clock, each deadlock in a row waiting one backoff longer than the one before, as
+the copier's passes do, and `Status.BatchesDeadlocked` counts the requeue. The cycles inside the
+backoff keep reading and confirming the stream but neither drain nor flush. A retry that waits
+on the copier's pass past the flush session's `lock_timeout` ends the catch-up with the server's
+lock-timeout error (SQLSTATE `55P03`). A flush rolled back as the victim
+`applier.CatchupOptions.DeadlockAttempts` times in a row ends the catch-up with that error,
+since the flush is losing every round and another cycle would hold the slot's WAL for nothing;
+a flush that commits, or that a constraint refuses, starts the count again. The victim may be
+the column-wise upsert or the whole-row fallback (CO-6) alike.
 A chunk whose pending keys outlast
 `copier.Options.CollisionAttempts` passes stops the copy with the latest pass's error and no cause
 of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
@@ -549,7 +572,24 @@ shadowing `<schema>, pg_catalog` path would otherwise name an owner that is not 
 refuse the engine's own table as foreign, and an empty `pg_namespace` or `pg_attribute` would
 report the schema absent or every column missing — decoy relations, functions, and operators on
 that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the text is held
-by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`), and `pkg/checksum` (the column-type read, the relation check,
+by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot reaper's slot
+listing and live-row read and the slot lock's database identity read, which run on the same
+caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
+`= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
+ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
+and the publication reads that judge whether the publication of the name is the route's, the
+create-side database guard included: a lookalike `name = name` and `name ~~ text` that answer
+true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
+as this database's orphan and let the drop take it, or match every publication and let the drop
+take someone else's `FOR ALL TABLES` one, and a lookalike `text = text` and `text <> text` that
+answer false would read a live row as terminal and let the reaper drop its slot,
+`TestReaperLeavesAnotherDatabasesSlotUnderALookalikeEquals`,
+`TestReaperKeepsALiveRowsSlotUnderLookalikeTextComparisons`,
+`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`, and
+`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`, and the text is held by
+`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
+`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
+character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -1305,8 +1345,9 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
-`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; inside the
+require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
+`migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
+`MinPoolConns`; inside the
 shadow build's transaction, `pkg/schemachange`
 `readSequenceOwnedColumns` and `refuseNewSequenceColumns` refuse a gated statement that
 gives the shadow an identity or sequence-owned column the source does not have
@@ -1650,11 +1691,16 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   reason, except the restart: without `--restart` a stopped run resumes and nothing is
   discarded, and a leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
-  nothing. Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
+  nothing, typed by its own sentinel so an embedder tells it from any other error.
+  Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
   own sentinel before any database work, and `migrate --desired` rejects each flag. A new
-  string field on `Options` or `CopySwapOptions` not declared as no acknowledgement, a new
-  destructive shape, or a new `SCHEMA.TABLE` flag on `migrate` fails CI until it has a registry
-  entry and a desired-state decision. RF-10, RF-5, and AB-1..AB-5 state what each gate does;
+  string or bool field reachable from `Options`, nested structs and pointers included, not
+  declared as no acknowledgement, a
+  new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI
+  until it has a registry entry and a desired-state decision, and a registry acknowledgement
+  with no `migrate` flag fails too. `Acknowledgements` exports the set by name and
+  `Options.Acknowledgements` names the ones a policy carries, so an adapter can tell
+  `WithoutAcknowledgements` set one aside. RF-10, RF-5, and AB-1..AB-5 state what each gate does;
   this invariant states that the set of acknowledgement gates is complete. Irreversible steps
   the engine takes on its own, with no operator decision to acknowledge, are outside the
   registry and held by their own invariants: dropping the retained source after a committed
@@ -1664,21 +1710,27 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
   refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; a scenario in `irreversibleScenarios`; and, for a CLI flag,
+  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel its wrong-target check wraps;
+  a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
   (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
-  `ErrBlockWritesNotSupported`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
+  `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`),
+  `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
   registry's shape and the desired-state rejections;
   `TestEveryOpKindIsClassifiedForDestructiveness` and
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
   derives; `TestIrreversibleOperationsAreGated` for each entry's refusal and wrong-target usage
   error against real PostgreSQL with the table, checkpoint, and write path unchanged, and a
-  restart's unrecorded leftover left standing; and
-  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for each CLI flag reaching exactly its own
-  field and sentinel.
+  restart's unrecorded leftover left standing;
+  `TestEveryAcknowledgementFlagMapsToARegistryEntry` for every `migrate` flag being an
+  acknowledgement or declared not one, each acknowledgement flag reaching exactly its own
+  field and sentinel, and every registry acknowledgement having a flag; and
+  `TestAcknowledgementsNamesTheRegistry` and
+  `TestOptionsAcknowledgementsNamesWhatThePolicyCarries` for the exported view.
   *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
 
 ## Orchestration / control-plane (OC)

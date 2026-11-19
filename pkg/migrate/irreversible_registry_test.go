@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,6 +61,8 @@ func setEveryField(t *testing.T, v reflect.Value, path string) {
 		v.SetBool(true)
 	case reflect.Int, reflect.Int32, reflect.Int64:
 		v.SetInt(7)
+	case reflect.Uint64:
+		v.SetUint(7)
 	case reflect.Pointer:
 		v.Set(reflect.New(v.Type().Elem()))
 	case reflect.Func:
@@ -96,6 +99,64 @@ func assertSameFields(t *testing.T, want, got reflect.Value, path string) {
 	default:
 		assert.Equal(t, want.Interface(), got.Interface(), "%s", path)
 	}
+}
+
+// Acknowledgements names the registry's acknowledgements in RunDesired's
+// rejection order, and a caller that changes the slice it was handed
+// changes neither the registry nor the next call's answer.
+func TestAcknowledgementsNamesTheRegistry(t *testing.T) {
+	want := []string{"force", "accept-blocking", "allow-destructive", "restart", "block-writes"}
+	got := Acknowledgements()
+	require.Equal(t, want, got)
+	for i, a := range ackKinds() {
+		assert.Equal(t, string(a), got[i])
+	}
+
+	got[0] = "app.orders"
+	got[1] = "restart"
+	assert.Equal(t, want, Acknowledgements())
+	assert.Equal(t, ackForce, ackKinds()[0])
+}
+
+// Options.Acknowledgements names exactly the acknowledgements a policy
+// carries, so an adapter can tell the desired-state view set one aside.
+func TestOptionsAcknowledgementsNamesWhatThePolicyCarries(t *testing.T) {
+	t.Run("a default policy carries none", func(t *testing.T) {
+		assert.Nil(t, DefaultOptions().Acknowledgements())
+	})
+
+	t.Run("each acknowledgement is named alone", func(t *testing.T) {
+		for _, a := range ackKinds() {
+			opts := withAck(t, DefaultOptions(), a, "app.orders")
+			assert.Equal(t, []string{string(a)}, opts.Acknowledgements())
+		}
+	})
+
+	t.Run("several are named in registry order", func(t *testing.T) {
+		opts := DefaultOptions()
+		opts.CopySwap.BlockWrites = "app.orders"
+		opts.Force = "app.orders"
+		opts.CopySwap.Restart = "app.orders"
+		assert.Equal(t, []string{"force", "restart", "block-writes"}, opts.Acknowledgements())
+	})
+
+	t.Run("the desired-state view carries none and the original keeps its own", func(t *testing.T) {
+		opts := DefaultOptions()
+		opts.AllowDestructive = "app.orders"
+		assert.Nil(t, opts.WithoutAcknowledgements().Acknowledgements())
+		assert.Equal(t, []string{"allow-destructive"}, opts.Acknowledgements())
+	})
+
+	t.Run("changing the returned slice changes nothing", func(t *testing.T) {
+		opts := DefaultOptions()
+		opts.AcceptBlocking = "app.orders"
+		got := opts.Acknowledgements()
+		got[0] = "force"
+		assert.Equal(t, []string{"accept-blocking"}, opts.Acknowledgements())
+		assert.Equal(t, "app.orders", opts.AcceptBlocking)
+		assert.Empty(t, opts.Force)
+		assert.Equal(t, "accept-blocking", Acknowledgements()[1])
+	})
 }
 
 // The registry lists every irreversible operation with the acknowledgement
@@ -186,45 +247,47 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 		require.ErrorIs(t, err, ErrForceNotSupported)
 	})
 
-	// Every string field on the policy either carries one of the
-	// acknowledgements or is listed here as not one. A new acknowledgement
-	// field added without a registry entry would otherwise reach every
-	// statement a desired-state plan derives.
-	t.Run("every string field on the policy is an acknowledgement or declared not one", func(t *testing.T) {
-		notAcks := map[string]bool{"Options.CreateOwner": true}
-		var unaccounted []string
-		check := func(typ reflect.Type, set func(name string) Options) {
-			for f := range typ.Fields() {
-				if f.Type.Kind() != reflect.String {
-					continue
-				}
-				name := typ.Name() + "." + f.Name
-				if notAcks[name] {
-					continue
-				}
-				opts := set(f.Name)
-				read := false
-				for _, a := range acks {
-					if v, _ := a.value(opts); v == "app.orders" {
-						read = true
-					}
-				}
-				if !read {
-					unaccounted = append(unaccounted, name)
-				}
+	// Every string or bool reachable from the policy, through nested
+	// structs and pointers to a string or bool, either carries one of the
+	// acknowledgements or is listed here as not one. A string is an
+	// acknowledgement when one of them reads it; a bool cannot name its
+	// table, so it is never one and must be listed. A new acknowledgement
+	// field, or a switch that opens a new irreversible step, added without
+	// a registry entry would otherwise reach every statement a
+	// desired-state plan derives.
+	t.Run("every string or bool reachable from the policy is an acknowledgement or declared not one", func(t *testing.T) {
+		notAcks := map[string]bool{
+			// The role a greenfield table is created as: who owns the result.
+			"Options.CreateOwner": true,
+			// A concurrent index build whose statement_timeout the caller
+			// owns: a bound on the build, not a loss.
+			"Options.Budget.Concurrent.CallerOwned": true,
+			// Opens the copy-and-swap route; each irreversible step on it
+			// has its own acknowledgement.
+			"Options.CopySwap.Enabled": true,
+			// Keeps the retained source, so it loses less, not more.
+			"Options.CopySwap.KeepOld": true,
+			// Where the route's own sessions connect, and how they verify TLS.
+			"Options.CopySwap.Connection.URL":        true,
+			"Options.CopySwap.Connection.CACertPath": true,
+		}
+		var unaccounted, walked []string
+		for _, sw := range policySwitches(reflect.TypeFor[Options](), "Options", nil) {
+			walked = append(walked, sw.name)
+			opts := DefaultOptions()
+			sw.set(reflect.ValueOf(&opts).Elem().FieldByIndex(sw.index))
+			if notAcks[sw.name] {
+				assert.Empty(t, opts.Acknowledgements(), "%s is declared not an acknowledgement", sw.name)
+				continue
+			}
+			if sw.isBool || len(opts.Acknowledgements()) != 1 {
+				unaccounted = append(unaccounted, sw.name)
 			}
 		}
-		check(reflect.TypeFor[Options](), func(name string) Options {
-			opts := DefaultOptions()
-			reflect.ValueOf(&opts).Elem().FieldByName(name).SetString("app.orders")
-			return opts
-		})
-		check(reflect.TypeFor[CopySwapOptions](), func(name string) Options {
-			opts := DefaultOptions()
-			reflect.ValueOf(&opts.CopySwap).Elem().FieldByName(name).SetString("app.orders")
-			return opts
-		})
-		assert.Empty(t, unaccounted, "string fields that are neither an acknowledgement nor declared not one")
+		assert.Empty(t, unaccounted, "string or bool fields that are neither an acknowledgement nor declared not one")
+		for name := range notAcks {
+			assert.Contains(t, walked, name, "declared not an acknowledgement but no such string or bool field")
+		}
 	})
 
 	// The hand-listed entries name the acknowledgement and refusal their
@@ -311,4 +374,56 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ackKinds hands back a slice no caller can use to change the registry:
+// writing to one result leaves the next call's answer unchanged.
+func TestAckKindsIsNotShared(t *testing.T) {
+	ackKinds()[0] = "app.orders"
+	assert.Equal(t, ackForce, ackKinds()[0])
+}
+
+// policySwitch is one string or bool reachable from a policy type, with how
+// to set it to a non-zero value.
+type policySwitch struct {
+	name   string
+	index  []int
+	isBool bool
+	set    func(reflect.Value)
+}
+
+// policySwitches lists every exported string or bool reachable from typ,
+// recursing through nested structs and following pointers to a string or a
+// bool.
+func policySwitches(typ reflect.Type, path string, index []int) []policySwitch {
+	var out []policySwitch
+	for f := range typ.Fields() {
+		if !f.IsExported() {
+			continue
+		}
+		name := path + "." + f.Name
+		idx := append(slices.Clone(index), f.Index...)
+		switch f.Type.Kind() {
+		case reflect.String:
+			out = append(out, policySwitch{name, idx, false, func(v reflect.Value) { v.SetString("app.orders") }})
+		case reflect.Bool:
+			out = append(out, policySwitch{name, idx, true, func(v reflect.Value) { v.SetBool(true) }})
+		case reflect.Struct:
+			out = append(out, policySwitches(f.Type, name, idx)...)
+		case reflect.Pointer:
+			switch f.Type.Elem().Kind() {
+			case reflect.String:
+				out = append(out, policySwitch{name, idx, false, func(v reflect.Value) {
+					v.Set(reflect.New(v.Type().Elem()))
+					v.Elem().SetString("app.orders")
+				}})
+			case reflect.Bool:
+				out = append(out, policySwitch{name, idx, true, func(v reflect.Value) {
+					v.Set(reflect.New(v.Type().Elem()))
+					v.Elem().SetBool(true)
+				}})
+			}
+		}
+	}
+	return out
 }

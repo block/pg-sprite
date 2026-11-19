@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -40,6 +41,9 @@ type runState struct {
 	// pass's outcome.
 	reconciled     bool
 	reconciliation checksum.Outcome
+	// copyPaced is how far the stream's lag held this run's copy back;
+	// the zero value when this run copied nothing or was never held.
+	copyPaced copier.Paced
 }
 
 // dispatch reads the target's checkpoint row and starts fresh or resumes
