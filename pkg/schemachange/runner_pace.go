@@ -39,6 +39,15 @@ func (l *streamLag) follow(c catchupStatus) {
 	l.source.Store(&c)
 }
 
+// paceSource is the catch-up a live run's copy is paced by: the run's
+// own, wrapped when the Runner has a wrap set.
+func (r *Runner) paceSource(c *applier.Catchup) catchupStatus {
+	if r.paceWrap == nil {
+		return c
+	}
+	return r.paceWrap(c)
+}
+
 // bytes is the unconfirmed WAL as the catch-up's last cycle measured it:
 // the server's write position less the position the shadow durably holds.
 func (l *streamLag) bytes() uint64 {
