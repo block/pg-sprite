@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // DefaultSlotLagCeiling is the most WAL a slot may hold before the route
@@ -15,7 +18,7 @@ import (
 // the server releases what the stream confirmed, so the volume needs
 // headroom above the ceiling of about the source's write rate times that
 // grace (see SlotLagWatch).
-const DefaultSlotLagCeiling int64 = 1 << 30
+const DefaultSlotLagCeiling = preflight.DefaultSlotLagCeiling
 
 // RestartReleaseInterval is the longest the server goes between the
 // running-transactions records it logs on a primary, busy or quiet (the
@@ -73,6 +76,12 @@ type SlotLagExceededError struct {
 	Retained    int64
 	Unconfirmed int64
 	Ceiling     int64
+	// CopyPaced is how far the stopped run's copy was held back by the WAL
+	// its stream had yet to confirm, as schemachange.Runner records it on
+	// a live run's stop. It is the zero Paced for a run that made no copy,
+	// for a copy the stream kept up with, and for an abort from a catch-up
+	// no Runner drives.
+	CopyPaced copier.Paced
 }
 
 func (e *SlotLagExceededError) Error() string {

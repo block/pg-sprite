@@ -126,7 +126,9 @@ type Options struct {
 	CopySwap CopySwapOptions
 
 	// Logger receives decision diagnostics (routing, preflight, execution
-	// transitions); nil discards them.
+	// transitions) at Debug; nil discards them. A copy-and-swap's catch-up
+	// also writes Info and Warn records here when it requeues a batch
+	// (applier.CatchupOptions.Logger lists them).
 	Logger *slog.Logger
 
 	// Audit receives the force-override audit record; nil discards it.

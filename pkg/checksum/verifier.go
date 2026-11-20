@@ -353,6 +353,7 @@ func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, stmts statemen
 		if next.source != next.shadow {
 			v.countMismatch()
 			if live {
+				v.countSettleRows(next.rows)
 				if err := differ(ctx, next.rows); err != nil {
 					return Report{}, err
 				}

@@ -407,13 +407,12 @@ func TestRunAcceptBlockingReportsACancelledLockWaitAsNothingSubmitted(t *testing
 	}()
 
 	// Cancel only once the engine's table lock request is provably waiting
-	// on the holder; the polling query's own text does not start with it.
+	// on the holder. The request is found as the one session the holder
+	// blocks, not by its text: tests on a shared server have lock waits of
+	// their own.
 	require.Eventually(t, func() bool {
-		var waiting bool
-		err := pool.QueryRow(t.Context(),
-			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			  WHERE query LIKE 'LOCK TABLE %' AND wait_event_type = 'Lock')`).Scan(&waiting)
-		return err == nil && waiting
+		blocked, err := testutil.BlockedBy(t.Context(), pool, holder.Conn().PgConn().PID())
+		return err == nil && blocked
 	}, 30*time.Second, 25*time.Millisecond, "the engine's table lock request must be waiting on the holder's lock")
 	cancel()
 

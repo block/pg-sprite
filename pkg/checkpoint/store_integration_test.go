@@ -179,9 +179,8 @@ func TestEnsureWaitsForAConcurrentFirstCreate(t *testing.T) {
 	t.Cleanup(wg.Wait)
 	const waitingDeadline = 5 * time.Second
 	require.Eventually(t, func() bool {
-		var waiting bool
-		require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted)").Scan(&waiting))
-		return waiting
+		blocked, err := testutil.BlockedBy(t.Context(), f.pool, first.Conn().PgConn().PID())
+		return err == nil && blocked
 	}, waitingDeadline, 10*time.Millisecond, "the second Ensure should be waiting behind the first create")
 	require.NoError(t, first.Commit(t.Context()))
 	const ensureDeadline = 5 * time.Second

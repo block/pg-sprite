@@ -1,0 +1,24 @@
+#!/bin/bash
+#
+# Stand-in docker for scripts/check-image-pins_test.sh. It answers
+# `buildx version` and `buildx imagetools inspect REF` from files in
+# $FAKE_DIR named after REF with / and : replaced by _:
+#   <name>           stdout of a lookup that answers
+#   <name>.err       stderr of a lookup that fails, every time
+#   <name>.once.err  stderr of a lookup that fails once, then answers
+# It ignores --format, so it stands in for a registry's answer, not for buildx.
+
+if [ "$1 $2" = "buildx version" ]; then
+	exit 0
+fi
+key="$FAKE_DIR/$(echo "$4" | tr '/:' '__')"
+if [ -f "$key.once.err" ]; then
+	cat "$key.once.err" >&2
+	rm "$key.once.err"
+	exit 1
+fi
+if [ -f "$key.err" ]; then
+	cat "$key.err" >&2
+	exit 1
+fi
+cat "$key"

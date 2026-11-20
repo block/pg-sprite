@@ -1,9 +1,11 @@
 package schemachange_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
@@ -29,15 +31,29 @@ func cutoverProof() schemachange.SwapProof {
 			Column: "id", Always: true, SequenceSchema: "app", SequenceName: "orders_id_seq",
 			Options: schemachange.SequenceOptions{Start: 1, Increment: 1, Min: 1, Max: 9223372036854775807, Cache: 1},
 		}},
-		Attempts: 2,
+		Attempts:     2,
+		SwapPosition: 0x16B3748,
 	}
+}
+
+// A stored proof leaves the swap's WAL position out: the verdict carries
+// it as pg_lsn text, and a stored proof is only compared through SameSwap,
+// which ignores it, so encoding it as a bare integer here would give one
+// value a second rendering.
+func TestSwapProofLeavesTheSwapPositionOutOfItsJSON(t *testing.T) {
+	encoded, err := json.Marshal(cutoverProof())
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+	assert.NotContains(t, fields, "swap_position")
+	assert.Contains(t, fields, "attempts", "the rest of the proof is still encoded")
 }
 
 // A proof re-derived after the fact differs from the cutover's in exactly
 // the fields no later read can know — the shadow names in the pairing, the
-// derived name an unpaired source dependent now bears, and the attempt
-// count — and SameSwap treats the two as the same swap, where == would
-// not.
+// derived name an unpaired source dependent now bears, the attempt count,
+// and the swap's WAL position — and SameSwap treats the two as the same
+// swap, where == would not.
 func TestSameSwapIgnoresWhatARederivedProofCannotKnow(t *testing.T) {
 	checkpointed := cutoverProof()
 	inspected := cutoverProof()
@@ -47,6 +63,7 @@ func TestSameSwapIgnoresWhatARederivedProofCannotKnow(t *testing.T) {
 		UnpairedShadow: []string{},
 	}
 	inspected.Attempts = 0
+	inspected.SwapPosition = 0
 
 	assert.NotEqual(t, checkpointed, inspected, "the two shapes differ field for field")
 	assert.True(t, checkpointed.SameSwap(inspected))

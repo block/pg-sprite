@@ -318,12 +318,16 @@ cycle by rolling one back. The rolled-back pass committed nothing and leaves the
 unchanged, so the chunk takes its next pass, on every path including the `DEFERRABLE` rerun
 below. Both sides of the cycle are retried: when the server picks the flush as the victim, the
 flush returns `applier.ErrBatchDeadlocked` with the shadow unchanged, the catch-up requeues the
-batch whole and flushes it again on the catch-up's next cycle, with no wait beyond the cycle's
-own, and `Status.BatchesDeadlocked` counts the requeue. A retry that waits on the copier's pass
-past the flush session's `lock_timeout` ends the catch-up with the server's lock-timeout error
-(SQLSTATE `55P03`). A flush rolled back as the victim
-`applier.CatchupOptions.DeadlockAttempts` cycles in a row ends the catch-up with that error,
-since the flush is losing every round and another cycle would hold the slot's WAL for nothing.
+batch whole and flushes it again once `applier.CatchupOptions.DeadlockBackoff` has passed on
+the catch-up's clock, each deadlock in a row waiting one backoff longer than the one before, as
+the copier's passes do, and `Status.BatchesDeadlocked` counts the requeue. The cycles inside the
+backoff keep reading and confirming the stream but neither drain nor flush. A retry that waits
+on the copier's pass past the flush session's `lock_timeout` ends the catch-up with the server's
+lock-timeout error (SQLSTATE `55P03`). A flush rolled back as the victim
+`applier.CatchupOptions.DeadlockAttempts` times in a row ends the catch-up with that error,
+since the flush is losing every round and another cycle would hold the slot's WAL for nothing;
+a flush that commits, or that a constraint refuses, starts the count again. The victim may be
+the column-wise upsert or the whole-row fallback (CO-6) alike.
 A chunk whose pending keys outlast
 `copier.Options.CollisionAttempts` passes stops the copy with the latest pass's error and no cause
 of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
@@ -574,15 +578,22 @@ caller's pool, qualify every function, relation, cast, and operator too — `=`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
 ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
 and the publication reads that judge whether the publication of the name is the route's, the
-create-side database guard included: a lookalike `name = name` and `name ~~ text` that answer
+create-side database guard included, and the slot inspection (`InspectSlot`) that
+`InspectResume` adopts or refuses a slot on (ST-3) and treats a missing slot as lost on (ST-4),
+and that the catch-up's slot check reads: a lookalike `name = name` and `name ~~ text` that answer
 true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
-as this database's orphan and let the drop take it, or match every publication and let the drop
-take someone else's `FOR ALL TABLES` one, and a lookalike `text = text` and `text <> text` that
+as this database's orphan and let the drop take it, match every publication and let the drop
+take someone else's `FOR ALL TABLES` one, or read another database's slot as `Own` and a
+missing slot as found, and a lookalike `text = text` and `text <> text` that
 answer false would read a live row as terminal and let the reaper drop its slot,
 `TestReaperLeavesAnotherDatabasesSlotUnderALookalikeEquals`,
 `TestReaperKeepsALiveRowsSlotUnderLookalikeTextComparisons`,
-`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`, and
-`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`, and the text is held by
+`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`,
+`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
+`TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
+`TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
+prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
+the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
 `TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
 character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,

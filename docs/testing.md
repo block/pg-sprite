@@ -148,12 +148,15 @@ one convention.
 A load spec with `RecordFailures` keeps its workers writing through statements that
 fail for a reason other than an expected race, and lists each with its SQLSTATE and
 time, so a test measures what a swap does to an application's statements.
-`TouchedIDs` lists the key of every row a committed mutation wrote, in commit order
-(both keys of a unique-key swap or a key move), and `Progress` reads the counts and the
-list's length without copying it. The oracle's `ExcludeKeys` leaves keys out of both
-sides and both counts, so a test that marks the touched list at an instant compares
-exactly the rows last written before it. The [load proof](#the-load-proof) is built on
-these three.
+`Touches` lists the key of every row a committed mutation wrote, in commit order
+(both keys of a unique-key swap or a key move), each with the server's WAL insert
+position the mutation read inside its write, and `Progress` reads the counts and the
+list's length without copying it. Every mutation names its keys before it writes, so a
+write that runs out its client-side deadline, which the server may still commit, lists
+its keys in `Ambiguous` instead. The oracle's `ExcludeKeys` leaves keys out of both
+sides and both counts, so a test can leave out every key a write touched after a
+boundary it chose. The [load proof](#the-load-proof) is built on these, with the
+swap's WAL position as its boundary.
 
 To hold a copy chunk in flight, a test pins a shadow row: `PinShadowKey` returns a pin
 whose `Clock` the copier takes as its `Options.Clock`. At the clock's first reading,
@@ -225,6 +228,7 @@ capability no peer suite has.
 | `make demo-check` | The demo tour in check mode against the built `bin/pg-sprite` and the compose database — CI's artifact smoke test (TM-8). Needs Docker and `jq`. |
 | `make check-capabilities` | Regenerates the generated regions of [capabilities.md](capabilities.md) from `pkg/capabilities/capabilities.yaml` and fails if the committed page differs. CI runs it; no Docker. |
 | `make check-vulnerabilities` | Scans the module with a pinned `govulncheck` and fails if the code calls into a known vulnerability. CI runs it as the `Vulnerability Scan` workflow on every pull request, on every push to `main`, and daily on `main`; the workflow is not part of `all-green`. Exit 3 means reachable findings; any other failure means the scan itself could not run. No Docker. |
+| `make check-image-pins` | Asks each image's registry whether every `image: repo:tag@sha256:…` pin in `compose/supabase.yml` still names its digest (the index digest or one platform manifest in it), and fails naming each pin whose tag resolves elsewhere. Docker pulls by digest and ignores the tag, so a wrong tag otherwise passes CI and misstates the tested versions. `PINS_FILE` selects another compose file. The script, `scripts/check-image-pins.sh [compose-file]`, exits 1 for a mismatched or missing tag and 2 when an image could not be checked — a registry lookup failed twice (unreachable, rate-limited, or not authorized) or an `image:` line is not a pin it can read — so the check is incomplete; through `make` both are a failure. CI's Supabase job runs it before starting the services; on a PR that did not touch `compose/supabase.yml`, exit 1 means a publisher moved a tag (re-pin in a separate PR) and exit 2 is usually the registry (re-run the job). Needs `docker buildx` and network access; no login for public images, `docker login` first for private ones. `make test-image-pins` drives the script through each outcome against a stand-in docker, with no network. |
 | `make replay` / `make replay-refresh` / `make replay-down` | Corpus replay ([replay/README.md](../replay/README.md)): drive the built binary through a pinned real-project schema-change history, asserting each statement's typed outcome. Operator-run, not a CI gate. |
 | `make load-proof LOAD_PROOF_FREE_DISK=…` | The [load proof](#the-load-proof): the built binary carries a copy-and-swap over a large table while a concurrent workload writes it, and writes `results.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF=1`, which the target sets. |
 
@@ -287,11 +291,15 @@ options the CLI sets; an importer's own cancellation and resume are not part of 
 A pass proves:
 
 - the binary exits 0 with `executed-via-copy-and-swap`;
-- the retained `_old` table and the live table agree row for row over every key the
-  load did not write after the mark, the last checkpoint poll before the cutover. The
-  mark must fall in the verify pass, after the run inserted, updated and deleted. Writes
-  during the drain and the swap are carried but not compared; `rows.excluded` in
-  `results.json` counts the keys left out;
+- the retained `_old` table and the live table agree row for row over every key whose
+  last write the load recorded below the verdict's `swap_lsn`, the WAL position the
+  swap read under its lock: writes made during the drain and while the swap waited for
+  its lock are compared too. A write above that position exists only in the live
+  table, and a write that ran out its client-side deadline may have committed on
+  either side, so their keys are left out; `rows.excluded` in `results.json` counts
+  them and `rows.ambiguous` the deadline ones. The mark, the last checkpoint poll
+  before the cutover, must fall in the verify pass, after the run inserted, updated
+  and deleted, so the judged writes span the stream;
 - the live table's catalog equals that of a table the statement changed natively;
 - every load failure is one the swap causes, when it can cause it: a lock timeout or a
   client deadline between the mark and one statement deadline after the binary exits,

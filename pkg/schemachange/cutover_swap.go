@@ -14,7 +14,7 @@ import (
 // swapOnce is one attempt at the swap transaction: lock, confirm the write
 // fence when the caller requires it, drain, re-check the shape, re-gate,
 // compare the keys a live pass left for the swap, rename, hand off,
-// recheck, commit. Any error leaves the transaction
+// recheck, read the WAL position, commit. Any error leaves the transaction
 // rolled back on the server unless the client stopped hearing from it,
 // which the caller resolves by following the backend returned here to its
 // exit and then inspecting the catalog. The backend is zero when the
@@ -111,7 +111,13 @@ func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, rea
 	if err := confirmSwap(ctx, tx, fresh, identities); err != nil {
 		return SwappedTable{}, err
 	}
-	return newSwappedTable(fresh, identities, 0), nil
+	position, err := readSwapPosition(ctx, tx)
+	if err != nil {
+		return SwappedTable{}, err
+	}
+	swapped := newSwappedTable(fresh, identities, 0)
+	swapped.swapPosition = position
+	return swapped, nil
 }
 
 // lockForSwap takes ACCESS EXCLUSIVE on the source and the shadow in one

@@ -210,7 +210,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 7,
+		"format_version": 8,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 3,
@@ -235,6 +235,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 				"chunks_mismatched": 0,
 				"chunks_repaired": 0,
 				"chunks_reread": 0,
+				"settle_rows_read": 0,
 				"changes_applied": 0,
 				"changes_buffered": 0,
 				"lag_bytes": 0,
@@ -279,7 +280,7 @@ func TestSnapshotJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 7,
+		"format_version": 8,
 		"phase": "pending",
 		"elapsed_ns": 0,
 		"step_elapsed_ns": 0,
