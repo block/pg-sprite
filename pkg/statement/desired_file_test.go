@@ -263,3 +263,64 @@ CREATE POLICY documents_team_read ON documents
 	require.ErrorIs(t, err, ErrCommentLoss)
 	assert.Empty(t, formatted)
 }
+
+// Input that is not valid SQL is a parse refusal, as ParseDesiredFile reports
+// it, even when the lexer is the first to see it: an unterminated quote or
+// comment fails the comment check's scan before the parser runs.
+func TestFormatDesiredReportsUnterminatedInputAsAParseRefusal(t *testing.T) {
+	for _, sql := range []string{
+		"CREATE TABLE t (note text DEFAULT 'oops);",
+		"CREATE TABLE t (id int) /* oops",
+	} {
+		_, parseErr := ParseDesiredFile(sql)
+		require.ErrorIs(t, parseErr, ErrParseDesired)
+		formatted, err := FormatDesired(sql)
+		assert.ErrorIs(t, err, ErrParseDesired, sql)
+		assert.Empty(t, formatted)
+	}
+}
+
+// formatDesiredRowSecurityFile declares a table, an index, a policy and its
+// comment, and row security, in an order FormatDesired does not keep.
+const formatDesiredRowSecurityFile = `
+CREATE TABLE documents (
+    id bigint PRIMARY KEY,
+    team_id bigint NOT NULL
+);
+CREATE INDEX documents_team_id_idx ON documents (team_id);
+CREATE POLICY documents_team_read ON documents
+    FOR SELECT
+    USING (team_id = 1);
+COMMENT ON POLICY documents_team_read ON documents IS 'team reads';
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+`
+
+// FormatDesired prints the admitted statements in the order Statements
+// reports them, each followed by ";\n", keeps the policy's COMMENT ON
+// statement as content, and its output formats to itself.
+func TestFormatDesiredPrintsCanonicalTextAndIsIdempotent(t *testing.T) {
+	want := "CREATE TABLE documents (id bigint PRIMARY KEY, team_id bigint NOT NULL);\n" +
+		"CREATE INDEX documents_team_id_idx ON documents USING btree (team_id);\n" +
+		"CREATE POLICY documents_team_read ON documents FOR SELECT TO public USING (team_id = 1);\n" +
+		"ALTER TABLE documents ENABLE ROW LEVEL SECURITY;\n" +
+		"COMMENT ON POLICY documents_team_read ON documents IS 'team reads';\n"
+	first, err := FormatDesired(formatDesiredRowSecurityFile)
+	require.NoError(t, err)
+	assert.Equal(t, want, first)
+
+	second, err := FormatDesired(first)
+	require.NoError(t, err)
+	assert.Equal(t, first, second)
+}
+
+// The comment check runs before any admission rule: a commented file the
+// front door would also refuse, for its second CREATE TABLE, is reported as
+// comment loss.
+func TestFormatDesiredChecksCommentsBeforeAdmission(t *testing.T) {
+	formatted, err := FormatDesired(`
+CREATE TABLE a (id int); -- two tables
+CREATE TABLE b (id int);
+`)
+	require.ErrorIs(t, err, ErrCommentLoss)
+	assert.Empty(t, formatted)
+}
