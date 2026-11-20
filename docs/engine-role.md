@@ -137,7 +137,8 @@ senders under `max_wal_senders` (the run holds one at a time;
 is headroom). Both apply only to a run
 that decodes WAL; a run that blocks writes skips them. The same check compares the free disk the
 caller measured on the database volume — PostgreSQL has no function that reports it —
-against the shadow copy's headroom, and
+against the shadow copy's headroom, less what a stopped run being resumed already holds on
+the volume, read from the server, and
 refuses an unmeasured volume rather than assuming it is large enough. The figure is the
 bytes the volume can still absorb before writes fail: on a fixed-size volume, the free
 space the host reports for the data directory; on a managed volume that grows on demand

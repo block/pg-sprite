@@ -75,8 +75,11 @@ type CopySwapOptions struct {
 	// FreeDiskBytes is the free space the operator reports on the volume
 	// the table lives on; the preflight refuses the run when the shadow and
 	// its indexes would not fit, or, for a live run, when they and
-	// SlotLagCeilingBytes of retained WAL would not fit together. Zero means
-	// no space, and refuses.
+	// SlotLagCeilingBytes of retained WAL would not fit together. A run
+	// that resumes a stopped one is asked only for what is left to grow:
+	// the shadow the stopped run built and the WAL its slot retains, both
+	// read from the server, are subtracted, since the measured free space
+	// already excludes them. Zero means no space, and refuses.
 	FreeDiskBytes int64
 
 	// KeepOld leaves the retained source under its derived _old name after
@@ -230,6 +233,33 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 	}
 }
 
+// checkCopySwap is the route's preflight for the table: the privilege,
+// shape, and environment checks preflight.CheckCopySwap folds, with the
+// disk check told what a stopped run the table's checkpoint row records
+// already holds on the volume, measured from the server, so a resume is
+// asked only for what is left to grow. A run that starts over (Restart) is
+// checked as a fresh run: its discard frees what the stopped run held,
+// and counting the space before it is gone would be counting on the
+// discard.
+func checkCopySwap(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, schema, table string, o CopySwapOptions) (preflight.CopySwapTarget, error) {
+	env := o.environment()
+	role, err := preflight.CheckPrivileges(ctx, pool, schema, table,
+		preflight.Requirement{Tier: preflight.TierCopyAndSwap, LogicalDecoding: env.LogicalDecoding})
+	if err != nil {
+		return preflight.CopySwapTarget{}, err
+	}
+	shape, err := preflight.CheckCopySwapShape(ctx, pool, schema, table, role)
+	if err != nil {
+		return preflight.CopySwapTarget{}, err
+	}
+	if o.Restart == "" {
+		if env.Held, err = schemachange.MeasureResumeHeld(ctx, pool, store, shape, env.LogicalDecoding); err != nil {
+			return preflight.CopySwapTarget{}, err
+		}
+	}
+	return preflight.CheckCopySwapEnvironment(ctx, pool, shape, env)
+}
+
 // copyAndSwap runs a statement the router assigned to the copy-and-swap
 // backend through the schemachange.Runner and folds the result into one
 // verdict. The verdict-and-error contract is Run's: a preflight or shadow
@@ -273,7 +303,7 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	if err := schemachange.CheckPool(pool, opts.CopySwap.Copier); err != nil {
 		return copySwapPoolVerdict(st, err), fmt.Errorf("migrate: %w", err)
 	}
-	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
+	target, err := checkCopySwap(ctx, pool, store, st.Schema(), st.Table(), opts.CopySwap)
 	if err != nil {
 		return copySwapPreflightVerdict(st, err)
 	}
@@ -463,7 +493,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 	resume := "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
 	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause == decode.SlotLagWALRetained {
 		return resume + "; when no open or prepared write transaction on the source holds the WAL back, the write rate is the cause, " +
-			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); the resume counts that ceiling against --free-disk beside the shadow, so the free space passed must cover it too"
+			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); the resume counts that ceiling against --free-disk beside the shadow, less the shadow already built and the WAL the slot already retains, so pass the free space the volume has now"
 	}
 	return resume
 }
