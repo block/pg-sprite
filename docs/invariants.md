@@ -592,11 +592,23 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 `TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
 `TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
 `TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
-prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
-the text is held by
+prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone);
+the WAL marker (`MarkWAL`), written in a transaction on the caller's pool, and the stream's read
+of `wal_sender_timeout`, on the replication session, whose `search_path` comes from the caller's
+connection settings and the role's and database's and is never repaired, spell their cast and
+comparison through `pg_catalog` too: on a shadowing `<schema>, pg_catalog` path a lookalike
+`text` type would cut the marker's position to `0/1`, short of every change the caller's
+snapshot saw, and a lookalike `text = text` that answers false would match no setting and refuse
+the stream, `TestMarkWALReturnsTheServersPositionUnderALookalikeTextType` and
+`TestHeartbeatReadsTheSenderTimeoutUnderALookalikeEquals`; and the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
 `TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
-character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
+character outside `OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
+write-position reads, on the caller's pool every cycle, cast through `pg_catalog.text`: a
+lookalike `text` type on a shadowing path would cut the snapshot into one the drain refuses and
+the write position to `0/1`, below anything the stream has confirmed,
+`TestCatchupMeasuresTheServersPositionUnderALookalikeTextType`, the text held by
+`TestCatchupPoolReadsQualifyEveryFunctionAndCast`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
