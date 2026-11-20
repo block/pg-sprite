@@ -1,6 +1,7 @@
 package schemachange
 
 import (
+	"errors"
 	"sync/atomic"
 
 	"github.com/block/pg-sprite/pkg/applier"
@@ -39,6 +40,15 @@ func (l *streamLag) follow(c catchupStatus) {
 	l.source.Store(&c)
 }
 
+// paceSource is the catch-up a live run's copy is paced by: the run's
+// own, wrapped when the Runner has a wrap set.
+func (r *Runner) paceSource(c *applier.Catchup) catchupStatus {
+	if r.paceWrap == nil {
+		return c
+	}
+	return r.paceWrap(c)
+}
+
 // bytes is the unconfirmed WAL as the catch-up's last cycle measured it:
 // the server's write position less the position the shadow durably holds.
 func (l *streamLag) bytes() uint64 {
@@ -64,6 +74,16 @@ func (r *Runner) pacedCopier(lag *streamLag) copier.Options {
 		Sleep:     r.opts.sleep(),
 	}
 	return opts
+}
+
+// recordCopyPaced carries how far the run's copy was held back onto a
+// lag-ceiling stop, the one stop the pace is there to put off, since Run
+// returns no Result beside an error. err is returned as it came.
+func recordCopyPaced(err error, paced copier.Paced) error {
+	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok {
+		lag.CopyPaced = paced
+	}
+	return err
 }
 
 // copyPaceMark is the unconfirmed WAL, in bytes, above which a live run's

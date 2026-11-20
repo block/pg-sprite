@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // DefaultSlotLagCeiling is the most WAL a slot may hold before the route
@@ -13,11 +16,12 @@ import (
 // bound is hard for the WAL the stream has yet to confirm, judged on one
 // reading. The WAL the slot retains may stand over it for a grace while
 // the server releases what the stream confirmed, so the volume needs
-// headroom above the ceiling of about the source's write rate times that
+// headroom above the ceiling of about the cluster's WAL rate times that
 // grace (see SlotLagWatch), and the ceiling itself must hold that much of
-// the source's writes, since a release on a busy source keeps about that
-// much back (see RestartReleaseInterval).
-const DefaultSlotLagCeiling int64 = 1 << 30
+// the cluster's WAL, the copy's own writes included, with margin, since a
+// release on a busy source keeps about that much back (see
+// RestartReleaseInterval).
+const DefaultSlotLagCeiling = preflight.DefaultSlotLagCeiling
 
 // RestartReleaseInterval is the longest the server goes between the
 // running-transactions records it logs on a primary, busy or quiet (the
@@ -82,6 +86,12 @@ type SlotLagExceededError struct {
 	Retained    int64
 	Unconfirmed int64
 	Ceiling     int64
+	// CopyPaced is how far the stopped run's copy was held back by the WAL
+	// its stream had yet to confirm, as schemachange.Runner records it on
+	// a live run's stop. It is the zero Paced for a run that made no copy,
+	// for a copy the stream kept up with, and for an abort from a catch-up
+	// no Runner drives.
+	CopyPaced copier.Paced
 }
 
 func (e *SlotLagExceededError) Error() string {
@@ -93,8 +103,8 @@ func (e *SlotLagExceededError) Error() string {
 	case SlotLagWALRetained:
 		return fmt.Sprintf("slot %s retains %s of WAL, over the %s ceiling (%d > %d bytes), for longer than the server takes to release WAL the stream confirmed, "+
 			"and the stream itself is %s behind; either a transaction on the source holds the WAL back (an open write transaction or a prepared one), "+
-			"and the run can resume once it ends, or the source writes more WAL per release interval than the ceiling allows, "+
-			"and the run needs a higher SlotLagCeiling",
+			"and the run can resume once it ends, or the cluster writes more WAL per release interval and catch-up cycle than the ceiling holds, "+
+			"and the run needs a higher SlotLagCeiling, with margin above that much WAL",
 			e.Slot, humanBytes(e.Retained), humanBytes(e.Ceiling), e.Retained, e.Ceiling, humanBytes(e.Unconfirmed))
 	default:
 		return fmt.Sprintf("slot %s is over the %s ceiling (cause %q): retains %s, %s unconfirmed",

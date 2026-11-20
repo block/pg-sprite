@@ -1,7 +1,9 @@
 package applier_test
 
 import (
+	"log/slog"
 	"math"
+	"math/bits"
 	"sync"
 	"testing"
 	"time"
@@ -62,11 +64,13 @@ func oneInFlight(t *testing.T, key int64) copier.Position {
 // 1's batch collides with row 2's stale shadow row column-wise and again
 // whole-row, is refused, and is requeued. Until row 2's chunk lands the
 // slot is not confirmed past the swap; once it lands both rows flush
-// together and the shadow converges (CO-6, ST-4).
+// together and the shadow converges (CO-6, ST-4). The refusals are logged
+// at Info as the run's count reaches 1, 2, 4, and so on, not once a cycle.
 func TestCatchupRequeuesADeferredBatchAndConverges(t *testing.T) {
 	f := newCatchupFixture(t, 20)
 	positions := &switchPosition{pos: oneInFlight(t, 2)}
-	run := startCatchupWith(t, f, catchupSetup{positions: positions})
+	logs := newRequeueRecords(t)
+	run := startCatchupWith(t, f, catchupSetup{positions: positions, opts: applier.CatchupOptions{Logger: logs.logger()}})
 
 	q := f.table.Qualified()
 	var two int
@@ -93,6 +97,16 @@ func TestCatchupRequeuesADeferredBatchAndConverges(t *testing.T) {
 	run.awaitStatus(t, "confirm past the swap", func(s applier.Status) bool {
 		return s.Confirmed >= end && s.Buffered == 0
 	})
+	deferred := run.status(t).BatchesDeferred
+	records := logs.withKey("batches_deferred")
+	require.Len(t, records, bits.Len64(deferred), "one record as the count reaches each power of two up to %d", deferred)
+	for i, rec := range records {
+		assert.Equal(t, slog.LevelInfo, rec.level, "a refusal that waits for the copy is expected, not a warning")
+		assert.Equal(t, uint64(1)<<i, rec.attrs["batches_deferred"])
+		assert.Equal(t, f.table.Table, rec.attrs["table"])
+		assert.Equal(t, int64(1), rec.attrs["entries"], "row 1's image; row 2's waits on its chunk outside the batch")
+	}
+	assert.Empty(t, logs.withKey("batches_deadlocked"), "no flush was a deadlock victim")
 	run.stop(t)
 	f.assertConverged(t, run.shadow)
 }

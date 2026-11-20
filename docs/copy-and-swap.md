@@ -116,9 +116,15 @@ without writes for the run.
 ## Free disk space
 
 The shadow table is a full second copy of the table and its indexes, so the preflight requires
-free space of at least twice the table's heap, indexes, and TOAST. PostgreSQL cannot report the
+free space of at least twice the table's heap, indexes, and TOAST. A live run also needs room
+for the WAL its replication slot may retain, so its preflight adds the
+[slot lag ceiling](#slot-lag-ceiling) to that figure: 1 GiB unless you pass
+`--slot-lag-ceiling`. A live run on a 10 GiB table therefore needs 21 GiB free by default; an
+offline run (`--block-writes`) holds no slot and needs 20 GiB. PostgreSQL cannot report the
 free space on its own volume over SQL, so you pass it with `--free-disk` (binary units: `MiB`,
-`GiB`, `TiB`). A run without it is refused with cause `copy-and-swap-disk-headroom`.
+`GiB`, `TiB`). A run without it, or with less than it needs, is refused with cause
+`copy-and-swap-disk-headroom`; for a live run the detail names both the shadow's figure and
+the ceiling's.
 
 - **Self-managed PostgreSQL:** run `df -h` on the volume holding the data directory.
 - **Amazon RDS for PostgreSQL:** read the instance's `FreeStorageSpace` metric in CloudWatch.
@@ -135,7 +141,12 @@ it. Until then it stays required.
 A live run's replication slot keeps WAL on the server until pg-sprite has applied the changes
 in it. The run stops when the slot holds more than the slot lag ceiling: 1 GiB unless you pass
 `--slot-lag-ceiling SIZE` (`CopySwapOptions.SlotLagCeilingBytes` as a library caller). An
-offline run holds no slot, so the flag is refused with `--block-writes`.
+offline run holds no slot, so the flag is refused with `--block-writes`. The ceiling, the
+1 GiB default included, counts against `--free-disk` beside the shadow (see
+[Free disk space](#free-disk-space)), so a ceiling the volume cannot hold is refused with cause
+`copy-and-swap-disk-headroom` before anything is built. That check is a floor on the free
+space, not a guarantee the slot cannot fill the volume: as the next paragraph says, the slot can
+stand over the ceiling, so leave headroom above it.
 
 The ceiling is a stop threshold pg-sprite checks once per catch-up cycle, not a limit
 PostgreSQL enforces on the slot. The slot can hold more than the ceiling by the time a cycle
@@ -169,7 +180,8 @@ slot and the saved progress stay, so running the same command again resumes the 
   each step stops one step short, so the slot keeps between 15 and 30 seconds of the source's
   writes even while pg-sprite keeps up; the ceiling must hold more than 15 seconds of them. Resume with
   a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
-  that much WAL:
+  that much WAL. The resume's preflight counts the new ceiling against
+  `--free-disk` beside the shadow, so the free space you measure and pass must cover it too:
 
 ```sh
 pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
@@ -203,9 +215,13 @@ A successful run prints one verdict, `executed-via-copy-and-swap`, and exits 0. 
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
   "table": "public.order_archive",
-  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run"
+  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run",
+  "swap_lsn": "0/3F2A1B8"
 }
 ```
+
+`swap_lsn` is the server's WAL position read inside the swap transaction, under its lock:
+writes to the table after it exist only in the new table.
 
 The old table is dropped once the swap commits. Add `--keep-old` to keep it under its `_old`
 name for a rollback window; you drop it yourself when the window ends.

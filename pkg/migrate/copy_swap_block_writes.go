@@ -76,6 +76,7 @@ var ErrBlockWritesNotSupported = errors.New(
 
 // ErrBlockWritesMismatch means the block-writes acknowledgement named a
 // table other than the statement's resolved target. Nothing has executed.
+// The error is an [AcknowledgementMismatchError] carrying both tables.
 var ErrBlockWritesMismatch = errors.New("the block-writes acknowledgement must name the resolved target table")
 
 // checkBlockWritesAck confirms that the block-writes acknowledgement names the
@@ -87,7 +88,7 @@ func checkBlockWritesAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrBlockWritesMismatch, qualified(st), ack)
+	return ackBlockWrites.mismatch(qualified(st), ack)
 }
 
 // auditBlockWrites records, before the fence goes on, that the operator took

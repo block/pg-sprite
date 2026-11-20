@@ -66,8 +66,14 @@ var synchronousStandbyThatNeverConnects = []string{"synchronous_commit=local", "
 
 // whenCatchingUp is the AfterCheckpoint hook that makes the write.
 func (h *hiddenCommit) whenCatchingUp(t *testing.T) func(context.Context, checkpoint.Checkpoint) error {
+	return h.whenIn(t, checkpoint.PhaseCatchingUp)
+}
+
+// whenIn is the AfterCheckpoint hook that makes the write at the first
+// save of phase.
+func (h *hiddenCommit) whenIn(t *testing.T, phase checkpoint.Phase) func(context.Context, checkpoint.Checkpoint) error {
 	return func(_ context.Context, cp checkpoint.Checkpoint) error {
-		if cp.Phase != checkpoint.PhaseCatchingUp {
+		if cp.Phase != phase {
 			return nil
 		}
 		var hookErr error

@@ -74,7 +74,9 @@ type CopySwapOptions struct {
 
 	// FreeDiskBytes is the free space the operator reports on the volume
 	// the table lives on; the preflight refuses the run when the shadow and
-	// its indexes would not fit. Zero means no space, and refuses.
+	// its indexes would not fit, or, for a live run, when they and
+	// SlotLagCeilingBytes of retained WAL would not fit together. Zero means
+	// no space, and refuses.
 	FreeDiskBytes int64
 
 	// KeepOld leaves the retained source under its derived _old name after
@@ -89,7 +91,7 @@ type CopySwapOptions struct {
 	// writes until the swap. It must name the resolved target table as
 	// SCHEMA.TABLE, the same way Restart does, so the declaration cannot be
 	// left on a script and fence another table by accident; a value naming
-	// any other table returns [ErrBlockWritesMismatch]. Empty runs the
+	// any other table returns [ErrBlockWritesMismatch], an [AcknowledgementMismatchError]. Empty runs the
 	// live path: slot, stream, and catch-up. Run takes it; RunDesired
 	// rejects any value with ErrBlockWritesNotSupported.
 	BlockWrites string
@@ -101,7 +103,7 @@ type CopySwapOptions struct {
 	// is built (schemachange.RunOptions.Restart). It must name the
 	// resolved target table as SCHEMA.TABLE, the same way Options.Force
 	// does, so the acknowledgement cannot be left on a script by accident;
-	// a value naming any other table returns [ErrRestartMismatch]. A leftover whose swap already committed is not discarded: the
+	// a value naming any other table returns [ErrRestartMismatch], an [AcknowledgementMismatchError]. A leftover whose swap already committed is not discarded: the
 	// change is past the point of starting over, and the run is refused
 	// so it can be finished without the acknowledgement. Empty resumes a
 	// leftover, as every run does. Run takes it; RunDesired rejects any
@@ -149,8 +151,12 @@ type CopySwapOptions struct {
 	// *decode.SlotLagExceededError, leaving the slot and the checkpoint row
 	// for the next run to resume from (applier.CatchupOptions.SlotLagCeiling).
 	// Zero takes decode.DefaultSlotLagCeiling, one GiB; a negative value is
-	// refused before anything is read. A run that blocks writes holds no
-	// slot and does not read it. The CLI sets it from --slot-lag-ceiling.
+	// refused before anything is read. The preflight counts the ceiling,
+	// the default included, against FreeDiskBytes beside the shadow. A run
+	// that blocks writes holds no slot and does not read it. A live run
+	// needs a ceiling above about a release interval and a catch-up cycle
+	// of the cluster's WAL, with margin, or it stops wal-retained while its
+	// stream keeps up. The CLI sets it from --slot-lag-ceiling.
 	SlotLagCeilingBytes int64
 
 	// OnCheckpoint, when set, is the run's progress signal: it is called
@@ -186,7 +192,8 @@ type CopySwapOptions struct {
 // choices, the host's sizing, slot-lag ceiling, and progress hook, and the
 // one setting the route fixes — a done row from an earlier run is
 // replaced, since a second change on the table is the next statement, not
-// a rollback window.
+// a rollback window. The catch-up's requeue warnings go to the call's
+// diagnostics logger.
 func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions {
 	return schemachange.RunOptions{
 		Copier:             o.Copier,
@@ -194,7 +201,7 @@ func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions
 		ReplaceDone:        true,
 		Restart:            o.Restart != "",
 		CheckpointInterval: o.CheckpointInterval,
-		Catchup:            applier.CatchupOptions{SlotLagCeiling: o.SlotLagCeilingBytes},
+		Catchup:            applier.CatchupOptions{Logger: logger, SlotLagCeiling: o.SlotLagCeilingBytes},
 		AfterCheckpoint: func(ctx context.Context, cp checkpoint.Checkpoint) error {
 			logger.Debug("copy-and-swap checkpoint saved",
 				"schema", cp.Schema, "table", cp.Table, "phase", cp.Phase.String())
@@ -208,11 +215,18 @@ func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions
 
 // environment is what the operator declared about the run's surroundings,
 // in the form the preflight reads: a quiesced run decodes no WAL, so it
-// needs none of the server's logical-decoding facilities.
+// needs none of the server's logical-decoding facilities. The slot lag
+// ceiling is the one the catch-up will enforce, the default when none is
+// set, so the disk check counts the WAL the slot may actually retain.
 func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
+	ceiling := o.SlotLagCeilingBytes
+	if ceiling == 0 {
+		ceiling = decode.DefaultSlotLagCeiling
+	}
 	return preflight.CopySwapEnvironment{
-		LogicalDecoding: o.BlockWrites == "",
-		FreeDiskBytes:   o.FreeDiskBytes,
+		LogicalDecoding:     o.BlockWrites == "",
+		FreeDiskBytes:       o.FreeDiskBytes,
+		SlotLagCeilingBytes: ceiling,
 	}
 }
 
@@ -300,7 +314,18 @@ func copySwapOutcome(st statement.Statement, hold sourceHold, result schemachang
 		Table:         qualified(st),
 		Detail:        detail,
 		WritesBlocked: hold == holdFence,
+		SwapLSN:       swapLSN(result),
 	}, nil
+}
+
+// swapLSN renders the WAL position the run's own swap transaction read, or
+// empty when the run's proof of the swap carries none: one re-derived from
+// the catalog, or none at all once the retained source was gone.
+func swapLSN(result schemachange.Result) string {
+	if result.Swapped.SwapPosition == 0 {
+		return ""
+	}
+	return result.Swapped.SwapPosition.String()
 }
 
 // copySwapPreflightVerdict folds a copy-and-swap preflight error into Run's
@@ -438,7 +463,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 	resume := "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
 	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause == decode.SlotLagWALRetained {
 		return resume + "; when no open or prepared write transaction on the source holds the WAL back, the write rate is the cause, " +
-			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE)"
+			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); the resume counts that ceiling against --free-disk beside the shadow, so the free space passed must cover it too"
 	}
 	return resume
 }
