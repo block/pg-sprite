@@ -1,0 +1,44 @@
+# Kept out of ci.yml, and so out of the all-green rollup, deliberately. The
+# slot release proof runs a catch-up on the real clock through two of
+# PostgreSQL's own slot releases, about a minute a major, and it measures the
+# server's behaviour rather than the diff in front of it: the WAL the slot
+# retains between releases is what the lag-ceiling sizing rule in
+# docs/copy-and-swap.md rests on. Run weekly on main, it fails here, on the
+# major whose release cadence changed, instead of rotting unnoticed.
+name: Slot Release Proof
+
+on:
+  schedule:
+    - cron: "41 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  proof:
+    name: slot release proof (PostgreSQL ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ["14", "15", "16", "17", "18"]
+    env:
+      PG_VERSION: ${{ matrix.pg }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      # The test starts its own PostgreSQL container (testcontainers), so
+      # PG_DSN stays unset; the log carries the slot's positions at every
+      # reading, which tells the server's timing apart from a slow stream.
+      - name: Run the slot release proof
+        run: make slot-release-proof
