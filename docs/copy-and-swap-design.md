@@ -435,7 +435,7 @@ observation and policy.
 **Where enforced.** `pkg/copier` (`Chunker`: chunks are sized in rows and cut by keyset from the
 live table, so sparse and dense key spaces yield equal work per chunk; each timing feedback scales
 the measured chunk's own row count toward the target by at most a factor of two, within a configured
-floor and ceiling, so concurrent workers' reports do not compound; `Copier` times each chunk from claim to commit on an injected clock and feeds it back; `Pace`: a worker waits before a chunk claim while the backlog its caller measures is over a mark, bounded per chunk, and `Paced` counts the waits), `pkg/schemachange` (`Runner` sets the pace on the live route alone, from its catch-up's per-cycle `Status().Lag()` against a quarter of the run's slot lag ceiling, refuses a pace the caller sets, and reports the waits on `Result.CopyPaced`), `pkg/decode` (`SlotLagWatch`), and `pkg/applier` (`Catchup` judges the slot every cycle); LK-3, ST-3.
+floor and ceiling, so concurrent workers' reports do not compound; `Copier` times each chunk from claim to commit on an injected clock and feeds it back; `Pace`: a worker waits before a chunk claim while the backlog its caller measures is over a mark, bounded per chunk, and `Paced` counts the waits), `pkg/schemachange` (`Runner` sets the pace on the live route alone, from its catch-up's per-cycle `Status().Lag()` against a quarter of the run's slot lag ceiling, refuses a pace the caller sets, and reports the waits on `Result.CopyPaced`, and on the `SlotLagExceededError` of a run the ceiling stopped), `pkg/decode` (`SlotLagWatch`), and `pkg/applier` (`Catchup` judges the slot every cycle); LK-3, ST-3.
 
 ### D13 — Recover unique-secondary-key moves batch-wide
 
