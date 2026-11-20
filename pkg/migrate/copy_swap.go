@@ -289,6 +289,13 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	if hold == holdFence && err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
 		hold, err = fenceAfterStop(ctx, store, st, err)
 	}
+	if result.CarriedCompare.Keys > 0 {
+		// A committed swap found every carried key equal: one that differs
+		// refuses the swap, and the refusal names the count and the time.
+		logger.Debug("copy-and-swap compared carried keys under the swap lock",
+			"schema", st.Schema(), "table", st.Table(), "carried_keys", result.CarriedCompare.Keys,
+			"elapsed", result.CarriedCompare.Elapsed)
+	}
 	return copySwapOutcome(st, hold, result, err)
 }
 

@@ -28,7 +28,7 @@ import (
 // statement, before the lock is granted. The drain's post-write
 // resolution check also needs a fresh snapshot to see a catalog change
 // its writes resolved through (CO-9).
-func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, requireFence bool, opts Options) (SwappedTable, swapBackend, error) {
+func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts CutoverOptions) (SwappedTable, swapBackend, error) {
 	built := ready.built
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite})
 	if err != nil {
@@ -44,7 +44,7 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 	if err != nil {
 		return SwappedTable{}, swapBackend{}, err
 	}
-	swapped, err := swapInTx(ctx, tx, lock, ready, drain, requireFence, opts)
+	swapped, err := swapInTx(ctx, tx, lock, ready, drain, opts)
 	if err != nil {
 		return SwappedTable{}, backend, err
 	}
@@ -56,9 +56,9 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 
 // swapInTx runs every statement of the swap inside the open transaction,
 // up to but not including COMMIT.
-func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, requireFence bool, opts Options) (SwappedTable, error) {
+func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts CutoverOptions) (SwappedTable, error) {
 	built := ready.built
-	if err := setGateSession(ctx, tx, built, opts); err != nil {
+	if err := setGateSession(ctx, tx, built, opts.Options); err != nil {
 		return SwappedTable{}, err
 	}
 	if err := confirmTableLock(ctx, tx, lock); err != nil {
@@ -70,7 +70,7 @@ func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, rea
 	// A quiesced proof is only as good as the fence that kept the source
 	// quiet; a live proof is finished by the drain instead.
 	// INV: CO-1
-	if requireFence && !ready.verified.Live() {
+	if opts.requireWriteFence && !ready.verified.Live() {
 		if err := confirmWriteFence(ctx, tx, built); err != nil {
 			return SwappedTable{}, err
 		}
@@ -98,7 +98,8 @@ func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, rea
 	// nothing can change them: after the drain, on the relations the
 	// checklist just confirmed, before any name moves.
 	// INV: CO-1
-	if err := compareCarried(ctx, tx, fresh); err != nil {
+	carried, err := compareCarried(ctx, tx, fresh, opts.clock())
+	if err != nil {
 		return SwappedTable{}, err
 	}
 	if err := renameForSwap(ctx, tx, fresh); err != nil {
@@ -115,7 +116,7 @@ func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, rea
 	if err != nil {
 		return SwappedTable{}, err
 	}
-	swapped := newSwappedTable(fresh, identities, 0)
+	swapped := newSwappedTable(fresh, identities, carried, 0)
 	swapped.swapPosition = position
 	return swapped, nil
 }
