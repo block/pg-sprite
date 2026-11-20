@@ -151,7 +151,8 @@ type RetainedWAL struct {
 // once. The read runs on the caller's pool, whatever its search_path, so
 // every function, cast, and operator is spelled through pg_catalog: a
 // lookalike = on name would otherwise find a slot for a name nobody holds
-// and call another database's slot this one's (CO-9).
+// and call another database's slot this one's (CO-9), which InspectResume
+// would then adopt as its own (ST-3) or not see as lost (ST-4).
 const inspectSlotSQL = `
 	SELECT s.database, s.slot_type OPERATOR(pg_catalog.=) 'logical',
 	       s.slot_type OPERATOR(pg_catalog.=) 'logical'
@@ -180,7 +181,10 @@ const inspectSlotSQL = `
 // Database so the caller never mistakes it for its own. On a server in
 // recovery the slot's retained and unconfirmed WAL are unknown and the
 // rest of the row is reported. The invalidation cause is Reported only on
-// a server that has the column.
+// a server that has the column. The read resolves every name through
+// pg_catalog, whatever db's search_path, so a pool with a shadowing path
+// is safe to pass; a RowQuerier that wraps db must run the statement as
+// given.
 func InspectSlot(ctx context.Context, db dbconn.RowQuerier, name string) (status SlotStatus, found bool, err error) {
 	var database, walStatus, restartLSN, confirmedFlushLSN, invalidation *string
 	var activePID *int32

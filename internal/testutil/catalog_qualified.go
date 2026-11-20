@@ -4,13 +4,13 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 var (
-	catalogRelation      = regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+(\S+)`)
+	catalogRelation      = regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+(?:LATERAL\s+)?(\(\s*(?:SELECT|VALUES|WITH)\b|\S+)`)
+	catalogSubquery      = regexp.MustCompile(`(?i)^\(\s*(?:SELECT|VALUES|WITH)\b`)
 	catalogCall          = regexp.MustCompile(`([A-Za-z_][A-Za-z_.0-9]*)\(`)
 	catalogCast          = regexp.MustCompile(`::([A-Za-z_][A-Za-z_.0-9]*)`)
 	catalogOperator      = regexp.MustCompile(`OPERATOR\(pg_catalog\.[^)]+\)`)
@@ -22,6 +22,13 @@ var (
 	catalogOperatorWord = regexp.MustCompile(`(?i)\b(?:LIKE|ILIKE|SIMILAR|IN|BETWEEN|DISTINCT)\b`)
 )
 
+// catalogT is the part of *testing.T AssertCatalogQualified uses, so its
+// own test can record a report rather than fail.
+type catalogT interface {
+	Helper()
+	Errorf(format string, args ...any)
+}
+
 // AssertCatalogQualified fails on any relation, function, or cast in query
 // not qualified with pg_catalog, the relations in own excepted, and on any
 // operator not spelled OPERATOR(pg_catalog.…): every operator character
@@ -29,7 +36,7 @@ var (
 // path (LIKE, IN, BETWEEN, IS DISTINCT FROM). It is the text half of CO-9
 // for a read that runs on a caller's pool, whatever its search_path; a
 // lookalike pool proves the behaviour.
-func AssertCatalogQualified(t *testing.T, query string, own ...string) {
+func AssertCatalogQualified(t catalogT, query string, own ...string) {
 	t.Helper()
 	for _, match := range catalogRelation.FindAllStringSubmatch(query, -1) {
 		if slices.Contains(own, match[1]) {
@@ -37,12 +44,14 @@ func AssertCatalogQualified(t *testing.T, query string, own ...string) {
 		}
 		// A subquery in FROM or JOIN, LATERAL or not, names no relation
 		// itself; the relations and functions inside it are matched on
-		// their own.
-		if strings.HasPrefix(match[1], "(") || strings.EqualFold(match[1], "LATERAL") {
+		// their own. A parenthesised join is not a subquery: its first
+		// relation is matched without the parenthesis before it.
+		if catalogSubquery.MatchString(match[1]) {
 			continue
 		}
-		assert.True(t, strings.HasPrefix(match[1], "pg_catalog."),
-			"relation %q is not qualified with pg_catalog in:\n%s", match[1], query)
+		relation := strings.TrimLeft(match[1], "(")
+		assert.True(t, strings.HasPrefix(relation, "pg_catalog."),
+			"relation %q is not qualified with pg_catalog in:\n%s", relation, query)
 	}
 	for _, match := range catalogCall.FindAllStringSubmatch(query, -1) {
 		switch match[1] {
