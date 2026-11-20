@@ -2,7 +2,9 @@ package schemachange_test
 
 import (
 	"context"
+	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,21 +49,23 @@ func fillWAL(ctx context.Context, pool *pgxpool.Pool, rows int) error {
 
 // A live run the lag ceiling stops as stream-behind says on the error how
 // far its copy was held back before the stop, since Run returns no Result
-// with an error. The capture is held from confirming past one change the
-// source never makes visible, written at the run's first save, so every
-// later byte of WAL counts as the stream's lag. About 7 MiB written then
-// puts the lag over the pace's 4 MiB mark and under the 16 MiB ceiling,
-// so the copy's next chunk waits; the first wait writes about 26 MiB
-// more, which the next catch-up cycle reads over the ceiling.
+// with an error. The copy reads the stream's lag over its pace mark at
+// every reading, so it waits before its first chunk however the run is
+// timed. The capture is held from confirming past one change the source
+// never makes visible, written at the run's first save, so every later
+// byte of WAL counts as the stream's lag. Once that hold is in place, the
+// copy's first wait writes about 26 MiB, which the next catch-up cycle
+// reads over the 16 MiB ceiling.
 func TestRunnerStoppedStreamBehindReportsHowFarItsCopyWasHeldBack(t *testing.T) {
-	const seeded = 20000
+	const seeded = 2500
 	f := newDecodingFixtureOn(t, seeded, synchronousStandbyThatNeverConnects)
 	hidden := newHiddenCommit(t, f)
 	_, err := f.pool.Exec(t.Context(), walFillerTable)
 	require.NoError(t, err)
 
 	holdConfirmation := hidden.whenIn(t, checkpoint.PhaseCopying)
-	var overMark, overCeiling sync.Once
+	var held atomic.Bool
+	var overCeiling sync.Once
 	opts := liveRunOptions(schemachange.RunOptions{
 		Catchup: applier.CatchupOptions{SlotLagCeiling: paceStopCeiling, Interval: 10 * time.Millisecond},
 		Live:    checksum.LiveOptions{Poll: pacePoll},
@@ -69,15 +73,13 @@ func TestRunnerStoppedStreamBehindReportsHowFarItsCopyWasHeldBack(t *testing.T) 
 			if err := holdConfirmation(ctx, cp); err != nil {
 				return err
 			}
-			if cp.Phase != checkpoint.PhaseCopying {
-				return nil
+			if cp.Phase == checkpoint.PhaseCopying {
+				held.Store(true)
 			}
-			var fillErr error
-			overMark.Do(func() { fillErr = fillWAL(ctx, f.pool, 7000) })
-			return fillErr
+			return nil
 		},
 		Sleep: func(ctx context.Context, d time.Duration) error {
-			if d == pacePoll {
+			if d == pacePoll && held.Load() {
 				var fillErr error
 				overCeiling.Do(func() { fillErr = fillWAL(ctx, f.pool, 24000) })
 				if fillErr != nil {
@@ -89,6 +91,7 @@ func TestRunnerStoppedStreamBehindReportsHowFarItsCopyWasHeldBack(t *testing.T) 
 	})
 	r, err := schemachange.NewRunner(f.cfg, f.store, opts)
 	require.NoError(t, err)
+	schemachange.PaceOverMark(r, math.MaxInt64, nil)
 	_, err = r.Run(t.Context(), f.pool, f.target, f.liveStatement(t))
 
 	var exceeded *decode.SlotLagExceededError
