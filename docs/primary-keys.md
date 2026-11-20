@@ -255,7 +255,7 @@ The column then behaves like a `bigserial` key, and a rewrite runs through copy-
 the table passes the route's other shape checks:
 
 ```console
-$ pg-sprite migrate --copy-and-swap --free-disk 1GiB \
+$ pg-sprite migrate --copy-and-swap --free-disk 2GiB \
     --alter 'ALTER TABLE public.audit_log ALTER COLUMN note TYPE varchar(64)'
 executed via copy-and-swap
   table:     public.audit_log

@@ -134,7 +134,7 @@ vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environme
 | --- | --- | --- |
 | `*PrivilegeError` | `errors.As`; `Grant` is the exact statement to run | The engine role lacks the copy-and-swap tier against this table, or (for a run that decodes WAL) replication access. Raised before any shape or cluster read. |
 | `*UnsupportedCopySwapShapeError` | `CopySwapRefusalCauseOf` → a shape cause from the table below | The table's shape is outside what the route supports. |
-| `*CopySwapEnvironmentError` | `CopySwapRefusalCauseOf` → a cluster or volume cause from the table below, plus `Setting`, and for a measured disk refusal `FreeDiskBytes`, `ShadowBytes`, and `SlotLagCeilingBytes` (zero for a quiesced run) | The cluster or the volume cannot carry the run. |
+| `*CopySwapEnvironmentError` | `CopySwapRefusalCauseOf` → a cluster or volume cause from the table below, plus `Setting`, and for a measured disk refusal `FreeDiskBytes`, `RequiredShadowBytes` (the space required for the shadow, twice the table), and `SlotLagCeilingBytes` (the effective ceiling for a run that decodes WAL, even when the shadow alone does not fit; zero only for a quiesced run) | The cluster or the volume cannot carry the run. |
 | `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
 | any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
 

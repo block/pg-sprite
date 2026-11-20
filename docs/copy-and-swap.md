@@ -144,7 +144,9 @@ in it. The run stops when the slot holds more than the slot lag ceiling: 1 GiB u
 offline run holds no slot, so the flag is refused with `--block-writes`. The ceiling, the
 1 GiB default included, counts against `--free-disk` beside the shadow (see
 [Free disk space](#free-disk-space)), so a ceiling the volume cannot hold is refused with cause
-`copy-and-swap-disk-headroom` before anything is built.
+`copy-and-swap-disk-headroom` before anything is built. That check is a floor on the free
+space, not a guarantee the slot cannot fill the volume: as the next paragraph says, the slot can
+stand over the ceiling, so leave headroom above it.
 
 The ceiling is a stop threshold pg-sprite checks once per catch-up cycle, not a limit
 PostgreSQL enforces on the slot. The slot can hold more than the ceiling by the time a cycle
@@ -175,7 +177,8 @@ slot and the saved progress stay, so running the same command again resumes the 
   NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`). End it, then
   resume. If there is none, the source writes more WAL per release interval than the ceiling
   allows: resume with a higher ceiling, above the retained WAL the detail reports, and with
-  room on the volume for that much WAL:
+  room on the volume for that much WAL. The resume's preflight counts the new ceiling against
+  `--free-disk` beside the shadow, so the free space you measure and pass must cover it too:
 
 ```sh
 pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \

@@ -169,7 +169,7 @@ func TestRefuseCopySwapEnvironmentCountsTheSlotLagCeilingForALiveRun(t *testing.
 	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
 	assert.Empty(t, refusal.Setting)
 	assert.Equal(t, shadow+512<<20, refusal.FreeDiskBytes)
-	assert.Equal(t, shadow, refusal.ShadowBytes)
+	assert.Equal(t, shadow, refusal.RequiredShadowBytes)
 	assert.Equal(t, int64(1<<30), refusal.SlotLagCeilingBytes)
 
 	env.LogicalDecoding = false
@@ -185,6 +185,55 @@ func TestRefuseCopySwapEnvironmentCountsTheSlotLagCeilingForALiveRun(t *testing.
 	require.NotNil(t, refusal, "a ceiling the volume cannot hold beside the shadow is refused, not overflowed")
 	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
 	assert.Equal(t, int64(math.MaxInt64), refusal.SlotLagCeilingBytes)
+}
+
+// A caller of the exported preflight that leaves the ceiling unset gets the
+// default the catch-up will enforce counted, not a shadow-only check, and a
+// negative ceiling is refused rather than read as no WAL.
+func TestRefuseCopySwapEnvironmentCountsTheDefaultCeilingWhenNoneIsSet(t *testing.T) {
+	facts, env := sufficientCopySwapEnvironment()
+	shadow := facts.totalBytes * copySwapDiskHeadroomFactor
+	env.SlotLagCeilingBytes = 0
+	env.FreeDiskBytes = shadow
+
+	refusal := refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal, "an unset ceiling is the default, which does not fit beside the shadow")
+	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+	assert.Equal(t, DefaultSlotLagCeiling, refusal.SlotLagCeilingBytes)
+
+	env.FreeDiskBytes = shadow + DefaultSlotLagCeiling
+	assert.Nil(t, refuseCopySwapEnvironment(facts, env), "the shadow plus the default ceiling is admitted")
+
+	env.SlotLagCeilingBytes = -5
+	refusal = refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal, "a negative ceiling is refused, not counted as no WAL")
+	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+	assert.Zero(t, refusal.FreeDiskBytes, "a refused ceiling is not a measured disk refusal")
+}
+
+// A live run whose free space does not cover even the shadow is refused once
+// for the whole requirement, so the operator who raises the free space to the
+// figure named is not refused again for the ceiling. An offline run at the
+// same size counts no ceiling.
+func TestLiveRefusalBelowTheShadowNamesTheWholeRequirement(t *testing.T) {
+	facts, env := sufficientCopySwapEnvironment()
+	shadow := facts.totalBytes * copySwapDiskHeadroomFactor
+	env.SlotLagCeilingBytes = 1 << 30
+	env.FreeDiskBytes = shadow - 1
+
+	refusal := refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal)
+	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+	assert.Equal(t, shadow-1, refusal.FreeDiskBytes)
+	assert.Equal(t, shadow, refusal.RequiredShadowBytes)
+	assert.Equal(t, int64(1<<30), refusal.SlotLagCeilingBytes)
+
+	env.LogicalDecoding = false
+	refusal = refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal)
+	assert.Equal(t, shadow-1, refusal.FreeDiskBytes)
+	assert.Equal(t, shadow, refusal.RequiredShadowBytes)
+	assert.Zero(t, refusal.SlotLagCeilingBytes, "an offline run holds no slot")
 }
 
 // Enablement is decided before the slot name, the slot name before
