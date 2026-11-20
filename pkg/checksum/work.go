@@ -43,6 +43,11 @@ import (
 //     a reread of every row of the chunk on both sides, judged key by
 //     key — so it can pass chunks_mismatched while the pass waits on a
 //     chunk some key of which keeps changing.
+//   - settle_rows_read is the number of rows a live pass has read row by
+//     row to settle its differing chunks, both sides counted: the sweep's
+//     read of each chunk it found differing, and every settling reread.
+//     It is the settling's read load beyond the sweep's digests, and stays
+//     zero under Check, which rereads digests and never rows.
 //
 // The counters are the pass's, not the step's: once the pass returns the
 // tracker no longer asks the verifier, and the pass's final figures are the
@@ -140,4 +145,12 @@ func (v *Verifier) countReread() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.work.ChunksReread++
+}
+
+// countSettleRows records the rows a live pass read, on both sides, from
+// one read of a chunk it is settling.
+func (v *Verifier) countSettleRows(read observation) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.work.SettleRowsRead += uint64(len(read.source) + len(read.shadow))
 }

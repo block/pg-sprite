@@ -300,6 +300,18 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 		assert.NotContains(t, v.Detail, "the run then returned")
 		assert.False(t, v.WritesBlocked, "a live run's verdict does not claim the table was offline")
+		assert.Empty(t, v.SwapLSN, "a run whose proof carries no swap position reports none")
+	})
+
+	t.Run("the swap's WAL position is rendered as pg_lsn text", func(t *testing.T) {
+		done := schemachange.Result{
+			Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone},
+			Swapped:    schemachange.SwapProof{SwapPosition: 0x1_00A2B3C8},
+			SwapProven: true,
+		}
+		v, err := copySwapOutcome(st, holdSlot, done, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "1/A2B3C8", v.SwapLSN)
 	})
 
 	t.Run("a block-writes done row is marked writes-blocked", func(t *testing.T) {
@@ -337,6 +349,7 @@ func TestCopySwapRunOptionsCarryTheHostsPolicy(t *testing.T) {
 		assert.True(t, got.ReplaceDone)
 		assert.Equal(t, 3, got.Copier.Workers)
 		assert.Equal(t, 2*time.Second, got.CheckpointInterval)
+		assert.Same(t, logger, got.Catchup.Logger, "the catch-up's requeue warnings reach the call's diagnostics")
 		assert.Equal(t, int64(3<<30), got.Catchup.SlotLagCeiling, "the ceiling reaches the catch-up that enforces it")
 	})
 

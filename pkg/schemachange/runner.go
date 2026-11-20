@@ -237,6 +237,10 @@ type Runner struct {
 	cfg   dbconn.Config
 	store *checkpoint.Store
 	opts  RunOptions
+	// paceWrap, when set, wraps the catch-up a live run's copy is paced
+	// by. Tests set it: a real stream's lag crosses the pace mark only as
+	// the timing of a run allows, and a wrapped reading crosses it on cue.
+	paceWrap func(catchupStatus) catchupStatus
 }
 
 // Result is what a completed run hands back.

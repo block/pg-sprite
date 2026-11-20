@@ -49,7 +49,7 @@ const (
 // field semantics. Adding a phase or operation value is a contract change
 // and bumps this version, even when no field is added or renamed. Adding a
 // field also bumps this version so strict consumers can detect the new shape.
-const FormatVersion = 7
+const FormatVersion = 8
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -84,7 +84,8 @@ const (
 // counter marshals explicitly — a fresh build reports honest zeros, never an
 // empty object a consumer must guess at. Rows and bytes belong to the
 // copy-and-swap row copy; chunks compared, rows hashed, rows to hash, chunks
-// mismatched, chunks repaired and chunks reread to the checksum pass;
+// mismatched, chunks repaired, chunks reread and settle rows read to the
+// checksum pass;
 // changes applied, changes buffered and lag bytes to the catch-up; blocks,
 // tuples and lockers to a concurrent index build. No operation fabricates
 // another's counters.
@@ -99,6 +100,7 @@ type Work struct {
 	ChunksMismatched uint64 `json:"chunks_mismatched"`
 	ChunksRepaired   uint64 `json:"chunks_repaired"`
 	ChunksReread     uint64 `json:"chunks_reread"`
+	SettleRowsRead   uint64 `json:"settle_rows_read"`
 	ChangesApplied   uint64 `json:"changes_applied"`
 	ChangesBuffered  uint64 `json:"changes_buffered"`
 	LagBytes         uint64 `json:"lag_bytes"`

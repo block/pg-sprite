@@ -1,10 +1,14 @@
 package applier_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"runtime/pprof"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -135,6 +139,58 @@ type catchupSetup struct {
 	copierClock progress.Clock
 }
 
+// requeueRecords keeps the level and attributes of every record the
+// catch-up logs, and writes each to the test's output for a reader of a
+// failed run. Tests read the attributes, never the message text.
+type requeueRecords struct {
+	mu      sync.Mutex
+	records []loggedRecord
+	out     slog.Handler
+}
+
+type loggedRecord struct {
+	level slog.Level
+	attrs map[string]any
+}
+
+func newRequeueRecords(t *testing.T) *requeueRecords {
+	t.Helper()
+	return &requeueRecords{out: slog.NewTextHandler(t.Output(), nil)}
+}
+
+func (r *requeueRecords) logger() *slog.Logger { return slog.New(r) }
+
+func (r *requeueRecords) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *requeueRecords) Handle(ctx context.Context, rec slog.Record) error {
+	attrs := map[string]any{}
+	rec.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	r.mu.Lock()
+	r.records = append(r.records, loggedRecord{level: rec.Level, attrs: attrs})
+	r.mu.Unlock()
+	return r.out.Handle(ctx, rec)
+}
+
+func (r *requeueRecords) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *requeueRecords) WithGroup(string) slog.Handler { return r }
+
+// withKey is every record so far that carries key.
+func (r *requeueRecords) withKey(key string) []loggedRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []loggedRecord
+	for _, rec := range r.records {
+		if _, ok := rec.attrs[key]; ok {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
 func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *catchupRun {
 	t.Helper()
 	return startCatchupWith(t, f, catchupSetup{opts: opts})
@@ -247,6 +303,7 @@ func (r *catchupRun) awaitStatus(t *testing.T, what string, want func(applier.St
 		}
 		select {
 		case <-deadline.C:
+			r.logStuck(t)
 			t.Fatalf("catch-up did not %s within %s; last status %+v", what, statusDeadline, s)
 		case <-poll.C:
 		}
@@ -290,9 +347,66 @@ func (r *catchupRun) wait(t *testing.T) error {
 		r.done <- err
 		return err
 	case <-time.After(stopDeadline):
-		t.Fatalf("catch-up did not return within %s of its context ending", stopDeadline)
+		r.logStuck(t)
+		t.Fatalf("catch-up did not return within %s", stopDeadline)
 		return nil
 	}
+}
+
+// logStuck records, for a catch-up test that missed a deadline, what is
+// needed to tell where the run is: the last completed cycle's whole status,
+// the server's write position and the slot read together a moment later,
+// and the stack of every catch-up goroutine. The lines suit every caller;
+// one snapshot shows no movement, so they are clues, not a verdict.
+//
+//   - A zero WALEnd says no cycle has completed.
+//   - Delivered against Confirmed separates a stream that delivered nothing
+//     from a confirmation that is held, and Held, Invisible and Deferred say
+//     what holds it.
+//   - A slot whose unconfirmed WAL is far past the status's WALEnd says the
+//     status is stale: the run is inside a cycle, and the stack names the
+//     call it is blocked in (the stream, a flush, or the pool).
+//   - In the ceiling tests, unconfirmed WAL under the ceiling while
+//     retained WAL is over it says the run is waiting out the retained-WAL
+//     grace.
+//
+// The reads are bounded and not tied to the test's context, which a
+// cleanup has already cancelled; Status takes only the catch-up's short
+// lock.
+func (r *catchupRun) logStuck(t *testing.T) {
+	t.Helper()
+	t.Logf("catch-up status: %+v", r.catchup.Status())
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+	defer cancel()
+	var written string
+	if err := r.f.pool.QueryRow(ctx, `SELECT pg_current_wal_lsn()::text`).Scan(&written); err != nil {
+		t.Logf("server write position: read failed: %v", err)
+	} else {
+		t.Logf("server write position: %s", written)
+	}
+	slot, found, err := decode.InspectSlot(ctx, r.f.pool, r.slot)
+	switch {
+	case err != nil:
+		t.Logf("slot %s: read failed: %v", r.slot, err)
+	case !found:
+		t.Logf("slot %s: not found", r.slot)
+	default:
+		t.Logf("slot %s: %+v", r.slot, slot)
+	}
+	var dump bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&dump, 2); err != nil {
+		t.Logf("goroutine dump failed: %v", err)
+		return
+	}
+	// Collected before logging: a range-over-func body is a closure, which
+	// t.Helper does not cover, so a log inside it names this line.
+	var stacks []string
+	for g := range strings.SplitSeq(dump.String(), "\n\n") {
+		if strings.Contains(g, "applier.(*Catchup).Run") {
+			stacks = append(stacks, g)
+		}
+	}
+	t.Logf("catch-up goroutines:\n%s", strings.Join(stacks, "\n\n"))
 }
 
 // catchUpTracker is a tracker mid catch-up step, the way the orchestrator
