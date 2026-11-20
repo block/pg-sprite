@@ -18,7 +18,13 @@ import (
 // a shared server would; and only a session queued behind the holder's own
 // table makes the holder blocking.
 func TestBlockedByNamesOnlyTheHoldersOwnWaiter(t *testing.T) {
-	pool, err := pgxpool.New(t.Context(), StartPostgres(t))
+	// The test holds four connections at once (two holders and two waiters)
+	// and probes on a fifth, so the pool is sized for that rather than left
+	// to its default, which is four on a four-CPU machine.
+	cfg, err := pgxpool.ParseConfig(StartPostgres(t))
+	require.NoError(t, err)
+	cfg.MaxConns = 6
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	schema := NewSchema(t, pool)
