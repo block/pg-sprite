@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // DefaultSlotLagCeiling is the most WAL a slot may hold before the route
@@ -17,7 +18,7 @@ import (
 // the server releases what the stream confirmed, so the volume needs
 // headroom above the ceiling of about the source's write rate times that
 // grace (see SlotLagWatch).
-const DefaultSlotLagCeiling int64 = 1 << 30
+const DefaultSlotLagCeiling = preflight.DefaultSlotLagCeiling
 
 // RestartReleaseInterval is the longest the server goes between the
 // running-transactions records it logs on a primary, busy or quiet (the

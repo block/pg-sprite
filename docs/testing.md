@@ -312,7 +312,8 @@ slots and publications, and disk for two full tables (the retained source and th
 live one) plus the WAL the slot retains. The workload row is about 10 KiB with its
 out-of-line column, so the default size is about 10 GiB a table. `LOAD_PROOF_FREE_DISK`
 has no default: it is the operator's statement of the free space on the data volume,
-and the preflight refuses the run when twice the table would not fit. A target other
+and the preflight refuses the run when twice the table plus the 1 GiB default slot lag
+ceiling would not fit. A target other
 than this machine (`localhost`, a loopback address, or a Unix socket) is refused unless
 `LOAD_PROOF_ALLOW_REMOTE=1` says that server is disposable; overriding
 `LOAD_PROOF_DSN` also skips starting the compose database. The test refuses to start

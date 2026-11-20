@@ -1342,7 +1342,8 @@ still draw each identity default from the source's sequence). *Source:*
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table), execute-and-introspect workspace, lock LK-1 acquired, and the RF-* refusals
+(~2× the table, plus the slot lag ceiling for a run that decodes WAL), execute-and-introspect
+workspace, lock LK-1 acquired, and the RF-* refusals
 below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
 checkpoint fingerprint uses the rolled-back, transaction-scoped `pkg/schemadiff` scratch schema.
@@ -1351,7 +1352,8 @@ declarative diff; for the copy-and-swap route, `pkg/preflight` `CheckPrivileges`
 grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability, `REPLICA
 IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
-caller-measured disk headroom against the shadow copy's requirement), chained by type —
+caller-measured disk headroom against the shadow copy's requirement plus, for a run that
+decodes WAL, the slot lag ceiling), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
 `migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
