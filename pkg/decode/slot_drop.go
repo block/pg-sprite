@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pglogrepl"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
@@ -70,15 +69,19 @@ func dropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name s
 	if !slotNamePattern.MatchString(name) {
 		return fmt.Errorf("%w: ST-3: %q is not an engine slot name", ErrInvariantViolation, name)
 	}
-	own, found, err := slotIsOwn(ctx, pool, name)
+	// INV: ST-3 — the slot is judged the engine's by InspectSlot's Own, the
+	// one statement that spells "a logical slot of the pool's own
+	// database"; it never consults the pool's search_path (CO-9), and a
+	// read that fails or cannot be parsed refuses the drop.
+	status, found, err := InspectSlot(ctx, pool, name)
 	if err != nil {
-		return err
-	}
-	if found && !own {
-		return foreignSlot(name)
+		return fmt.Errorf("drop slot %s: %w", name, err)
 	}
 	if !found {
 		return nil
+	}
+	if !status.Own {
+		return foreignSlot(name)
 	}
 	if err := dropReplicationSlot(ctx, cfg, pool, name, wait); err != nil {
 		return err
@@ -86,36 +89,12 @@ func dropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name s
 	return confirmSlotGone(ctx, pool, name)
 }
 
-// slotIsOwnSQL reads whether the named slot is a logical slot of the
-// session's database. The pool is the caller's, whatever its search_path,
-// so every comparison is spelled OPERATOR(pg_catalog.=): a lookalike = on
-// name would otherwise call another database's slot this one's and let
-// the drop take it (CO-9).
-const slotIsOwnSQL = `
-		SELECT s.slot_type OPERATOR(pg_catalog.=) 'logical'
-		   AND s.database OPERATOR(pg_catalog.=) pg_catalog.current_database()
-		FROM pg_catalog.pg_replication_slots s
-		WHERE s.slot_name OPERATOR(pg_catalog.=) $1`
-
-// slotIsOwn reports whether the named slot exists and, if so, whether it is
-// a logical slot of pool's own database.
-func slotIsOwn(ctx context.Context, pool *pgxpool.Pool, name string) (own, found bool, err error) {
-	err = pool.QueryRow(ctx, slotIsOwnSQL, name).Scan(&own)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, false, nil
-	}
-	if err != nil {
-		return false, false, fmt.Errorf("read slot %s: %w", name, err)
-	}
-	return own, true, nil
-}
-
 // confirmSlotGone re-reads the catalog after a drop the server accepted and
 // refuses to report a drop while the slot is still there.
 func confirmSlotGone(ctx context.Context, pool *pgxpool.Pool, name string) error {
-	_, found, err := slotIsOwn(ctx, pool, name)
+	_, found, err := InspectSlot(ctx, pool, name)
 	if err != nil {
-		return err
+		return fmt.Errorf("confirm drop of slot %s: %w", name, err)
 	}
 	// INV: ST-3 — success means the catalog no longer shows the slot.
 	if found {
