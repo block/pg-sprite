@@ -1,6 +1,8 @@
 package migrate
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -110,13 +112,30 @@ func TestEachMismatchIsAnAcknowledgementMismatchError(t *testing.T) {
 	}
 }
 
+// Every registered acknowledgement has a mismatch sentinel of its own, and
+// its typed error unwraps to it, so a kind added to the registry without
+// one fails here rather than refusing with an error no sentinel answers.
+func TestEveryAcknowledgementKindUnwrapsToItsOwnMismatchSentinel(t *testing.T) {
+	seen := map[error]ackKind{}
+	for _, a := range ackKinds() {
+		sentinel := a.mismatchErr()
+		require.NotNilf(t, sentinel, "%s has no case in mismatchErr", a)
+		prior, dup := seen[sentinel]
+		require.Falsef(t, dup, "%s and %s share a mismatch sentinel", a, prior)
+		seen[sentinel] = a
+
+		err := a.mismatch("app.orders", "app.other")
+		assert.Equal(t, sentinel, errors.Unwrap(err), "%s", a)
+		assert.ErrorIs(t, err, sentinel)
+		assert.True(t, strings.HasPrefix(err.Error(), sentinel.Error()), "%s: %q", a, err.Error())
+	}
+}
+
 // The accept-blocking mismatch is built after the statement's lock is read,
 // so it is pinned here directly: its message names the statement kind
 // whose lock was acknowledged, and it answers only its own sentinel.
 func TestAcceptBlockingMismatchNamesTheLockingStatement(t *testing.T) {
-	mismatch := ackAcceptBlocking.mismatch("app.orders", "app.other")
-	mismatch.locks = statement.KindDropIndex
-	var err error = mismatch
+	var err error = acceptBlockingMismatch("app.orders", "app.other", statement.KindDropIndex)
 
 	assert.EqualError(t, err,
 		`the accept-blocking acknowledgement must name the table the statement locks: DROP INDEX locks "app.orders", got "app.other"; nothing was executed`)

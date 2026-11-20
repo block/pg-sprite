@@ -23,7 +23,7 @@ var ErrRestartNotSupported = errors.New(
 	"the restart acknowledgement applies to the imperative front door only; desired-state execution resumes a stopped run and never starts one over")
 
 // ErrRestartMismatch means the restart acknowledgement named a table other
-// than the statement's resolved target. Nothing has executed.
+// than the statement's resolved target. Nothing has executed. The error is an [AcknowledgementMismatchError] carrying both tables.
 var ErrRestartMismatch = errors.New("the restart acknowledgement must name the resolved target table")
 
 // checkRestartAck confirms that the restart acknowledgement names the

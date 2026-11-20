@@ -23,7 +23,8 @@ import (
 var (
 	// ErrAllowDestructiveMismatch means the destructive acknowledgement
 	// named a table other than the statement's resolved target. Nothing has
-	// executed.
+	// executed. The error is an [AcknowledgementMismatchError] carrying both
+	// tables.
 	ErrAllowDestructiveMismatch = errors.New("the destructive acknowledgement must name the resolved target table")
 	// ErrAllowDestructiveNotSupported is returned by [RunDesired] when
 	// Options.AllowDestructive is set: desired-state execution refuses a

@@ -76,6 +76,7 @@ var ErrBlockWritesNotSupported = errors.New(
 
 // ErrBlockWritesMismatch means the block-writes acknowledgement named a
 // table other than the statement's resolved target. Nothing has executed.
+// The error is an [AcknowledgementMismatchError] carrying both tables.
 var ErrBlockWritesMismatch = errors.New("the block-writes acknowledgement must name the resolved target table")
 
 // checkBlockWritesAck confirms that the block-writes acknowledgement names the
