@@ -77,9 +77,12 @@ type SlotLagExceededError struct {
 	Ceiling     int64
 	// CopyPaced is how far the stopped run's copy was held back by the WAL
 	// its stream had yet to confirm, as schemachange.Runner records it on
-	// a live run's stop. It is the zero Paced for a run that made no copy,
-	// for a copy the stream kept up with, and for an abort from a catch-up
-	// no Runner drives.
+	// a live run's stop of either cause; a stop after the copy ended
+	// carries the whole copy's count. Waited counts finished poll steps
+	// only, so a wait the stop interrupted adds to Waits and not to Waited.
+	// It is the zero Paced for a run that made no copy, for a copy the
+	// stream kept up with, and for an abort from a catch-up no Runner
+	// drives, so zero does not tell those apart.
 	CopyPaced copier.Paced
 }
 

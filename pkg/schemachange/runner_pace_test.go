@@ -3,6 +3,7 @@ package schemachange
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -164,4 +165,36 @@ func TestPaceOverMarkGivesEachRunItsOwnReadings(t *testing.T) {
 	assert.Positive(t, first.Status().Lag())
 	assert.Positive(t, second.Status().Lag())
 	assert.Zero(t, first.Status().Lag())
+}
+
+// A lag-ceiling stop of either cause carries the copy's whole pace, found
+// however deep it is wrapped, and the error comes back as it came, still
+// answering for the ceiling.
+func TestRecordCopyPacedCarriesThePaceOnALagStop(t *testing.T) {
+	paced := copier.Paced{Waits: 3, Expired: 1, Waited: 90 * time.Millisecond}
+	for name, cause := range map[string]decode.SlotLagCause{
+		"stream-behind": decode.SlotLagStreamBehind,
+		"wal-retained":  decode.SlotLagWALRetained,
+	} {
+		t.Run(name, func(t *testing.T) {
+			lag := &decode.SlotLagExceededError{Slot: "s", Cause: cause, Ceiling: 1}
+			wrapped := errors.Join(fmt.Errorf("capture: %w", lag), errors.New("end"))
+			got := recordCopyPaced(wrapped, paced)
+			assert.Equal(t, wrapped, got, "the error is returned as it came")
+			assert.Equal(t, paced, lag.CopyPaced)
+			assert.ErrorIs(t, got, decode.ErrSlotLagCeiling)
+		})
+	}
+}
+
+// Any error that is not a lag-ceiling stop, and no error, passes through
+// untouched.
+func TestRecordCopyPacedLeavesOtherErrorsAlone(t *testing.T) {
+	paced := copier.Paced{Waits: 3}
+	assert.NoError(t, recordCopyPaced(nil, paced))
+	ended := fmt.Errorf("capture: %w", decode.ErrStreamEnded)
+	assert.Same(t, ended, recordCopyPaced(ended, paced))
+	lost := &decode.SlotLostError{Slot: "s"}
+	assert.Equal(t, error(lost), recordCopyPaced(lost, paced))
+	assert.Equal(t, decode.SlotLostError{Slot: "s"}, *lost)
 }
