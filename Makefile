@@ -16,6 +16,8 @@ REPLAY_PROJECT ?= buzz
 
 # Compose file whose image pins check-image-pins verifies.
 PINS_FILE ?= compose/supabase.yml
+# Guide whose tested versions must name each of those pins' versions.
+GUIDE_FILE ?= docs/supabase.md
 
 .PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
@@ -146,15 +148,18 @@ check-capabilities:
 check-vulnerabilities:
 	@scripts/check-vulnerabilities.sh
 
-# Fail if an image pin's tag no longer resolves to its pinned digest. Docker
+# Fail if the guide's tested versions do not name each pinned version (offline),
+# then if an image pin's tag no longer resolves to its pinned digest. Docker
 # pulls by digest and ignores the tag, so only a registry lookup catches a
-# wrong tag. PINS_FILE selects the compose file.
+# wrong tag. PINS_FILE selects the compose file, GUIDE_FILE the guide.
 check-image-pins:
+	@scripts/check-guide-versions.sh "$(PINS_FILE)" "$(GUIDE_FILE)"
 	@scripts/check-image-pins.sh "$(PINS_FILE)"
 
-# Drive check-image-pins through each outcome against a stand-in docker: no
-# registry, no Docker daemon.
+# Drive both checks through each outcome, check-image-pins against a stand-in
+# docker: no registry, no Docker daemon.
 test-image-pins:
+	@scripts/check-guide-versions_test.sh
 	@scripts/check-image-pins_test.sh
 
 # Configure git hooks (relative path so worktrees work too).
