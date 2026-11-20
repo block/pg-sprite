@@ -443,6 +443,15 @@ the zero `copier.Paced` for a quiesced run, for a run that resumed past its copy
 the stream kept up with. Like every field it is not returned with an error; a run the slot lag
 ceiling stopped carries the same count on the `*decode.SlotLagExceededError` it returns
 (`CopyPaced`), so a run that ended `stream-behind` still says whether its copy was held back.
+`CarriedCompare` says what
+the swap paid under its `ACCESS EXCLUSIVE` lock to compare the rows a live verification pass
+could not judge because the application kept rewriting them: `Keys`, how many it read on
+each side, and `Elapsed`, how long those reads held the lock. It tells a swap that compared
+keys from a plain one; a key that differed would have refused the swap as
+`cutover-carried-diverged`, so a returned `Result` always found them equal. It is zero for a
+quiesced run, for a live pass that left no key, and for a run that resumed past its swap.
+The compare reads at most `checksum.MaxCarryKeys` rows on each side, bounded otherwise only
+by the swap's `statement_timeout`, which rolls the swap back with the source live.
 
 ### Routing the checkpoint store's own refusals
 

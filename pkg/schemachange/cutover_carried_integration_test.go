@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
@@ -82,12 +83,27 @@ func shadowName(f reconcileFixture, shadow schemachange.BuiltShadow) string {
 	return pgx.Identifier{f.table.Schema, shadow.ShadowTable()}.Sanitize()
 }
 
+// steppingClock moves forward by step at every reading, so a duration
+// measured between two readings is exactly step.
+type steppingClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *steppingClock) Now() time.Time {
+	c.now = c.now.Add(c.step)
+	return c.now
+}
+
 // A proof that leaves a key for the swap is finished inside the swap
 // transaction: after the drain, under ACCESS EXCLUSIVE on both tables, the
 // swap reads the key on the source and on the shadow. The drain here
 // stands in for the catch-up's and applies the one change the stream would
 // carry, the source's latest amount for the key, so the two sides are
-// equal, the swap commits, and the live table holds that amount.
+// equal, the swap commits, and the live table holds that amount. The
+// swapped table reports the one key compared and the time the compare
+// took by the cutover's clock, which reads once before the compare and
+// once after it.
 func TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft(t *testing.T) {
 	f := newReconcileFixture(t, 300)
 	shadow := f.buildShadow(t)
@@ -102,10 +118,12 @@ func TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft(t *testing.T) {
 		return err
 	}
 
-	swapped, err := schemachange.Cutover(t.Context(), f.pool, f.lock, ready, drain, schemachange.CutoverOptions{})
+	clock := &steppingClock{step: 3 * time.Millisecond}
+	swapped, err := schemachange.Cutover(t.Context(), f.pool, f.lock, ready, drain, schemachange.CutoverOptions{Clock: clock})
 	require.NoError(t, err)
 
 	assert.Equal(t, f.table.Table, swapped.Table())
+	assert.Equal(t, schemachange.CarriedCompare{Keys: 1, Elapsed: 3 * time.Millisecond}, swapped.CarriedCompare())
 	var live bool
 	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT to_regclass($1)::oid = $2`, f.table.Qualified(), shadow.ShadowOID()).Scan(&live))
 	assert.True(t, live, "the shadow bears the source's name")
