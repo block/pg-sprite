@@ -102,7 +102,9 @@ Handle unrelated upgrades in a separate follow-up. When making an upgrade:
 3. Run the required Supabase CI job and investigate failures before accepting
    new versions
 4. Update the tested versions and any changed limits in `docs/supabase.md` in
-   the same PR
+   the same PR. `make check-image-pins` first confirms, offline, that the
+   paragraph under "What works today" names each pinned tag's version (a
+   leading `v` dropped), and fails naming any pin it does not
 
 This check is triggered by agent work, not a scheduled update bot. Fresh CI
 runners pull the pinned images on each run, which also exposes unavailable pins,
