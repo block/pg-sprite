@@ -49,12 +49,19 @@ func AllVisible() Snapshot {
 	return Snapshot{read: true, all: true}
 }
 
+// snapshotSQL reads the server's current snapshot. It runs on the caller's
+// pool, whatever its search_path, so the cast is spelled through
+// pg_catalog as well as the function: a lookalike text type on the path
+// would otherwise reshape the snapshot the drain judges visibility by
+// (CO-9).
+const snapshotSQL = `SELECT pg_catalog.pg_current_snapshot()::pg_catalog.text`
+
 // ReadSnapshot takes the server's current snapshot on db. The snapshot is
 // read as text and parsed here rather than decoded as the server's xid8
 // type: the text form is stable across the supported majors.
 func ReadSnapshot(ctx context.Context, db dbconn.RowQuerier) (Snapshot, error) {
 	var text string
-	if err := db.QueryRow(ctx, `SELECT pg_catalog.pg_current_snapshot()::text`).Scan(&text); err != nil {
+	if err := db.QueryRow(ctx, snapshotSQL).Scan(&text); err != nil {
 		return Snapshot{}, fmt.Errorf("read the source's snapshot: %w", err)
 	}
 	snap, err := parseSnapshot(text)

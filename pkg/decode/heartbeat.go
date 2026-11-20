@@ -34,14 +34,23 @@ const (
 	minHeartbeatInterval = 10 * time.Millisecond
 )
 
+// senderTimeoutSQL reads wal_sender_timeout from the settings view. The
+// replication session it runs on takes its search_path from the caller's
+// connection settings and the role's and database's, none of which the
+// engine repairs, so the comparison is spelled OPERATOR(pg_catalog.=): a
+// lookalike = on text on that path would otherwise match no setting, or
+// another one, and the heartbeat would run at an interval the server's
+// timeout does not call for (CO-9).
+const senderTimeoutSQL = `
+	SELECT setting
+	FROM pg_catalog.pg_settings
+	WHERE name OPERATOR(pg_catalog.=) 'wal_sender_timeout'`
+
 // readSenderTimeout reads wal_sender_timeout as the session conn is about
 // to become a walsender sees it — a role or database setting included —
 // in milliseconds, which is the setting's unit on every supported server.
 func readSenderTimeout(ctx context.Context, conn *pgconn.PgConn) (time.Duration, error) {
-	results, err := conn.Exec(ctx, `
-		SELECT setting
-		FROM pg_catalog.pg_settings
-		WHERE name = 'wal_sender_timeout'`).ReadAll()
+	results, err := conn.Exec(ctx, senderTimeoutSQL).ReadAll()
 	if err != nil {
 		return 0, fmt.Errorf("read wal_sender_timeout: %w", err)
 	}
