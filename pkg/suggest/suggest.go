@@ -19,11 +19,12 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-// Version 5 added alter-column-type-in-place to the Guidance vocabulary;
-// version 4 added coordinated-constraint-rename; version 3 added
-// expand-contract-column and coordinated-table-rename; version 2 added
+// Version 6 added add-integer-primary-key to the Guidance vocabulary;
+// version 5 added alter-column-type-in-place; version 4 added
+// coordinated-constraint-rename; version 3 added expand-contract-column
+// and coordinated-table-rename; version 2 added
 // name-constraint-then-validate and unique-index-then-constraint.
-const FormatVersion = 5
+const FormatVersion = 6
 
 // Caveat is a typed condition attached to a recommendation; automation
 // branches on it, never on prose. The caveats are independent — no caveat
@@ -152,7 +153,20 @@ const (
 	// never by a suggestion: the advisory surface covers blocking idioms,
 	// and this statement is refused for its data loss.
 	GuidanceAlterColumnTypeInPlace Guidance = "alter-column-type-in-place"
+	// GuidanceAddIntegerPrimaryKey: a copy-and-swap change on a table with
+	// no primary key. The route chunks the copy and keys the change buffer
+	// on one integer-family primary-key column, so add one online — over a
+	// column that already identifies each row, or over a new bigint column
+	// filled from a sequence — and run the change again. Carried by a
+	// copy-and-swap-pk-unsupported refusal for a keyless table, never by a
+	// suggestion; a uuid, text, composite, or DEFERRABLE key carries none,
+	// since a table has one primary key and no online route replaces it.
+	GuidanceAddIntegerPrimaryKey Guidance = "add-integer-primary-key"
 )
+
+// primaryKeysGuideURL is the guide the add-integer-primary-key manual path
+// points at: it walks the online sequence step by step.
+const primaryKeysGuideURL = "https://github.com/block/pg-sprite/blob/main/docs/primary-keys.md#add-a-primary-key-online"
 
 // Guidances returns the closed set of Guidance values. It is part of the
 // suggest-report contract (docs/suggest-report.md): the set changes only
@@ -170,6 +184,7 @@ func Guidances() []Guidance {
 		GuidanceCoordinatedTableRename,
 		GuidanceCoordinatedConstraintRename,
 		GuidanceAlterColumnTypeInPlace,
+		GuidanceAddIntegerPrimaryKey,
 	}
 }
 
@@ -205,6 +220,10 @@ func ManualPath(g Guidance) string {
 	case GuidanceAlterColumnTypeInPlace:
 		return "change the column in place with ALTER TABLE ... ALTER COLUMN ... TYPE ... USING ..., which converts its values; " +
 			"dropping and re-adding it discards every value it holds"
+	case GuidanceAddIntegerPrimaryKey:
+		return "add a single-column integer primary key online — over a column that already identifies each row, " +
+			"or over a new bigint column filled from a sequence — then run the change again; the steps are at " +
+			primaryKeysGuideURL
 	}
 	return string(g)
 }

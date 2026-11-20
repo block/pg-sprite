@@ -49,7 +49,11 @@ import (
 // Version 18 added the dependent-trigger, dependent-generated-column, and
 // partition-key planner reasons and the dependent_triggers,
 // dependent_generated_columns, and partition_key_tables decision fields.
-const FormatVersion = 19
+// Version 20 added the add-integer-primary-key guidance code, which a
+// copy-and-swap-pk-unsupported refusal verdict for a keyless table
+// carries; no report emits it, but the report embeds the whole guidance
+// vocabulary.
+const FormatVersion = 20
 
 // Source identifies which front door derived the plan.
 type Source string

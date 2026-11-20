@@ -20,6 +20,7 @@ import (
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -330,13 +331,21 @@ func swapLSN(result schemachange.Result) string {
 
 // copySwapPreflightVerdict folds a copy-and-swap preflight error into Run's
 // contract: a missing privilege and a refused shape or environment are
-// refused verdicts; anything else stopped the pipeline before a verdict.
+// refused verdicts; anything else stopped the pipeline before a verdict. A
+// table refused for having no primary key carries the guidance to add one,
+// and its detail states the steps and where the guide is; every other key
+// shape has no online route and carries none.
 func copySwapPreflightVerdict(st statement.Statement, err error) (verdict.Verdict, error) {
-	r, detail, err := classifyCopySwapPreflight(err)
-	if err != nil {
-		return verdict.Verdict{}, err
+	r, detail, classifyErr := classifyCopySwapPreflight(err)
+	if classifyErr != nil {
+		return verdict.Verdict{}, classifyErr
 	}
-	return refusedVerdict(st, r, detail), nil
+	v := refusedVerdict(st, r, detail)
+	if shape, ok := errors.AsType[*preflight.UnsupportedCopySwapShapeError](err); ok && shape.NoPrimaryKey {
+		v.Guidance = suggest.GuidanceAddIntegerPrimaryKey
+		v.Detail += "; to run it through copy-and-swap, " + manualPath(v.Guidance)
+	}
+	return v, nil
 }
 
 // classifyCopySwapPreflight sorts an error out of preflight.CheckCopySwap

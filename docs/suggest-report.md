@@ -16,8 +16,8 @@ and the closed vocabularies below (caveats, guidance codes, and the embedded pla
 reasons and execution contracts): adding a value to any of them is a contract change and
 bumps `format_version`, even if no field is added or renamed.
 
-The current version is **5**: version 5 added `alter-column-type-in-place` to the
-Guidance vocabulary; version 4 added `coordinated-constraint-rename`; version 3 added `expand-contract-column` and
+The current version is **6**: version 6 added `add-integer-primary-key` to the
+Guidance vocabulary; version 5 added `alter-column-type-in-place`; version 4 added `coordinated-constraint-rename`; version 3 added `expand-contract-column` and
 `coordinated-table-rename` to the Guidance vocabulary and admitted `app-breaking-rename`
 as a suggestion `reason`; version 2 added `name-constraint-then-validate` and
 `unique-index-then-constraint` to the Guidance vocabulary.
@@ -195,6 +195,21 @@ place: `ALTER TABLE ... ALTER COLUMN qty TYPE bigint USING qty::bigint` converts
 value instead. If discarding the values is the intent, rerun the statement with
 `--allow-destructive` naming the table.
 
+### `add-integer-primary-key`
+
+**Emitted for:** never by a suggestion. A `pg-sprite migrate` refusal verdict with reason
+`copy-and-swap-refused` and cause `copy-and-swap-pk-unsupported` carries it when the table
+has no primary key at all.
+
+Copy-and-swap copies the table in ranges of one `smallint`, `integer`, or `bigint`
+primary-key column and keys the changes it replays on it. Add that key online, over a
+column that already identifies each row or over a new `bigint` column filled from a
+sequence, then run the change again: [primary-keys.md](primary-keys.md#add-a-primary-key-online)
+walks both. A table whose key is `uuid`, text, composite, or `DEFERRABLE` is refused under
+the same cause with no guidance: a table has one primary key, and pg-sprite has no online
+route that replaces it
+([primary-keys.md](primary-keys.md#tables-with-a-uuid-text-composite-or-deferrable-key)).
+
 ## The rewrite table: operation → safer form → caveats
 
 This is the specification of the advice — which safer native idiom each risky-as-written
@@ -223,7 +238,7 @@ A constructed rewrite (`pg-sprite suggest --json` over
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "suggestions": [
     {
       "statement": 1,
@@ -244,7 +259,7 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "suggestions": [
     {
       "statement": 1,
