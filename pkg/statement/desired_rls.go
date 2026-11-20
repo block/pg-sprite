@@ -15,7 +15,19 @@ import (
 var ErrRowSecurityDeclaration = errors.New("desired row security requires one explicit ENABLE or DISABLE on the desired table")
 
 // ErrRowSecurityTableDefinitionRequired identifies a missing table definition in an RLS file.
-var ErrRowSecurityTableDefinitionRequired = errors.New("desired row security requires a CREATE TABLE definition")
+// It also matches ErrRowSecurityDeclaration, whose sentence it does not print:
+// the file may well hold its ENABLE.
+var ErrRowSecurityTableDefinitionRequired error = rowSecurityTableDefinitionError{}
+
+type rowSecurityTableDefinitionError struct{}
+
+func (rowSecurityTableDefinitionError) Error() string {
+	return "desired row security requires a CREATE TABLE definition"
+}
+
+func (rowSecurityTableDefinitionError) Is(target error) bool {
+	return target == ErrRowSecurityDeclaration
+}
 
 // ErrPolicyRelationDependency refuses a policy expression that reads a table it
 // does not name schema-qualified. Policy expressions resolve against nothing but
@@ -134,7 +146,7 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 		}
 	}
 	if !hasTable {
-		return DesiredWithRowSecurity{}, fmt.Errorf("%w: %w", ErrRowSecurityTableDefinitionRequired, ErrRowSecurityDeclaration)
+		return DesiredWithRowSecurity{}, ErrRowSecurityTableDefinitionRequired
 	}
 	table, err := ParseDesired(tableSQL.String())
 	if err != nil {

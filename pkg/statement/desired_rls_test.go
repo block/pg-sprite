@@ -197,6 +197,8 @@ func TestDesiredRowSecurityRequiresTableDefinition(t *testing.T) {
  CREATE POLICY readers ON documents FOR SELECT USING (true);`)
 	require.ErrorIs(t, err, ErrRowSecurityDeclaration)
 	require.ErrorIs(t, err, ErrRowSecurityTableDefinitionRequired)
+	// The file has its ENABLE, so the message names only the missing table.
+	assert.EqualError(t, err, "desired row security requires a CREATE TABLE definition")
 }
 
 // Extension schemas widen only the table definition of a row-security
