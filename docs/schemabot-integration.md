@@ -727,7 +727,18 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   a usage error with a zero verdict and nothing executed, carrying its own sentinel:
   `ErrForceMismatch`, `ErrAcceptBlockingMismatch`, `ErrAllowDestructiveMismatch`,
   `ErrRestartMismatch`, `ErrBlockWritesMismatch`. Branch on them with `errors.Is`, not on the
-  message; a retry with the same input fails the same way. Where the table came from decides
+  message; a retry with the same input fails the same way. Each is a
+  `*migrate.AcknowledgementMismatchError`, so one `errors.As` answers whether the error is
+  any wrong-table acknowledgement, and its fields carry what to show: `Acknowledgement`
+  (the name as `migrate.Acknowledgements()` spells it, such as `force`), `Table` (the table
+  the acknowledgement must name), `Given` (the value it carried), and for `AcceptBlocking`
+  `LockingStatement` (the kind of the statement whose lock was acknowledged). `Table` is the
+  engine's flat `SCHEMA.TABLE` spelling: an unquoted name folded to lower case, a quoted one
+  kept as written, no quoting added. It is exactly what the operator must type, but it cannot be
+  split back into schema and table, and it is empty for a statement that names no table. The
+  error unwraps to its own sentinel and no other. Read it as the engine returns it; a value an
+  adapter builds in its own tests behaves the same only with `Acknowledgement` spelled as
+  `migrate.Acknowledgements()` returns it. Where the table came from decides
   the action. An acknowledgement the operator typed goes back to the operator, with the
   message, which carries the resolved table and the one given. One the adapter filled in from
   its own plan means the plan and the live schema disagree — a renamed table, a different

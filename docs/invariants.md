@@ -971,11 +971,12 @@ exactly that table: a `DROP INDEX ... CASCADE` also drops the objects that depen
 such as a foreign key on another table, so it is not a single-relation statement and the
 executor refuses it (`ErrUnsupportedAcceptedBlocking`) before opening a transaction.
 *Enforced:* `pkg/migrate`
-(`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
+(`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`, built as an
+`AcknowledgementMismatchError` by `acceptBlockingMismatch` in `ack_mismatch.go`,
 `ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
 `pkg/executor` (`acceptedBlockingIneligibility`), `pkg/statement` (`ParseOne` classifies a
 cascading drop as `IndexTargetOther`),
-`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`,
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestAcceptBlockingMismatchNamesTheLockingStatement`, `TestRelationKindMatches`,
 `TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`,
 `TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer`,
 `TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer`.
@@ -1639,7 +1640,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
-  run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
+  run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`, returned as an
+  `AcknowledgementMismatchError` from `ack_mismatch.go`; `TestEachMismatchIsAnAcknowledgementMismatchError`), `RunDesired`'s admission
   and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/planner`
   (`destructiveOp`, which decides every shape in `statement.OpKinds()` explicitly and
   treats an unclassified one as destructive;
@@ -1717,15 +1719,17 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
   refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel its wrong-target check wraps;
+  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel, a case for it in
+  `mismatchErr`, and a wrong-target check returning `AcknowledgementMismatchError`;
   a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
   (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
   `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
-  `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`),
-  `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`, each the
+  `Unwrap` of an `AcknowledgementMismatchError` through `mismatchErr`;
+  `TestEveryAcknowledgementKindUnwrapsToItsOwnMismatchSentinel`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
   registry's shape and the desired-state rejections;
   `TestEveryOpKindIsClassifiedForDestructiveness` and
