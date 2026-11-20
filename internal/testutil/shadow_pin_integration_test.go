@@ -117,15 +117,8 @@ func TestShadowPinCleanupWaitsForAHookStillPlacingThePin(t *testing.T) {
 	wg.Go(func() { pin.Clock().Now() })
 	const blockDeadline = 10 * time.Second
 	require.Eventually(t, func() bool {
-		var waiting bool
-		err := pool.QueryRow(t.Context(), `
-			SELECT EXISTS (
-				SELECT 1
-				FROM pg_catalog.pg_stat_activity
-				WHERE wait_event_type = 'Lock'
-				  AND datname = pg_catalog.current_database()
-			)`).Scan(&waiting)
-		return err == nil && waiting
+		blocked, err := BlockedBy(t.Context(), pool, holder.Conn().PgConn().PID())
+		return err == nil && blocked
 	}, blockDeadline, 20*time.Millisecond, "the pin's insert waits on the held key")
 
 	ended := make(chan error, 1)

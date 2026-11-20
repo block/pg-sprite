@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -203,6 +204,7 @@ func TestRunAcceptBlockingRejectsFalseAcknowledgements(t *testing.T) {
 		assert.Equal(t, "accept-blocking", mismatch.Acknowledgement)
 		assert.Equal(t, schema+".orders", mismatch.Table)
 		assert.Equal(t, schema+".customers", mismatch.Given)
+		assert.Equal(t, statement.KindDropIndex, mismatch.LockingStatement)
 		assert.EqualError(t, err, fmt.Sprintf(
 			`the accept-blocking acknowledgement must name the table the statement locks: DROP INDEX locks "%s.orders", got "%s.customers"; nothing was executed`,
 			schema, schema))
@@ -423,13 +425,12 @@ func TestRunAcceptBlockingReportsACancelledLockWaitAsNothingSubmitted(t *testing
 	}()
 
 	// Cancel only once the engine's table lock request is provably waiting
-	// on the holder; the polling query's own text does not start with it.
+	// on the holder. The request is found as the one session the holder
+	// blocks, not by its text: tests on a shared server have lock waits of
+	// their own.
 	require.Eventually(t, func() bool {
-		var waiting bool
-		err := pool.QueryRow(t.Context(),
-			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			  WHERE query LIKE 'LOCK TABLE %' AND wait_event_type = 'Lock')`).Scan(&waiting)
-		return err == nil && waiting
+		blocked, err := testutil.BlockedBy(t.Context(), pool, holder.Conn().PgConn().PID())
+		return err == nil && blocked
 	}, 30*time.Second, 25*time.Millisecond, "the engine's table lock request must be waiting on the holder's lock")
 	cancel()
 

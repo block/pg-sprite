@@ -71,7 +71,7 @@ type Options struct {
 	// backend-unavailable refusal. It must name the resolved
 	// schema-qualified target table exactly; empty means the engine's
 	// routing decides. A value naming any other table returns
-	// [ErrForceMismatch]. Planner refusals (no known safe path) and gated
+	// [ErrForceMismatch], an [AcknowledgementMismatchError]. Planner refusals (no known safe path) and gated
 	// statement kinds cannot be forced.
 	Force string
 
@@ -82,7 +82,7 @@ type Options struct {
 	// statement-kind gate refuses. It must name the schema-qualified table
 	// whose lock the operator accepts — the index's owning table, resolved
 	// from the catalog — exactly; empty means every refusal stands. A
-	// value naming any other table returns [ErrAcceptBlockingMismatch].
+	// value naming any other table returns [ErrAcceptBlockingMismatch], an [AcknowledgementMismatchError].
 	// Ineligible refusals stand regardless. Force and AcceptBlocking are
 	// mutually exclusive: a statement reaches one routing decision, and
 	// one acknowledgement names it. An accepted DROP INDEX also needs
@@ -96,7 +96,7 @@ type Options struct {
 	// could take. It must name the resolved schema-qualified target table
 	// exactly — for a DROP INDEX, the index's owning table; empty means
 	// destructive statements are refused. A value naming any other table
-	// returns [ErrAllowDestructiveMismatch]. It acknowledges only the loss:
+	// returns [ErrAllowDestructiveMismatch], an [AcknowledgementMismatchError]. It acknowledges only the loss:
 	// the statement still meets every other gate, so a statement that also
 	// needs Force or AcceptBlocking needs both. [RunDesired] rejects it.
 	AllowDestructive string
@@ -126,7 +126,9 @@ type Options struct {
 	CopySwap CopySwapOptions
 
 	// Logger receives decision diagnostics (routing, preflight, execution
-	// transitions); nil discards them.
+	// transitions) at Debug; nil discards them. A copy-and-swap's catch-up
+	// also writes Info and Warn records here when it requeues a batch
+	// (applier.CatchupOptions.Logger lists them).
 	Logger *slog.Logger
 
 	// Audit receives the force-override audit record; nil discards it.
@@ -483,7 +485,7 @@ func qualifyStatement(st statement.Statement, schema string) (statement.Statemen
 }
 
 // ErrForceMismatch means the force acknowledgement named a table other than
-// the statement's resolved target. Nothing has executed.
+// the statement's resolved target. Nothing has executed. The error is an [AcknowledgementMismatchError] carrying both tables.
 var ErrForceMismatch = errors.New("the force acknowledgement must name the resolved target table")
 
 // checkForceAck validates the force acknowledgement: it must name the

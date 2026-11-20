@@ -89,7 +89,7 @@ type CopySwapOptions struct {
 	// writes until the swap. It must name the resolved target table as
 	// SCHEMA.TABLE, the same way Restart does, so the declaration cannot be
 	// left on a script and fence another table by accident; a value naming
-	// any other table returns [ErrBlockWritesMismatch]. Empty runs the
+	// any other table returns [ErrBlockWritesMismatch], an [AcknowledgementMismatchError]. Empty runs the
 	// live path: slot, stream, and catch-up. Run takes it; RunDesired
 	// rejects any value with ErrBlockWritesNotSupported.
 	BlockWrites string
@@ -101,7 +101,7 @@ type CopySwapOptions struct {
 	// is built (schemachange.RunOptions.Restart). It must name the
 	// resolved target table as SCHEMA.TABLE, the same way Options.Force
 	// does, so the acknowledgement cannot be left on a script by accident;
-	// a value naming any other table returns [ErrRestartMismatch]. A leftover whose swap already committed is not discarded: the
+	// a value naming any other table returns [ErrRestartMismatch], an [AcknowledgementMismatchError]. A leftover whose swap already committed is not discarded: the
 	// change is past the point of starting over, and the run is refused
 	// so it can be finished without the acknowledgement. Empty resumes a
 	// leftover, as every run does. Run takes it; RunDesired rejects any
@@ -186,7 +186,8 @@ type CopySwapOptions struct {
 // choices, the host's sizing, slot-lag ceiling, and progress hook, and the
 // one setting the route fixes — a done row from an earlier run is
 // replaced, since a second change on the table is the next statement, not
-// a rollback window.
+// a rollback window. The catch-up's requeue warnings go to the call's
+// diagnostics logger.
 func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions {
 	return schemachange.RunOptions{
 		Copier:             o.Copier,
@@ -194,7 +195,7 @@ func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions
 		ReplaceDone:        true,
 		Restart:            o.Restart != "",
 		CheckpointInterval: o.CheckpointInterval,
-		Catchup:            applier.CatchupOptions{SlotLagCeiling: o.SlotLagCeilingBytes},
+		Catchup:            applier.CatchupOptions{Logger: logger, SlotLagCeiling: o.SlotLagCeilingBytes},
 		AfterCheckpoint: func(ctx context.Context, cp checkpoint.Checkpoint) error {
 			logger.Debug("copy-and-swap checkpoint saved",
 				"schema", cp.Schema, "table", cp.Table, "phase", cp.Phase.String())
@@ -300,7 +301,18 @@ func copySwapOutcome(st statement.Statement, hold sourceHold, result schemachang
 		Table:         qualified(st),
 		Detail:        detail,
 		WritesBlocked: hold == holdFence,
+		SwapLSN:       swapLSN(result),
 	}, nil
+}
+
+// swapLSN renders the WAL position the run's own swap transaction read, or
+// empty when the run's proof of the swap carries none: one re-derived from
+// the catalog, or none at all once the retained source was gone.
+func swapLSN(result schemachange.Result) string {
+	if result.Swapped.SwapPosition == 0 {
+		return ""
+	}
+	return result.Swapped.SwapPosition.String()
 }
 
 // copySwapPreflightVerdict folds a copy-and-swap preflight error into Run's

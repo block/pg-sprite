@@ -235,8 +235,8 @@ func annotate(ps plan.Statement) string {
 	return s
 }
 
-// runFmt canonicalizes a desired-state schema file: every statement is
-// parsed through the PostgreSQL grammar, admitted by ParseDesiredFile — the
+// runFmt canonicalizes a desired-state schema file with
+// statement.FormatDesired: the file is admitted by ParseDesiredFile — the
 // same front door diff and migrate --desired use, so a file that declares row
 // security is accepted too — and printed back in the deparser's canonical
 // form, in the order the admitted file reports its statements (policy
@@ -253,17 +253,12 @@ func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 	} else if src, err = os.ReadFile(c.Path); err != nil {
 		return fmt.Errorf("read schema file: %w", err)
 	}
-	if err := statement.CheckNoComments(string(src)); err != nil {
-		return err
-	}
-	file, err := statement.ParseDesiredFile(string(src))
+	formatted, err := statement.FormatDesired(string(src))
 	if err != nil {
 		return err
 	}
-	for _, st := range file.Statements() {
-		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL()); err != nil {
-			return fmt.Errorf("write formatted schema: %w", err)
-		}
+	if _, err := io.WriteString(out, formatted); err != nil {
+		return fmt.Errorf("write formatted schema: %w", err)
 	}
 	return nil
 }

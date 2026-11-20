@@ -46,3 +46,37 @@ func ExampleParseDesiredFile() {
 	// refused: statement kind not allowed in a desired schema
 	// not valid SQL
 }
+
+// ExampleFormatDesired formats a desired-state schema file the way the fmt
+// command does. A file is printed in canonical form; a commented one is
+// refused, since the parser would drop the comment; a syntax error is told
+// from a refusal by ErrParseDesired. On any error the text is empty.
+func ExampleFormatDesired() {
+	for _, sql := range []string{
+		"create table documents (id bigint primary key);\n" +
+			"create index documents_id_idx on documents (id);",
+		"CREATE TABLE documents (id bigint PRIMARY KEY); -- keep me",
+		"CREATE TABLE documents (title text DEFAULT 'oops);",
+		"CREATE TABLE documents (id bigint);\nALTER TABLE documents ADD COLUMN title text;",
+	} {
+		formatted, err := statement.FormatDesired(sql)
+		switch {
+		case errors.Is(err, statement.ErrCommentLoss):
+			fmt.Println("refused: commented input")
+		case errors.Is(err, statement.ErrParseDesired):
+			fmt.Println("not valid SQL")
+		case errors.Is(err, statement.ErrDisallowedStatement):
+			fmt.Println("refused:", statement.ErrDisallowedStatement)
+		case err != nil:
+			fmt.Println("refused:", err)
+		default:
+			fmt.Print(formatted)
+		}
+	}
+	// Output:
+	// CREATE TABLE documents (id bigint PRIMARY KEY);
+	// CREATE INDEX documents_id_idx ON documents USING btree (id);
+	// refused: commented input
+	// not valid SQL
+	// refused: statement kind not allowed in a desired schema
+}
