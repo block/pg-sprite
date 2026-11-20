@@ -26,7 +26,7 @@ cd "$(git rev-parse --show-toplevel)"
 # Pinned so the scanner is reproducible. The vulnerability database it reads
 # is live by design, and is the part that is meant to move. Renovate bumps
 # this pin (see renovate.json).
-GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.6.0}"
+GOVULNCHECK_VERSION="${GOVULNCHECK_VERSION:-v1.10.0}"
 
 # govulncheck judges the standard library of the toolchain go resolves to.
 # Pinning that toolchain to the go directive makes a local run judge the same

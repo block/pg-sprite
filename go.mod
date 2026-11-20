@@ -10,9 +10,9 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.11
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pglogrepl v0.0.0-20261111174325-d50336b09c47
-	github.com/jackc/pgx/v5 v5.12.0
-	github.com/moby/moby/api v1.56.1
-	github.com/moby/moby/client v0.6.2
+	github.com/jackc/pgx/v5 v5.13.0
+	github.com/moby/moby/api v1.57.0
+	github.com/moby/moby/client v0.6.3
 	github.com/pganalyze/pg_query_go/v6 v6.2.5
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
