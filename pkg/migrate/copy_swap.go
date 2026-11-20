@@ -153,8 +153,10 @@ type CopySwapOptions struct {
 	// Zero takes decode.DefaultSlotLagCeiling, one GiB; a negative value is
 	// refused before anything is read. The preflight counts the ceiling,
 	// the default included, against FreeDiskBytes beside the shadow. A run
-	// that blocks writes holds no slot and does not read it. The CLI sets
-	// it from --slot-lag-ceiling.
+	// that blocks writes holds no slot and does not read it. A live run
+	// needs a ceiling above about a release interval and a catch-up cycle
+	// of the cluster's WAL, with margin, or it stops wal-retained while its
+	// stream keeps up. The CLI sets it from --slot-lag-ceiling.
 	SlotLagCeilingBytes int64
 
 	// OnCheckpoint, when set, is the run's progress signal: it is called

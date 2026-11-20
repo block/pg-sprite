@@ -17,7 +17,7 @@ REPLAY_PROJECT ?= buzz
 # Compose file whose image pins check-image-pins verifies.
 PINS_FILE ?= compose/supabase.yml
 
-.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -104,6 +104,13 @@ LOAD_PROOF_DSN ?= $(PG_DSN_LOCAL)
 LOAD_PROOF_DB = $(if $(filter file,$(origin LOAD_PROOF_DSN)),db-up)
 load-proof: build $(LOAD_PROOF_DB)
 	@LOAD_PROOF=1 LOAD_PROOF_BIN=$(CURDIR)/bin/pg-sprite LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProof$$' -v ./integration/loadproof
+
+# Operator-run proof that a catch-up keeps running while PostgreSQL releases
+# its slot at the server's own cadence on a busy source (pkg/applier): about
+# a minute of real time a run, so `make test` skips it. PG_VERSION selects
+# the major. What it proves: docs/testing.md#how-to-run.
+slot-release-proof:
+	SLOT_RELEASE_PROOF=1 $(GO) test -race -count=1 -timeout 10m -run '^TestCatchupKeepsRunningWhileTheServerReleasesTheSlotAtItsOwnCadence$$' -v ./pkg/applier
 
 lint:
 	golangci-lint run

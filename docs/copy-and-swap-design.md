@@ -342,7 +342,12 @@ so the second free sender is a margin, not something the run uses.
 Slot lag has a byte ceiling, default 1 GiB; crossing it aborts
 fail closed. It is hard for the WAL the stream has yet to confirm; the WAL the slot retains may
 stand over it for the server's release interval plus one cycle, so the volume needs headroom of
-about the write rate times that grace above the ceiling (ST-3). The reaper, `checkpoint.Store.ReapOrphanSlots`, drops orphan `pgsprite_*` slots
+about the cluster's WAL rate (the copy's own writes and other databases included) times that
+grace above the ceiling (ST-3). The ceiling itself must hold that grace's worth of the cluster's
+WAL too, with margin: while a transaction is in progress at a running-transactions
+record, the server releases the slot only to the record before, so on a busy source the slot
+keeps between one and two release intervals of writes with the stream caught up, and a ceiling
+below one release interval and a cycle of them stays crossed through every release. The reaper, `checkpoint.Store.ReapOrphanSlots`, drops orphan `pgsprite_*` slots
 that belong to the current database (`pg_replication_slots.database = current_database()`), are
 inactive (`active_pid IS NULL`), and whose checkpoint row is absent or terminal; slots of other
 databases are never inspected, let alone dropped. Nothing runs it at startup in this build: it
@@ -409,8 +414,9 @@ change, so a copy that writes faster than the stream is confirmed carries the sl
 by itself, and the run ends on its own work. Holding the copy back keeps the ceiling for lag the
 copy did not cause. The pace reads only the ceiling's unconfirmed measure, so it guards against a
 `stream-behind` stop. Retained WAL, which the server releases only every
-`RestartReleaseInterval`, is not part of the reading: a copy that writes more than the ceiling's
-worth of WAL per release interval can still end the run `wal-retained` with the stream caught up.
+`RestartReleaseInterval` and on a busy source only up to the record before, is not part of the
+reading: a copy that writes more than the ceiling's worth of WAL per release interval and cycle
+can still end the run `wal-retained` with the stream caught up.
 
 The mark is a quarter of the ceiling, not the ceiling, because a wait holds back only the next
 chunk: the chunks every worker already has in flight still land, the source keeps taking writes,
