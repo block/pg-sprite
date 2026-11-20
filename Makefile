@@ -105,10 +105,11 @@ LOAD_PROOF_DB = $(if $(filter file,$(origin LOAD_PROOF_DSN)),db-up)
 load-proof: build $(LOAD_PROOF_DB)
 	@LOAD_PROOF=1 LOAD_PROOF_BIN=$(CURDIR)/bin/pg-sprite LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProof$$' -v ./integration/loadproof
 
-# Operator-run proof that a catch-up keeps running while PostgreSQL releases
-# its slot at the server's own cadence on a busy source (pkg/applier): about
-# a minute of real time a run, so `make test` skips it. PG_VERSION selects
-# the major. What it proves: docs/testing.md#how-to-run.
+# Proof that a catch-up keeps running while PostgreSQL releases its slot at
+# the server's own cadence on a busy source (pkg/applier): about a minute of
+# real time a run, so `make test` skips it and the weekly Slot Release Proof
+# workflow runs it on every major. PG_VERSION selects the major. What it
+# proves: docs/testing.md#how-to-run.
 slot-release-proof:
 	SLOT_RELEASE_PROOF=1 $(GO) test -race -count=1 -timeout 10m -run '^TestCatchupKeepsRunningWhileTheServerReleasesTheSlotAtItsOwnCadence$$' -v ./pkg/applier
 
