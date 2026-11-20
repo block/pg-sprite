@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
@@ -72,7 +73,11 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 	if err := schemachange.CheckPool(pool, opts.CopySwap.Copier); err != nil {
 		return stopped("the pool is too small for the route", err)
 	}
-	_, err := preflight.CheckCopySwap(ctx, pool, report.Schema, report.Table, opts.CopySwap.environment())
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	if err != nil {
+		return stopped("the route's checkpoint store could not be opened", err)
+	}
+	_, err = checkCopySwap(ctx, pool, store, report.Schema, report.Table, opts.CopySwap)
 	if err == nil {
 		return DesiredResult{}, true, nil
 	}

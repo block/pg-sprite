@@ -126,6 +126,19 @@ free space on its own volume over SQL, so you pass it with `--free-disk` (binary
 `copy-and-swap-disk-headroom`; for a live run the detail names both the shadow's figure and
 the ceiling's.
 
+A resumed run is asked only for what is left to grow. The space the stopped run already holds
+is gone from the free space you measure, so the resume's preflight subtracts it from the
+requirement: the shadow's size so far, and, for a live run, the WAL its replication slot
+retains. pg-sprite reads both from the server, not from the saved progress. Say a live run on
+a 10 GiB table stopped with 6 GiB of shadow built and 1.5 GiB of WAL in its slot, and you
+resume it with `--slot-lag-ceiling 2GiB`. The resume needs 20 − 6 = 14 GiB for the shadow and
+2 − 1.5 = 0.5 GiB for the slot, 14.5 GiB in all. Pass the free space the volume has now, as for
+any run. Neither discount goes past its own requirement, and anything pg-sprite cannot read
+(no shadow, a slot that is gone or lost, a server that cannot measure the WAL) counts as
+nothing held, so the check falls back to a fresh run's figure. A run with
+`--restart SCHEMA.TABLE` is checked as a fresh run: it discards what the stopped run held
+before it builds anew.
+
 - **Self-managed PostgreSQL:** run `df -h` on the volume holding the data directory.
 - **Amazon RDS for PostgreSQL:** read the instance's `FreeStorageSpace` metric in CloudWatch.
 - **Aurora PostgreSQL:** the cluster volume grows on demand, but only up to a maximum. Read the
@@ -189,7 +202,8 @@ slot and the saved progress stay, so running the same command again resumes the 
   `confirmed_flush_lsn` (unconfirmed) from `pg_replication_slots`; `make slot-release-proof`
   logs the same three on a busy test source. Resume with a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
   that much WAL. The resume's preflight counts the new ceiling against
-  `--free-disk` beside the shadow, so the free space you measure and pass must cover it too:
+  `--free-disk` beside the shadow, less the shadow already built and the WAL the slot already
+  retains (see [Free disk space](#free-disk-space)), so pass the free space the volume has now:
 
 ```sh
 pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
