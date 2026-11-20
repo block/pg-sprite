@@ -342,8 +342,9 @@ so the second free sender is a margin, not something the run uses.
 Slot lag has a byte ceiling, default 1 GiB; crossing it aborts
 fail closed. It is hard for the WAL the stream has yet to confirm; the WAL the slot retains may
 stand over it for the server's release interval plus one cycle, so the volume needs headroom of
-about the write rate times that grace above the ceiling (ST-3). The ceiling itself must hold
-that grace's worth of writes too: while a transaction is in progress at a running-transactions
+about the cluster's WAL rate (the copy's own writes and other databases included) times that
+grace above the ceiling (ST-3). The ceiling itself must hold that grace's worth of the cluster's
+WAL too, with margin: while a transaction is in progress at a running-transactions
 record, the server releases the slot only to the record before, so on a busy source the slot
 keeps between one and two release intervals of writes with the stream caught up, and a ceiling
 below one release interval and a cycle of them stays crossed through every release. The reaper, `checkpoint.Store.ReapOrphanSlots`, drops orphan `pgsprite_*` slots

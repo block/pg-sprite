@@ -267,6 +267,13 @@ func TestCatchupKeepsRunningWhileTheServerReleasesTheSlotAtItsOwnCadence(t *test
 		"while the retained WAL stood over the ceiling the stream kept confirming and the restart position stood still")
 	assert.Greater(t, releases[1].at.Sub(releases[0].at), decode.RestartReleaseInterval/2,
 		"the releases are the server's own, one release interval apart, not two readings of one release")
+	// The sizing rule rests on this: a release on a busy source moves the
+	// restart position only to the record before, so just after it the slot
+	// still holds about the WAL written between two releases. Eight tenths
+	// of it allows for the readings landing a little after each release.
+	between := int64(releases[1].write - releases[0].write)
+	assert.GreaterOrEqual(t, releases[1].retained, between*8/10,
+		"just after a release the slot still retains about one release interval of the load's WAL (%d bytes written between the two releases)", between)
 	t.Logf("readings spanned %s", time.Since(start))
 
 	// The last reading came after the second release; a cycle that ends

@@ -146,7 +146,8 @@ offline run holds no slot, so the flag is refused with `--block-writes`. The cei
 [Free disk space](#free-disk-space)), so a ceiling the volume cannot hold is refused with cause
 `copy-and-swap-disk-headroom` before anything is built. That check is a floor on the free
 space, not a guarantee the slot cannot fill the volume: as the next paragraph says, the slot can
-stand over the ceiling, so leave headroom above it.
+stand over the ceiling, so leave headroom above it of about one release interval and a cycle
+of the cluster's WAL.
 
 The ceiling is a stop threshold pg-sprite checks once per catch-up cycle, not a limit
 PostgreSQL enforces on the slot. The slot can hold more than the ceiling by the time a cycle
@@ -161,8 +162,10 @@ ceiling only with free space on the volume for that much WAL, read the way
 `MiB`, `GiB`, or `TiB`, case-insensitive; `KB`, `MB`, `GB`, and `TB` mean the same binary
 multiples. `2GiB` and `2147483648` are the same ceiling. Zero, negative values, fractions such
 as `1.5GiB`, and other units are refused as a usage error (exit 1) before anything runs. There
-is no minimum beyond one byte, as in the library; a ceiling well below the default stops a
-busy run sooner, not more safely.
+is no lower limit beyond one byte, as in the library, but a live run needs more than about 15
+seconds and a catch-up cycle of the cluster's WAL, with margin, or it stops `wal-retained` even
+while pg-sprite keeps up (see below); a ceiling well below the default stops a busy run sooner,
+not more safely.
 
 The run stops with a failed verdict (exit 1) whose detail says which of two measures crossed
 the ceiling; the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
@@ -175,11 +178,16 @@ slot and the saved progress stay, so running the same command again resumes the 
   for longer than it takes to release WAL pg-sprite has confirmed. Look for a transaction holding
   it back first: an open write transaction (`pg_stat_activity` where `backend_xid IS NOT
   NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`). End it, then
-  resume. If there is none, the source writes more WAL per release interval than the ceiling
-  allows. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a busy source
-  each step stops one step short, so the slot keeps between 15 and 30 seconds of the source's
-  writes even while pg-sprite keeps up; the ceiling must hold more than 15 seconds of them. Resume with
-  a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
+  resume. If there is none, the cluster writes more WAL per release interval and cycle than the
+  ceiling holds. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a busy source
+  each step stops one step short, so the slot keeps between 15 and 30 seconds of the cluster's
+  WAL even while pg-sprite keeps up. That is everything the server logs, not only the
+  application's writes: the copy's own inserts into the shadow and other databases count too.
+  The ceiling must hold more than 15 seconds and a catch-up cycle of it, with margin (ten
+  percent covers a record the server logs late or a stream a cycle slower). To read your slot
+  the same way, compare `pg_current_wal_lsn()` with `restart_lsn` (retained) and
+  `confirmed_flush_lsn` (unconfirmed) from `pg_replication_slots`; `make slot-release-proof`
+  logs the same three on a busy test source. Resume with a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
   that much WAL. The resume's preflight counts the new ceiling against
   `--free-disk` beside the shadow, so the free space you measure and pass must cover it too:
 
