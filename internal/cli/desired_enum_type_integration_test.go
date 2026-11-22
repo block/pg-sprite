@@ -103,3 +103,65 @@ func TestDesiredEnumTypeFileRefusesADroppedLabel(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"new", "paid"}, live.Labels, "nothing was added")
 }
+
+// migrate --desired --dry-run on an enum type file prints the plan diff
+// prints for the same file and adds nothing. A file the type cannot
+// converge onto is refused at planning with the refusal verdict and exit 2,
+// and the live labels stay as they were.
+func TestDesiredEnumTypeFileDryRun(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	t.Run("prints the plan diff prints and adds nothing", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.order_status AS ENUM ('new', 'shipped')`, schema))
+		require.NoError(t, err)
+		const file = "CREATE TYPE order_status AS ENUM ('new', 'paid', 'shipped', 'delivered');\n"
+
+		diff := newDiffCmd(t, url, schema, file)
+		diff.JSON = true
+		var diffOut strings.Builder
+		require.NoError(t, diff.run(t.Context(), &diffOut))
+		var want plan.Report
+		require.NoError(t, json.Unmarshal([]byte(diffOut.String()), &want))
+		require.Len(t, want.Statements, 2)
+
+		cmd := desiredCommand(t, url, schema, file)
+		cmd.DryRun = true
+		var out strings.Builder
+		require.NoError(t, cmd.run(t.Context(), &out))
+		var got plan.Report
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &got), out.String())
+		assert.Equal(t, want, got, "the dry run prints the plan diff prints")
+		assert.Equal(t, "order_status", got.Type)
+
+		live, err := schemadiff.IntrospectEnumType(t.Context(), pool, schema, "order_status")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"new", "shipped"}, live.Labels, "the dry run adds nothing")
+	})
+
+	t.Run("refuses a file the type cannot converge onto", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.order_status AS ENUM ('new', 'paid')`, schema))
+		require.NoError(t, err)
+
+		cmd := desiredCommand(t, url, schema, "CREATE TYPE order_status AS ENUM ('new', 'shipped');\n")
+		cmd.DryRun = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused, "ErrRefused is the exit-2 refusal")
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v), out.String())
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+		assert.Equal(t, verdict.ClassNoOnlineSafetyProblem, v.Class)
+		assert.Equal(t, verdict.OwnerDirectOperator, v.Owner)
+		assert.Contains(t, v.Detail, "carries ('paid'), which the file no longer lists")
+
+		live, err := schemadiff.IntrospectEnumType(t.Context(), pool, schema, "order_status")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"new", "paid"}, live.Labels, "nothing was added")
+	})
+}
