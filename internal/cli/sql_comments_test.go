@@ -39,6 +39,18 @@ func TestMissingTableHeaderIsOnlyComments(t *testing.T) {
 	}
 }
 
+func TestConvergedEnumTypeIsOnlyComments(t *testing.T) {
+	for _, ending := range []string{"\r", "\n", "\r\n"} {
+		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {
+			var out strings.Builder
+			report := plan.Report{Schema: "public" + ending + "SELECT 42; --", Type: "status" + ending + "DROP TABLE app.accounts; --"}
+			require.NoError(t, writePlanText(&out, report))
+			_, err := statement.ParseDesired(out.String())
+			require.ErrorIs(t, err, statement.ErrEmptyDesired)
+		})
+	}
+}
+
 func TestSaferSQLAnnotationDoesNotAddStatements(t *testing.T) {
 	for _, ending := range []string{"\r", "\n", "\r\n"} {
 		t.Run(fmt.Sprintf("%q", ending), func(t *testing.T) {

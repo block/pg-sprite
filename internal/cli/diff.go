@@ -142,7 +142,7 @@ func writeJSON(out io.Writer, report plan.Report) error {
 func writePlanText(out io.Writer, report plan.Report) error {
 	if len(report.Statements) == 0 {
 		if report.Type != "" {
-			if _, err := fmt.Fprintf(out, "-- no changes: enum type %s.%s carries every label the file lists\n", report.Schema, report.Type); err != nil {
+			if _, err := fmt.Fprintln(out, sqlDiagnosticComment(fmt.Sprintf("no changes: enum type %s.%s carries every label the file lists", report.Schema, report.Type))); err != nil {
 				return fmt.Errorf("write plan: %w", err)
 			}
 			return nil

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -143,6 +144,59 @@ func TestRunDesiredEnumTypeRefusesWhatItCannotConverge(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A run that adds two labels to the same gap commits them one at a time.
+// When the second addition fails, the first stays committed, the run
+// reports failure naming the second statement, and the type is left short
+// of the file. A rerun plans only the missing label, still placed BEFORE
+// the live label it precedes, and converges with every label in the
+// file's order.
+func TestRunDesiredEnumTypeRecoversAfterACommittedPrefix(t *testing.T) {
+	pool := enumPool(t)
+	schema := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.order_status AS ENUM ('new', 'shipped')`, schema))
+	require.NoError(t, err)
+	// The trigger fires inside the ADD VALUE's own transaction, after the
+	// label is inserted, so raising rolls back exactly the 'packed'
+	// addition and nothing before it.
+	const trigger = "fail_packed"
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, trigger, fmt.Sprintf(`
+		IF TG_TAG = 'ALTER TYPE'
+			AND EXISTS (SELECT FROM pg_catalog.pg_enum e
+				JOIN pg_catalog.pg_type ty ON ty.oid = e.enumtypid
+				JOIN pg_catalog.pg_namespace n ON n.oid = ty.typnamespace
+				WHERE n.nspname = '%s' AND ty.typname = 'order_status' AND e.enumlabel = 'packed') THEN
+			RAISE EXCEPTION 'refusing the label packed';
+		END IF;`, schema))
+	desired := parseEnumType(t, `CREATE TYPE order_status AS ENUM ('new', 'paid', 'packed', 'shipped');`)
+
+	res, err := migrate.RunDesiredEnumType(t.Context(), pool,
+		migrate.EnumTypeRequest{Schema: schema, Desired: desired}, runOptions())
+	require.Error(t, err, "a mid-plan execution failure returns the failed result with the error")
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	require.Len(t, res.Plan.Statements, 2)
+	assert.Equal(t, fmt.Sprintf("ALTER TYPE %s.order_status ADD VALUE 'paid' BEFORE 'shipped'", schema), res.Plan.Statements[0].SQL)
+	assert.Equal(t, fmt.Sprintf("ALTER TYPE %s.order_status ADD VALUE 'packed' BEFORE 'shipped'", schema), res.Plan.Statements[1].SQL)
+	require.Len(t, res.Verdicts, 2, "the committed 'paid' and the failed 'packed'")
+	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome, res.Verdicts[0].Detail)
+	assert.Equal(t, verdict.OutcomeFailed, res.Verdicts[1].Outcome)
+	assert.Contains(t, res.Verdicts[1].Statement, "'packed'", "the failed verdict names the statement that failed")
+	assert.Equal(t, "P0001", res.Verdicts[1].SQLState, "the verdict carries the server's SQLSTATE")
+	assert.Contains(t, res.Detail, "planned statement 2 of 2 failed", "the disclosure counts the committed prefix")
+	assert.Equal(t, []string{"new", "paid", "shipped"}, liveEnumLabels(t, pool, schema, "order_status"),
+		"'paid' stays committed and 'packed' was rolled back")
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`ALTER EVENT TRIGGER %s DISABLE`, pgx.Identifier{schema + "_" + trigger}.Sanitize()))
+	require.NoError(t, err)
+
+	again, err := migrate.RunDesiredEnumType(t.Context(), pool,
+		migrate.EnumTypeRequest{Schema: schema, Desired: desired}, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, again.Outcome, "%s: %s", again.Reason, again.Detail)
+	require.Len(t, again.Plan.Statements, 1, "the rerun plans only the missing label")
+	assert.Equal(t, fmt.Sprintf("ALTER TYPE %s.order_status ADD VALUE 'packed' BEFORE 'shipped'", schema), again.Plan.Statements[0].SQL)
+	assert.Equal(t, []string{"new", "paid", "packed", "shipped"}, liveEnumLabels(t, pool, schema, "order_status"))
 }
 
 // A plan pinned to a reviewed fingerprint runs only while the live type
