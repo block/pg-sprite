@@ -309,6 +309,11 @@ func OutcomeCode(err error) Code {
 	if err == nil {
 		return ""
 	}
+	// An invariant breach is the fail-closed outcome whichever typed failure
+	// carries it, so it outranks every typed code below.
+	if errors.Is(err, ErrInvariantViolation) {
+		return CodeInvariantViolation
+	}
 	if stepErr, ok := errors.AsType[*SequenceStepError](err); ok {
 		return OutcomeCode(stepErr.Err)
 	}

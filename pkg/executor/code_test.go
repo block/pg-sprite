@@ -299,3 +299,18 @@ func TestSequenceReportJSONContractIsStable(t *testing.T) {
 		]
 	}`, string(got))
 }
+
+// An invariant breach is the fail-closed outcome, so its code outranks every
+// typed failure that carries it.
+func TestOutcomeCodeInvariantViolationOutranksTypedFailures(t *testing.T) {
+	breach := fmt.Errorf("%w: LK-2", executor.ErrInvariantViolation)
+	for name, err := range map[string]error{
+		"invalid index":  &executor.InvalidIndexError{Schema: "s", Index: "i", Build: breach, Cleanup: executor.ErrBuildLeftInvalidIndex},
+		"budget":         fmt.Errorf("%w: %w", &executor.BudgetError{Cause: executor.CauseStatement, Budget: time.Second}, breach),
+		"unknown commit": &executor.CommitOutcomeUnknownError{Err: breach},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, executor.CodeInvariantViolation, executor.OutcomeCode(err))
+		})
+	}
+}

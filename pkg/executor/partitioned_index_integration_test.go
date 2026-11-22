@@ -112,6 +112,13 @@ func TestBuildPartitionedIndex(t *testing.T) {
 
 			ctx, stop := context.WithCancel(t.Context())
 			var writer sync.WaitGroup
+			// Registered after the connection's closer, so it runs first on
+			// every exit path and the writer is joined before its connection
+			// closes.
+			t.Cleanup(func() {
+				stop()
+				writer.Wait()
+			})
 			var writeTimes []time.Time
 			var writeErr error
 			started := make(chan struct{})
