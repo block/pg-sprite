@@ -44,7 +44,8 @@ type EnumTypeRequest struct {
 // close the pool.
 func RunDesiredEnumType(ctx context.Context, pool *pgxpool.Pool, req EnumTypeRequest, opts Options) (result DesiredResult, err error) {
 	defer func() { opts.finishProgress(result.Outcome, err) }()
-	// INV: RF-12 — desired-state execution takes no acknowledgement.
+	// INV: RF-12 — desired-state execution takes no acknowledgement in
+	// Options.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
@@ -75,5 +76,5 @@ func RunDesiredEnumType(ctx context.Context, pool *pgxpool.Pool, req EnumTypeReq
 	if refused, ok := admitPlan(DesiredRequest{ExpectedFingerprint: req.ExpectedFingerprint}, report); !ok {
 		return refused, nil
 	}
-	return executePlan(ctx, pool, report, opts, replan)
+	return executePlan(ctx, pool, report, opts, "", replan)
 }
