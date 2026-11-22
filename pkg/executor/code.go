@@ -74,6 +74,16 @@ const (
 	// CodeInvalidIndexUnproven: an invalid index may remain but the
 	// catalog state could not be proven; an operator must inspect.
 	CodeInvalidIndexUnproven Code = "invalid-index-unproven"
+	// CodeNotCreateIndex: the statement handed to the partitioned index
+	// build is not a CREATE INDEX.
+	CodeNotCreateIndex Code = "not-create-index"
+	// CodeNotPartitionedTable: the target of a partitioned index build is
+	// not a partitioned table.
+	CodeNotPartitionedTable Code = "not-partitioned-table"
+	// CodePartitionedIndexNameTaken: a name the partitioned index build
+	// needs is held by a relation that is not the requested index; the
+	// occupant is left for an operator.
+	CodePartitionedIndexNameTaken Code = "partitioned-index-name-taken"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -210,6 +220,9 @@ func Codes() []Code {
 		CodeInvalidIndexNotDroppable,
 		CodeInvalidIndexBuilderUnobservable,
 		CodeInvalidIndexUnproven,
+		CodeNotCreateIndex,
+		CodeNotPartitionedTable,
+		CodePartitionedIndexNameTaken,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -256,6 +269,9 @@ func (c Code) Permanent() bool {
 		CodeInvalidIndexNotDroppable,
 		CodeInvalidBlockingBudget,
 		CodeUnsupportedAcceptedBlocking,
+		CodeNotCreateIndex,
+		CodeNotPartitionedTable,
+		CodePartitionedIndexNameTaken,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -339,6 +355,12 @@ func sentinelCode(err error) Code {
 		return CodeCancelledByCaller
 	case errors.Is(err, ErrCancelledExternally):
 		return CodeCancelledExternally
+	case errors.Is(err, ErrNotCreateIndex):
+		return CodeNotCreateIndex
+	case errors.Is(err, ErrNotPartitionedTable):
+		return CodeNotPartitionedTable
+	case errors.Is(err, ErrPartitionedIndexNameTaken):
+		return CodePartitionedIndexNameTaken
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):
