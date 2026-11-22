@@ -32,13 +32,13 @@ if [ "${1:-}" = "refresh" ]; then
         | python3 -c 'import json,sys; print("\n".join(sorted(e["name"] for e in json.load(sys.stdin) if e["name"].endswith(".sql"))))')"
     new=0
     while IFS= read -r f; do
-        if ! printf '%s\n' "${FILES[@]}" | grep -qxF "$f"; then
+        if ! in_files "$f"; then
             echo "new     $f"
             new=$((new + 1))
         fi
     done <<<"$remote"
     for f in "${FILES[@]}"; do
-        if ! printf '%s' "$remote" | grep -qxF "$f"; then
+        if ! grep -qxF "$f" <<<"$remote"; then
             echo "missing $f (in pin, gone at ${ref})"
         fi
     done
