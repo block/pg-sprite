@@ -27,7 +27,10 @@ gate green — as defined with the
 CI can gate on the exit code without parsing JSON. A destructive change (`DROP
 COLUMN`, `DROP CONSTRAINT`, `DROP NOT NULL`) is one of those refusals until
 `--allow-destructive` names the table; the acknowledged plan still marks it
-`.statements[].destructive` in the JSON report.
+`.statements[].destructive` in the JSON report. A desired-state plan that drops
+anything is refused whole in the same way, and runs only with `--allow-destructive`
+and `--expect-fingerprint` together (see [Apply a reviewed
+drop](cli.md#apply-a-reviewed-drop)).
 Exit 2 covers every refusal cause; the exit code answers *should this
 proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
@@ -134,7 +137,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. The same `cause` field carries the partitioned-parent shape under `unsupported-partitioned-parent`; both are refusal causes, unrelated to the plan statement's create-shape `cause`. |
 | `not-native-safe-rewrite-required` | The submitted form blocks and must run as a safer native sequence, but none could be constructed. |
 | `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation, an added column whose type rewrites); a type rewrite of an existing column (`ALTER COLUMN TYPE`) executes through the route instead. |
-| `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; desired-state execution runs no destructive statement, so run the drop deliberately through `migrate --alter` instead ([execution model](execution-model.md)). |
+| `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; a desired-state plan that drops anything is refused whole until the run pins the reviewed plan with `--expect-fingerprint` and names its table with `--allow-destructive` ([Apply a reviewed drop](cli.md#apply-a-reviewed-drop), [execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
 | `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. |
@@ -644,6 +647,73 @@ $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --al
       "execution": "autocommit-each-step"
     }
   ]
+}
+```
+
+### Refused until acknowledged: a desired file that drops structure (`destructive-change`) — exit 2
+
+A desired file that no longer has the `note` column makes a destructive plan.
+`migrate --desired --dry-run --json` ends in the refusal, and its `fingerprint`
+covers the refused plan, which cannot be pinned. `pinnable_fingerprint` is the
+plan the run executes once the table is acknowledged: pass it to
+`--expect-fingerprint`. Each destructive statement carries `drops`, the live
+object it removes, and the fingerprint covers it.
+
+```console
+$ pg-sprite migrate --desired orders.sql --dry-run --json
+{
+  "format_version": 21,
+  "source": "diff",
+  "schema": "public",
+  "table": "orders",
+  "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
+  "disposition": "refuse",
+  "reason": "destructive-change",
+  "class": "by-design",
+  "fingerprint": "sha256:c13fbf2570e6fe10022386a4067d84e479865db6401d3c51933b6989de44f156",
+  "pinnable_fingerprint": "sha256:95c0640054358fac2b09dd0e73fd530e09ec2c13f1e0d39823d53d441e09933e",
+  "statements": [
+    {
+      "sql": "ALTER TABLE public.orders DROP note",
+      "kind": "drop-column",
+      "drops": {
+        "kind": "column",
+        "name": "note",
+        "definition": "attnum 3: text"
+      },
+      "destructive": true,
+      "route": "native",
+      "disposition": "refuse",
+      "reason": "destructive-change",
+      "class": "by-design",
+      "blocking_passthrough_eligible": false,
+      "decisions": [
+        {
+          "operation": "DROP COLUMN note",
+          "destructive": true,
+          "route": "native",
+          "reason": "metadata-only"
+        }
+      ]
+    }
+  ]
+}
+```
+
+A dry run compares `--expect-fingerprint` as the run does. A pin that is not the
+plan the run would execute ends in `plan-fingerprint-mismatch`, with the
+previewed plan in `plan` (shortened here):
+
+```console
+$ pg-sprite migrate --desired orders.sql --dry-run --allow-destructive public.orders \
+    --expect-fingerprint sha256:0000000000000000000000000000000000000000000000000000000000000000 --json
+{
+  "plan": { "…": "the plan the run would execute" },
+  "outcome": "refused",
+  "reason": "plan-fingerprint-mismatch",
+  "class": "environmental",
+  "detail": "the plan derived at execution time (fingerprint sha256:95c0640054358fac2b09dd0e73fd530e09ec2c13f1e0d39823d53d441e09933e) is not the pinned plan (fingerprint sha256:0000000000000000000000000000000000000000000000000000000000000000); the live table or the desired schema changed since the plan was reviewed — re-review the new plan"
 }
 ```
 

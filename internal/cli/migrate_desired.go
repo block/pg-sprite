@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
@@ -21,6 +23,9 @@ func (c *MigrateCmd) validateInput() error {
 	if (c.Alter == "") == (c.Desired == "") {
 		return errors.New("provide exactly one of --alter or --desired")
 	}
+	if c.Desired == "" && c.ExpectFingerprint != "" {
+		return errors.New("--expect-fingerprint requires --desired: it pins a desired-state plan, and --alter runs one statement with no plan to pin")
+	}
 	if c.Desired != "" {
 		if c.Force != "" {
 			return errors.New("--force cannot be combined with --desired")
@@ -31,14 +36,66 @@ func (c *MigrateCmd) validateInput() error {
 		if c.Restart != "" {
 			return errors.New("--restart cannot be combined with --desired: the plan, not the operator, decides which run the acknowledgement would discard; run the stopped statement with migrate --alter --copy-and-swap --restart instead")
 		}
-		if c.AllowDestructive != "" {
-			return errors.New("--allow-destructive cannot be combined with --desired: desired-state execution refuses a destructive plan whole")
+		if c.AllowDestructive != "" && c.ExpectFingerprint == "" {
+			return errors.New("--allow-destructive with --desired requires --expect-fingerprint: a destructive plan runs only when the run pins the reviewed plan; review it with diff --desired, then pass its fingerprint")
 		}
 		if c.BlockWrites != "" {
 			return errors.New("--block-writes cannot be combined with --desired: the plan, not the operator, decides how many copies would block the table's writes; run each statement with migrate --alter --block-writes instead")
 		}
 	}
 	return nil
+}
+
+// desiredOptions is the run policy for a desired-state run. Its destructive
+// acknowledgement travels on the request, bound to the pinned plan, never in
+// the policy, which desired-state execution rejects it from.
+func (c *MigrateCmd) desiredOptions(logger *slog.Logger) migrate.Options {
+	opts := c.options(logger)
+	opts.AllowDestructive = ""
+	return opts
+}
+
+// previewDesiredPlan returns the plan a desired-state dry run prints. A plan
+// that discards live structure is previewed as refused, as a run refuses it,
+// unless the dry run carries the pin and the acknowledgement the run needs.
+// For a refusal it also returns the fingerprint a run must pin, which is not
+// the refused preview's own.
+func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report, pinnable string) {
+	if !slices.ContainsFunc(report.Statements, func(ps plan.Statement) bool { return ps.Destructive }) {
+		return report, ""
+	}
+	if c.AllowDestructive == report.Schema+"."+report.Table && c.ExpectFingerprint == report.Fingerprint {
+		return report, ""
+	}
+	plan.RefuseDestructive(&report)
+	return report, report.PinnableFingerprint
+}
+
+// writeDesiredPreview prints a desired-state dry run's plan and, for a
+// refused destructive plan, the flags that lift the refusal. It checks the
+// acknowledged table first and the pin next, as the run does, before
+// anything is rendered.
+func (c *MigrateCmd) writeDesiredPreview(out io.Writer, report plan.Report) error {
+	if err := migrate.CheckDesiredAllowDestructiveTable(c.AllowDestructive, report); err != nil {
+		return err
+	}
+	if stale, ok := migrate.CheckPlanPin(c.ExpectFingerprint, report); !ok {
+		return c.finishDesired(out, stale, nil)
+	}
+	preview, pinnable := c.previewDesiredPlan(report)
+	diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, ExtensionSchema: c.ExtensionSchema, JSON: c.JSON}
+	reportErr := diff.writeDiffReport(out, preview)
+	if pinnable == "" || c.JSON {
+		return reportErr
+	}
+	w := &stickyWriter{out: out, pal: c.palette(out), started: true}
+	w.diag("note", "", "a run refuses a plan that discards live structure unless it pins the reviewed plan and names the table; to run this plan, add to the command:")
+	w.printf("  --expect-fingerprint %s --allow-destructive %s.%s\n", pinnable, report.Schema, report.Table)
+	w.diag("note", "", "with both flags this dry run previews the plan the run would execute")
+	if w.err != nil {
+		return w.err
+	}
+	return reportErr
 }
 
 func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
@@ -77,16 +134,20 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 			return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, desired.Statements()[0].SQL())
 		}
 		// Preview uses desired-state admission: a routed native step can still
-		// discard live structure, which RunDesired refuses before execution.
-		plan.RefuseDestructive(&report)
-		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, ExtensionSchema: c.ExtensionSchema, JSON: c.JSON}
-		return diff.writeDiffReport(out, report)
+		// discard live structure, which RunDesired refuses before execution
+		// unless the run pins the plan and names the table.
+		return c.writeDesiredPreview(out, report)
 	}
-	opts, stopProgress, err := c.startProgress(ctx, c.options(c.diag()))
+	opts, stopProgress, err := c.startProgress(ctx, c.desiredOptions(c.diag()))
 	if err != nil {
 		return err
 	}
-	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, opts)
+	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{
+		Schema:              c.Schema,
+		Desired:             desired,
+		ExpectedFingerprint: c.ExpectFingerprint,
+		AllowDestructive:    c.AllowDestructive,
+	}, opts)
 	stopProgress()
 	return c.finishDesired(out, result, runErr)
 }
@@ -95,6 +156,9 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 // the plan diff prints, and a run adds each label the live type lacks. As
 // for diff, --extension-schema has no effect on an enum type file.
 func (c *MigrateCmd) runDesiredEnumType(ctx context.Context, out io.Writer, desired statement.DesiredEnumType) error {
+	if c.AllowDestructive != "" {
+		return errors.New("--allow-destructive does not apply to an enum type file: a run only adds labels, and no plan drops one")
+	}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
 		return err
@@ -106,13 +170,18 @@ func (c *MigrateCmd) runDesiredEnumType(ctx context.Context, out io.Writer, desi
 		if err != nil {
 			return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, desired.Statements()[0].SQL())
 		}
+		if stale, ok := migrate.CheckPlanPin(c.ExpectFingerprint, report); !ok {
+			return c.finishDesired(out, stale, nil)
+		}
 		return diff.writeDiffReport(out, report)
 	}
-	opts, stopProgress, err := c.startProgress(ctx, c.options(c.diag()))
+	opts, stopProgress, err := c.startProgress(ctx, c.desiredOptions(c.diag()))
 	if err != nil {
 		return err
 	}
-	result, runErr := migrate.RunDesiredEnumType(ctx, pool, migrate.EnumTypeRequest{Schema: c.Schema, Desired: desired}, opts)
+	result, runErr := migrate.RunDesiredEnumType(ctx, pool, migrate.EnumTypeRequest{
+		Schema: c.Schema, Desired: desired, ExpectedFingerprint: c.ExpectFingerprint,
+	}, opts)
 	stopProgress()
 	return c.finishDesired(out, result, runErr)
 }

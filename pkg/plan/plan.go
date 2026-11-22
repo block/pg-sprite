@@ -52,7 +52,8 @@ import (
 // Version 19 added the extension_schemas field and its part in the
 // fingerprint. Version 20 added the add-enum-value change kind and the type
 // field, for a plan of a desired enum type file. Version 21 added the
-// statement-level drops field and its part in the fingerprint.
+// statement-level drops field and its part in the fingerprint, and the
+// report-level pinnable_fingerprint field.
 const FormatVersion = 21
 
 // Source identifies which front door derived the plan.
@@ -209,6 +210,13 @@ type Report struct {
 	// reviewer approves is the plan that executes" is enforced across
 	// storage and forwarding.
 	Fingerprint string `json:"fingerprint"`
+	// PinnableFingerprint is set only on a desired-state preview that
+	// withdrew a plan holding a destructive statement (RefuseDestructive):
+	// the identity the plan had before the withdrawal, which is the value a
+	// run pins with the acknowledgement to execute it. Fingerprint then
+	// identifies the withdrawn, refused plan, which no run executes.
+	// Explanatory: excluded from the fingerprint.
+	PinnableFingerprint string `json:"pinnable_fingerprint,omitempty"`
 	// ExtensionSchemas are the schemas the desired file's unqualified names
 	// also resolved against (statement.DesiredSchema.WithExtensionSchemas),
 	// in the order they were searched. A table that does not exist yet is
