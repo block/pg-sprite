@@ -52,17 +52,20 @@ func ExecuteNativeAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.P
 	if at.Tracker != nil {
 		at.Tracker.StartStep(at.Step, progress.OperationOptimistic, st.SQL())
 	}
-	return executeNative(ctx, pool, pt, st, b, retry, nil, nil, at.Tracker)
+	return executeNative(ctx, pool, pt, st, b, retry, nil, nil, nil, at.Tracker)
 }
 
 // RunSequenceAsStep is RunSequence reported to the run step at, taking
-// over adopts and validating validates when they are set, as
-// RunSequenceAdopting and RunSequenceValidating do; at most one of the two
-// may be set. Each admitted step is reported as at.Step in turn, so a
+// over adopts, validating validates, and dropping dropped when they are
+// set; at most one of the three may be set. The first two are checked as
+// RunSequenceAdopting and RunSequenceValidating check them; the step that
+// drops dropped first checks, under the table's lock, that the column,
+// constraint, or NOT NULL still has the definition the plan carried, and
+// refuses with ErrDroppedObjectDrift, dropping nothing, when it does not. Each admitted step is reported as at.Step in turn, so a
 // concurrent index build publishes the server's build counters under it. A
 // zero at runs exactly as the untracked entry point for the same
 // arguments.
-func RunSequenceAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, at RunStep) (SequenceReport, error) {
+func RunSequenceAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject, at RunStep) (SequenceReport, error) {
 	if err := at.validate(); err != nil {
 		return SequenceReport{}, err
 	}
@@ -70,7 +73,11 @@ func RunSequenceAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pre
 		return SequenceReport{}, fmt.Errorf("%w: one sequence cannot carry both the adoption of index %s and the validation of constraint %s",
 			ErrInvariantViolation, adopts.Index, validates.Constraint)
 	}
-	return runSequence(ctx, pool, pt, steps, b, retry, adopts, validates, at.Tracker, at.Step)
+	if dropped != nil && (adopts != nil || validates != nil) {
+		return SequenceReport{}, fmt.Errorf("%w: one sequence cannot carry both the drop of %s %s and an adoption or a validation",
+			ErrInvariantViolation, dropped.Kind, dropped.Name)
+	}
+	return runSequence(ctx, pool, pt, steps, b, retry, adopts, validates, dropped, at.Tracker, at.Step)
 }
 
 // ExecuteCreateAsSteps is ExecuteCreate reported to a run whose steps are

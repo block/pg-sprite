@@ -162,6 +162,11 @@ const (
 	// drop. Unlike the drift codes, something was dropped: inspect the
 	// table's indexes and recreate the dropped one if it should stay.
 	CodeDroppedIndexReplaced Code = "dropped-index-replaced"
+	// CodeDroppedObjectDrift: the column, constraint, or NOT NULL a
+	// reviewed plan drops no longer has the definition the plan carried,
+	// read again under the table's lock; nothing was dropped. Re-plan
+	// against the table as it stands and review the new plan.
+	CodeDroppedObjectDrift Code = "dropped-object-drift"
 	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
 	// CONSTRAINT validates was dropped or replaced after planning, read
 	// again under the table's lock; nothing was validated. Re-plan against
@@ -262,6 +267,7 @@ func Codes() []Code {
 		CodeAdoptedIndexDrift,
 		CodeDroppedIndexDrift,
 		CodeDroppedIndexReplaced,
+		CodeDroppedObjectDrift,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -310,6 +316,7 @@ func (c Code) Permanent() bool {
 		CodeAdoptedIndexDrift,
 		CodeDroppedIndexDrift,
 		CodeDroppedIndexReplaced,
+		CodeDroppedObjectDrift,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -422,6 +429,8 @@ func sentinelCode(err error) Code {
 		return CodeDroppedIndexDrift
 	case errors.Is(err, ErrDroppedIndexReplaced):
 		return CodeDroppedIndexReplaced
+	case errors.Is(err, ErrDroppedObjectDrift):
+		return CodeDroppedObjectDrift
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
