@@ -20,10 +20,19 @@ import (
 // re-plan against the table as it stands and review the new plan.
 var ErrDroppedObjectDrift = errors.New("the object the plan drops changed after planning")
 
+// ErrDroppedColumnHasDescendants means a reviewed column drop would also
+// drop the column from the table's partitions or inheritance children, read
+// under the table's lock. The plan reviewed only the named table's column
+// and its dependents, not the children's copies and theirs, so nothing was
+// dropped. The outcome is permanent.
+var ErrDroppedColumnHasDescendants = errors.New("the column the plan drops also reaches tables below it")
+
 // dropsObject reports whether st is an ALTER TABLE whose only operation
 // drops the column, constraint, or NOT NULL that d names. An index drop is
 // a DROP INDEX statement and never matches here (see
-// ExecuteDropIndexConcurrently).
+// ExecuteDropIndexConcurrently). A matching drop that says CASCADE is an
+// error: it would remove objects d does not list, and a plan never drops
+// with CASCADE.
 func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, error) {
 	if st.Kind() != statement.KindAlterTable {
 		return false, nil
@@ -35,7 +44,11 @@ func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, err
 	if len(ops) != 1 {
 		return false, nil
 	}
-	switch op := ops[0]; d.Kind {
+	op := ops[0]
+	if op.Cascade {
+		return false, fmt.Errorf("%w: %q drops with CASCADE, which removes objects the plan did not review", ErrInvariantViolation, st.SQL())
+	}
+	switch d.Kind {
 	case schemadiff.DroppedColumn:
 		return op.Kind == statement.OpDropColumn && op.Column == d.Name, nil
 	case schemadiff.DroppedConstraint:
@@ -77,6 +90,31 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 		return fmt.Errorf("%w: dropping %s %s of %s would also remove %s, which the plan did not review; re-plan",
 			ErrDroppedObjectDrift, d.Kind, d.Name, target, strings.Join(extra, "; "))
 	}
+	if d.Kind == schemadiff.DroppedColumn {
+		return refuseColumnDropBelow(ctx, tx, st, d, target)
+	}
+	return nil
+}
+
+// refuseColumnDropBelow refuses a column drop on a table that has
+// partitions or inheritance children, read under the table's lock. A drop
+// without ONLY reaches their copies of the column too, and with them any
+// index or constraint on a copy, none of which the plan reviewed.
+func refuseColumnDropBelow(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	var below bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
+		  JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.inhparent
+		  JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		 WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2)`,
+		st.Schema(), st.Table()).Scan(&below); err != nil {
+		return fmt.Errorf("read the tables below %s before dropping column %s: %w", target, d.Name, err)
+	}
+	if below {
+		return fmt.Errorf("%w: %s has partitions or inheritance children, and dropping column %s would drop their copies "+
+			"and anything on them, which the plan did not review", ErrDroppedColumnHasDescendants, target, d.Name)
+	}
 	return nil
 }
 
@@ -99,6 +137,18 @@ func droppingStep(admitted []sequenceStep, d *schemadiff.DroppedObject) (int, er
 		if step.kind != StepBrief {
 			return -1, fmt.Errorf("%w: step %d drops %s %s as a %s step, not a brief one",
 				ErrInvariantViolation, i+1, d.Kind, d.Name, step.kind)
+		}
+		// Only this step is checked, so a later step that drops the same
+		// name would drop whatever took it in between, unchecked.
+		for j := i + 1; j < len(admitted); j++ {
+			again, err := dropsObject(admitted[j].st, d)
+			if err != nil {
+				return -1, err
+			}
+			if again {
+				return -1, fmt.Errorf("%w: steps %d and %d both drop %s %s, and only one drop is checked",
+					ErrInvariantViolation, i+1, j+1, d.Kind, d.Name)
+			}
 		}
 		return i, nil
 	}

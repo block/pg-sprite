@@ -162,6 +162,10 @@ const (
 	// read again under the table's lock; nothing was dropped. Re-plan
 	// against the table as it stands and review the new plan.
 	CodeDroppedObjectDrift Code = "dropped-object-drift"
+	// CodeDroppedColumnHasDescendants: a reviewed column drop would also
+	// drop the column from the table's partitions or inheritance children,
+	// which the plan did not review; nothing was dropped.
+	CodeDroppedColumnHasDescendants Code = "dropped-column-has-descendants"
 	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
 	// CONSTRAINT validates was dropped or replaced after planning, read
 	// again under the table's lock; nothing was validated. Re-plan against
@@ -247,6 +251,7 @@ func Codes() []Code {
 		CodeDroppedIndexDrift,
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
+		CodeDroppedColumnHasDescendants,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -294,6 +299,7 @@ func (c Code) Permanent() bool {
 		CodeDroppedIndexDrift,
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
+		CodeDroppedColumnHasDescendants,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -403,6 +409,8 @@ func sentinelCode(err error) Code {
 		return CodeDroppedIndexReplaced
 	case errors.Is(err, ErrDroppedObjectDrift):
 		return CodeDroppedObjectDrift
+	case errors.Is(err, ErrDroppedColumnHasDescendants):
+		return CodeDroppedColumnHasDescendants
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
