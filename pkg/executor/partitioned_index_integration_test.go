@@ -183,6 +183,52 @@ func TestBuildPartitionedIndex(t *testing.T) {
 			f.requireCovered(t, "orders", name, partitions...)
 		})
 
+		// A partition that is itself partitioned gets its own metadata-only
+		// index, filled by its partitions' indexes and attached upward, to
+		// any depth. Leaves are built; the levels between are "partitioned".
+		t.Run("builds through sub-partitioned partitions", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `CREATE TABLE %s.events (id bigint NOT NULL, region text NOT NULL, ts date NOT NULL) PARTITION BY RANGE (ts)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_2024 PARTITION OF %[1]s.events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01') PARTITION BY LIST (region)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_2024_eu PARTITION OF %[1]s.events_2024 FOR VALUES IN ('eu')`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_2024_us PARTITION OF %[1]s.events_2024 FOR VALUES IN ('us') PARTITION BY HASH (id)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_2024_us_h0 PARTITION OF %[1]s.events_2024_us FOR VALUES WITH (MODULUS 2, REMAINDER 0)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_2024_us_h1 PARTITION OF %[1]s.events_2024_us FOR VALUES WITH (MODULUS 2, REMAINDER 1)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_2025 PARTITION OF %[1]s.events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')`, f.schema)
+			f.exec(t, `INSERT INTO %s.events SELECT g, CASE g %% 2 WHEN 0 THEN 'eu' ELSE 'us' END, DATE '2024-03-01' + g FROM generate_series(1, 100) g`, f.schema)
+			all := []string{"events_2024", "events_2024_eu", "events_2024_us", "events_2024_us_h0", "events_2024_us_h1", "events_2025"}
+
+			rep := f.build(t, "events", fmt.Sprintf("CREATE INDEX idx_events_region ON ONLY %s.events (region, id)", f.schema))
+
+			assert.Equal(t, 6, rep.Partitions)
+			assert.ElementsMatch(t, all, workedTables(rep))
+			actions := map[string]executor.PartitionIndexAction{}
+			for _, w := range rep.Worked {
+				actions[w.Table] = w.Action
+			}
+			assert.Equal(t, map[string]executor.PartitionIndexAction{
+				"events_2024":       executor.PartitionIndexOnly,
+				"events_2024_eu":    executor.PartitionIndexBuilt,
+				"events_2024_us":    executor.PartitionIndexOnly,
+				"events_2024_us_h0": executor.PartitionIndexBuilt,
+				"events_2024_us_h1": executor.PartitionIndexBuilt,
+				"events_2025":       executor.PartitionIndexBuilt,
+			}, actions)
+			f.requireCovered(t, "events", "idx_events_region", "events_2024", "events_2025")
+			// Each sub-partitioned level is valid on its own only because
+			// the level below it is covered.
+			for _, p := range []string{"events_2024", "events_2024_us"} {
+				for name, r := range f.indexesOn(t, p) {
+					if r.parent != "" {
+						assert.Equal(t, "I", r.kind, "%s.%s", p, name)
+						assert.True(t, r.valid, "%s.%s must be valid", p, name)
+					}
+				}
+			}
+			f.requireCovered(t, "events_2024", f.derived(t, "idx_events_region", "events_2024"), "events_2024_eu", "events_2024_us")
+			f.requireCovered(t, "events_2024_us", f.derived(t, "idx_events_region", "events_2024_us"), "events_2024_us_h0", "events_2024_us_h1")
+		})
+
 		// NULLS NOT DISTINCT is part of the printed definition from
 		// PostgreSQL 15 on, so a unique index that sets it must keep it on
 		// every partition. Earlier servers do not have the option, so the

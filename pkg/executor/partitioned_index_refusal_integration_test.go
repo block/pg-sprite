@@ -45,6 +45,27 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 			assert.Zero(t, f.indexCount(t, "plain"))
 		})
 
+		// A foreign table cannot carry an index, so the parent's index would
+		// never become valid. The refusal comes before the parent's index
+		// exists.
+		t.Run("a tree with a foreign table partition", func(t *testing.T) {
+			f := newFixture(t)
+			partitions := f.ordersByRegion(t)
+			wrapper := "fdw_" + f.schema
+			f.exec(t, `CREATE FOREIGN DATA WRAPPER %s`, wrapper)
+			t.Cleanup(func() {
+				_, err := f.pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(`DROP FOREIGN DATA WRAPPER IF EXISTS %s CASCADE`, wrapper))
+				assert.NoError(t, err)
+			})
+			f.exec(t, `CREATE SERVER srv_%s FOREIGN DATA WRAPPER %s`, f.schema, wrapper)
+			f.exec(t, `CREATE FOREIGN TABLE %[1]s.orders_fx PARTITION OF %[1]s.orders FOR VALUES IN ('fx') SERVER srv_%[1]s`, f.schema)
+
+			_, err := f.buildErr(t, "orders", fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema))
+
+			require.ErrorIs(t, err, executor.ErrForeignTablePartition)
+			f.requireNothingBuilt(t, "orders", partitions...)
+		})
+
 		// Each of these holds a name the build needs. None is renamed,
 		// dropped, or attached; the build says so and stops.
 		t.Run("a name held by something that is not the requested index", func(t *testing.T) {
@@ -200,6 +221,27 @@ func TestBuildPartitionedIndexWithProgress(t *testing.T) {
 			assert.Equal(t, 4, snapshot.Step)
 			assert.NotEmpty(t, snapshot.Detail.Statement)
 			f.requireCovered(t, "orders", "idx_orders_total", partitions...)
+		})
+
+		t.Run("a sub-partitioned tree counts every partition that needs an index", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `CREATE TABLE %s.events (id bigint NOT NULL, region text NOT NULL) PARTITION BY LIST (region)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_eu PARTITION OF %[1]s.events FOR VALUES IN ('eu') PARTITION BY HASH (id)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_eu_0 PARTITION OF %[1]s.events_eu FOR VALUES WITH (MODULUS 2, REMAINDER 0)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_eu_1 PARTITION OF %[1]s.events_eu FOR VALUES WITH (MODULUS 2, REMAINDER 1)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.events_us PARTITION OF %[1]s.events FOR VALUES IN ('us')`, f.schema)
+			tracker, err := progress.NewTracker(progress.WallClock{})
+			require.NoError(t, err)
+
+			_, err = executor.BuildPartitionedIndexWithProgress(t.Context(), f.cfg, f.pool, mustPreflight(t, f.pool, f.schema, "events"),
+				fmt.Sprintf("CREATE INDEX idx_events_id ON %s.events (id)", f.schema), buildBudget, tracker)
+
+			require.NoError(t, err)
+			snapshot, err := tracker.Progress(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, progress.PhaseFinished, snapshot.Phase)
+			assert.Equal(t, 5, snapshot.TotalSteps, "the parent's index and four partitions")
+			assert.LessOrEqual(t, snapshot.Step, snapshot.TotalSteps)
 		})
 
 		t.Run("a failed build ends failed", func(t *testing.T) {
