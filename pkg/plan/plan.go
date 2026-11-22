@@ -52,8 +52,12 @@ import (
 // Version 19 added the extension_schemas field and its part in the
 // fingerprint. Version 20 added the add-enum-value change kind and the type
 // field, for a plan of a desired enum type file. Version 21 added the
-// statement-level drops field and its part in the fingerprint.
-const FormatVersion = 21
+// add-integer-primary-key guidance code, which a
+// copy-and-swap-pk-unsupported refusal verdict for a keyless table
+// carries; no report emits it, but the report embeds the whole guidance
+// vocabulary. Version 22 added the statement-level
+// drops field and its part in the fingerprint.
+const FormatVersion = 22
 
 // Source identifies which front door derived the plan.
 type Source string
