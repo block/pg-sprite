@@ -309,7 +309,7 @@ read-only or fully offline.
 | `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
 | `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
-| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone; `--desired` checks a desired-state file against the admission `diff` and `migrate --desired` run, and prints the refusal verdict for a file they would refuse |
+| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone; `--desired` runs the desired-file admission `diff` and `migrate --desired` share and prints the refusal verdict for a file it refuses; planning can still refuse what admission does not inspect |
 | `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, exits 0 on any script it can parse |
 
 The offline commands have no connection flags at all, so they cannot be

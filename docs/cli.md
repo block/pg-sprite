@@ -342,10 +342,12 @@ CREATE INDEX orders_total_idx ON orders USING btree (total);
 faithfully. A `diff` against a freshly pulled file reports no changes, which
 proves the baseline. [pull.md](pull.md) covers the refused shapes.
 `pg-sprite fmt schema/orders.sql` prints a hand-edited file in canonical form,
-without a database. `pg-sprite lint --desired schema/orders.sql` checks, also
-without a database, that `diff` and `migrate --desired` would accept the file:
-a file they would refuse, such as a types or partitions file, prints the same
-refusal verdict and exits 2.
+without a database. `pg-sprite lint --desired schema/orders.sql` runs, also
+without a database, the file admission `diff` and `migrate --desired` share: a
+file it refuses, such as a types or partitions file, prints the same refusal
+verdict and exits 2. Passing it does not mean planning will succeed: `diff`
+can still refuse a table shape or a difference from the live table that `lint`
+does not inspect.
 
 ### Review the plan for an edited file
 

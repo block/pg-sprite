@@ -65,11 +65,13 @@ codes make the conservatism visible instead of burying it:
 
 `pg-sprite lint --desired` checks a desired-state file (one `CREATE TABLE`, its indexes, and
 its row security) instead of a script. Its statements are declarations, not operations, so
-the codes below do not apply to them. It runs the admission `diff` and `migrate --desired`
-run before they connect. A file they would refuse prints the refusal verdict
+the codes below do not apply to them. It runs the file admission `diff` and `migrate --desired`
+share before they connect. A file it refuses prints the refusal verdict
 ([refusal classes](refusal-classes.md)), not this report, and exits 2. An admitted file is clean: text
-prints nothing, and `--json` prints this report with no findings. Invalid SQL exits 1. How
-the file differs from a live table is `diff`'s to report, because only `diff` reads the table.
+prints nothing, and `--json` prints this report with no findings. Invalid SQL exits 1. Admission
+does not mean planning will succeed: `diff` can still refuse a table shape it builds on the
+server, such as a lone `PARTITION OF` table, or a difference from the live table, because only
+`diff` reads the server.
 
 ## Report fields
 

@@ -704,11 +704,12 @@ $ pg-sprite lint /tmp/changes.sql --json
 
 ### A desired file refused offline (`lint --desired`) — exit 2
 
-`lint --desired` checks a desired file instead of a script: the admission
-`diff` and `migrate --desired` run before they connect, with no database. A
-file they would refuse prints the same refusal verdict and exits 2; an
-admitted file is clean and exits 0. How the file differs from a live table is
-`diff`'s to report.
+`lint --desired` checks a desired file instead of a script: it runs the file
+admission `diff` and `migrate --desired` share before they connect, with no
+database. A file it refuses prints the same refusal verdict and exits 2; an
+admitted file is clean and exits 0. Planning can still refuse what admission
+does not inspect: a table shape built on the server, or a difference from the
+live table.
 
 ```sql
 -- /tmp/events.sql

@@ -55,14 +55,16 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 	return nil
 }
 
-// lintDesired checks a desired schema file offline with the admission
-// diff and migrate --desired run before they connect: a file that is not one
+// lintDesired checks a desired schema file offline with the file admission
+// diff and migrate --desired share before they connect: a file that is not one
 // table with its indexes and row security, a types or partitions file, or a
 // statement such a file may not hold is refused with its verdict and exits
 // 2. An admitted file is clean: text prints nothing and JSON prints the
 // empty lint report. Its statements are declarations, not operations, so the
 // script rules do not apply to them; how the file differs from a live table
-// is diff's to report, because only diff reads the table.
+// is diff's to report, because only diff reads the table, and so is a table
+// shape refused when the server builds it: admission does not mean planning
+// will succeed.
 func (c *LintCmd) lintDesired(out io.Writer, src string) error {
 	if _, err := statement.ParseDesiredFile(src); err != nil {
 		return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, "")
