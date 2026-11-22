@@ -751,6 +751,66 @@ row stays in `cutover`. The rows are read by primary key, so the lock covers a r
 only other writer; a row whose key moved across a chunk boundary between the two reads is the
 next pass's to catch.
 
+### Evidence: key-by-key settling under the load proof's default load
+
+Recorded 2026-11-22 on a laptop (16 CPUs, Docker VM with about 8 GiB of memory, the compose
+database: PostgreSQL 16.16, `fsync=off`). Every run is the [load proof](testing.md#the-load-proof)
+at its default load, 8 workers × 100 mutations a second spread over the whole table
+(`LOAD_PROOF_HOT` unset), with the row count lowered to one the laptop carries:
+
+```sh
+make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_WORKERS=8 LOAD_PROOF_RATE=100 LOAD_PROOF_FREE_DISK=10GiB
+make load-proof LOAD_PROOF_ROWS=100000 LOAD_PROOF_WORKERS=8 LOAD_PROOF_RATE=100 LOAD_PROOF_FREE_DISK=10GiB
+```
+
+The runs compare three commits. Before is `52a4097`, the load proof itself, which judged a
+differing chunk as a whole. Settling is `beefc86`, the commit that added the key-by-key settling
+above, four commits later and with no other change to the copy-and-swap route or the load
+proof between them; its runs carry one test-helper change from a later commit, `a9f4f61`,
+which leaves the `pg_attver` column option newer PostgreSQL images stamp on every column out of
+the load proof's catalog comparison, since without it that comparison fails every run after the
+swap. Main is `469f1b8`, 61 commits after
+before, which adds the later engine changes that bear on these runs: slot lag judged by
+unconfirmed WAL, keys left for the swap to compare under its lock, and the copy paced by slot
+lag ([D12](#d12--throttle-by-chunk-time-and-slot-lag)). No run failed for an environmental
+reason. The table lists every run but three: two started at once against the one compose
+database by mistake, and one at `beefc86` without the test-helper change, which passed live
+verify and the swap and then failed that catalog comparison.
+
+| Code | Rows | Run | Result | Stopped in | Chunks compared | Settled key by key | Rereads | `hot` outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| before | 50,000 | 1 | fail, `execution-failed` | live verify, after 31 s | — | — | 3, the bound | chunk [min, 1010]: source 978 rows, shadow 979; no keys named |
+| before | 50,000 | 2 | fail, `execution-failed` | live verify, after 61 s | — | — | 3, the bound | chunk [1008, 3020]: source 1950 rows, shadow 1952; no keys named |
+| before | 100,000 | 1 | fail, `execution-failed` | catch-up: slot over the 1 GiB ceiling | — | — | — | — |
+| settling | 50,000 | 1 | pass | — | 26 | 25 | not recorded | none |
+| settling | 50,000 | 2 | pass | — | 31 | 30 | not recorded | none |
+| settling | 50,000 | 3 | pass | — | 36 | 36 | not recorded | none |
+| main | 50,000 | 1 | pass | — | 42 | 42 | not recorded | none |
+| main | 50,000 | 2 | pass | — | 26 | 25 | not recorded | none |
+| main | 50,000 | 3 | pass | — | 24 | 23 | not recorded | none |
+| main | 100,000 | 1 | pass | — | 49 | 46 | not recorded | none |
+| main | 100,000 | 2 | pass | — | 74 | 70 | not recorded | none |
+
+"Chunks compared" and "settled key by key" are the verdict's `verified N rows in C chunks
+(S settled against the stream)`; every other chunk matched in the sweep or had keys left for
+the swap. The engine reports a pass's rereads in the progress report while it runs
+(`chunks_reread`, `settle_rows_read`), and keeps the keys it left for the swap on
+`Report.Carried`, but the load proof records neither for a passing run, so neither is shown; a
+carried key that differed would have refused the swap, and none did. Every pass compared the
+retained and live tables row for row over 52,693 to 115,777 keys, with 55 to 304 excluded above
+the swap position and none ambiguous, and its only load failures were the 8 to 24 `0A000` stale
+prepared statements the swap causes.
+
+At 50,000 rows the settling alone changes the outcome: before, a chunk the default load writes
+at every reread never reads equal as a whole, and the pass stops after its three rereads; from
+`beefc86` on, the same load settles differing chunks key by key, no run ends `hot`, and the live
+verify pass passes. At 100,000 rows the before run never reached the verify pass: it stopped in
+the catch-up on the slot lag ceiling, which the later slot lag changes on main address, not the
+settling, and the settling commit was not run at that size. The evidence is bounded by its size
+and its host: a laptop at 50,000 and 100,000 rows (about 0.5 and 1 GiB a table) with `fsync=off`,
+not the default 1,000,000 rows of about 10 GiB, which is a separate run on a host with the disk
+and I/O for it.
+
 ## Package and proof-type map
 
 | Package | Responsibility and proof types | Invariants |
