@@ -20,6 +20,7 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -78,6 +79,33 @@ func TestCopySwapPreflightVerdict(t *testing.T) {
 		assert.Equal(t, verdict.Cause(preflight.CopySwapCauseUnlogged), v.Cause)
 		assert.Equal(t, "billing.orders", v.Table)
 		assert.Contains(t, v.Detail, "UNLOGGED")
+	})
+
+	t.Run("a keyless table carries the guidance to add an integer key", func(t *testing.T) {
+		shapeErr := &preflight.UnsupportedCopySwapShapeError{
+			Cause:        preflight.CopySwapCausePKUnsupported,
+			Detail:       "the primary key has 0 columns; exactly one is required",
+			NoPrimaryKey: true,
+		}
+		v, err := copySwapPreflightVerdict(st, fmt.Errorf("preflight: %w", shapeErr))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.Cause(preflight.CopySwapCausePKUnsupported), v.Cause)
+		assert.Equal(t, suggest.GuidanceAddIntegerPrimaryKey, v.Guidance)
+		assert.Contains(t, v.Detail, "docs/primary-keys.md#add-a-primary-key-online")
+	})
+
+	t.Run("a uuid-keyed table carries no guidance", func(t *testing.T) {
+		// A table has one primary key, and no online route replaces it,
+		// so there is no add-a-key step to point at.
+		shapeErr := &preflight.UnsupportedCopySwapShapeError{
+			Cause:  preflight.CopySwapCausePKUnsupported,
+			Detail: "primary-key column id has type uuid; smallint, integer, or bigint is required",
+		}
+		v, err := copySwapPreflightVerdict(st, shapeErr)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.Cause(preflight.CopySwapCausePKUnsupported), v.Cause)
+		assert.Empty(t, v.Guidance)
+		assert.Equal(t, shapeErr.Error(), v.Detail)
 	})
 
 	t.Run("a refused environment is environmental with its cause", func(t *testing.T) {
