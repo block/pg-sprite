@@ -22,11 +22,19 @@ var (
 	// ErrNoCreateTable is returned when the input has no CREATE TABLE.
 	ErrNoCreateTable = errors.New("desired schema must contain a CREATE TABLE")
 	// ErrMultipleCreateTables is returned for more than one CREATE TABLE:
-	// the engine is single-table scoped.
+	// the engine is single-table scoped. The parser returns it inside a
+	// [*SecondTableError], which names the refused CREATE TABLE.
 	ErrMultipleCreateTables = errors.New("desired schema must contain exactly one CREATE TABLE")
+	// ErrDesiredPartitions is returned alongside ErrMultipleCreateTables
+	// (both inside a [*SecondTableError]) for a file whose CREATE TABLEs
+	// declare partitions of a table: a partition is a table of its own, and
+	// the declarative model does not plan partitions.
+	ErrDesiredPartitions = errors.New("desired schema declares partitions of a table, which the declarative model does not plan")
 	// ErrDisallowedStatement is returned for any statement kind other than
 	// CREATE TABLE / CREATE INDEX. The desired file is executed verbatim on
 	// a scratch schema, so only pure schema definition is admitted.
+	// The parser returns it inside a [*DisallowedStatementError], which
+	// names the statement and its kind.
 	ErrDisallowedStatement = errors.New("statement kind not allowed in a desired schema")
 	// ErrQualifiedName is returned when a statement schema-qualifies its
 	// target. Desired files are schema-relative; the live schema comes from
@@ -44,6 +52,65 @@ var (
 	// own terms.
 	ErrExtensionSchema = errors.New("invalid extension schema")
 )
+
+// DisallowedStatementError is [ErrDisallowedStatement] for one statement of
+// a desired file. It carries the statement's canonical SQL and the kind
+// [ParseOne] gives it, so a caller can classify the refusal the way the
+// imperative front door classifies the same statement.
+type DisallowedStatementError struct {
+	// SQL is the refused statement in the deparser's canonical form.
+	SQL string
+	// Kind is the statement's kind as [ParseOne] classifies it.
+	Kind Kind
+}
+
+func (e *DisallowedStatementError) Error() string {
+	return fmt.Sprintf("%v: %s", ErrDisallowedStatement, e.SQL)
+}
+
+// Unwrap returns [ErrDisallowedStatement].
+func (e *DisallowedStatementError) Unwrap() error { return ErrDisallowedStatement }
+
+// SecondTableError is [ErrMultipleCreateTables] for the second CREATE TABLE
+// of a desired file. It also matches [ErrDesiredPartitions] when either
+// CREATE TABLE is a partition.
+type SecondTableError struct {
+	// SQL is the refused CREATE TABLE in the deparser's canonical form.
+	SQL string
+	// Partition reports whether the file declares a partition.
+	Partition bool
+}
+
+func (e *SecondTableError) Error() string {
+	if e.Partition {
+		return fmt.Sprintf("%v: %v: %s", ErrMultipleCreateTables, ErrDesiredPartitions, e.SQL)
+	}
+	return fmt.Sprintf("%v: %s", ErrMultipleCreateTables, e.SQL)
+}
+
+// Unwrap returns [ErrMultipleCreateTables], and [ErrDesiredPartitions] when
+// the file declares a partition.
+func (e *SecondTableError) Unwrap() []error {
+	if e.Partition {
+		return []error{ErrMultipleCreateTables, ErrDesiredPartitions}
+	}
+	return []error{ErrMultipleCreateTables}
+}
+
+// disallowedStatement returns the refusal for a desired-file statement the
+// front door does not admit, classified by [ParseOne] from its canonical
+// text.
+func disallowedStatement(node *pganalyze.Node) error {
+	sql, err := deparseOne(node)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrDisallowedStatement, err)
+	}
+	st, err := ParseOne(sql)
+	if err != nil {
+		return fmt.Errorf("%w: classify %s: %w", ErrDisallowedStatement, sql, err)
+	}
+	return &DisallowedStatementError{SQL: sql, Kind: st.Kind()}
+}
 
 // DesiredSchema proves a desired-state schema file passed the set-level
 // admission rules: exactly one unqualified CREATE TABLE plus any number of
@@ -138,13 +205,15 @@ func parseDesiredTree(tree *pganalyze.ParseResult) (DesiredSchema, error) {
 		return DesiredSchema{}, ErrEmptyDesired
 	}
 	var ds DesiredSchema
+	partition := false
 	for i, raw := range tree.GetStmts() {
-		st, err := admitDesiredStatement(raw.GetStmt(), ds.table)
+		st, err := admitDesiredStatement(raw.GetStmt(), ds.table, partition)
 		if err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
 		if st.kind == KindCreateTable {
 			ds.table = st.table
+			partition = isPartition(raw.GetStmt().GetCreateStmt())
 			ds.foreignKeys = len(foreignKeyConstraints(raw.GetStmt().GetCreateStmt())) > 0
 			if ds.referenced, err = referencedTables(raw.GetStmt().GetCreateStmt()); err != nil {
 				return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
@@ -190,8 +259,9 @@ func executionOrder(statements []Statement) []Statement {
 
 // admitDesiredStatement applies the per-statement admission rules and
 // returns the statement's kind and target. seenTable is the CREATE TABLE
-// target admitted so far, empty when none.
-func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, error) {
+// target admitted so far, empty when none, and seenPartition reports
+// whether that CREATE TABLE is a partition.
+func admitDesiredStatement(node *pganalyze.Node, seenTable string, seenPartition bool) (Statement, error) {
 	switch {
 	case node.GetCreateStmt() != nil:
 		create := node.GetCreateStmt()
@@ -200,7 +270,11 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, e
 			return Statement{}, fmt.Errorf("%w: %s.%s", ErrQualifiedName, rel.GetSchemaname(), rel.GetRelname())
 		}
 		if seenTable != "" {
-			return Statement{}, ErrMultipleCreateTables
+			sql, err := deparseOne(node)
+			if err != nil {
+				return Statement{}, fmt.Errorf("%w: %w", ErrMultipleCreateTables, err)
+			}
+			return Statement{}, &SecondTableError{SQL: sql, Partition: seenPartition || isPartition(create)}
 		}
 		return Statement{kind: KindCreateTable, table: rel.GetRelname()}, nil
 	case node.GetIndexStmt() != nil:
@@ -214,8 +288,14 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, e
 		}
 		return Statement{kind: KindCreateIndex, table: rel.GetRelname()}, nil
 	default:
-		return Statement{}, ErrDisallowedStatement
+		return Statement{}, disallowedStatement(node)
 	}
+}
+
+// isPartition reports whether a CREATE TABLE declares a partition of a
+// table (PARTITION OF ... FOR VALUES or DEFAULT).
+func isPartition(create *pganalyze.CreateStmt) bool {
+	return create.GetPartbound() != nil
 }
 
 // Qualify returns sql with its target relation qualified by schema; an

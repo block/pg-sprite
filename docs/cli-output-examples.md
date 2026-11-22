@@ -776,6 +776,33 @@ $ pg-sprite diff --desired /tmp/users.sql --json
 }
 ```
 
+### Refused before planning: a file that is not one table (`unsupported-statement`) — exit 2
+
+A desired file holds one `CREATE TABLE`, its indexes, and its row security.
+A file that holds anything else is refused before `diff` connects or plans,
+with the refusal verdict instead of a plan report. The class comes from the
+refused statement's kind, as the imperative front door would class it: a type
+goes to the operator who runs catalog work, a data change to the data change
+runner. A second table is refused by design, and partitions of a table as a
+capability boundary. `migrate --desired` refuses the same files the same way.
+
+```sql
+-- /tmp/account_status.sql
+CREATE TYPE account_status AS ENUM ('active', 'closed');
+```
+
+```console
+$ pg-sprite diff --desired /tmp/account_status.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "no-online-safety-problem",
+  "owner": "direct-operator",
+  "statement": "CREATE TYPE account_status AS ENUM ('active', 'closed')",
+  "detail": "a desired file holds one CREATE TABLE, its indexes, and its row security, so this statement is not allowed in it; nothing was planned or executed"
+}
+```
+
 ## Capabilities
 
 `capabilities` needs no database: it prints the embedded support matrix

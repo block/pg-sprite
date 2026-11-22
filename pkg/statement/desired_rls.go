@@ -182,7 +182,7 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []Qua
 	case node.GetAlterTableStmt() != nil:
 		alter := node.GetAlterTableStmt()
 		if alter.GetMissingOk() || alter.GetObjtype() != pganalyze.ObjectType_OBJECT_TABLE {
-			return "", nil, ErrDisallowedStatement
+			return "", nil, disallowedStatement(node)
 		}
 		for _, cmd := range alter.GetCmds() {
 			switch cmd.GetAlterTableCmd().GetSubtype() {
@@ -191,7 +191,7 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []Qua
 			case pganalyze.AlterTableType_AT_ForceRowSecurity, pganalyze.AlterTableType_AT_NoForceRowSecurity:
 				*forced += 1
 			default:
-				return "", nil, ErrDisallowedStatement
+				return "", nil, disallowedStatement(node)
 			}
 		}
 		target, err := rowSecurityTarget(alter.GetRelation())
@@ -210,7 +210,7 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []Qua
 	case node.GetCommentStmt() != nil:
 		comment := node.GetCommentStmt()
 		if comment.GetObjtype() != pganalyze.ObjectType_OBJECT_POLICY {
-			return "", nil, ErrDisallowedStatement
+			return "", nil, disallowedStatement(node)
 		}
 		names := comment.GetObject().GetList().GetItems()
 		if len(names) != 2 {
@@ -218,7 +218,7 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []Qua
 		}
 		return names[0].GetString_().GetSval(), nil, nil
 	default:
-		return "", nil, ErrDisallowedStatement
+		return "", nil, disallowedStatement(node)
 	}
 }
 

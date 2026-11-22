@@ -308,6 +308,26 @@ func TestParseOneKinds(t *testing.T) {
 			want: Statement{kind: KindCatalogWork},
 		},
 		{
+			name: "create enum type is catalog work",
+			sql:  "CREATE TYPE mood AS ENUM ('happy', 'sad')",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create domain is catalog work",
+			sql:  "CREATE DOMAIN positive AS int CHECK (VALUE > 0)",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create composite type is catalog work",
+			sql:  "CREATE TYPE address AS (zip text)",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create range type is catalog work",
+			sql:  "CREATE TYPE span AS RANGE (subtype = int4)",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
 			name: "comment is catalog work",
 			sql:  "COMMENT ON TABLE users IS 'people'",
 			want: Statement{kind: KindCatalogWork},

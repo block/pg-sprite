@@ -47,7 +47,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 	}
 	file, err := statement.ParseDesiredFile(string(raw))
 	if err != nil {
-		return err
+		return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, "")
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
 		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
@@ -70,7 +70,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 	if c.DryRun {
 		report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: c.Schema, Desired: desired})
 		if err != nil {
-			return err
+			return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, desired.Statements()[0].SQL())
 		}
 		// Preview uses desired-state admission: a routed native step can still
 		// discard live structure, which RunDesired refuses before execution.
