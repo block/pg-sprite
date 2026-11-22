@@ -1,0 +1,160 @@
+package executor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/schemadiff"
+)
+
+// ErrDroppedIndexDrift means the index a reviewed plan drops is no longer
+// the plain, valid index of the plan's table with the definition the plan
+// carried: it is gone, belongs to another table, is invalid, is a
+// partitioned table's index or an index partition, now backs a constraint,
+// or is another index that took over its name. It is returned only from the
+// read before the drop, so nothing was dropped. The outcome is permanent:
+// re-plan and review the new plan.
+var ErrDroppedIndexDrift = errors.New("the index the plan drops changed after planning")
+
+// ErrDroppedIndexReplaced means a drop that passed its pre-drop read dropped
+// an index the plan did not review: another session gave the name to a
+// different index in the round trip between the read and the drop, and the
+// index that was read is still in the catalog. Unlike ErrDroppedIndexDrift,
+// something was dropped; the operator inspects the table's indexes and
+// recreates the one that was dropped if it should stay. The outcome is
+// permanent.
+var ErrDroppedIndexReplaced = errors.New("the drop removed an index the plan did not review")
+
+// ExecuteDropIndexConcurrently drops one reviewed index with DROP INDEX
+// CONCURRENTLY, so the drop never takes the ACCESS EXCLUSIVE lock a plain
+// DROP INDEX holds while it waits behind the table's other transactions. A
+// caller has already admitted the index as destructive; definition is the
+// one the plan carried (schemadiff.DroppedObject.Definition).
+//
+// DROP INDEX CONCURRENTLY cannot run inside a transaction block, so the
+// index is checked and dropped on one pooled session under the CONCURRENTLY
+// wait policy (see ConcurrentBudget). Immediately before the drop the check
+// refuses, dropping nothing, unless schema.index is still a valid plain
+// index of schema.table that has definition and that the server will drop
+// concurrently (ErrDroppedIndexDrift), and is not the replica identity
+// index of a table, whose loss makes UPDATE and DELETE fail while a
+// publication publishes them (ErrReplicaIdentityDrop).
+//
+// PostgreSQL drops an index only by name, so another session can swap the
+// name in the round trip between the check and the drop. After the drop the
+// checked index's OID is looked up once more. That lookup is detective
+// only: it catches a swap that renamed the checked index aside, reports it
+// as ErrDroppedIndexReplaced, and cannot undo the drop or see a swap that
+// dropped the checked index as well.
+//
+// statement_timeout is the overall budget, or the caller's cancellation in
+// caller-owned mode, and lock_timeout is disabled for the reasons
+// ConcurrentBudget gives. A drop that does not finish returns a
+// *BudgetError or the caller's cancellation and leaves the index as it was
+// or marks it invalid; an invalid leftover is debris the diff reports as an
+// advisory, never as a drop. It needs one pool connection.
+func ExecuteDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, b ConcurrentBudget) (DroppedIndex, error) {
+	if err := b.validate(); err != nil {
+		return DroppedIndex{}, err
+	}
+	// INV: LK-2 — in caller-owned mode the caller's cancellation is the
+	// drop's only bound, so a context without one is refused before any
+	// session use.
+	if b.CallerOwned && ctx.Done() == nil {
+		return DroppedIndex{}, ErrCallerOwnedNeedsCancellableContext
+	}
+	if schema == "" || table == "" || index == "" {
+		return DroppedIndex{}, fmt.Errorf("%w: a drop needs the schema, table, and index names, got %q, %q, %q",
+			ErrUnqualifiedTable, schema, table, index)
+	}
+	if definition == "" {
+		return DroppedIndex{}, fmt.Errorf("%w: dropping index %s.%s needs the definition the plan carried for it",
+			ErrInvariantViolation, schema, index)
+	}
+	ref := pgx.Identifier{schema, index}
+	tableRef := pgx.Identifier{schema, table}
+
+	conn, release, err := acquireBudgetedSession(ctx, pool, b, schema)
+	if err != nil {
+		return DroppedIndex{}, err
+	}
+	defer release()
+
+	// The name must resolve to a valid, plain index of the plan's table
+	// with the planned definition, read on the session that drops it,
+	// immediately before the drop.
+	var (
+		oid         uint32
+		valid       bool
+		droppable   bool
+		replicaHead bool
+	)
+	err = conn.QueryRow(ctx,
+		`SELECT c.oid, i.indisvalid, `+droppableColumn+`,
+		        (i.indisreplident AND t.relreplident OPERATOR(pg_catalog.=) 'i')
+		   FROM pg_catalog.pg_index i
+		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
+		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		   JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
+		   JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
+		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2
+		    AND tn.nspname OPERATOR(pg_catalog.=) $1 AND t.relname OPERATOR(pg_catalog.=) $3`,
+		schema, index, table).Scan(&oid, &valid, &droppable, &replicaHead)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return DroppedIndex{}, fmt.Errorf("%w: %s has no index %s on %s any more; re-plan",
+			ErrDroppedIndexDrift, schema, ref.Sanitize(), tableRef.Sanitize())
+	case err != nil:
+		return DroppedIndex{}, fmt.Errorf("read index %s before dropping it: %w", ref.Sanitize(), err)
+	}
+	switch {
+	case !valid:
+		return DroppedIndex{}, fmt.Errorf("%w: %s is invalid, which is unfinished build debris and not what the plan reviewed; re-plan",
+			ErrDroppedIndexDrift, ref.Sanitize())
+	case !droppable:
+		return DroppedIndex{}, fmt.Errorf("%w: %s is now a constraint's index, a partitioned table's index, or an index partition, "+
+			"which DROP INDEX CONCURRENTLY does not drop; re-plan", ErrDroppedIndexDrift, ref.Sanitize())
+	case replicaHead:
+		return DroppedIndex{}, fmt.Errorf("%w: %s is the replica identity index of %s, which makes UPDATE and DELETE fail "+
+			"while a publication publishes them; point REPLICA IDENTITY at another unique index, at a primary key (DEFAULT), "+
+			"or at the whole row (FULL) first, then re-plan", ErrReplicaIdentityDrop, ref.Sanitize(), tableRef.Sanitize())
+	}
+	live, found, err := schemadiff.ReadDroppedObject(ctx, conn, schema, table, schemadiff.DroppedIndex, index)
+	switch {
+	case err != nil:
+		return DroppedIndex{}, fmt.Errorf("read the definition of index %s before dropping it: %w", ref.Sanitize(), err)
+	case !found:
+		return DroppedIndex{}, fmt.Errorf("%w: %s has no index %s on %s any more; re-plan",
+			ErrDroppedIndexDrift, schema, ref.Sanitize(), tableRef.Sanitize())
+	case live.Definition != definition:
+		return DroppedIndex{}, fmt.Errorf("%w: index %s is now %q, not the %q the plan reviewed; re-plan",
+			ErrDroppedIndexDrift, ref.Sanitize(), live.Definition, definition)
+	}
+
+	start := time.Now()
+	_, dropErr := conn.Exec(ctx, "DROP INDEX CONCURRENTLY "+ref.Sanitize())
+	elapsed := time.Since(start)
+	if dropErr != nil {
+		return DroppedIndex{}, asConcurrentBudgetError(ctx, dropErr, b, elapsed, "drop index "+ref.Sanitize())
+	}
+	// PostgreSQL has no drop by OID, so this lookup is after the fact: it
+	// cannot stop a drop of the wrong index, only report one.
+	var remaining int
+	if err := conn.QueryRow(ctx,
+		`SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1`,
+		oid).Scan(&remaining); err != nil {
+		return DroppedIndex{}, fmt.Errorf("look up the index checked before the drop of %s: %w", ref.Sanitize(), err)
+	}
+	if remaining != 0 {
+		return DroppedIndex{}, fmt.Errorf("%w: %s was dropped by name, but the index the plan checked (oid %d) is still in the catalog, "+
+			"so another session gave the name to a different index between the check and the drop and that index is the one that was dropped; "+
+			"inspect the indexes of %s and recreate the dropped one if it should stay",
+			ErrDroppedIndexReplaced, ref.Sanitize(), oid, tableRef.Sanitize())
+	}
+	return DroppedIndex{Schema: schema, Index: index, IndexOID: oid, Duration: elapsed}, nil
+}
