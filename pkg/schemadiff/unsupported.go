@@ -37,6 +37,10 @@ const (
 	// CauseGenerated refuses when an existing column becomes or stops being generated,
 	// changes between stored and virtual, or changes type while generated.
 	CauseGenerated UnsupportedCause = "generated"
+	// CauseGeneratedCheckName refuses when an unnamed check constraint needs
+	// a generated name the server's numbering would truncate to fit the
+	// identifier limit, which the plan does not reproduce.
+	CauseGeneratedCheckName UnsupportedCause = "generated-check-name"
 	// CauseEnumTypeMissing refuses when the enum type a desired enum type file
 	// declares does not exist in the schema.
 	CauseEnumTypeMissing UnsupportedCause = "enum-type-missing"
@@ -66,6 +70,7 @@ func UnsupportedCauses() []UnsupportedCause {
 		CauseIdentity,
 		CauseIdentitySequence,
 		CauseGenerated,
+		CauseGeneratedCheckName,
 		CauseEnumTypeMissing,
 		CauseEnumTypeKind,
 		CauseEnumValueRemoved,

@@ -35,8 +35,9 @@ func unsupportedChangeRefusal(err error) (verdict.Refusal, bool) {
 // declaring the result in the file, so it has no online-safety problem. A
 // persistence or collation change rewrites the table or column, which the
 // planner does not construct. The rest are shapes the diff does not derive:
-// table identity (partitioning), row security on the table-only path, and
-// column forms the plan cannot carry.
+// table identity (partitioning), row security on the table-only path,
+// column forms the plan cannot carry, and an unnamed check whose next
+// generated name the server would truncate.
 //
 // An enum type the file declares but the schema lacks is created once with
 // CREATE TYPE, which locks no table, and a label the file dropped is renamed
@@ -61,6 +62,7 @@ func unsupportedCauseRefusal(cause schemadiff.UnsupportedCause) (verdict.Refusal
 		schemadiff.CauseAddedColumnCollation,
 		schemadiff.CauseIdentity,
 		schemadiff.CauseGenerated,
+		schemadiff.CauseGeneratedCheckName,
 		schemadiff.CauseEnumTypeKind:
 		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 	}
