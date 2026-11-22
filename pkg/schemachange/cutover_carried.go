@@ -35,32 +35,38 @@ func compareCarried(ctx context.Context, tx pgx.Tx, ready CutoverReady, clock pr
 	started := clock.Now()
 	differing, err := checksum.CompareCarried(ctx, tx, built.target, built, ready.verified)
 	if err != nil {
-		return CarriedCompare{}, fmt.Errorf("compare the %d keys the verification pass left for the swap of %s.%s: %w", carried, built.Schema(), built.SourceTable(), err)
+		return CarriedCompare{}, fmt.Errorf("compare the %d keys the verification pass left for the swap of %s.%s, failed after %s: %w", carried, built.Schema(), built.SourceTable(), clock.Now().Sub(started), err)
 	}
 	compared := CarriedCompare{Keys: carried, Elapsed: clock.Now().Sub(started)}
 	if err := setSearchPath(ctx, tx, built.Schema()); err != nil {
 		return CarriedCompare{}, err
 	}
 	if len(differing) > 0 {
+		// The message names no time, so the same divergence reads the
+		// same on every occurrence.
 		// INV: CO-1
-		return CarriedCompare{}, refuse(CauseCarriedDiverged, nil, "%d of the %d keys the verification pass left for the swap differ between %s.%s and its shadow %s under the swap lock, after the drain, compared in %s; the first is %d",
-			len(differing), carried, built.Schema(), built.SourceTable(), built.ShadowTable(), compared.Elapsed, differing[0])
+		return CarriedCompare{}, refuse(CauseCarriedDiverged, nil, "%d of the %d keys the verification pass left for the swap differ between %s.%s and its shadow %s under the swap lock, after the drain; the first is %d",
+			len(differing), carried, built.Schema(), built.SourceTable(), built.ShadowTable(), differing[0])
 	}
 	return compared, nil
 }
 
 // CarriedCompare is what the swap's compare of the keys a live pass left
-// for it cost: how many keys it read on each side and how long the reads
-// held the swap's ACCESS EXCLUSIVE lock for. A committed swap's compare
-// found every key equal, so there is no differing count to carry; a
-// compare that found one refuses the swap as cutover-carried-diverged
-// instead. The zero value is a swap that compared nothing: a quiesced
-// proof, a live pass that left no key, or a SwappedTable InspectSwapped
-// re-derived, which cannot know what the swap compared.
+// for it cost: how many keys it read on each side and how long those reads
+// ran inside the swap's ACCESS EXCLUSIVE lock. That is the compare's share
+// of the lock, not the whole hold, which also covers the drain, the
+// checklist, the renames, and the commit. A committed swap's compare found
+// every key equal, so there is no differing count to carry; a compare that
+// found one refuses the swap as cutover-carried-diverged instead. The zero
+// value is a swap that compared nothing (a quiesced proof, or a live pass
+// that left no key) or a SwappedTable InspectSwapped re-derived, which
+// cannot know what the swap compared. A swap whose commit the client never
+// heard of, and whose outcome the catalog then settled, keeps the compare
+// of the attempt that committed.
 type CarriedCompare struct {
 	// Keys is how many carried keys the swap compared.
 	Keys int
-	// Elapsed is how long the compare ran, under the swap's lock, as the
-	// cutover's clock measured it.
+	// Elapsed is how long the compare ran inside the swap's lock, as the
+	// cutover's clock measured it: a share of the time the lock was held.
 	Elapsed time.Duration
 }

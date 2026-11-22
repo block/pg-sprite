@@ -49,7 +49,11 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 		return SwappedTable{}, backend, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return SwappedTable{}, backend, fmt.Errorf("commit cutover of %s.%s: %w", built.Schema(), built.SourceTable(), err)
+		// The attempt's table is returned with the commit's error: when
+		// the client never heard the answer, the catalog may yet say the
+		// swap committed, and the compare this attempt ran is then the
+		// committed swap's.
+		return swapped, backend, fmt.Errorf("commit cutover of %s.%s: %w", built.Schema(), built.SourceTable(), err)
 	}
 	return swapped, backend, nil
 }

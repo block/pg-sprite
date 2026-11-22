@@ -85,6 +85,8 @@ type CutoverOptions struct {
 	Sleep func(ctx context.Context, d time.Duration) error
 	// Clock times the compare of the keys a live pass left for the swap,
 	// which SwappedTable.CarriedCompare reports; nil reads the wall clock.
+	// Now is called inside the swap's ACCESS EXCLUSIVE lock, so it must
+	// return at once: every moment it takes is a moment the table is held.
 	Clock progress.Clock
 
 	// requireWriteFence makes the swap of a quiesced proof refuse unless the
@@ -237,7 +239,7 @@ func cutoverWithRetry(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 			return swapped, nil
 		}
 		if outcomeUnknown(err) {
-			return resolveUnknownOutcome(ctx, pool, ready, backend, attempt, err, opts)
+			return resolveUnknownOutcome(ctx, pool, ready, backend, attempt, swapped.carried, err, opts)
 		}
 		if !lockRetryable(err) {
 			return SwappedTable{}, rolledBack(err)

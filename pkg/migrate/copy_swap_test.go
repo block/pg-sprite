@@ -412,6 +412,17 @@ func TestCopySwapDetail(t *testing.T) {
 		"the retained source is kept under its _old name; "+
 		"the run reconciled a lost replication slot before catching up", kept)
 
+	// A swap that compared the keys its live pass left names how many and
+	// how long the compare ran under the lock, so a host reading the
+	// verdict sees what the swap paid without --debug.
+	carried := copySwapDetail(schemachange.Result{
+		Verification:    checksum.Report{Rows: 300, Chunks: 1},
+		CarriedCompare:  schemachange.CarriedCompare{Keys: 7, Elapsed: 12 * time.Millisecond},
+		OldTableDropped: true,
+	}, false)
+	assert.Equal(t, "verified 300 rows in 1 chunks; compared 7 still-changing keys under the swap lock in 12ms; "+
+		"the retained source is dropped", carried)
+
 	quiesced := copySwapDetail(schemachange.Result{
 		Verification:    checksum.Report{Rows: 4, Chunks: 1},
 		OldTableDropped: true,

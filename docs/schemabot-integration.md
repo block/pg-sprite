@@ -427,11 +427,11 @@ the pool besides; an importer running many tables from one process sizes for bot
 read no field of it then. A returned `Result` means the swap committed and the row is `done`
 (`Result.Checkpoint`). What the adapter can record about the swap depends on how the run met it:
 
-| How the run met the swap | `Swapped` | `SwapProven` | `OldTableDropped` | `Verification` |
-| --- | --- | --- | --- | --- |
-| This run's cutover made it | The proof of the renames | `true` | `true`, or `false` under `KeepOld` | This run's pass |
-| A resume found it committed with the retained source still there | The proof re-derived from the catalog | `true` | `true`, or `false` under `KeepOld` | Zero: no pass was made |
-| A resume found it committed with the retained source already dropped | Zero `SwapProof` | `false` | `true` | Zero: no pass was made |
+| How the run met the swap | `Swapped` | `SwapProven` | `OldTableDropped` | `Verification` | `CarriedCompare` |
+| --- | --- | --- | --- | --- | --- |
+| This run's cutover made it | The proof of the renames | `true` | `true`, or `false` under `KeepOld` | This run's pass | The swap's compare; zero when it compared no key |
+| A resume found it committed with the retained source still there | The proof re-derived from the catalog | `true` | `true`, or `false` under `KeepOld` | Zero: no pass was made | Zero: the catalog does not record it |
+| A resume found it committed with the retained source already dropped | Zero `SwapProof` | `false` | `true` | Zero: no pass was made | Zero: the catalog does not record it |
 
 `SwapProven == false` does not mean the swap is in doubt: it committed, but the renames it
 performed can no longer be read back once one side of them is gone, so there is no proof to
@@ -446,10 +446,14 @@ ceiling stopped carries the same count on the `*decode.SlotLagExceededError` it 
 `CarriedCompare` says what
 the swap paid under its `ACCESS EXCLUSIVE` lock to compare the rows a live verification pass
 could not judge because the application kept rewriting them: `Keys`, how many it read on
-each side, and `Elapsed`, how long those reads held the lock. It tells a swap that compared
-keys from a plain one; a key that differed would have refused the swap as
-`cutover-carried-diverged`, so a returned `Result` always found them equal. It is zero for a
-quiesced run, for a live pass that left no key, and for a run that resumed past its swap.
+each side, and `Elapsed`, how long those reads ran inside the lock. That is the compare's
+share of the lock, not the whole hold, which also covers the drain, the checks, the renames,
+and the commit. It tells a swap that compared keys from a plain one; a key that differed
+would have refused the swap as `cutover-carried-diverged`, so a returned `Result` always
+found them equal. It is zero for a quiesced run, for a live pass that left no key, and for a
+run that resumed past its swap. A swap whose commit the run never heard back about, and
+then found committed in the catalog, keeps the compare its attempt ran. `pkg/migrate` puts
+the same count and time in the verdict's `Detail`.
 The compare reads at most `checksum.MaxCarryKeys` rows on each side, bounded otherwise only
 by the swap's `statement_timeout`, which rolls the swap back with the source live.
 
