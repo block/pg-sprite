@@ -93,8 +93,10 @@ func requireSQLState(t *testing.T, err error, code string) {
 // the table it reads or writes and releases them when it ends, so the attach
 // waits behind DML statements that are running on that partition, not behind
 // a writer's open transaction, and until it commits it holds back every new
-// statement on that partition. Both waits are bounded by the lock_timeout
-// the build gives the attach, and the other partitions are not affected.
+// statement on that partition. The build's lock_timeout bounds how long the
+// attach waits to acquire its locks; a statement held back by the attach
+// waits under its own client's timeouts, until the attach's transaction ends.
+// The other partitions are not affected.
 // The modes are the same on every supported major.
 func TestAttachPartitionLocksThePartitionsIndex(t *testing.T) {
 	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
@@ -152,29 +154,32 @@ func TestAttachPartitionLocksThePartitionsIndex(t *testing.T) {
 
 		t.Run("a statement running on the partition delays the attach until the lock timeout", func(t *testing.T) {
 			f := newFixture(t).readyToAttach(t)
-			// The statement inserts one row, which opens the partition's
-			// indexes, and then sleeps while it evaluates the next row.
+			// The statement opens the partition's indexes when it starts,
+			// inserts one row, and then sleeps while it evaluates the next.
+			conn, err := f.pool.Acquire(t.Context())
+			require.NoError(t, err)
+			pid := conn.Conn().PgConn().PID()
 			writerCtx, stop := context.WithCancel(t.Context())
 			finished := make(chan error, 1)
 			go func() {
-				_, err := f.pool.Exec(writerCtx, fmt.Sprintf(
+				_, err := conn.Exec(writerCtx, fmt.Sprintf(
 					`INSERT INTO %s.orders_eu SELECT 1000 + g, 'eu', 1, 'n' FROM generate_series(1, 2) g WHERE g = 1 OR pg_sleep(20) IS NOT NULL`, f.schema))
 				finished <- err
 			}()
 			t.Cleanup(func() {
 				stop()
 				assert.Error(t, <-finished, "the running statement is cancelled when the test ends")
+				conn.Release()
 			})
 			require.Eventually(t, func() bool {
-				var running bool
+				var sleeping bool
 				require.NoError(t, f.pool.QueryRow(t.Context(), `
-					SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-					                WHERE state = 'active' AND query LIKE '%pg_sleep(20)%' AND pid <> pg_backend_pid())`).Scan(&running))
-				return running
-			}, 30*time.Second, 20*time.Millisecond, "the insert must be running")
+					SELECT COALESCE((SELECT wait_event = 'PgSleep' FROM pg_stat_activity WHERE pid = $1), false)`, pid).Scan(&sleeping))
+				return sleeping
+			}, 30*time.Second, 20*time.Millisecond, "the insert must be sleeping inside its statement")
 
 			attach := f.begin(t, "250ms")
-			_, err := attach.Exec(t.Context(), f.attachSQL())
+			_, err = attach.Exec(t.Context(), f.attachSQL())
 
 			requireSQLState(t, err, "55P03")
 		})

@@ -192,6 +192,7 @@ func TestBuildPartitionedIndexTreeChangesDuringARun(t *testing.T) {
 			assert.Contains(t, err.Error(), "ST-7")
 			assert.Contains(t, err.Error(), f.schema+"."+detached, "the error names the detached partition")
 			assert.Contains(t, err.Error(), f.schema+"."+leftover, "the error names the index left on it")
+			assert.Contains(t, err.Error(), "inspect the catalog", "the error asks for the catalog to be inspected")
 			row, ok := f.indexesOn(t, detached)[leftover]
 			require.True(t, ok, "the leftover index stays on the detached table")
 			assert.Empty(t, row.parent, "the leftover index is not attached")
