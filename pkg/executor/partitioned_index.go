@@ -187,6 +187,17 @@ func buildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool
 	if err != nil {
 		return rep, fmt.Errorf("lock %s for the partitioned index build: %w", qualifiedName(req.schema, req.table), err)
 	}
+	// INV: LK-1 — an advisory lock excludes only inside its own database, and
+	// the steps run on the pool, so the lock must be held in the pool's
+	// database before any step runs.
+	if err := confirmLockInPoolDatabase(ctx, pool, lock, req); err != nil {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCleanupTimeout)
+		defer cancel()
+		if releaseErr := lock.Release(releaseCtx); releaseErr != nil {
+			err = errors.Join(err, fmt.Errorf("release the table lock for %s: %w", qualifiedName(req.schema, req.table), releaseErr))
+		}
+		return rep, err
+	}
 	// Everything the lock protects runs under a context that ends when the
 	// lock is lost, so no statement outlives the exclusion it relied on.
 	lockedCtx, stop := lock.Bind(ctx)
@@ -204,6 +215,23 @@ func buildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool
 	}
 	rep.Duration = elapsedSince(tracker, start)
 	return rep, err
+}
+
+// confirmLockInPoolDatabase proves, from a pool session, that the backend
+// holding the build's table lock holds it in the database the pool is
+// connected to. The lock is taken on a session dialed from cfg and every step
+// runs on the pool, so a cfg and a pool that reach different databases would
+// give the build no exclusion while both looked healthy.
+func confirmLockInPoolDatabase(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, req partitionedIndexRequest) error {
+	holder, found, err := dbconn.LookupTableLockHolder(ctx, pool, req.schema, req.table)
+	if err != nil {
+		return fmt.Errorf("confirm the table lock for %s from the pool: %w", qualifiedName(req.schema, req.table), err)
+	}
+	if !found || holder.PID != lock.BackendPID() {
+		return fmt.Errorf("%w: LK-1: the table lock for %s is not held in the database the pool is connected to; the connection target and the pool must reach the same database",
+			ErrInvariantViolation, qualifiedName(req.schema, req.table))
+	}
+	return nil
 }
 
 // partitionedIndexRequest is the admitted statement's identity facts.

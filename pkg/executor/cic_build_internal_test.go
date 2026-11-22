@@ -87,7 +87,7 @@ func TestVerifiedBuildReportFailsClosed(t *testing.T) {
 	t.Cleanup(conn.Release)
 
 	t.Run("an invalid entry under the build's name fails closed", func(t *testing.T) {
-		_, err := verifiedBuildReport(t.Context(), conn, build, target, time.Second)
+		_, err := verifiedBuildReport(t.Context(), conn, build, target, 0, time.Second)
 		require.ErrorIs(t, err, ErrBuildLeftInvalidIndex)
 		var invalidErr *InvalidIndexError
 		require.ErrorAs(t, err, &invalidErr)
@@ -98,7 +98,7 @@ func TestVerifiedBuildReportFailsClosed(t *testing.T) {
 	t.Run("an unreadable catalog fails closed", func(t *testing.T) {
 		cancelledCtx, cancel := context.WithCancel(t.Context())
 		cancel()
-		_, err := verifiedBuildReport(cancelledCtx, conn, build, target, time.Second)
+		_, err := verifiedBuildReport(cancelledCtx, conn, build, target, 0, time.Second)
 		var invalidErr *InvalidIndexError
 		require.ErrorAs(t, err, &invalidErr)
 		assert.NotErrorIs(t, err, ErrBuildLeftInvalidIndex, "an unreadable catalog cannot prove a leftover")
