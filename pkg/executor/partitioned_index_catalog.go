@@ -107,6 +107,9 @@ type relationFacts struct {
 	quotedName   string
 	quotedSchema string
 	quotedTable  string
+	// backsConstraint is whether a constraint names the relation as its
+	// index (pg_constraint.conindid).
+	backsConstraint bool
 }
 
 func (f relationFacts) isPartitionedIndex() bool { return f.relkind == "I" }
@@ -120,7 +123,8 @@ const relationFactColumns = `c.oid, n.nspname, c.relname, c.relkind::pg_catalog.
 		        CASE WHEN c.relkind OPERATOR(pg_catalog.=) 'i' OR c.relkind OPERATOR(pg_catalog.=) 'I'
 		             THEN pg_catalog.pg_get_indexdef(c.oid) END,
 		        pg_catalog.quote_ident(c.relname), pg_catalog.quote_ident(n.nspname),
-		        pg_catalog.quote_ident(t.relname), t.relkind::pg_catalog.text, t.relname`
+		        pg_catalog.quote_ident(t.relname), t.relkind::pg_catalog.text, t.relname,
+		        EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conindid OPERATOR(pg_catalog.=) c.oid)`
 
 const relationFactJoins = `FROM pg_catalog.pg_class c
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
@@ -137,7 +141,7 @@ func scanRelationFacts(row pgx.Row) (relationFacts, error) {
 	)
 	err := row.Scan(&f.oid, &f.schema, &f.name, &f.relkind, &f.isPartition,
 		&tableOID, &valid, &unique, &def,
-		&f.quotedName, &f.quotedSchema, &quotedTable, &tableRelkind, &tableName)
+		&f.quotedName, &f.quotedSchema, &quotedTable, &tableRelkind, &tableName, &f.backsConstraint)
 	if err != nil {
 		return relationFacts{}, err
 	}

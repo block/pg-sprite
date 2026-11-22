@@ -202,8 +202,9 @@ func (f *partitionedIndexFlow) processSubPartitioned(ctx context.Context, node p
 	if err != nil {
 		return err
 	}
+	step := &partitionStep{flow: f}
 	if !attached {
-		if idx, err = f.ensureSubPartitionIndex(ctx, node); err != nil {
+		if idx, err = f.ensureSubPartitionIndex(ctx, node, step); err != nil {
 			return err
 		}
 	}
@@ -213,9 +214,11 @@ func (f *partitionedIndexFlow) processSubPartitioned(ctx context.Context, node p
 	if attached {
 		return nil
 	}
-	// The partition's step began with its own index; the attach, after its
-	// partitions' steps, stays on the latest one so steps never go back.
-	if err := f.attach(ctx, node, parentIdx, idx, func(sql string) { f.startStep(progress.OperationBrief, sql, false) }); err != nil {
+	// The partition's step began with its own index when the build created
+	// it, and the attach, after its partitions' steps, stays on the latest
+	// one so steps never go back. A resumed index was not created here, so
+	// the attach starts the partition's step.
+	if err := f.attach(ctx, node, parentIdx, idx, func(sql string) { f.startStep(progress.OperationBrief, sql, !step.started) }); err != nil {
 		return err
 	}
 	f.rep.Worked = append(f.rep.Worked, PartitionIndexResult{
@@ -227,7 +230,7 @@ func (f *partitionedIndexFlow) processSubPartitioned(ctx context.Context, node p
 // ensureSubPartitionIndex returns the ON ONLY index of a sub-partitioned
 // partition under the derived name, creating it when no relation holds the
 // name and resuming it when an earlier run created it.
-func (f *partitionedIndexFlow) ensureSubPartitionIndex(ctx context.Context, node partitionNode) (relationFacts, error) {
+func (f *partitionedIndexFlow) ensureSubPartitionIndex(ctx context.Context, node partitionNode, step *partitionStep) (relationFacts, error) {
 	name := derivedPartitionIndexName(f.req.index, node.oid)
 	var (
 		occupant relationFacts
@@ -254,7 +257,7 @@ func (f *partitionedIndexFlow) ensureSubPartitionIndex(ctx context.Context, node
 	if err != nil {
 		return relationFacts{}, fmt.Errorf("make the index statement for partition %s: %w", node.qualified(), err)
 	}
-	f.startStep(progress.OperationBrief, createSQL, true)
+	step.start(progress.OperationBrief, createSQL)
 	var created relationFacts
 	err = f.tx.run(ctx, "create the index of partition "+node.qualified(), catalogReadPath(), true,
 		func(ctx context.Context, tx pgx.Tx) error {
@@ -297,6 +300,12 @@ func (f *partitionedIndexFlow) judgeOccupant(occ relationFacts, node partitionNo
 	if occ.isPartition {
 		return 0, fmt.Errorf("%w: %s is already attached to another partitioned index",
 			ErrPartitionedIndexNameTaken, name)
+	}
+	// A constraint's index has duties beyond its key, so attaching it under
+	// a parent index that is not a constraint's would change what it is.
+	if occ.backsConstraint {
+		return 0, fmt.Errorf("%w: %s backs a constraint on partition %s",
+			ErrPartitionedIndexNameTaken, name, node.qualified())
 	}
 	key, err := occ.definitionKey()
 	if err != nil {

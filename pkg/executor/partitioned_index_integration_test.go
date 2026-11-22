@@ -230,7 +230,8 @@ func TestBuildPartitionedIndex(t *testing.T) {
 		})
 
 		// A rerun of a finished build has nothing to do: it creates nothing,
-		// lists no partition as worked, and still verifies the parent.
+		// lists no partition as worked, and still confirms the tree and
+		// verifies the parent.
 		t.Run("a rerun of a finished build changes nothing", func(t *testing.T) {
 			f := newFixture(t)
 			partitions := f.ordersByRegion(t)
@@ -243,7 +244,7 @@ func TestBuildPartitionedIndex(t *testing.T) {
 			assert.Empty(t, second.Worked)
 			assert.Equal(t, 3, second.Partitions)
 			assert.Equal(t, first.IndexOID, second.IndexOID)
-			assert.Equal(t, 1, second.Passes)
+			assert.Equal(t, 2, second.Passes, "one pass, then the confirmation that rereads the tree")
 			f.requireCovered(t, "orders", "idx_orders_total", partitions...)
 		})
 
