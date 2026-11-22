@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -18,6 +19,26 @@ import (
 // name reached that type instead. Nothing was added. The outcome is
 // permanent: plan again against the catalog as it stands.
 var ErrEnumTypeDrift = errors.New("the ADD VALUE reached a type other than the enum type the engine checked")
+
+// ErrEnumLabelExists means the enum type the engine checked already carries
+// the label an ALTER TYPE ... ADD VALUE without IF NOT EXISTS adds: another
+// change added it after the statement was planned. Nothing was added. The
+// outcome is permanent: the same statement meets the same label on every
+// attempt, so plan again against the catalog as it stands.
+var ErrEnumLabelExists = errors.New("the enum type already carries the label the ADD VALUE adds")
+
+// ErrEnumNeighborMissing means the enum type the engine checked no longer
+// carries the label an ALTER TYPE ... ADD VALUE places its value BEFORE or
+// AFTER: another change renamed or removed it after the statement was
+// planned. Nothing was added. The outcome is permanent: the same statement
+// meets the same missing label on every attempt, so plan again against the
+// catalog as it stands.
+var ErrEnumNeighborMissing = errors.New("the enum type no longer carries the label the ADD VALUE places its value next to")
+
+// sqlstateInvalidParameterValue is the server's invalid_parameter_value,
+// which an ADD VALUE raises when the label its BEFORE or AFTER names is not
+// on the type. A label the type already carries raises duplicate_object.
+const sqlstateInvalidParameterValue = "22023"
 
 // ExecuteEnumValueAdd runs an ALTER TYPE ... ADD VALUE as bounded attempts
 // under transaction-local budgets, retrying only lock_timeout failures,
@@ -34,6 +55,12 @@ var ErrEnumTypeDrift = errors.New("the ADD VALUE reached a type other than the e
 // transaction wrote belongs to the target, that the target carries the
 // label, and, when the statement wrote nothing, that the name still
 // resolves to the target, and rolls back with ErrEnumTypeDrift otherwise.
+//
+// A statement the server rejects because the type already carries the
+// label, or lacks the label BEFORE or AFTER names, returns
+// ErrEnumLabelExists or ErrEnumNeighborMissing when the target, read by
+// OID, shows that fact, and ErrEnumTypeDrift when it does not, since the
+// statement then reached a different type.
 func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, et preflight.EnumTarget, st statement.Statement, b Budget, retry RetryPolicy) error {
 	if err := b.validate(); err != nil {
 		return err
@@ -48,7 +75,7 @@ func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, et preflight.E
 	if et.OID() == 0 || et.Ref() != st.EnumType() {
 		return fmt.Errorf("%w: the enum target was not checked for the type %s names", ErrInvariantViolation, st.SQL())
 	}
-	return executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
+	err := executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
 		// INV: ST-7 — the label is added only to the enum type the engine
 		// checked, confirmed by identity before the commit.
 		after := func(ctx context.Context, tx pgx.Tx) error {
@@ -56,6 +83,59 @@ func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, et preflight.E
 		}
 		return executeBoundedAttemptAs(ctx, pool, st, b, []string{et.Schema()}, "", nil, after)
 	}, sleepContext)
+	return classifyEnumValueAddRejection(ctx, pool, et, st, err)
+}
+
+// classifyEnumValueAddRejection turns the server's rejection of an ADD
+// VALUE for a label already present, or for a missing BEFORE or AFTER
+// label, into its typed outcome. The rejection names no type, and another
+// session can give the statement's name to a different type before it
+// runs, so the fact is read from the checked type by OID: when the target
+// shows it, the outcome is ErrEnumLabelExists or ErrEnumNeighborMissing;
+// when it does not, the statement reached another type, which is
+// ErrEnumTypeDrift. Any other error is returned as it came.
+func classifyEnumValueAddRejection(ctx context.Context, pool *pgxpool.Pool, et preflight.EnumTarget, st statement.Statement, err error) error {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok {
+		return err
+	}
+	var label string
+	var wantPresent bool
+	var outcome error
+	switch {
+	case pgErr.Code == sqlstateDuplicateObject:
+		label, wantPresent, outcome = st.AddedEnumValue(), true, ErrEnumLabelExists
+	case pgErr.Code == sqlstateInvalidParameterValue && st.EnumValueNeighbor() != "":
+		label, wantPresent, outcome = st.EnumValueNeighbor(), false, ErrEnumNeighborMissing
+	default:
+		return err
+	}
+	present, readErr := enumCarriesLabel(ctx, pool, et.OID(), label)
+	if readErr != nil {
+		return fmt.Errorf("read enum type OID %d for label %q after the server rejected the ADD VALUE (%w): %w", et.OID(), label, err, readErr)
+	}
+	if present != wantPresent {
+		return fmt.Errorf("%w: the server rejected the statement over label %q, but the checked type does not show why, so the statement reached another type; nothing was added: %w",
+			ErrEnumTypeDrift, label, err)
+	}
+	return fmt.Errorf("%w: label %q on %s; nothing was added: %w", outcome, label, et.Qualified(), err)
+}
+
+// enumCarriesLabel reports whether the enum type with OID typ carries label.
+//
+// INV: CO-9 — the relation and operators are pg_catalog-qualified, so a
+// planted object on the search_path cannot change which rows the read sees.
+func enumCarriesLabel(ctx context.Context, pool *pgxpool.Pool, typ uint32, label string) (bool, error) {
+	const q = `
+		SELECT EXISTS (
+		    SELECT FROM pg_catalog.pg_enum e
+		    WHERE e.enumtypid OPERATOR(pg_catalog.=) $1
+		      AND e.enumlabel OPERATOR(pg_catalog.=) $2)`
+	var present bool
+	if err := pool.QueryRow(ctx, q, typ, label).Scan(&present); err != nil {
+		return false, fmt.Errorf("read the labels of enum type OID %d: %w", typ, err)
+	}
+	return present, nil
 }
 
 // refuseEnumTypeDrift runs after the ADD VALUE, in its transaction, and

@@ -90,7 +90,12 @@ func TestParseOneKinds(t *testing.T) {
 			// target, and the type and the label it adds.
 			name: "alter type add value names the type, not a table",
 			sql:  "ALTER TYPE mood ADD VALUE 'calm' AFTER 'happy'",
-			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Name: "mood"}, enumValue: "calm"},
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Name: "mood"}, enumValue: "calm", enumNeighbor: "happy"},
+		},
+		{
+			name: "alter type add value before a label keeps the label it is placed next to",
+			sql:  "ALTER TYPE app.mood ADD VALUE 'calm' BEFORE 'sad'",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Schema: "app", Name: "mood"}, enumValue: "calm", enumNeighbor: "sad"},
 		},
 		{
 			name: "alter type add value schema-qualified keeps the type's schema",

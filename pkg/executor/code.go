@@ -162,6 +162,17 @@ const (
 	// the name to a different type; nothing was added. Plan again against
 	// the catalog as it stands.
 	CodeEnumTypeDrift Code = "enum-type-drift"
+	// CodeEnumLabelExists: the enum type the engine checked already
+	// carries the label an ALTER TYPE ... ADD VALUE without IF NOT EXISTS
+	// adds, because another change added it after planning; nothing was
+	// added. Plan again against the catalog as it stands.
+	CodeEnumLabelExists Code = "enum-label-exists"
+	// CodeEnumNeighborMissing: the enum type the engine checked no longer
+	// carries the label an ALTER TYPE ... ADD VALUE places its value
+	// BEFORE or AFTER, because another change renamed or removed it after
+	// planning; nothing was added. Plan again against the catalog as it
+	// stands.
+	CodeEnumNeighborMissing Code = "enum-neighbor-missing"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
 	// CodeDataFault: the server rejected the table's rows as the statement
@@ -231,6 +242,8 @@ func Codes() []Code {
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
+		CodeEnumLabelExists,
+		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation,
@@ -275,6 +288,8 @@ func (c Code) Permanent() bool {
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
+		CodeEnumLabelExists,
+		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation:
@@ -381,6 +396,10 @@ func sentinelCode(err error) Code {
 		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrEnumTypeDrift):
 		return CodeEnumTypeDrift
+	case errors.Is(err, ErrEnumLabelExists):
+		return CodeEnumLabelExists
+	case errors.Is(err, ErrEnumNeighborMissing):
+		return CodeEnumNeighborMissing
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:
