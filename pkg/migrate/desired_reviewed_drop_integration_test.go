@@ -274,8 +274,8 @@ func TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Empty(t, res.Verdicts)
-		assert.Contains(t, res.Detail, "--expect-fingerprint "+reviewed.Fingerprint)
-		assert.Contains(t, res.Detail, "--allow-destructive "+schema+".t")
+		assert.Contains(t, res.Detail, "ExpectedFingerprint "+reviewed.Fingerprint)
+		assert.Contains(t, res.Detail, "AllowDestructive "+schema+".t")
 		untouched(t)
 	})
 
