@@ -10,15 +10,24 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// processChildren gives every partition of the table an index attached to
-// parentIdx, the table's own index.
+// processChildren gives every direct partition of a table an index attached
+// to parentIdx, the table's own index. A partition that already has one
+// attached is left alone; a sub-partitioned one is still descended into,
+// because its own partitions may not have theirs.
 func (f *partitionedIndexFlow) processChildren(ctx context.Context, parentTableOID uint32, parentIdx relationFacts, tree []partitionNode) error {
 	for _, node := range childrenOf(tree, parentTableOID) {
-		if node.subPartitioned() {
-			return fmt.Errorf("%w: partition %s is itself partitioned, which this build does not handle yet",
-				ErrInvariantViolation, node.qualified())
+		var err error
+		switch {
+		case node.foreign():
+			// Unreachable after readTree's refusal; kept so a node kind the
+			// build cannot index is never handed to the leaf path.
+			err = fmt.Errorf("%w: %s", ErrForeignTablePartition, node.qualified())
+		case node.subPartitioned():
+			err = f.processSubPartitioned(ctx, node, parentIdx, tree)
+		default:
+			err = f.processLeaf(ctx, node, parentIdx)
 		}
-		if err := f.processLeaf(ctx, node, parentIdx); err != nil {
+		if err != nil {
 			return err
 		}
 	}
@@ -45,6 +54,7 @@ func (f *partitionedIndexFlow) processLeaf(ctx context.Context, node partitionNo
 	if err != nil {
 		return fmt.Errorf("build the index of partition %s: %w", node.qualified(), err)
 	}
+	f.changes++
 	idx, err := f.readBuiltIndex(ctx, node, name, built.IndexOID)
 	if err != nil {
 		return err
@@ -138,9 +148,82 @@ func (f *partitionedIndexFlow) attach(ctx context.Context, node partitionNode, p
 	attachSQL := "ALTER INDEX " + pgx.Identifier{parentIdx.schema, parentIdx.name}.Sanitize() +
 		" ATTACH PARTITION " + pgx.Identifier{child.schema, child.name}.Sanitize()
 	f.startStep(progress.OperationBrief, attachSQL, false)
-	return f.tx.run(ctx, "attach the index of partition "+node.qualified(), catalogReadPath(), true,
+	err := f.tx.run(ctx, "attach the index of partition "+node.qualified(), catalogReadPath(), true,
 		func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, attachSQL)
 			return err
 		})
+	if err != nil {
+		return err
+	}
+	f.changes++
+	return nil
+}
+
+// processSubPartitioned gives a partition that is itself partitioned an
+// index of its own, ON ONLY, fills it by recursing into its partitions, and
+// attaches it to parentIdx. The order is what makes each level valid: an
+// index is attached to its parent once the partition's own partitions have
+// theirs.
+func (f *partitionedIndexFlow) processSubPartitioned(ctx context.Context, node partitionNode, parentIdx relationFacts, tree []partitionNode) error {
+	var (
+		idx      relationFacts
+		attached bool
+	)
+	err := f.tx.read(ctx, "inspect the index of partition "+node.qualified(), func(ctx context.Context, q querier) error {
+		oid, found, err := attachedIndexOf(ctx, q, node.oid, parentIdx.oid)
+		if err != nil || !found {
+			return err
+		}
+		attached = true
+		idx, found, err = relationByOID(ctx, q, oid)
+		if err == nil && !found {
+			err = fmt.Errorf("%w: index %d attached under %s is not in the catalog", ErrInvariantViolation, oid, qualifiedName(parentIdx.schema, parentIdx.name))
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if !attached {
+		if idx, err = f.createSubPartitionIndex(ctx, node); err != nil {
+			return err
+		}
+	}
+	if err := f.processChildren(ctx, node.oid, idx, tree); err != nil {
+		return err
+	}
+	if attached {
+		return nil
+	}
+	if err := f.attach(ctx, node, parentIdx, idx); err != nil {
+		return err
+	}
+	f.rep.Worked = append(f.rep.Worked, PartitionIndexResult{
+		Schema: node.schema, Table: node.name, Index: idx.name, IndexOID: idx.oid, Action: PartitionIndexOnly,
+	})
+	return nil
+}
+
+// createSubPartitionIndex creates the ON ONLY index of a sub-partitioned
+// partition under the derived name.
+func (f *partitionedIndexFlow) createSubPartitionIndex(ctx context.Context, node partitionNode) (relationFacts, error) {
+	name := derivedPartitionIndexName(f.req.index, node.oid)
+	createSQL, err := statement.PartitionIndex(f.rootDef, node.schema, node.name, name, statement.PartitionIndexOnly)
+	if err != nil {
+		return relationFacts{}, fmt.Errorf("make the index statement for partition %s: %w", node.qualified(), err)
+	}
+	f.startStep(progress.OperationBrief, createSQL, true)
+	var created relationFacts
+	err = f.tx.run(ctx, "create the index of partition "+node.qualified(), catalogReadPath(), true,
+		func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			created, err = createOnlyIndex(ctx, tx, onlyIndexTable{oid: node.oid, schema: node.schema, name: node.name}, node.schema, name, createSQL)
+			return err
+		})
+	if err != nil {
+		return relationFacts{}, err
+	}
+	f.changes++
+	return created, nil
 }

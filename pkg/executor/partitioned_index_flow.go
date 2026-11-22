@@ -2,7 +2,9 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,8 +32,13 @@ type partitionedIndexFlow struct {
 	// text every partition's statement is derived from.
 	rootDef string
 
-	// step is the progress step in flight.
+	// changes counts the catalog changes the run has made; a pass that leaves
+	// it where it found it has nothing left to do.
+	changes int
+	// step is the progress step in flight; seen is the partitions already
+	// counted into the tracker's total.
 	step int
+	seen map[uint32]struct{}
 	rep  PartitionedIndexReport
 }
 
@@ -40,7 +47,8 @@ type partitionedIndexFlow struct {
 func runPartitionedIndex(ctx context.Context, pool *pgxpool.Pool, req partitionedIndexRequest, sql string, b ConcurrentBudget, tracker *progress.Tracker) (PartitionedIndexReport, error) {
 	f := &partitionedIndexFlow{
 		tx: briefTx{pool: pool}, pool: pool, budget: b, tracker: tracker, sql: sql, req: req,
-		rep: PartitionedIndexReport{Schema: req.schema, Index: req.index},
+		seen: map[uint32]struct{}{},
+		rep:  PartitionedIndexReport{Schema: req.schema, Index: req.index},
 	}
 	err := f.run(ctx)
 	return f.rep, err
@@ -57,7 +65,25 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 	if err := f.createParentIndex(ctx); err != nil {
 		return err
 	}
-	if err := f.processChildren(ctx, f.target.tableOID, f.parent, tree); err != nil {
+	passes, err := settlePasses(ctx, maxPartitionedIndexPasses, func(ctx context.Context, pass int) (bool, error) {
+		if pass > 1 {
+			var err error
+			if tree, err = f.readTree(ctx); err != nil {
+				return false, err
+			}
+		}
+		before := f.changes
+		if err := f.processChildren(ctx, f.target.tableOID, f.parent, tree); err != nil {
+			return false, err
+		}
+		return f.changes != before, nil
+	})
+	f.rep.Passes = passes
+	if errors.Is(err, ErrPartitionedIndexUnsettled) {
+		return fmt.Errorf("%w: %s still had partitions without an index after %d passes",
+			err, qualifiedName(f.req.schema, f.req.table), maxPartitionedIndexPasses)
+	}
+	if err != nil {
 		return err
 	}
 	return f.verify(ctx)
@@ -86,10 +112,14 @@ func (f *partitionedIndexFlow) resolveTarget(ctx context.Context) error {
 
 const relkindSQL = `SELECT c.relkind::pg_catalog.text FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1`
 
-// readTree lists the partitions and counts them into the tracker's total.
+// readTree lists the partition tree and refuses it when it holds a foreign
+// table: a foreign table cannot carry an index, and a parent's index never
+// becomes valid while one of its partitions has none. It is read at the start
+// and on every later pass, so a foreign table attached mid-run refuses the run
+// too.
 func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, error) {
 	var tree []partitionNode
-	err := f.tx.read(ctx, "list the partitions", func(ctx context.Context, q querier) error {
+	err := f.tx.read(ctx, "list the partition tree", func(ctx context.Context, q querier) error {
 		var err error
 		tree, err = listPartitionTree(ctx, q, f.target.tableOID)
 		return err
@@ -97,11 +127,28 @@ func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, e
 	if err != nil {
 		return nil, err
 	}
-	if f.tracker != nil {
-		f.tracker.AddSteps(len(tree))
+	if foreign := foreignPartitions(tree); len(foreign) > 0 {
+		return nil, fmt.Errorf("%w: %s under %s",
+			ErrForeignTablePartition, strings.Join(foreign, ", "), qualifiedName(f.target.schema, f.target.table))
 	}
+	f.countNewPartitions(tree)
 	f.rep.Partitions = len(tree)
 	return tree, nil
+}
+
+// countNewPartitions raises the tracker's total by the partitions it has not
+// counted yet.
+func (f *partitionedIndexFlow) countNewPartitions(tree []partitionNode) {
+	added := 0
+	for _, n := range tree {
+		if _, ok := f.seen[n.oid]; !ok {
+			f.seen[n.oid] = struct{}{}
+			added++
+		}
+	}
+	if f.tracker != nil {
+		f.tracker.AddSteps(added)
+	}
 }
 
 // startStep moves the tracker to the next step, or stays on the current one
@@ -169,4 +216,21 @@ func (f *partitionedIndexFlow) verify(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// settlePasses runs walk until a pass changes nothing, at most limit times, and
+// returns how many passes ran. A walk that still changes something on the last
+// pass has not settled: another session keeps adding partitions faster than the
+// walks cover them.
+func settlePasses(ctx context.Context, limit int, walk func(ctx context.Context, pass int) (changed bool, err error)) (int, error) {
+	for pass := 1; pass <= limit; pass++ {
+		changed, err := walk(ctx, pass)
+		if err != nil {
+			return pass, err
+		}
+		if !changed {
+			return pass, nil
+		}
+	}
+	return limit, ErrPartitionedIndexUnsettled
 }
