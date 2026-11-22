@@ -32,6 +32,8 @@ if [ "${1:-}" = "refresh" ]; then
         | python3 -c 'import json,sys; print("\n".join(sorted(e["name"] for e in json.load(sys.stdin) if e["name"].endswith(".sql"))))')"
     new=0
     while IFS= read -r f; do
+        # An empty listing still yields one empty line from the here-string.
+        [ -n "$f" ] || continue
         if ! in_files "$f"; then
             echo "new     $f"
             new=$((new + 1))
