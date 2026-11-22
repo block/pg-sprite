@@ -242,6 +242,7 @@ var declarativeOnlyClaims = []string{
 	"greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one",
 	"declarative-row-security-library",
 	"declarative-not-valid-constraint",
+	"declarative-unnamed-check-numbering",
 	"extension-objects-named-unqualified-in-a-desired-file",
 }
 
