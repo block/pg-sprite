@@ -66,6 +66,14 @@ func TestParseDesiredFileRefusesAnEnumTypeFileThatHoldsMore(t *testing.T) {
 			err:  ErrEnumTypeAlone,
 			stmt: "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
 		},
+		{
+			// The parse tree spells the empty old label as no label, so
+			// the canonical text would name an ADD VALUE.
+			name: "a rename from the empty label",
+			sql:  "CREATE TYPE mood AS ENUM ('a');\nALTER TYPE mood RENAME VALUE '' TO 'blue';\n",
+			err:  ErrEnumTypeAlone,
+			stmt: "ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+		},
 		{name: "a qualified name", sql: "CREATE TYPE app.status AS ENUM ('a')", err: ErrQualifiedName},
 		{name: "a label listed twice", sql: "CREATE TYPE status AS ENUM ('a', 'b', 'a')", err: ErrEnumLabel},
 		{name: "the empty label", sql: "CREATE TYPE status AS ENUM ('a', '')", err: ErrEnumLabel},

@@ -48,7 +48,7 @@ func TestDesiredFileRefusalVerdicts(t *testing.T) {
 			"a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed"},
 		{"renaming the empty enum label", "CREATE TABLE t (id int); ALTER TYPE mood RENAME VALUE '' TO 'blue'",
 			"ALTER TYPE mood RENAME VALUE '' TO 'blue'", verdict.ClassCapabilityBoundary, "",
-			"a desired file holds one CREATE TABLE, its indexes, and its row security, so this statement is not allowed in it; nothing was planned or executed"},
+			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"},
 		{"two unrelated tables", "CREATE TABLE a (id int); CREATE TABLE b (id int)",
 			"CREATE TABLE b (id int)", verdict.ClassByDesign, "",
 			"a desired file holds exactly one CREATE TABLE; nothing was planned or executed"},

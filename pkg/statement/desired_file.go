@@ -52,7 +52,7 @@ func ParseDesiredFile(sql string) (DesiredFile, error) {
 		return DesiredFile{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
 	if declaresEnumType(tree) {
-		enumType, err := parseDesiredEnumTree(tree)
+		enumType, err := parseDesiredEnumTree(sql, tree)
 		if err != nil {
 			return DesiredFile{}, err
 		}

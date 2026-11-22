@@ -27,7 +27,9 @@ var (
 // EnumTypeFileError is [ErrEnumTypeAlone] for one statement of a desired
 // enum type file.
 type EnumTypeFileError struct {
-	// SQL is the refused statement in the deparser's canonical form.
+	// SQL is the refused statement as [DisallowedStatementError.SQL]
+	// names it: the canonical form, or the source text when the canonical
+	// form would classify as a different kind.
 	SQL string
 }
 
@@ -77,16 +79,16 @@ func declaresEnumType(tree *pganalyze.ParseResult) bool {
 	})
 }
 
-// parseDesiredEnumTree admits a parsed file that declares an enum type:
-// the file's only statement is one unqualified CREATE TYPE ... AS ENUM
-// with distinct, non-empty labels.
-func parseDesiredEnumTree(tree *pganalyze.ParseResult) (DesiredEnumType, error) {
+// parseDesiredEnumTree admits tree, the parse of a source file that
+// declares an enum type: the file's only statement is one unqualified
+// CREATE TYPE ... AS ENUM with distinct, non-empty labels.
+func parseDesiredEnumTree(source string, tree *pganalyze.ParseResult) (DesiredEnumType, error) {
 	var desired DesiredEnumType
 	for i, raw := range tree.GetStmts() {
 		node := raw.GetStmt()
 		create := node.GetCreateEnumStmt()
 		if create == nil || desired.name != "" {
-			sql, err := deparseOne(node)
+			sql, _, err := refusedStatement(source, raw)
 			if err != nil {
 				return DesiredEnumType{}, fmt.Errorf("statement %d: %w: %w", i+1, ErrEnumTypeAlone, err)
 			}
