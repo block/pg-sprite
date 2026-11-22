@@ -179,6 +179,34 @@ func TestLivePrecursorCandidatesStopAtAnExactMatch(t *testing.T) {
 	assert.Equal(t, []string{"events_check", "events_check1"}, names)
 }
 
+// Two unnamed desired checks with the same text need two live copies. When
+// only one live check prints that text and another prints it one replay
+// behind, the exact copy can match just one of them, so both still get
+// every live constraint the file does not name.
+func TestLivePrecursorCandidatesCountDuplicateChecks(t *testing.T) {
+	const older = "CHECK (((id) > 0))"
+	live := checks(false,
+		Constraint{Name: "events_check", Def: checkA},
+		Constraint{Name: "events_check1", Def: older},
+	)
+	desired := checks(true,
+		Constraint{Name: "events_check", Def: checkA},
+		Constraint{Name: "events_check1", Def: checkA},
+	)
+	for _, c := range desired.Constraints[1:] {
+		var names []string
+		for _, l := range livePrecursorCandidates(live, desired, c) {
+			names = append(names, l.Name)
+		}
+		assert.Equal(t, []string{"events_check", "events_check1"}, names, c.Name)
+	}
+
+	live.Constraints[2].Def = checkA
+	for _, c := range desired.Constraints[1:] {
+		assert.Empty(t, livePrecursorCandidates(live, desired, c), c.Name)
+	}
+}
+
 // A LIKE clause that copies constraints can bring in checks under names the
 // file does not state, so no check is flagged as server-named and every
 // check keeps matching by name. Without such a clause, the unnamed check is

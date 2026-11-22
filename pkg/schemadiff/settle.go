@@ -364,10 +364,13 @@ func (r replayer) recordLivePrecursors(ctx context.Context, target string, settl
 // the scratch table may sit under a different generated name on the live
 // table (matchGeneratedCheckNames), so every live constraint is a
 // candidate except one whose name the file states, which belongs to that
-// declaration. When a candidate already prints c's text, c matches it by
-// definition and there is nothing to replay, so no candidate is returned:
-// each replay costs a savepoint and an introspection inside the planning
-// transaction, and a table whose checks did not move should cost none.
+// declaration. When the candidates already print c's text at least as many
+// times as the file declares that check unnamed, each copy matches one of
+// them by definition and there is nothing to replay, so no candidate is
+// returned: each replay costs a savepoint and an introspection inside the
+// planning transaction, and a table whose checks did not move should cost
+// none. With fewer exact copies, one desired copy has to match a live check
+// printed at another replay depth, so every candidate is returned.
 func livePrecursorCandidates(live, settled Model, c Constraint) []Constraint {
 	if !c.GeneratedName {
 		if l, ok := constraintsByName(live.Constraints)[c.Name]; ok {
@@ -382,16 +385,32 @@ func livePrecursorCandidates(live, settled Model, c Constraint) []Constraint {
 		}
 	}
 	var candidates []Constraint
+	exact := 0
 	for _, l := range live.Constraints {
 		if stated[l.Name] {
 			continue
 		}
 		if sameCheck(l, c) {
-			return nil
+			exact++
 		}
 		candidates = append(candidates, l)
 	}
+	if exact >= unnamedCopies(settled, c) {
+		return nil
+	}
 	return candidates
+}
+
+// unnamedCopies counts the checks the file leaves unnamed whose settled
+// text is c's, c included.
+func unnamedCopies(settled Model, c Constraint) int {
+	n := 0
+	for _, d := range settled.Constraints {
+		if d.GeneratedName && d.Def == c.Def {
+			n++
+		}
+	}
+	return n
 }
 
 // replayInSavepoint replays m's expressions on the scratch table in a
