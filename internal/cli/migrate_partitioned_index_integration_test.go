@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 	"strings"
 	"testing"
 
@@ -246,4 +247,41 @@ func TestMigrateDesiredResumesAnUnfinishedPartitionedIndex(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
 	assert.Contains(t, v.Detail, "converged: all 1 planned statements committed and a fresh plan is empty")
 	assertIndexBuiltEverywhere(t, pool, schema)
+}
+
+// A CREATE INDEX on a partitioned parent goes through the partitioned index
+// build's admission, and the dry run reports the same refusal the apply
+// does: an unnamed index, and IF NOT EXISTS, which is refused by design. An
+// unqualified table that the search_path resolves to the parent reaches the
+// same admission. Neither run builds an index.
+func TestMigrateDryRunRefusesPartitionedIndexShapesLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := partitionedIndexFixture(t, pool, 0)
+	u, err := neturl.Parse(url)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("options", "-csearch_path="+schema)
+	u.RawQuery = q.Encode()
+
+	for _, tc := range []struct {
+		name, url, alter string
+		class            verdict.Class
+	}{
+		{"an unnamed index", url, fmt.Sprintf("CREATE INDEX ON %s.p (v)", schema), verdict.ClassCapabilityBoundary},
+		{"IF NOT EXISTS", url, fmt.Sprintf("CREATE INDEX IF NOT EXISTS p_v_idx ON %s.p (v)", schema), verdict.ClassByDesign},
+		{"an unnamed index on a table the search_path resolves", u.String(), "CREATE INDEX ON p (v)", verdict.ClassCapabilityBoundary},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dryRun, applied := admissionRefusalVerdicts(t, tc.url, tc.alter)
+			assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, dryRun.Reason)
+			assert.Equal(t, tc.class, dryRun.Class)
+			assert.Equal(t, schema+".p", dryRun.Table)
+			assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
+			assert.Empty(t, indexStates(t, pool, schema), "no index was built")
+		})
+	}
 }
