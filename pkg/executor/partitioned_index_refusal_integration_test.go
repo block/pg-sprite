@@ -32,6 +32,10 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 				{"not an index", "orders", fmt.Sprintf("ALTER TABLE %s.orders ADD COLUMN extra int", s), executor.ErrNotCreateIndex},
 				{"unnamed", "orders", fmt.Sprintf("CREATE INDEX ON %s.orders (total)", s), executor.ErrUnnamedIndex},
 				{"if not exists", "orders", fmt.Sprintf("CREATE INDEX IF NOT EXISTS i ON %s.orders (total)", s), executor.ErrIfNotExistsUnsupported},
+				// The leaf indexes are built from the definition the server
+				// prints for the parent's index, and that never names a
+				// tablespace, so the clause would reach the parent alone.
+				{"tablespace", "orders", fmt.Sprintf("CREATE INDEX i ON %s.orders (total) TABLESPACE pg_default", s), executor.ErrPartitionedIndexTablespace},
 				{"unqualified", "orders", "CREATE INDEX i ON orders (total)", executor.ErrUnqualifiedTable},
 				{"two statements", "orders", fmt.Sprintf("CREATE INDEX i ON %[1]s.orders (total); CREATE INDEX j ON %[1]s.orders (note)", s), statement.ErrNotOneStatement},
 				{"another table than the preflighted one", "orders", fmt.Sprintf("CREATE INDEX i ON %s.plain (total)", s), executor.ErrInvariantViolation},

@@ -2,9 +2,11 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -410,18 +412,47 @@ func nodeInTree(ctx context.Context, q querier, node partitionNode) (bool, error
 	return present, nil
 }
 
+// lockAndProveNode takes a bounded lock on a partition and proves, under it,
+// that the partition is still in the tree. A detach needs an ACCESS EXCLUSIVE
+// lock on the partition, which this lock excludes until the transaction ends,
+// so a partition proved here cannot leave the tree before the statement that
+// follows. The lock is the weakest one that excludes a detach, and it does not
+// block the partition's writers. It is taken under the transaction's own
+// lock_timeout (LK-2).
+// INV: ST-7 — the statement runs against the partition that was proven.
+func lockAndProveNode(ctx context.Context, tx pgx.Tx, node partitionNode) error {
+	_, err := tx.Exec(ctx, "LOCK TABLE ONLY "+pgx.Identifier{node.schema, node.name}.Sanitize()+" IN SHARE UPDATE EXCLUSIVE MODE")
+	if err != nil {
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateUndefinedTable {
+			return fmt.Errorf("%w: ST-7: partition %s no longer exists under that name; it was renamed or dropped since the build listed it",
+				ErrInvariantViolation, node.qualified())
+		}
+		return err
+	}
+	return proveNodeIn(ctx, tx, node)
+}
+
 // attach attaches child, an index on node, to parentIdx. Both are named in
 // the statement, and PostgreSQL resolves a name, not an identity, so the
 // transaction first proves under its own snapshot that each name still
 // carries the identity the build resolved (ST-7); an index renamed, dropped,
-// or replaced since is refused. The statement is idempotent on the server,
-// so a rerun after an unknown commit outcome is safe.
+// or replaced since is refused. The partition is proved to be in the tree
+// still, under a lock that keeps it there until the transaction ends; one
+// detached since its index was built is refused, and the error names the
+// index the build left on it. The statement is idempotent on the server, so
+// a rerun after an unknown commit outcome is safe.
 func (f *partitionedIndexFlow) attach(ctx context.Context, node partitionNode, parentIdx, child relationFacts, announce func(sql string)) error {
 	attachSQL := "ALTER INDEX " + pgx.Identifier{parentIdx.schema, parentIdx.name}.Sanitize() +
 		" ATTACH PARTITION " + pgx.Identifier{child.schema, child.name}.Sanitize()
 	announce(attachSQL)
 	err := f.tx.run(ctx, "attach the index of partition "+node.qualified(), catalogReadPath(), true,
 		func(ctx context.Context, tx pgx.Tx) error {
+			if err := lockAndProveNode(ctx, tx, node); err != nil {
+				if errors.Is(err, ErrInvariantViolation) {
+					return f.detachedBeforeAttach(node, child, err)
+				}
+				return err
+			}
 			if err := f.proveIdentity(ctx, tx, parentIdx, parentIdx.tableOID); err != nil {
 				return err
 			}
@@ -457,6 +488,21 @@ func (f *partitionedIndexFlow) attach(ctx context.Context, node partitionNode, p
 	}
 	f.changes++
 	return nil
+}
+
+// detachedBeforeAttach is the refusal for a partition that left the tree
+// after the build listed it. The index the build made on it before the attach
+// stays on the table that left, and the error names both so an operator can
+// drop it, or keep it for that table.
+// INV: ST-7 — the build never attaches an index of a table it did not prove
+// to be in the tree, and says what it left behind.
+func (f *partitionedIndexFlow) detachedBeforeAttach(node partitionNode, child relationFacts, cause error) error {
+	leftover := qualifiedName(child.schema, child.name)
+	if child.name == derivedPartitionIndexName(f.req.index, node.oid) {
+		return fmt.Errorf("%w; the index %s that the build made on %s was not attached and stays on that table",
+			cause, leftover, node.qualified())
+	}
+	return fmt.Errorf("%w; the index %s on %s was not attached", cause, leftover, node.qualified())
 }
 
 const attachReadBackSQL = `SELECT EXISTS (
