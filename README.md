@@ -344,11 +344,11 @@ Four rules follow from the table, and one note for embedders:
   every code above. Allow 3 explicitly only where a maintenance-window
   blocking change is intended; exit 0 is never borrowed for it.
 - **Refusal is one code, whichever command produced it.** `migrate`, its dry
-  run, `diff`, and `pull` all exit 2 on a refusal; exit 3 can come only from
-  `migrate`, because no other command executes DDL. The offline `lint` exits
-  1 when a script has error-severity findings (warnings alone exit 0) and 2
-  when `--desired` refuses a desired-state file, and `suggest` exits 0 on any script it can parse — findings never gate; only an
-  unreadable or unparsable script exits 1.
+  run, `diff`, `pull`, and `lint --desired` all exit 2 on a refusal; exit 3
+  can come only from `migrate`, because no other command executes DDL. The
+  offline `lint` exits 1 when a script has error-severity findings (warnings
+  alone exit 0), and `suggest` exits 0 on any script it can parse — findings
+  never gate; only an unreadable or unparsable script exits 1.
 - **Exit 2 means nothing *committed*, not nothing ran.** An optimistic
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the

@@ -56,10 +56,13 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 }
 
 // lintDesired checks a desired schema file offline with the file admission
-// diff and migrate --desired share before they connect: a file that is not one
-// table with its indexes and row security, a types or partitions file, or a
-// statement such a file may not hold is refused with its verdict and exits
-// 2. An admitted file is clean: text prints nothing and JSON prints the
+// diff and migrate --desired share before they connect. A file that declares
+// a second table or partitions, or holds a statement such a file may not
+// hold, is refused with its verdict and exits 2. Any other rejection (a
+// schema-qualified name, CREATE INDEX CONCURRENTLY, an index on another
+// table, no CREATE TABLE, an invalid row-security rule, or invalid SQL) is an
+// input error, as it is for diff: it exits 1 with the error and prints no
+// verdict. An admitted file is clean: text prints nothing and JSON prints the
 // empty lint report. Its statements are declarations, not operations, so the
 // script rules do not apply to them; how the file differs from a live table
 // is diff's to report, because only diff reads the table, and so is a table

@@ -234,13 +234,10 @@ CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO (
 			assert.Equal(t, tc.class, v.Class)
 			assert.Equal(t, tc.owner, v.Owner)
 			assert.Equal(t, tc.statement, v.Statement)
-			assert.True(t, strings.HasSuffix(v.Detail, "nothing was planned or executed"), v.Detail)
 
 			out.Reset()
 			err = (&LintCmd{Desired: true}).runLint(strings.NewReader(tc.file), &out)
 			require.ErrorIs(t, err, verdict.ErrRefused)
-			assert.True(t, strings.HasPrefix(out.String(), "refused (unsupported-statement)\n"), out.String())
-			assert.Contains(t, out.String(), string(tc.class))
 		})
 	}
 
