@@ -234,31 +234,16 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 	}
 }
 
-// checkCopySwap is the route's preflight for the table: the privilege,
-// shape, and environment checks preflight.CheckCopySwap folds, with the
-// disk check told what a stopped run the table's checkpoint row records
-// already holds on the volume, measured from the server, so a resume is
-// asked only for what is left to grow. A run that starts over (Restart) is
-// checked as a fresh run: its discard frees what the stopped run held,
-// and counting the space before it is gone would be counting on the
-// discard.
+// checkCopySwap is the route's preflight for the table:
+// schemachange.CheckCopySwap under the options' environment, which asks a
+// resume only for the disk left to grow and checks a run that starts over
+// (Restart) as a fresh run.
 func checkCopySwap(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, schema, table string, o CopySwapOptions) (preflight.CopySwapTarget, error) {
-	env := o.environment()
-	role, err := preflight.CheckPrivileges(ctx, pool, schema, table,
-		preflight.Requirement{Tier: preflight.TierCopyAndSwap, LogicalDecoding: env.LogicalDecoding})
-	if err != nil {
-		return preflight.CopySwapTarget{}, err
+	start := schemachange.CopySwapResume
+	if o.Restart != "" {
+		start = schemachange.CopySwapRestart
 	}
-	shape, err := preflight.CheckCopySwapShape(ctx, pool, schema, table, role)
-	if err != nil {
-		return preflight.CopySwapTarget{}, err
-	}
-	if o.Restart == "" {
-		if env.Held, err = schemachange.MeasureResumeHeld(ctx, pool, store, shape, env.LogicalDecoding); err != nil {
-			return preflight.CopySwapTarget{}, err
-		}
-	}
-	return preflight.CheckCopySwapEnvironment(ctx, pool, shape, env)
+	return schemachange.CheckCopySwap(ctx, pool, store, schema, table, o.environment(), start)
 }
 
 // copyAndSwap runs a statement the router assigned to the copy-and-swap
