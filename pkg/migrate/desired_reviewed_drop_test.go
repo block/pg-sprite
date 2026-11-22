@@ -47,9 +47,23 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "planned statement 2 discards live structure (ALTER TABLE app.orders DROP COLUMN legacy_id)")
-		assert.Contains(t, res.Detail, "--expect-fingerprint sha256:reviewed")
-		assert.Contains(t, res.Detail, "--allow-destructive app.orders")
+		assert.Contains(t, res.Detail, "ExpectedFingerprint sha256:reviewed")
+		assert.Contains(t, res.Detail, "AllowDestructive app.orders")
 		assert.Contains(t, res.Detail, "the plan's other statement, even if non-destructive, was not run")
+	})
+
+	t.Run("a pinned drop beside a copy-and-swap statement is refused", func(t *testing.T) {
+		withCopySwap := destructiveReport()
+		withCopySwap.Statements = append(withCopySwap.Statements, plan.Statement{
+			SQL:         "ALTER TABLE app.orders ALTER COLUMN total TYPE int",
+			Disposition: router.DispositionExecute,
+			Backend:     router.BackendCopyAndSwap,
+		})
+		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, withCopySwap)
+		require.False(t, ok)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.Contains(t, res.Detail, "planned statement 2 discards live structure (ALTER TABLE app.orders DROP COLUMN legacy_id)")
+		assert.Contains(t, res.Detail, "planned statement 3 (ALTER TABLE app.orders ALTER COLUMN total TYPE int) routes to copy-and-swap")
 	})
 
 	t.Run("an acknowledgement without a pin is not admitted", func(t *testing.T) {

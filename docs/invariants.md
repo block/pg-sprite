@@ -1740,7 +1740,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   table in its own destructive acknowledgement (`DesiredRequest.AllowDestructive`), and each
   destructive statement then runs under that acknowledgement, audited and carrying the
   verdict as on `migrate --alter` (RF-10). The pin binds what each drop removes, not only
-  its name, since the fingerprint covers the removed object's definition. Without the acknowledgement the plan is refused whole with `destructive-change`; an
+  its name, since the fingerprint covers the removed object's definition. A pinned plan that
+  also routes a statement to copy-and-swap is refused whole with `destructive-change`, since its
+  drops would commit before copy-and-swap is checked. Without the acknowledgement the plan is refused whole with `destructive-change`; an
   acknowledgement without the fingerprint, or naming another table, is a usage error before
   any statement runs, for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The other four, and
   the destructive acknowledgement in `Options`, are rejected: `RunDesired` returns each one's

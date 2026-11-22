@@ -177,7 +177,7 @@ func TestAdmitPlan(t *testing.T) {
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "statement 2")
 		assert.Contains(t, res.Detail, "DROP COLUMN old")
-		assert.Contains(t, res.Detail, "--expect-fingerprint fp-live and --allow-destructive app.t",
+		assert.Contains(t, res.Detail, "ExpectedFingerprint fp-live and AllowDestructive app.t",
 			"a destructive refusal names the pinned, acknowledged run that would admit the plan")
 		assert.Contains(t, res.Detail, "the plan's other statement, even if non-destructive, was not run",
 			"a multi-statement refusal discloses that the rest of the plan was skipped too")
@@ -231,7 +231,7 @@ func TestAdmitPlan(t *testing.T) {
 		res, ok := admitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
-		assert.Contains(t, res.Detail, "--expect-fingerprint fp-live and --allow-destructive app.t")
+		assert.Contains(t, res.Detail, "ExpectedFingerprint fp-live and AllowDestructive app.t")
 		assert.NotContains(t, res.Detail, "imperative front door",
 			"the front door would refuse the drop; the detail must not point there")
 	})

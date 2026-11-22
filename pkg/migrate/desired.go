@@ -619,14 +619,41 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		detail := fmt.Sprintf(
 			"planned statement %d discards live structure (%s); desired-state execution runs a destructive "+
 				"statement only when the run pins the reviewed plan's fingerprint and names the table in the "+
-				"destructive acknowledgement — review the plan, then rerun with --expect-fingerprint %s and --allow-destructive %s.%s",
+				"destructive acknowledgement — review the plan, then rerun with ExpectedFingerprint %s and AllowDestructive %s.%s in the request",
 			i+1, ps.SQL, report.Fingerprint, report.Schema, report.Table)
 		detail += skippedRestDetail(len(report.Statements) - 1)
 		return refused.refused(destructiveChangeRefusal(), detail), false
 	}
+	if refusal, ok := refuseDestructiveWithCopySwap(report); !ok {
+		return refusal, false
+	}
 	if report.Disposition != router.DispositionExecute {
 		r, detail := planRefusal(report)
 		return refused.refused(r, detail), false
+	}
+	return DesiredResult{}, true
+}
+
+// refuseDestructiveWithCopySwap refuses a plan that both drops something and
+// routes a statement through copy-and-swap. Drops run first, and
+// copy-and-swap is checked against the table as it was before them, so a
+// drop it depends on (the primary key it copies by) would commit and the
+// copy-and-swap step would then refuse, leaving the plan half applied. The
+// two changes are reviewed and run as separate plans instead.
+func refuseDestructiveWithCopySwap(report plan.Report) (DesiredResult, bool) {
+	routed, ok := firstCopySwapStatement(report)
+	if !ok {
+		return DesiredResult{}, true
+	}
+	for i, ps := range report.Statements {
+		if !ps.Destructive {
+			continue
+		}
+		return DesiredResult{Plan: report}.refused(destructiveChangeRefusal(), fmt.Sprintf(
+			"planned statement %d discards live structure (%s) and planned statement %d (%s) routes to copy-and-swap; "+
+				"the drop would commit before the copy-and-swap step is checked against the changed table, so a plan "+
+				"cannot do both: change the desired file to make the drop alone, run that plan, then make the other change%s",
+			i+1, ps.SQL, routed+1, report.Statements[routed].SQL, skippedRestDetail(len(report.Statements)-1))), false
 	}
 	return DesiredResult{}, true
 }

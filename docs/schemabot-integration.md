@@ -793,7 +793,10 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `migrate.ErrAllowDestructiveNeedsFingerprint` before any database work, and one naming
   another table is `migrate.ErrAllowDestructiveMismatch` before any statement runs, even
   when the plan drops nothing. A plan whose fingerprint differs from the pin is refused as
-  `plan-fingerprint-mismatch` with nothing executed. Each destructive statement then runs
+  `plan-fingerprint-mismatch` with nothing executed. A pinned plan that drops something and
+  also routes a statement to copy-and-swap is refused whole with `destructive-change`, since
+  the drop would commit before copy-and-swap is checked against the changed table; make the
+  drop and the other change in two plans. Each destructive statement then runs
   under the acknowledgement as it does through `Run` (RF-10), so its verdict carries
   `allowed_destructive: true`, and a desired index drop runs as `DROP INDEX CONCURRENTLY`
   and never holds the table's lock, refusing, dropping nothing, if the index no longer has
