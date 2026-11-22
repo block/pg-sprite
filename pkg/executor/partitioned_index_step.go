@@ -60,8 +60,9 @@ func (b briefTx) run(ctx context.Context, what string, path []string, commit boo
 	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
 		return fmt.Errorf("scope the search path of %s: %w", what, err)
 	}
+	started := time.Now()
 	if err := fn(ctx, tx); err != nil {
-		return asBriefStepError(ctx, err, what, lockMS, statementMS)
+		return asBriefStepError(ctx, err, what, lockMS, statementMS, time.Since(started))
 	}
 	if !commit {
 		return nil
@@ -97,20 +98,29 @@ func txBudgets(ctx context.Context, tx pgx.Tx) (lockMS, statementMS int64, err e
 	return lockMS, statementMS, nil
 }
 
-// asBriefStepError types a brief step's failure: an expired lock_timeout and an
-// expired statement_timeout are the two budget outcomes, a cancellation after
-// the caller's context ended is the caller's own, and anything else names the
-// step.
-func asBriefStepError(ctx context.Context, err error, what string, lockMS, statementMS int64) error {
+// asBriefStepError types a brief step's failure. A cancellation after the
+// caller's context ended is the caller's own, whether the server's 57014 or
+// the client's context error arrived first. An expired lock_timeout is the
+// lock budget. SQLSTATE 57014 under a live context is query_canceled in
+// general, which an operator's pg_cancel_backend also raises, so it is the
+// statement budget only once the step has run at least that long:
+// statement_timeout cannot fire before its budget elapses. An earlier one is
+// an external cancellation, and anything else names the step.
+func asBriefStepError(ctx context.Context, err error, what string, lockMS, statementMS int64, elapsed time.Duration) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && isStatementCancellation(err) {
+		return fmt.Errorf("%w (%s, %w): %w", ErrCancelledByCaller, what, ctxErr, err)
+	}
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
 		switch pgErr.Code {
 		case sqlstateLockNotAvailable:
 			return &BudgetError{Cause: CauseLock, Budget: time.Duration(lockMS) * time.Millisecond, cause: err}
 		case sqlstateQueryCanceled:
-			if ctx.Err() != nil {
-				return fmt.Errorf("%w (%s, %w): %w", ErrCancelledByCaller, what, ctx.Err(), err)
+			budget := time.Duration(statementMS) * time.Millisecond
+			if elapsed >= budget {
+				return &BudgetError{Cause: CauseStatement, Budget: budget, cause: err}
 			}
-			return &BudgetError{Cause: CauseStatement, Budget: time.Duration(statementMS) * time.Millisecond, cause: err}
+			return fmt.Errorf("%w (%s, after %s of a %s statement budget): %w",
+				ErrCancelledExternally, what, elapsed.Round(time.Millisecond), budget, err)
 		}
 	}
 	return fmt.Errorf("%s: %w", what, err)
