@@ -36,7 +36,10 @@ var ErrSlotActive = errors.New("replication slot is held by another process")
 // place too, since the whole name is then in dispute. A name outside the
 // engine's shape is an invariant violation. The reads that judge the slot,
 // the server, and the publication do not consult pool's search_path, so a
-// caller need not pin it.
+// caller need not pin it. The slot is judged by the read InspectSlot makes,
+// so pool's role needs what that read needs, EXECUTE on pg_is_in_recovery(),
+// pg_current_wal_lsn() and pg_wal_lsn_diff() (PUBLIC holds it by default),
+// and a read that fails refuses the drop.
 func DropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string) error {
 	return dropSlotAndPublication(ctx, cfg, pool, name, true)
 }

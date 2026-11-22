@@ -189,6 +189,10 @@ GRANT USAGE, CREATE ON SCHEMA app TO app_owner;  -- if the owner lacks it
 -- Tier 3, only when copy-and-swap decodes WAL: one of
 GRANT rds_replication TO pgsprite_engine;          -- Aurora/RDS
 ALTER ROLE pgsprite_engine WITH REPLICATION;       -- self-managed
+-- The slot's inspection, and its drop, which judges the slot by that
+-- inspection, run pg_is_in_recovery(), pg_current_wal_lsn() and
+-- pg_wal_lsn_diff(). PUBLIC may execute them by default; a server that
+-- revokes that must grant EXECUTE on them to the role.
 
 -- Not grants, but checked alongside them for a run that decodes WAL:
 --   wal_level = logical          (rds.logical_replication = 1 on Aurora/RDS; both need a restart;
