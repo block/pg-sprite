@@ -29,7 +29,7 @@ var generatedCheckLabel = regexp.MustCompile(`check[0-9]*$`)
 func markGeneratedCheckNames(statements []statement.Statement, m *Model) error {
 	stated := make(map[string]bool)
 	for _, st := range statements {
-		if st.Kind() != statement.KindCreateTable && st.Kind() != statement.KindAlterTable {
+		if st.Kind() != statement.KindCreateTable {
 			continue
 		}
 		names, err := statement.ConstraintNames(st.SQL())
@@ -54,10 +54,11 @@ func markGeneratedCheckNames(statements []statement.Statement, m *Model) error {
 // matchGeneratedCheckNames renames each desired check constraint the file
 // leaves unnamed to the live check constraint with the same definition, so
 // the name-keyed diff sees no change where only the server's naming order
-// differs. PostgreSQL numbers unnamed check constraints in creation order
-// (`<table>_check`, `<table>_check1`, ...), so a table built by a history of
-// statements and the same table built from one file can hold identical
-// checks under shifted names.
+// differs. PostgreSQL names an unnamed check constraint after its table, and
+// after its column when it reads exactly one, then adds the next free
+// number when that name is taken (`<table>_check`, `<table>_check1`, ...),
+// so a table built by a history of statements and the same table built
+// from one file can hold identical checks under shifted names.
 //
 // A desired check keeps the live constraint of its own name when the two
 // definitions match. Otherwise it takes the first unclaimed live check, in

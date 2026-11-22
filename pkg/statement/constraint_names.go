@@ -27,9 +27,11 @@ type StatedConstraintNames struct {
 	Complete bool
 }
 
-// ConstraintNames returns the constraint names a CREATE TABLE or a
-// single-command ALTER TABLE ... ADD CONSTRAINT states. Any other statement
-// declares no constraint and returns an empty, complete result.
+// ConstraintNames returns the constraint names a CREATE TABLE or an ALTER
+// TABLE states, whether declared as a table constraint or inline on a
+// column: for ALTER TABLE, those of every ADD CONSTRAINT and ADD COLUMN
+// command it carries. Any other statement declares no constraint and
+// returns an empty, complete result.
 func ConstraintNames(sql string) (StatedConstraintNames, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {

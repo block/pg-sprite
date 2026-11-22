@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -152,4 +153,55 @@ func TestNextGeneratedCheckName(t *testing.T) {
 
 	_, err = nextGeneratedCheckName("events_positive", nil)
 	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+// An unnamed desired check that some live check already prints needs no
+// replay, so none of the other live checks is tried as its precursor. A
+// check whose live text moved still gets every live constraint the file
+// does not name.
+func TestLivePrecursorCandidatesStopAtAnExactMatch(t *testing.T) {
+	live := checks(false,
+		Constraint{Name: "events_check", Def: checkA},
+		Constraint{Name: "events_check1", Def: checkB},
+	)
+	desired := checks(true,
+		Constraint{Name: "events_check", Def: checkB},
+		Constraint{Name: "events_check1", Def: "CHECK ((id > 1))"},
+	)
+	matched := desired.Constraints[1]
+	assert.Empty(t, livePrecursorCandidates(live, desired, matched))
+
+	moved := desired.Constraints[2]
+	var names []string
+	for _, c := range livePrecursorCandidates(live, desired, moved) {
+		names = append(names, c.Name)
+	}
+	assert.Equal(t, []string{"events_check", "events_check1"}, names)
+}
+
+// A LIKE clause that copies constraints can bring in checks under names the
+// file does not state, so no check is flagged as server-named and every
+// check keeps matching by name. Without such a clause, the unnamed check is
+// flagged.
+func TestMarkGeneratedCheckNamesKeepsNameMatchingUnderLikeIncludingConstraints(t *testing.T) {
+	cases := []struct {
+		name      string
+		sql       string
+		generated bool
+	}{
+		{name: "including constraints", sql: "CREATE TABLE events (LIKE template INCLUDING CONSTRAINTS, id int CHECK (id > 0));"},
+		{name: "including all", sql: "CREATE TABLE events (LIKE template INCLUDING ALL, id int CHECK (id > 0));"},
+		{name: "including defaults only", sql: "CREATE TABLE events (LIKE template INCLUDING DEFAULTS, id int CHECK (id > 0));", generated: true},
+		{name: "no like clause", sql: "CREATE TABLE events (id int CHECK (id > 0));", generated: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ds, err := statement.ParseDesired(tc.sql)
+			require.NoError(t, err)
+			m := checks(false, Constraint{Name: "events_id_check", Def: checkA})
+			require.NoError(t, markGeneratedCheckNames(ds.Statements(), &m))
+			assert.False(t, m.Constraints[0].GeneratedName, "the primary key is never a check")
+			assert.Equal(t, tc.generated, m.Constraints[1].GeneratedName)
+		})
+	}
 }

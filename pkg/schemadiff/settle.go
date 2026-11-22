@@ -364,7 +364,10 @@ func (r replayer) recordLivePrecursors(ctx context.Context, target string, settl
 // the scratch table may sit under a different generated name on the live
 // table (matchGeneratedCheckNames), so every live constraint is a
 // candidate except one whose name the file states, which belongs to that
-// declaration.
+// declaration. When a candidate already prints c's text, c matches it by
+// definition and there is nothing to replay, so no candidate is returned:
+// each replay costs a savepoint and an introspection inside the planning
+// transaction, and a table whose checks did not move should cost none.
 func livePrecursorCandidates(live, settled Model, c Constraint) []Constraint {
 	if !c.GeneratedName {
 		if l, ok := constraintsByName(live.Constraints)[c.Name]; ok {
@@ -380,9 +383,13 @@ func livePrecursorCandidates(live, settled Model, c Constraint) []Constraint {
 	}
 	var candidates []Constraint
 	for _, l := range live.Constraints {
-		if !stated[l.Name] {
-			candidates = append(candidates, l)
+		if stated[l.Name] {
+			continue
 		}
+		if sameCheck(l, c) {
+			return nil
+		}
+		candidates = append(candidates, l)
 	}
 	return candidates
 }
