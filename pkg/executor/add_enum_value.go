@@ -83,7 +83,7 @@ func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, et preflight.E
 		}
 		return executeBoundedAttemptAs(ctx, pool, st, b, []string{et.Schema()}, "", nil, after)
 	}, sleepContext)
-	return classifyEnumValueAddRejection(ctx, pool, et, st, err)
+	return classifyEnumValueAddRejection(ctx, pool, et, st, b, err)
 }
 
 // classifyEnumValueAddRejection turns the server's rejection of an ADD
@@ -94,7 +94,11 @@ func ExecuteEnumValueAdd(ctx context.Context, pool *pgxpool.Pool, et preflight.E
 // shows it, the outcome is ErrEnumLabelExists or ErrEnumNeighborMissing;
 // when it does not, the statement reached another type, which is
 // ErrEnumTypeDrift. Any other error is returned as it came.
-func classifyEnumValueAddRejection(ctx context.Context, pool *pgxpool.Pool, et preflight.EnumTarget, st statement.Statement, err error) error {
+//
+// The read runs after the attempt rolled back, outside the transaction its
+// budget bounded, so it gets a deadline of its own, the statement timeout,
+// covering both the wait for a pooled session and the catalog read.
+func classifyEnumValueAddRejection(ctx context.Context, pool *pgxpool.Pool, et preflight.EnumTarget, st statement.Statement, b Budget, err error) error {
 	pgErr, ok := errors.AsType[*pgconn.PgError](err)
 	if !ok {
 		return err
@@ -110,7 +114,9 @@ func classifyEnumValueAddRejection(ctx context.Context, pool *pgxpool.Pool, et p
 	default:
 		return err
 	}
-	present, readErr := enumCarriesLabel(ctx, pool, et.OID(), label)
+	readCtx, cancel := context.WithTimeout(ctx, b.StatementTimeout)
+	defer cancel()
+	present, readErr := enumCarriesLabel(readCtx, pool, et.OID(), label)
 	if readErr != nil {
 		return fmt.Errorf("read enum type OID %d for label %q after the server rejected the ADD VALUE (%w): %w", et.OID(), label, err, readErr)
 	}
