@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
@@ -114,11 +115,38 @@ func (c *MigrateCmd) writeDesiredResult(out io.Writer, result migrate.DesiredRes
 		}
 		return nil
 	}
+	pal := c.palette(out)
 	for _, v := range result.Verdicts {
-		if err := writeVerdictText(out, c.palette(out), v); err != nil {
+		if err := writeVerdictText(out, pal, v); err != nil {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(out, "%s: %s\n", result.Outcome, result.Detail)
-	return err
+	return writeDesiredSummary(out, pal, result)
+}
+
+// writeDesiredSummary writes the run's closing line. A classified refusal
+// gets the verdict layout's headline, class, owner, and cause, because a
+// whole-run refusal (a file refused before anything planned) carries no
+// statement verdict that would show them; every other outcome is one line.
+func writeDesiredSummary(out io.Writer, pal palette, result migrate.DesiredResult) error {
+	if result.Outcome != verdict.OutcomeRefused || result.Reason == "" {
+		if _, err := fmt.Fprintf(out, "%s: %s\n", result.Outcome, result.Detail); err != nil {
+			return fmt.Errorf("write desired result: %w", err)
+		}
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(pal.severity("error", fmt.Sprintf("refused (%s)", result.Reason)))
+	fmt.Fprintf(&b, "\n  %s  %s", pal.bold("class:"), result.Class)
+	if result.Owner != "" {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("owner:"), result.Owner)
+	}
+	if result.Cause != verdict.CauseNone {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("cause:"), result.Cause)
+	}
+	fmt.Fprintf(&b, "\n  %s %s", pal.bold("detail:"), result.Detail)
+	if _, err := fmt.Fprintln(out, b.String()); err != nil {
+		return fmt.Errorf("write desired result: %w", err)
+	}
+	return nil
 }
