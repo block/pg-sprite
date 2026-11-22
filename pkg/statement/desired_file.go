@@ -36,13 +36,13 @@ func ParseDesiredFile(sql string) (DesiredFile, error) {
 		return DesiredFile{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
 	if hasRowSecurity(tree) {
-		rowSecurity, err := parseDesiredWithRowSecurityTree(tree)
+		rowSecurity, err := parseDesiredWithRowSecurityTree(sql, tree)
 		if err != nil {
 			return DesiredFile{}, err
 		}
 		return DesiredFile{rowSecurity: rowSecurity, hasRLS: true}, nil
 	}
-	schema, err := parseDesiredTree(tree)
+	schema, err := parseDesiredTree(sql, tree)
 	if err != nil {
 		return DesiredFile{}, err
 	}

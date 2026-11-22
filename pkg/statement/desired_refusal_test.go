@@ -33,6 +33,21 @@ func TestParseDesiredFileNamesTheDisallowedStatementAndItsKind(t *testing.T) {
 		{"comment on a table beside row security",
 			"CREATE TABLE t (id int); CREATE POLICY p ON t USING (true); COMMENT ON TABLE t IS 'people'",
 			"COMMENT ON TABLE t IS 'people'", KindCatalogWork},
+		// The parse tree spells an empty enum label as no label, so these
+		// deparse as a plain ADD VALUE. The refusal names and classifies the
+		// statement the file holds.
+		{"renaming the empty enum label",
+			"CREATE TABLE t (id int);\nALTER TYPE mood RENAME VALUE '' TO 'blue';\n",
+			"ALTER TYPE mood RENAME VALUE '' TO 'blue'", KindOther},
+		{"adding an enum label before the empty label",
+			"CREATE TABLE t (id int);\nALTER TYPE mood ADD VALUE 'calm' BEFORE '';\n",
+			"ALTER TYPE mood ADD VALUE 'calm' BEFORE ''", KindOther},
+		{"renaming the empty enum label beside row security",
+			"CREATE TABLE t (id int); ALTER TABLE t ENABLE ROW LEVEL SECURITY; ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+			"ALTER TYPE mood RENAME VALUE '' TO 'blue'", KindOther},
+		{"adding an enum label",
+			"CREATE TABLE t (id int); alter type mood add value 'calm'",
+			"ALTER TYPE mood ADD VALUE 'calm'", KindAddEnumValue},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

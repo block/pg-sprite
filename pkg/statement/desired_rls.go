@@ -109,14 +109,14 @@ func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	if err != nil {
 		return DesiredWithRowSecurity{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
-	return parseDesiredWithRowSecurityTree(tree)
+	return parseDesiredWithRowSecurityTree(sql, tree)
 }
 
 // parseDesiredWithRowSecurityTree applies ParseDesiredWithRowSecurity's
-// admission rules to a parsed file.
-func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRowSecurity, error) {
+// admission rules to tree, the parse of source.
+func parseDesiredWithRowSecurityTree(source string, tree *pganalyze.ParseResult) (DesiredWithRowSecurity, error) {
 	var tableSQL strings.Builder
-	var security []*pganalyze.Node
+	var security []*pganalyze.RawStmt
 	hasTable := false
 	for _, raw := range tree.GetStmts() {
 		node := raw.GetStmt()
@@ -130,7 +130,7 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 			}
 			tableSQL.WriteString(text + ";\n")
 		} else {
-			security = append(security, node)
+			security = append(security, raw)
 		}
 	}
 	if !hasTable {
@@ -146,8 +146,9 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 	d := DesiredWithRowSecurity{table: table.Table(), definition: table, statements: table.Statements()}
 	enabled, forced := 0, 0
 	var comments []Statement
-	for _, node := range security {
-		target, reads, err := admitRowSecurity(node, &enabled, &forced)
+	for _, raw := range security {
+		node := raw.GetStmt()
+		target, reads, err := admitRowSecurity(source, raw, &enabled, &forced)
 		if err != nil {
 			return DesiredWithRowSecurity{}, err
 		}
@@ -175,14 +176,16 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 	return d, nil
 }
 
-// admitRowSecurity admits one row-security statement and returns the table it
-// targets and, for a policy, the tables its expressions read.
-func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []QualifiedName, error) {
+// admitRowSecurity admits raw, one row-security statement of source, and
+// returns the table it targets and, for a policy, the tables its expressions
+// read.
+func admitRowSecurity(source string, raw *pganalyze.RawStmt, enabled, forced *int) (string, []QualifiedName, error) {
+	node := raw.GetStmt()
 	switch {
 	case node.GetAlterTableStmt() != nil:
 		alter := node.GetAlterTableStmt()
 		if alter.GetMissingOk() || alter.GetObjtype() != pganalyze.ObjectType_OBJECT_TABLE {
-			return "", nil, disallowedStatement(node)
+			return "", nil, disallowedStatement(source, raw)
 		}
 		for _, cmd := range alter.GetCmds() {
 			switch cmd.GetAlterTableCmd().GetSubtype() {
@@ -191,7 +194,7 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []Qua
 			case pganalyze.AlterTableType_AT_ForceRowSecurity, pganalyze.AlterTableType_AT_NoForceRowSecurity:
 				*forced += 1
 			default:
-				return "", nil, disallowedStatement(node)
+				return "", nil, disallowedStatement(source, raw)
 			}
 		}
 		target, err := rowSecurityTarget(alter.GetRelation())
@@ -210,7 +213,7 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []Qua
 	case node.GetCommentStmt() != nil:
 		comment := node.GetCommentStmt()
 		if comment.GetObjtype() != pganalyze.ObjectType_OBJECT_POLICY {
-			return "", nil, disallowedStatement(node)
+			return "", nil, disallowedStatement(source, raw)
 		}
 		names := comment.GetObject().GetList().GetItems()
 		if len(names) != 2 {
@@ -218,7 +221,7 @@ func admitRowSecurity(node *pganalyze.Node, enabled, forced *int) (string, []Qua
 		}
 		return names[0].GetString_().GetSval(), nil, nil
 	default:
-		return "", nil, disallowedStatement(node)
+		return "", nil, disallowedStatement(source, raw)
 	}
 }
 

@@ -54,13 +54,16 @@ var (
 )
 
 // DisallowedStatementError is [ErrDisallowedStatement] for one statement of
-// a desired file. It carries the statement's canonical SQL and the kind
-// [ParseOne] gives it, so a caller can classify the refusal the way the
-// imperative front door classifies the same statement.
+// a desired file. It carries the statement's SQL and the kind [ParseOne]
+// gives the statement's source text, so a caller can classify the refusal
+// the way the imperative front door classifies the same statement.
 type DisallowedStatementError struct {
-	// SQL is the refused statement in the deparser's canonical form.
+	// SQL is the refused statement in the deparser's canonical form, or its
+	// source text when the canonical form would classify as a different
+	// kind: the parse tree drops some distinctions [ParseOne] reads from the
+	// statement's keywords, such as an empty enum label.
 	SQL string
-	// Kind is the statement's kind as [ParseOne] classifies it.
+	// Kind is the kind [ParseOne] gives the statement's source text.
 	Kind Kind
 }
 
@@ -97,19 +100,44 @@ func (e *SecondTableError) Unwrap() []error {
 	return []error{ErrMultipleCreateTables}
 }
 
-// disallowedStatement returns the refusal for a desired-file statement the
-// front door does not admit, classified by [ParseOne] from its canonical
-// text.
-func disallowedStatement(node *pganalyze.Node) error {
-	sql, err := deparseOne(node)
+// disallowedStatement returns the refusal for raw, a statement of the
+// desired file source that the front door does not admit.
+func disallowedStatement(source string, raw *pganalyze.RawStmt) error {
+	sql, kind, err := refusedStatement(source, raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDisallowedStatement, err)
 	}
-	st, err := ParseOne(sql)
+	return &DisallowedStatementError{SQL: sql, Kind: kind}
+}
+
+// refusedStatement returns the text a refusal names for raw, a statement of
+// source, and the kind [ParseOne] gives it. The kind comes from the source
+// text, not the canonical text, because the deparse can lose what tells two
+// statements apart: a RENAME VALUE whose old label is empty deparses as an
+// ADD VALUE. The text is the canonical one unless it classifies differently,
+// in which case it is the source text.
+func refusedStatement(source string, raw *pganalyze.RawStmt) (string, Kind, error) {
+	scan, err := pgquery.Scan(source)
 	if err != nil {
-		return fmt.Errorf("%w: classify %s: %w", ErrDisallowedStatement, sql, err)
+		return "", KindOther, fmt.Errorf("scan desired file: %w", err)
 	}
-	return &DisallowedStatementError{SQL: sql, Kind: st.Kind()}
+	verbatim := locate(source, scan.GetTokens(), raw).SQL
+	written, err := ParseOne(verbatim)
+	if err != nil {
+		return "", KindOther, fmt.Errorf("classify %s: %w", verbatim, err)
+	}
+	canonical, err := deparseOne(raw.GetStmt())
+	if err != nil {
+		return "", KindOther, err
+	}
+	reprinted, err := ParseOne(canonical)
+	if err != nil {
+		return "", KindOther, fmt.Errorf("classify %s: %w", canonical, err)
+	}
+	if reprinted.Kind() != written.Kind() {
+		return verbatim, written.Kind(), nil
+	}
+	return canonical, written.Kind(), nil
 }
 
 // DesiredSchema proves a desired-state schema file passed the set-level
@@ -196,18 +224,19 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 	if err != nil {
 		return DesiredSchema{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
-	return parseDesiredTree(tree)
+	return parseDesiredTree(sql, tree)
 }
 
-// parseDesiredTree applies ParseDesired's admission rules to a parsed file.
-func parseDesiredTree(tree *pganalyze.ParseResult) (DesiredSchema, error) {
+// parseDesiredTree applies ParseDesired's admission rules to tree, the parse
+// of source.
+func parseDesiredTree(source string, tree *pganalyze.ParseResult) (DesiredSchema, error) {
 	if len(tree.GetStmts()) == 0 {
 		return DesiredSchema{}, ErrEmptyDesired
 	}
 	var ds DesiredSchema
 	partition := false
 	for i, raw := range tree.GetStmts() {
-		st, err := admitDesiredStatement(raw.GetStmt(), ds.table, partition)
+		st, err := admitDesiredStatement(source, raw, ds.table, partition)
 		if err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
@@ -257,11 +286,12 @@ func executionOrder(statements []Statement) []Statement {
 	return ordered
 }
 
-// admitDesiredStatement applies the per-statement admission rules and
-// returns the statement's kind and target. seenTable is the CREATE TABLE
+// admitDesiredStatement applies the per-statement admission rules to raw, a
+// statement of source, and returns its kind and target. seenTable is the CREATE TABLE
 // target admitted so far, empty when none, and seenPartition reports
 // whether that CREATE TABLE is a partition.
-func admitDesiredStatement(node *pganalyze.Node, seenTable string, seenPartition bool) (Statement, error) {
+func admitDesiredStatement(source string, raw *pganalyze.RawStmt, seenTable string, seenPartition bool) (Statement, error) {
+	node := raw.GetStmt()
 	switch {
 	case node.GetCreateStmt() != nil:
 		create := node.GetCreateStmt()
@@ -288,7 +318,7 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string, seenPartition
 		}
 		return Statement{kind: KindCreateIndex, table: rel.GetRelname()}, nil
 	default:
-		return Statement{}, disallowedStatement(node)
+		return Statement{}, disallowedStatement(source, raw)
 	}
 }
 
