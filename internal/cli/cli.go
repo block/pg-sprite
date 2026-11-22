@@ -285,8 +285,9 @@ func (c *FmtCmd) Run() error { return c.runFmt(os.Stdin, os.Stdout) }
 type LintCmd struct {
 	OutputFlags `embed:""`
 
-	Path string `arg:"" optional:"" help:"DDL file to lint; stdin when omitted." type:"existingfile"`
-	JSON bool   `help:"Emit the findings report as JSON."`
+	Path    string `arg:"" optional:"" help:"DDL file to lint; stdin when omitted." type:"existingfile"`
+	JSON    bool   `help:"Emit the findings report as JSON."`
+	Desired bool   `help:"Check the file as a desired schema file (one CREATE TABLE, its indexes, and its row security) instead of a DDL script. A file migrate --desired would refuse before planning prints its refusal verdict and exits 2."`
 }
 
 // Run implements the lint subcommand.

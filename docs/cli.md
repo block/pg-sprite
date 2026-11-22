@@ -91,7 +91,8 @@ lint:
 
 `lint` reads only the text, so it runs in any CI job. It exits 1 when a file
 has error-severity findings, the statements pg-sprite would refuse; warnings
-alone exit 0. Each code is listed in the [lint report contract](lint-report.md).
+alone exit 0. A desired schema file is not a script: check it with
+`lint --desired` (see [Manage tables from schema files](#manage-tables-from-schema-files)). Each code is listed in the [lint report contract](lint-report.md).
 
 ### Get the safer form
 
@@ -341,7 +342,10 @@ CREATE INDEX orders_total_idx ON orders USING btree (total);
 faithfully. A `diff` against a freshly pulled file reports no changes, which
 proves the baseline. [pull.md](pull.md) covers the refused shapes.
 `pg-sprite fmt schema/orders.sql` prints a hand-edited file in canonical form,
-without a database.
+without a database. `pg-sprite lint --desired schema/orders.sql` checks, also
+without a database, that `diff` and `migrate --desired` would accept the file:
+a file they would refuse, such as a types or partitions file, prints the same
+refusal verdict and exits 2.
 
 ### Review the plan for an edited file
 

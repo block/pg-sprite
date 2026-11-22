@@ -31,7 +31,7 @@ COLUMN`, `DROP CONSTRAINT`, `DROP NOT NULL`) is one of those refusals until
 Exit 2 covers every refusal cause; the exit code answers *should this
 proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
-(warnings alone exit 0), and `diff` prints the plan and exits 2 when it
+(warnings alone exit 0) and `lint --desired` exits 2 when it refuses a desired file, and `diff` prints the plan and exits 2 when it
 contains a statement execution would refuse — a missing table is diff's
 greenfield case (the plan creates the table), not a refusal, unlike the
 dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
@@ -699,6 +699,31 @@ $ pg-sprite lint /tmp/changes.sql --json
   ],
   "errors": 0,
   "warnings": 2
+}
+```
+
+### A desired file refused offline (`lint --desired`) — exit 2
+
+`lint --desired` checks a desired file instead of a script: the admission
+`diff` and `migrate --desired` run before they connect, with no database. A
+file they would refuse prints the same refusal verdict and exits 2; an
+admitted file is clean and exits 0. How the file differs from a live table is
+`diff`'s to report.
+
+```sql
+-- /tmp/events.sql
+CREATE TABLE events (id bigint NOT NULL, at date NOT NULL) PARTITION BY RANGE (at);
+CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+```
+
+```console
+$ pg-sprite lint --desired /tmp/events.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "capability-boundary",
+  "statement": "CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+  "detail": "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed"
 }
 ```
 

@@ -61,6 +61,16 @@ codes make the conservatism visible instead of burying it:
   is unique — and a dropped unique index whose gap admitted duplicate writes cannot be
   recreated at all.
 
+## Desired files (`--desired`)
+
+`pg-sprite lint --desired` checks a desired-state file (one `CREATE TABLE`, its indexes, and
+its row security) instead of a script. Its statements are declarations, not operations, so
+the codes below do not apply to them. It runs the admission `diff` and `migrate --desired`
+run before they connect. A file they would refuse prints the refusal verdict
+([refusal classes](refusal-classes.md)), not this report, and exits 2. An admitted file is clean: text
+prints nothing, and `--json` prints this report with no findings. Invalid SQL exits 1. How
+the file differs from a live table is `diff`'s to report, because only `diff` reads the table.
+
 ## Report fields
 
 | Field | Type | Presence | Meaning |
