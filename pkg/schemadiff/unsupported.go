@@ -2,10 +2,10 @@ package schemadiff
 
 import "fmt"
 
-// UnsupportedCause names why [Diff] refused to converge live onto desired.
-// Every ErrUnsupportedChange that Diff returns is an *UnsupportedChangeError
-// carrying one of [UnsupportedCauses], so a caller classifies the refusal by
-// its cause and never by its message.
+// UnsupportedCause names why [Diff], [IntrospectEnumType], or [DiffEnumType]
+// refused to converge live onto desired. Every ErrUnsupportedChange they
+// return is an *UnsupportedChangeError carrying one of [UnsupportedCauses],
+// so a caller classifies the refusal by its cause and never by its message.
 type UnsupportedCause string
 
 const (
@@ -37,9 +37,22 @@ const (
 	// CauseGenerated refuses when an existing column becomes or stops being generated,
 	// changes between stored and virtual, or changes type while generated.
 	CauseGenerated UnsupportedCause = "generated"
+	// CauseEnumTypeMissing refuses when the enum type a desired enum type file
+	// declares does not exist in the schema.
+	CauseEnumTypeMissing UnsupportedCause = "enum-type-missing"
+	// CauseEnumTypeKind refuses when the name a desired enum type file
+	// declares holds a type that is not an enum.
+	CauseEnumTypeKind UnsupportedCause = "enum-type-kind"
+	// CauseEnumValueRemoved refuses when the live enum type carries a label
+	// the desired file no longer lists, removed or renamed.
+	CauseEnumValueRemoved UnsupportedCause = "enum-value-removed"
+	// CauseEnumValueReordered refuses when the desired file lists the live
+	// enum type's labels in another order.
+	CauseEnumValueReordered UnsupportedCause = "enum-value-reordered"
 )
 
-// UnsupportedCauses is the closed set of causes [Diff] refuses with.
+// UnsupportedCauses is the closed set of causes [Diff], [IntrospectEnumType],
+// and [DiffEnumType] refuse with.
 func UnsupportedCauses() []UnsupportedCause {
 	return []UnsupportedCause{
 		CauseRowSecurity,
@@ -53,6 +66,10 @@ func UnsupportedCauses() []UnsupportedCause {
 		CauseIdentity,
 		CauseIdentitySequence,
 		CauseGenerated,
+		CauseEnumTypeMissing,
+		CauseEnumTypeKind,
+		CauseEnumValueRemoved,
+		CauseEnumValueReordered,
 	}
 }
 

@@ -9,44 +9,67 @@ import (
 )
 
 // DesiredFile is one desired-state schema file admitted through exactly one of
-// the two declarative front doors: [ParseDesired] for a table with its indexes,
-// or [ParseDesiredWithRowSecurity] for a table that also declares row security.
-// The choice is made once, by [ParseDesiredFile], so a consumer never
-// re-derives which planner owns a file. Only ParseDesiredFile constructs a
-// non-zero value, and exactly one of Schema and RowSecurity reports ok.
+// the three declarative front doors: [ParseDesired] for a table with its
+// indexes, [ParseDesiredWithRowSecurity] for a table that also declares row
+// security, or the enum type door for a file that declares one enum type
+// ([DesiredEnumType]). The choice is made once, by [ParseDesiredFile], so a
+// consumer never re-derives which planner owns a file. Only ParseDesiredFile
+// constructs a non-zero value, and exactly one of Schema, RowSecurity, and
+// EnumType reports ok.
 //
-// DesiredFile is a router over those two proof types, not a proof type itself:
-// no planner or executor accepts it. Hand the value Schema or RowSecurity
-// returns to the matching planner.
+// DesiredFile is a router over those proof types, not a proof type itself:
+// no planner or executor accepts it. Hand the value Schema, RowSecurity, or
+// EnumType returns to the matching planner.
 type DesiredFile struct {
+	door        desiredDoor
 	schema      DesiredSchema
 	rowSecurity DesiredWithRowSecurity
-	hasRLS      bool
+	enumType    DesiredEnumType
 }
 
+// desiredDoor names the front door that admitted a DesiredFile; the zero
+// value admitted nothing.
+type desiredDoor int
+
+const (
+	doorNone desiredDoor = iota
+	doorTable
+	doorRowSecurity
+	doorEnumType
+)
+
 // ParseDesiredFile parses sql once and admits it through the front door its
-// statements select. A file that declares row security (a policy, a policy
-// comment, or ENABLE, DISABLE, FORCE or NO FORCE ROW LEVEL SECURITY) must pass
-// ParseDesiredWithRowSecurity's rules; any other file must pass ParseDesired's.
-// Refusals are those front doors' typed errors, unchanged; input that is not
-// valid SQL is refused with [ErrParseDesired].
+// statements select. A file that declares an enum type (CREATE TYPE ... AS
+// ENUM) must hold that one statement and nothing else ([ErrEnumTypeAlone],
+// [ErrEnumLabel], [ErrQualifiedName]). A file that declares row security (a
+// policy, a policy comment, or ENABLE, DISABLE, FORCE or NO FORCE ROW LEVEL
+// SECURITY) must pass ParseDesiredWithRowSecurity's rules; any other file
+// must pass ParseDesired's. Refusals are those front doors' typed errors,
+// unchanged; input that is not valid SQL is refused with [ErrParseDesired].
 func ParseDesiredFile(sql string) (DesiredFile, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
 		return DesiredFile{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
+	}
+	if declaresEnumType(tree) {
+		enumType, err := parseDesiredEnumTree(tree)
+		if err != nil {
+			return DesiredFile{}, err
+		}
+		return DesiredFile{door: doorEnumType, enumType: enumType}, nil
 	}
 	if hasRowSecurity(tree) {
 		rowSecurity, err := parseDesiredWithRowSecurityTree(sql, tree)
 		if err != nil {
 			return DesiredFile{}, err
 		}
-		return DesiredFile{rowSecurity: rowSecurity, hasRLS: true}, nil
+		return DesiredFile{door: doorRowSecurity, rowSecurity: rowSecurity}, nil
 	}
 	schema, err := parseDesiredTree(sql, tree)
 	if err != nil {
 		return DesiredFile{}, err
 	}
-	return DesiredFile{schema: schema}, nil
+	return DesiredFile{door: doorTable, schema: schema}, nil
 }
 
 // FormatDesired returns the canonical text of a desired-state schema file:
@@ -57,8 +80,9 @@ func ParseDesiredFile(sql string) (DesiredFile, error) {
 //
 // The file is the one [ParseDesiredFile] admits: exactly one CREATE TABLE
 // ([ErrMultipleCreateTables] for a second), unqualified names
-// ([ErrQualifiedName]), the table's indexes, and its row-security statements;
-// any other statement kind is [ErrDisallowedStatement]. Input that is not
+// ([ErrQualifiedName]), the table's indexes, and its row-security statements,
+// any other statement kind being [ErrDisallowedStatement]; or exactly one
+// CREATE TYPE ... AS ENUM and nothing else ([ErrEnumTypeAlone]). Input that is not
 // valid SQL, an unterminated quote or comment included, is [ErrParseDesired].
 //
 // A lexical comment (-- or /* */) is refused with [ErrCommentLoss] before
@@ -91,36 +115,52 @@ func FormatDesired(sql string) (string, error) {
 }
 
 // Table returns the unqualified desired table, the same name the admitted
-// value's Table reports.
+// value's Table reports. An enum type file declares no table, so its Table
+// is empty; [DesiredEnumType.Name] names its type.
 func (f DesiredFile) Table() string {
-	if f.hasRLS {
+	switch f.door {
+	case doorTable:
+		return f.schema.Table()
+	case doorRowSecurity:
 		return f.rowSecurity.Table()
+	default:
+		return ""
 	}
-	return f.schema.Table()
 }
 
 // Statements returns the admitted statements in the order the admitted
 // value's Statements reports them. For a row-security file that is the
 // table and its indexes, then the settings and policies in the order the
-// file wrote them, then the policy comments. The slice is a copy.
+// file wrote them, then the policy comments. For an enum type file it is
+// the one CREATE TYPE. The slice is a copy.
 func (f DesiredFile) Statements() []Statement {
-	if f.hasRLS {
+	switch f.door {
+	case doorTable:
+		return f.schema.Statements()
+	case doorRowSecurity:
 		return f.rowSecurity.Statements()
+	case doorEnumType:
+		return f.enumType.Statements()
+	default:
+		return nil
 	}
-	return f.schema.Statements()
 }
 
-// Schema returns the ordinary planner input when the file declares no row
-// security. The zero DesiredFile admitted nothing, so it reports neither.
+// Schema returns the ordinary planner input when the file declares a table
+// and no row security. The zero DesiredFile admitted nothing, so it reports
+// none of the three.
 func (f DesiredFile) Schema() (DesiredSchema, bool) {
-	// The table check alone suffices for values ParseDesiredFile builds, which
-	// leave schema zero on the row-security branch; !hasRLS keeps the
-	// "exactly one reports ok" guarantee local to this type.
-	return f.schema, !f.hasRLS && f.schema.Table() != ""
+	return f.schema, f.door == doorTable
 }
 
 // RowSecurity returns the row-security planner input when the file declares
 // row security.
 func (f DesiredFile) RowSecurity() (DesiredWithRowSecurity, bool) {
-	return f.rowSecurity, f.hasRLS
+	return f.rowSecurity, f.door == doorRowSecurity
+}
+
+// EnumType returns the enum type planner input when the file declares an
+// enum type.
+func (f DesiredFile) EnumType() (DesiredEnumType, bool) {
+	return f.enumType, f.door == doorEnumType
 }

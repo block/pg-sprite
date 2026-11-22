@@ -228,6 +228,8 @@ func desiredFileSentinels() []error {
 		statement.ErrMultipleCreateTables,
 		statement.ErrDesiredPartitions,
 		statement.ErrDisallowedStatement,
+		statement.ErrEnumTypeAlone,
+		statement.ErrEnumLabel,
 	}
 }
 
@@ -249,7 +251,9 @@ func desiredFileRefusal(err error) (verdict.Refusal, bool) {
 	switch {
 	case errors.Is(err, statement.ErrDesiredPartitions):
 		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
-	case errors.Is(err, statement.ErrMultipleCreateTables):
+	case errors.Is(err, statement.ErrMultipleCreateTables),
+		errors.Is(err, statement.ErrEnumTypeAlone),
+		errors.Is(err, statement.ErrEnumLabel):
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	disallowed, ok := errors.AsType[*statement.DisallowedStatementError](err)
@@ -291,8 +295,13 @@ func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 	detail := fmt.Sprintf("%v; nothing was planned or executed", err)
 	if disallowed, isStatement := errors.AsType[*statement.DisallowedStatementError](err); isStatement {
 		sql = disallowed.SQL
-		detail = "a desired file holds one CREATE TABLE, its indexes, and its row security, so this statement " +
-			"is not allowed in it; nothing was planned or executed"
+		detail = "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, " +
+			"so this statement is not allowed in it; nothing was planned or executed"
+	}
+	if extra, isExtra := errors.AsType[*statement.EnumTypeFileError](err); isExtra {
+		sql = extra.SQL
+		detail = "a desired enum type file holds exactly one CREATE TYPE ... AS ENUM, so this statement belongs " +
+			"in a file of its own; nothing was planned or executed"
 	}
 	if second, isTable := errors.AsType[*statement.SecondTableError](err); isTable {
 		sql = second.SQL

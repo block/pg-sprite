@@ -29,7 +29,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **19**: version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **20**: version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -62,7 +62,8 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `format_version` | int | always | Contract version; reject unknown versions. |
 | `source` | string | always | Front door that derived the plan (see Sources). |
 | `schema` | string | when resolved | Target schema. The **resolved** name the engine planned against — an unqualified alter reports the schema the session `search_path` resolves its table to, the one execution acts on (`public` when the `search_path` shows no such table), never an empty echo of the submitted text. Absent only when the statement has no single table target. |
-| `table` | string | when targeted | Target table; absent for statements with no single table target (index maintenance). |
+| `table` | string | when targeted | Target table; absent for statements with no single table target (index maintenance) and for a desired enum type file. |
+| `type` | string | `diff` source, enum type file | The enum type a desired enum type file declares, unqualified; `schema` names where it lives. Present exactly when the plan is for an enum type, and then `table` is absent. Not covered by the fingerprint. |
 | `server_version` | string | when connected | The PostgreSQL `server_version` the plan was derived against. Classification is version-sensitive; a stored or forwarded report names the server whose rules produced it. |
 | `table_exists` | bool | when introspected | Whether the live table was found. Set by both sources that introspect the target (diff, and the alter dry run); absent means the plan has no single table target to introspect. For diff, `false` means the plan is the full desired schema; for an alter dry run, `false` means the plan was classified from zero facts, executing it would fail, and the dry run exits with the refusal code. |
 | `disposition` | string | always | Aggregate disposition across all statements (see Dispositions). |
@@ -294,6 +295,7 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `validate-constraint` | Validates a live check constraint left `NOT VALID` whose definition otherwise matches the desired one, the state an interrupted online add leaves behind. Not destructive. |
 | `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Always refused for execution (`declarative-foreign-key`). |
 | `create-index` | Creates an index. |
+| `add-enum-value` | Adds a label to an enum type (`ALTER TYPE ... ADD VALUE`), placed `BEFORE` the next label the type already carries when the file lists it ahead of one. The only kind a desired enum type file plans. Not destructive. |
 
 ### Advisory kinds (`advisories[].kind`, diff source only)
 
@@ -360,7 +362,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -403,7 +405,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -470,7 +472,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

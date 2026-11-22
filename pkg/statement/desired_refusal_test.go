@@ -18,8 +18,8 @@ func TestParseDesiredFileNamesTheDisallowedStatementAndItsKind(t *testing.T) {
 		stmt string
 		kind Kind
 	}{
-		{"enum type file", "CREATE TYPE mood AS ENUM ('happy', 'sad')",
-			"CREATE TYPE mood AS ENUM ('happy', 'sad')", KindCatalogWork},
+		{"domain file", "CREATE DOMAIN email AS text", "CREATE DOMAIN email AS text", KindCatalogWork},
+		{"composite type file", "CREATE TYPE pair AS (a int, b int)", "CREATE TYPE pair AS (a int, b int)", KindCatalogWork},
 		{"domain beside a table", "CREATE TABLE t (id int); CREATE DOMAIN positive AS int CHECK (VALUE > 0)",
 			"CREATE DOMAIN positive AS int CHECK (value > 0)", KindCatalogWork},
 		{"data change", "CREATE TABLE t (id int); DELETE FROM t", "DELETE FROM t", KindDataChange},
@@ -27,9 +27,9 @@ func TestParseDesiredFileNamesTheDisallowedStatementAndItsKind(t *testing.T) {
 		{"alter table", "CREATE TABLE t (id int); ALTER TABLE t ADD COLUMN c int",
 			"ALTER TABLE t ADD COLUMN c int", KindAlterTable},
 		{"drop index", "CREATE TABLE t (id int); DROP INDEX i", "DROP INDEX i", KindDropIndex},
-		{"enum type beside row security",
-			"CREATE TABLE t (id int); ALTER TABLE t ENABLE ROW LEVEL SECURITY; CREATE TYPE mood AS ENUM ('happy')",
-			"CREATE TYPE mood AS ENUM ('happy')", KindCatalogWork},
+		{"domain beside row security",
+			"CREATE TABLE t (id int); ALTER TABLE t ENABLE ROW LEVEL SECURITY; CREATE DOMAIN email AS text",
+			"CREATE DOMAIN email AS text", KindCatalogWork},
 		{"comment on a table beside row security",
 			"CREATE TABLE t (id int); CREATE POLICY p ON t USING (true); COMMENT ON TABLE t IS 'people'",
 			"COMMENT ON TABLE t IS 'people'", KindCatalogWork},

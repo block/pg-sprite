@@ -163,7 +163,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -204,7 +204,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -397,7 +397,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -439,7 +439,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -513,7 +513,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -550,7 +550,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -615,7 +615,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -769,7 +769,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 19,
+  "format_version": 20,
   "source": "diff",
   "schema": "public",
   "table": "users",
@@ -802,30 +802,31 @@ $ pg-sprite diff --desired /tmp/users.sql --json
 }
 ```
 
-### Refused before planning: a file that is not one table (`unsupported-statement`) — exit 2
+### Refused before planning: a file that is not one table or one enum type (`unsupported-statement`) — exit 2
 
-A desired file holds one `CREATE TABLE`, its indexes, and its row security.
-A file that holds anything else is refused before `diff` connects or plans,
-with the refusal verdict instead of a plan report. The class comes from the
-refused statement's kind, as the imperative front door would class it: a type
-goes to the operator who runs catalog work, a data change to the data change
-runner. A second table is refused by design, and partitions of a table as a
+A desired file holds one `CREATE TABLE`, its indexes, and its row security,
+or one `CREATE TYPE ... AS ENUM`. A file that holds anything else is refused
+before `diff` connects or plans, with the refusal verdict instead of a plan
+report. The class comes from the refused statement's kind, as the imperative
+front door would class it: a domain goes to the operator who runs catalog
+work, a data change to the data change runner. A second table, or a table in
+an enum type file, is refused by design, and partitions of a table as a
 capability boundary. `migrate --desired` refuses the same files the same way.
 
 ```sql
--- /tmp/account_status.sql
-CREATE TYPE account_status AS ENUM ('active', 'closed');
+-- /tmp/account_email.sql
+CREATE DOMAIN account_email AS text;
 ```
 
 ```console
-$ pg-sprite diff --desired /tmp/account_status.sql --json
+$ pg-sprite diff --desired /tmp/account_email.sql --json
 {
   "outcome": "refused",
   "reason": "unsupported-statement",
   "class": "no-online-safety-problem",
   "owner": "direct-operator",
-  "statement": "CREATE TYPE account_status AS ENUM ('active', 'closed')",
-  "detail": "a desired file holds one CREATE TABLE, its indexes, and its row security, so this statement is not allowed in it; nothing was planned or executed"
+  "statement": "CREATE DOMAIN account_email AS text",
+  "detail": "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"
 }
 ```
 

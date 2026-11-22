@@ -50,6 +50,9 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, "")
 	}
+	if enumType, ok := file.EnumType(); ok {
+		return c.runDesiredEnumType(ctx, out, enumType)
+	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
 		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
 			return fmt.Errorf("--extension-schema: %w", err)
@@ -84,6 +87,32 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, opts)
+	stopProgress()
+	return c.finishDesired(out, result, runErr)
+}
+
+// runDesiredEnumType converges a desired enum type file: a dry run prints
+// the plan diff prints, and a run adds each label the live type lacks. As
+// for diff, --extension-schema has no effect on an enum type file.
+func (c *MigrateCmd) runDesiredEnumType(ctx context.Context, out io.Writer, desired statement.DesiredEnumType) error {
+	pool, err := dbconn.NewPool(ctx, c.Config())
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if c.DryRun {
+		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
+		report, err := diffplan.PlanEnumType(ctx, pool, c.Schema, desired)
+		if err != nil {
+			return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, desired.Statements()[0].SQL())
+		}
+		return diff.writeDiffReport(out, report)
+	}
+	opts, stopProgress, err := c.startProgress(ctx, c.options(c.diag()))
+	if err != nil {
+		return err
+	}
+	result, runErr := migrate.RunDesiredEnumType(ctx, pool, migrate.EnumTypeRequest{Schema: c.Schema, Desired: desired}, opts)
 	stopProgress()
 	return c.finishDesired(out, result, runErr)
 }

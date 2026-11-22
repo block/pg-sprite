@@ -205,9 +205,9 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
-	_, typeFileErr := statement.ParseDesiredFile("CREATE TYPE account_status AS ENUM ('active', 'closed');\n")
+	_, typeFileErr := statement.ParseDesiredFile("CREATE DOMAIN account_email AS text;\n")
 	typeFileRefused, ok := migrate.DesiredFileRefusal(typeFileErr, "")
-	require.True(t, ok, "a type file is a desired-file refusal: %v", typeFileErr)
+	require.True(t, ok, "a domain file is a desired-file refusal: %v", typeFileErr)
 
 	var lintDesiredOut strings.Builder
 	lintDesiredErr := (&LintCmd{Desired: true, JSON: true}).runLint(strings.NewReader(

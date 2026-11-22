@@ -174,7 +174,8 @@ func TestLintParseFailureIsErrorNotFinding(t *testing.T) {
 // lint --desired checks a desired schema file with the admission diff and
 // migrate --desired run before they connect, offline: an admitted file is
 // clean even though, read as a script, its row security is unrecognized and
-// its index would block writes, while a types file or a partitions file is
+// its index would block writes, and an enum type file is clean, while a
+// domain file, an enum type file with a table in it, or a partitions file is
 // refused with its class and exit 2 instead of passing or failing untyped.
 func TestLintDesiredReportsTheAdmissionVerdict(t *testing.T) {
 	const admitted = `CREATE TABLE documents (
@@ -200,6 +201,13 @@ CREATE POLICY owners ON documents FOR ALL USING (owner_id = current_setting('app
 		assert.Equal(t, lint.EmptyReport(), report)
 	})
 
+	t.Run("enum type", func(t *testing.T) {
+		var out strings.Builder
+		require.NoError(t, (&LintCmd{Desired: true}).runLint(strings.NewReader(
+			"CREATE TYPE status AS ENUM ('active', 'closed');\n"), &out))
+		assert.Empty(t, out.String())
+	})
+
 	cases := []struct {
 		name      string
 		file      string
@@ -208,11 +216,17 @@ CREATE POLICY owners ON documents FOR ALL USING (owner_id = current_setting('app
 		statement string
 	}{
 		{
-			name:      "types file",
-			file:      "CREATE TYPE status AS ENUM ('active', 'closed');",
+			name:      "domain file",
+			file:      "CREATE DOMAIN account_email AS text;",
 			class:     verdict.ClassNoOnlineSafetyProblem,
 			owner:     verdict.OwnerDirectOperator,
-			statement: "CREATE TYPE status AS ENUM ('active', 'closed')",
+			statement: "CREATE DOMAIN account_email AS text",
+		},
+		{
+			name:      "enum type file with a table",
+			file:      "CREATE TYPE status AS ENUM ('active', 'closed');\nCREATE TABLE accounts (id bigint PRIMARY KEY, status status);",
+			class:     verdict.ClassByDesign,
+			statement: "CREATE TABLE accounts (id bigint PRIMARY KEY, status status)",
 		},
 		{
 			name: "partitions file",

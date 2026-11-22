@@ -14,9 +14,9 @@ import (
 
 // A desired file refused before anything is planned gets a refusal verdict
 // naming the refused statement, classed as the registry classes its cause:
-// a type file goes to the operator who runs catalog work, a file of
-// partitions waits on a capability, and a second unrelated table is refused
-// by design.
+// a domain file goes to the operator who runs catalog work, a file of
+// partitions waits on a capability, and a second unrelated table, a table in
+// an enum type file, or a label listed twice is refused by design.
 func TestDesiredFileRefusalVerdicts(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -26,15 +26,21 @@ func TestDesiredFileRefusalVerdicts(t *testing.T) {
 		owner  verdict.Owner
 		detail string
 	}{
-		{"enum type file", "CREATE TYPE mood AS ENUM ('happy', 'sad')",
-			"CREATE TYPE mood AS ENUM ('happy', 'sad')", verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDirectOperator,
-			"a desired file holds one CREATE TABLE, its indexes, and its row security, so this statement is not allowed in it; nothing was planned or executed"},
+		{"domain file", "CREATE DOMAIN email AS text",
+			"CREATE DOMAIN email AS text", verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDirectOperator,
+			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"},
+		{"table in an enum type file", "CREATE TYPE mood AS ENUM ('happy', 'sad'); CREATE TABLE t (id int)",
+			"CREATE TABLE t (id int)", verdict.ClassByDesign, "",
+			"a desired enum type file holds exactly one CREATE TYPE ... AS ENUM, so this statement belongs in a file of its own; nothing was planned or executed"},
+		{"enum label listed twice", "CREATE TYPE mood AS ENUM ('happy', 'happy')",
+			"unused", verdict.ClassByDesign, "",
+			"statement 1: a desired enum type's labels must be distinct and non-empty: \"happy\" is listed twice; nothing was planned or executed"},
 		{"data change", "CREATE TABLE t (id int); INSERT INTO t VALUES (1)",
 			"INSERT INTO t VALUES (1)", verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDataChangeRunner,
-			"a desired file holds one CREATE TABLE, its indexes, and its row security, so this statement is not allowed in it; nothing was planned or executed"},
+			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"},
 		{"change statement", "CREATE TABLE t (id int); ALTER TABLE t ADD COLUMN c int",
 			"ALTER TABLE t ADD COLUMN c int", verdict.ClassByDesign, "",
-			"a desired file holds one CREATE TABLE, its indexes, and its row security, so this statement is not allowed in it; nothing was planned or executed"},
+			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"},
 		{"partitions file",
 			"CREATE TABLE log_p1 PARTITION OF log FOR VALUES FROM (1) TO (2); " +
 				"CREATE TABLE log_p2 PARTITION OF log FOR VALUES FROM (2) TO (3)",
@@ -138,6 +144,60 @@ func TestDesiredFileRefusalClassesUnsupportedChanges(t *testing.T) {
 			assert.Equal(t, tt.owner, v.Owner)
 			assert.Equal(t, "CREATE TABLE events (id bigint NOT NULL)", v.Statement)
 			assert.Equal(t, fmt.Sprintf("plan: %v; nothing was planned or executed", err), v.Detail)
+		})
+	}
+}
+
+// A live enum type the file cannot converge is refused as a desired-file
+// refusal, classed by its cause: a missing type or a dropped label is the
+// owner's to fix directly (CREATE TYPE, ALTER TYPE ... RENAME VALUE), labels
+// listed out of live order are the file's to correct, and a name that holds
+// another kind of type waits on a capability.
+func TestDesiredFileRefusalClassesEnumTypeChanges(t *testing.T) {
+	file, err := statement.ParseDesiredFile("CREATE TYPE mood AS ENUM ('happy', 'sad')")
+	require.NoError(t, err)
+	desired, ok := file.EnumType()
+	require.True(t, ok)
+	tests := []struct {
+		name  string
+		err   error
+		class verdict.Class
+		owner verdict.Owner
+	}{
+		{"missing type", &schemadiff.UnsupportedChangeError{Cause: schemadiff.CauseEnumTypeMissing},
+			verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDirectOperator},
+		{"not an enum", &schemadiff.UnsupportedChangeError{Cause: schemadiff.CauseEnumTypeKind},
+			verdict.ClassCapabilityBoundary, ""},
+	}
+	for _, live := range []struct {
+		name   string
+		labels []string
+		class  verdict.Class
+		owner  verdict.Owner
+	}{
+		{"label removed", []string{"happy", "sad", "meh"}, verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDirectOperator},
+		{"labels reordered", []string{"sad", "happy"}, verdict.ClassByDesign, ""},
+	} {
+		_, diffErr := schemadiff.DiffEnumType(schemadiff.EnumType{Schema: "public", Name: "mood", Labels: live.labels}, desired)
+		require.ErrorIs(t, diffErr, schemadiff.ErrUnsupportedChange)
+		tests = append(tests, struct {
+			name  string
+			err   error
+			class verdict.Class
+			owner verdict.Owner
+		}{live.name, diffErr, live.class, live.owner})
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sql := desired.Statements()[0].SQL()
+			v, ok := DesiredFileRefusal(fmt.Errorf("plan: %w", tt.err), sql)
+			require.True(t, ok, "classified: %v", tt.err)
+			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+			assert.Equal(t, tt.class, v.Class)
+			assert.Equal(t, tt.owner, v.Owner)
+			assert.Equal(t, sql, v.Statement)
+			assert.Equal(t, fmt.Sprintf("plan: %v; nothing was planned or executed", tt.err), v.Detail)
 		})
 	}
 }
