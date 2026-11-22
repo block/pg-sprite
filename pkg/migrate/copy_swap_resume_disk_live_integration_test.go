@@ -130,6 +130,25 @@ func TestRunCopySwapResumeIsAskedOnlyForTheDiskLeftToGrow(t *testing.T) {
 	assert.Zero(t, envErr.HeldShadowBytes)
 	assert.Zero(t, envErr.HeldWALBytes)
 
+	// The exported resume-aware preflight, which the route itself calls,
+	// gives the same answer: a restart measures nothing and is refused at
+	// the figure, whatever Held it is handed, while a resume is discounted
+	// what the server says the stopped run holds and is admitted.
+	_, store := f.measureInputs(t)
+	env := preflight.CopySwapEnvironment{
+		LogicalDecoding: true, FreeDiskBytes: free, SlotLagCeilingBytes: resumedRunCeiling,
+		Held: held,
+	}
+	_, err = schemachange.CheckCopySwap(t.Context(), f.pool, store, schema, table, env, true)
+	envErr, ok = errors.AsType[*preflight.CopySwapEnvironmentError](err)
+	require.True(t, ok, "a restart at the figure is a disk refusal: %v", err)
+	assert.Equal(t, preflight.CopySwapCauseDiskHeadroom, envErr.Cause)
+	assert.Zero(t, envErr.HeldShadowBytes, "a restart is checked as a fresh run")
+	assert.Zero(t, envErr.HeldWALBytes, "a restart is checked as a fresh run")
+	target, err := schemachange.CheckCopySwap(t.Context(), f.pool, store, schema, table, env, false)
+	require.NoError(t, err, "a resume at the figure is discounted what the stopped run holds")
+	assert.True(t, target.DecodesWAL())
+
 	resume := f.options()
 	resume.CopySwap.FreeDiskBytes = free
 	resume.CopySwap.SlotLagCeilingBytes = resumedRunCeiling

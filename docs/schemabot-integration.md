@@ -121,14 +121,15 @@ implementation time):
   `CopySwapEnvironment.SlotLagCeilingBytes` the ceiling the catch-up will enforce: the disk
   check counts it beside the shadow, zero counts `preflight.DefaultSlotLagCeiling` (the
   catch-up's default), and a negative value is refused. A resume checked through
-  `CheckCopySwap` discounts nothing of what the stopped run holds; to ask it only for what
-  is left to grow, call `CheckPrivileges` and `CheckCopySwapShape`, fill
-  `CopySwapEnvironment.Held` from `schemachange.MeasureResumeHeld` (the shadow's and the
-  slot's sizes, read from the server, zero for a fresh run), then call
-  `CheckCopySwapEnvironment`, as `pkg/migrate` does. Skip the measure for a run that
-  starts over (`RunOptions.Restart`) and leave `Held` zero: the restart's discard has not
-  freed what the stopped run holds when the preflight runs, so counting it would ask for
-  less than the run will have. How to classify each refusal of these checks is in
+  `preflight.CheckCopySwap` discounts nothing of what the stopped run holds; to ask it only
+  for what is left to grow, call `schemachange.CheckCopySwap` instead, as `pkg/migrate`
+  does. It runs the same three checks and fills `CopySwapEnvironment.Held` between the
+  shape and the environment check from `schemachange.MeasureResumeHeld` (the shadow's and
+  the slot's sizes, read from the server, zero for a fresh run). Pass its `restart`
+  argument the run's `RunOptions.Restart`: a restart is checked as a fresh run with `Held`
+  zero, because the restart's discard has not freed what the stopped run holds when the
+  preflight runs, and counting it would ask for less than the run will have. Do not
+  rebuild that chain by hand. How to classify each refusal of these checks is in
   [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause).
 - **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
