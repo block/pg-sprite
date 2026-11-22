@@ -263,3 +263,27 @@ func goneLock(t *testing.T, cfg dbconn.Config, pool *pgxpool.Pool, schema, table
 	require.NoError(t, lock.Err(), "the keepalive has not yet noticed the loss; the in-transaction check must")
 	return lock
 }
+
+// A PID is unique only within one server, so a lock session also reports its
+// backend start. Another connection to the same server reads the same pair for
+// the holder, which is what lets it tell the lock's own session from a
+// same-PID session on another server.
+func TestTableLockSessionBackendStartMatchesTheHolderSeenElsewhere(t *testing.T) {
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	held, err := dbconn.AcquireTableLock(t.Context(), cfg, "app", "backend_start_probe")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, held.Release(context.WithoutCancel(t.Context())))
+	})
+
+	holder, found, err := dbconn.LookupTableLockHolder(t.Context(), pool, "app", "backend_start_probe")
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, held.BackendPID(), holder.PID)
+	assert.False(t, held.BackendStart().IsZero(), "the session knows when its backend started")
+	assert.True(t, holder.BackendStart.Equal(held.BackendStart()), "the holder's backend start, read from the pool, is the session's own")
+}

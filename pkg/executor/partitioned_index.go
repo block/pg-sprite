@@ -225,7 +225,9 @@ func confirmLockInPoolDatabase(ctx context.Context, pool *pgxpool.Pool, lock *db
 	if err != nil {
 		return fmt.Errorf("confirm the table lock for %s from the pool: %w", qualifiedName(req.schema, req.table), err)
 	}
-	if !found || holder.PID != lock.BackendPID() {
+	// A PID is unique only within one server, so the holder's backend start
+	// must match too: the pair is what identifies the lock's own session.
+	if !found || holder.PID != lock.BackendPID() || !holder.BackendStart.Equal(lock.BackendStart()) {
 		return fmt.Errorf("%w: LK-1: the table lock for %s is not held in the database the pool is connected to; the connection target and the pool must reach the same database",
 			ErrInvariantViolation, qualifiedName(req.schema, req.table))
 	}
