@@ -92,6 +92,14 @@ func liveIndexes(t *testing.T, pool *pgxpool.Pool, schema string) []string {
 // release is called, without blocking any other statement on the table.
 func holdTableRead(t *testing.T, pool *pgxpool.Pool, schema string) (release func()) {
 	t.Helper()
+	_, release = holdTableReadPID(t, pool, schema)
+	return release
+}
+
+// holdTableReadPID is holdTableRead that also returns the holding session's
+// backend PID, so a test can wait until the drop is waiting on it.
+func holdTableReadPID(t *testing.T, pool *pgxpool.Pool, schema string) (pid uint32, release func()) {
+	t.Helper()
 	tx, err := pool.Begin(t.Context())
 	require.NoError(t, err)
 	var n int
@@ -104,7 +112,7 @@ func holdTableRead(t *testing.T, pool *pgxpool.Pool, schema string) (release fun
 		}
 	}
 	t.Cleanup(release)
-	return release
+	return tx.Conn().PgConn().PID(), release
 }
 
 // An operator reviews a desired file that removes a column, a constraint, a
@@ -475,9 +483,65 @@ func TestRunDesiredReviewedIndexDropFailureCarriesTheServerError(t *testing.T) {
 	assert.Equal(t, "57014", v.SQLState, "the verdict names the server's query_canceled SQLSTATE")
 	assert.Contains(t, v.ServerError, "statement timeout")
 	assert.Contains(t, v.Detail, "may still stand")
+	assert.Contains(t, liveIndexes(t, pool, schema), "t_keep_idx", "the cancelled drop leaves the index in the catalog")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.t VALUES (2, 'k2', 'l2', 4)", schema))
+	require.NoError(t, err, "the table stays writable after the cancelled drop")
 
 	raw, err := json.Marshal(v)
 	require.NoError(t, err)
 	assert.Contains(t, string(raw), `"sqlstate":"57014"`)
 	assert.Contains(t, string(raw), `"server_error":`)
+}
+
+// A reviewed index drop never blocks writes. While the drop waits for an
+// older transaction that has read the table, another session still writes
+// under a short lock timeout; once the reader ends, the drop finishes and
+// the index is gone.
+func TestRunDesiredReviewedIndexDropLeavesWritesUnblocked(t *testing.T) {
+	pool, schema := reviewedDropTable(t)
+	desired := `CREATE TABLE t (id int PRIMARY KEY, keep text, legacy text, qty int NOT NULL,
+		CONSTRAINT t_qty_positive CHECK (qty > 0));`
+	reviewed := plannedDrop(t, pool, schema, desired)
+	require.Len(t, reviewed.Statements, 1)
+	holder, release := holdTableReadPID(t, pool, schema)
+	desiredSchema := parseDesired(t, desired)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	type outcome struct {
+		res migrate.DesiredResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{
+			Schema: schema, Desired: desiredSchema,
+			ExpectedFingerprint: reviewed.Fingerprint, AllowDestructive: schema + ".t",
+		}, runOptions())
+		done <- outcome{res, err}
+	}()
+	require.Eventually(t, func() bool {
+		blocked, err := testutil.BlockedBy(t.Context(), pool, holder)
+		return err == nil && blocked
+	}, 30*time.Second, 25*time.Millisecond, "the drop must be waiting on the older reader")
+
+	writer, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = writer.Rollback(context.WithoutCancel(t.Context())) }()
+	_, err = writer.Exec(t.Context(), "SET LOCAL lock_timeout = '200ms'")
+	require.NoError(t, err)
+	_, err = writer.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.t VALUES (2, 'k2', 'l2', 4)", schema))
+	require.NoError(t, err, "a write must not wait on the pending drop")
+	require.NoError(t, writer.Commit(t.Context()))
+
+	release()
+	select {
+	case out := <-done:
+		require.NoError(t, out.err)
+		require.Equal(t, verdict.OutcomeExecuted, out.res.Outcome, "%s", out.res.Detail)
+	case <-time.After(30 * time.Second):
+		cancel()
+		t.Fatal("the drop must finish once the reader ends")
+	}
+	assert.Equal(t, []string{"t_pkey"}, liveIndexes(t, pool, schema))
 }
