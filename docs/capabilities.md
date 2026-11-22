@@ -182,7 +182,8 @@ Support differs by front door, so the matrix marks the exceptions:
 - **Imperative** (`migrate --alter`, `migrate --dry-run`, `lint`, `suggest`): takes one DDL
   statement, classifies it, and executes the online form — rewriting a blocking statement into its
   safer sequence where one exists. This door has the **broadest coverage**.
-- **Declarative** (`diff`, `pull`, desired files): compares a desired `CREATE TABLE`
+- **Declarative** (`diff`, `pull`, desired files, and `lint --desired`, which runs
+  the desired-file admission offline): compares a desired `CREATE TABLE`
   file against the live table. This door depends on the canonical table *model*, which
   is deliberately narrower: a table the model cannot fully describe gets a typed
   refusal rather than a silently lossy description. Today that means tables that are

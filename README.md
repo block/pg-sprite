@@ -309,7 +309,7 @@ read-only or fully offline.
 | `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
 | `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
-| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone |
+| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone; `--desired` runs the desired-file admission `diff` and `migrate --desired` share and prints the refusal verdict for a file it refuses; planning can still refuse what admission does not inspect |
 | `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, exits 0 on any script it can parse |
 
 The offline commands have no connection flags at all, so they cannot be
@@ -344,11 +344,11 @@ Four rules follow from the table, and one note for embedders:
   every code above. Allow 3 explicitly only where a maintenance-window
   blocking change is intended; exit 0 is never borrowed for it.
 - **Refusal is one code, whichever command produced it.** `migrate`, its dry
-  run, `diff`, and `pull` all exit 2 on a refusal; exit 3 can come only from
-  `migrate`, because no other command executes DDL. The offline `lint` exits
-  1 when a script has error-severity findings (warnings alone exit 0), and
-  `suggest` exits 0 on any script it can parse — findings never gate; only an
-  unreadable or unparsable script exits 1.
+  run, `diff`, `pull`, and `lint --desired` all exit 2 on a refusal; exit 3
+  can come only from `migrate`, because no other command executes DDL. The
+  offline `lint` exits 1 when a script has error-severity findings (warnings
+  alone exit 0), and `suggest` exits 0 on any script it can parse — findings
+  never gate; only an unreadable or unparsable script exits 1.
 - **Exit 2 means nothing *committed*, not nothing ran.** An optimistic
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the
