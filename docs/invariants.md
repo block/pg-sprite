@@ -558,7 +558,9 @@ lists the source schema do not change the indexes or statistics read; the reads 
 a path pg-sprite did not set — the cutover's backend reads on the caller's pool and the write
 fence function's `format` in the writer's session — are qualified too, pinned by
 `TestCutoverBackendReadsResolveToTheRealCatalog` and
-`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`), `pkg/migrate`
+`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`; the resume's shadow size read in
+`MeasureResumeHeld`, which runs on the caller's pool, qualifies every function, relation, and
+operator, the `pg_total_relation_size(oid)` call included), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
@@ -1348,7 +1350,8 @@ still draw each identity default from the source's sequence). *Source:*
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table, plus the slot lag ceiling for a run that decodes WAL), execute-and-introspect
+(~2× the table, plus the slot lag ceiling for a run that decodes WAL, less what a resumed run
+already holds of each, measured from the server), execute-and-introspect
 workspace, lock LK-1 acquired, and the RF-* refusals
 below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
@@ -1359,7 +1362,8 @@ grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability
 IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement plus, for a run that
-decodes WAL, the slot lag ceiling), chained by type —
+decodes WAL, the slot lag ceiling, each less what `pkg/schemachange` `MeasureResumeHeld`
+reads from the server that a resumed run already holds of it), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
 `migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below

@@ -86,6 +86,27 @@ type CopySwapEnvironment struct {
 	// to the disk requirement; a quiesced run holds no slot, and the value
 	// is ignored.
 	SlotLagCeilingBytes int64
+	// Held is what a stopped run that this run resumes already holds on
+	// the volume, which the free space the caller measured already
+	// excludes; the disk check requires only what is left to grow. The
+	// zero value is a fresh run and discounts nothing.
+	Held CopySwapHeld
+}
+
+// CopySwapHeld is the space a stopped copy-and-swap run already occupies on
+// the volume when the run being checked resumes it: the shadow it built so
+// far and the WAL its replication slot retains. Both figures must be read
+// from the server, never from a checkpoint row, and a figure that could
+// not be read is zero, so the check discounts no more than the volume
+// truly holds. A negative figure is refused.
+type CopySwapHeld struct {
+	// ShadowBytes is the shadow table's total size (heap, indexes, TOAST)
+	// as the server reports it.
+	ShadowBytes int64
+	// RetainedWALBytes is the WAL the stopped run's slot retains, from its
+	// restart position to the server's write position. It is counted only
+	// for a run that decodes WAL; a quiesced run holds no slot.
+	RetainedWALBytes int64
 }
 
 // DefaultSlotLagCeiling is the slot lag ceiling, in bytes, a catch-up
@@ -115,6 +136,15 @@ type CopySwapEnvironmentError struct {
 	FreeDiskBytes       int64
 	RequiredShadowBytes int64
 	SlotLagCeilingBytes int64
+	// The part of each requirement a resumed run already holds, discounted
+	// from it (CopySwapEnvironment.Held): the shadow built so far, at most
+	// RequiredShadowBytes, and the WAL the stopped run's slot retains, at
+	// most SlotLagCeilingBytes and zero for a quiesced run. Both are zero
+	// for a fresh run. The space the run was refused for is
+	// RequiredShadowBytes − HeldShadowBytes + SlotLagCeilingBytes −
+	// HeldWALBytes.
+	HeldShadowBytes int64
+	HeldWALBytes    int64
 }
 
 // Error implements the error interface.
@@ -205,51 +235,7 @@ func refuseCopySwapEnvironment(f copySwapEnvironmentFacts, env CopySwapEnvironme
 			}
 		}
 	}
-	if env.FreeDiskBytes <= 0 {
-		return &CopySwapEnvironmentError{
-			Cause:  CopySwapCauseDiskHeadroom,
-			Detail: fmt.Sprintf("free disk space was not measured (%d bytes reported); the volume's free space must be passed in", env.FreeDiskBytes),
-		}
-	}
-	shadow := f.totalBytes * copySwapDiskHeadroomFactor
-	if !env.LogicalDecoding {
-		if env.FreeDiskBytes < shadow {
-			return &CopySwapEnvironmentError{
-				Cause:               CopySwapCauseDiskHeadroom,
-				Detail:              fmt.Sprintf("%d bytes are free; %d bytes (%d× the table's %d bytes of heap, indexes, and TOAST) are required", env.FreeDiskBytes, shadow, copySwapDiskHeadroomFactor, f.totalBytes),
-				FreeDiskBytes:       env.FreeDiskBytes,
-				RequiredShadowBytes: shadow,
-			}
-		}
-		return nil
-	}
-	ceiling := env.SlotLagCeilingBytes
-	if ceiling < 0 {
-		return &CopySwapEnvironmentError{
-			Cause:  CopySwapCauseDiskHeadroom,
-			Detail: fmt.Sprintf("the slot lag ceiling is %d bytes; a live run must count the ceiling its catch-up enforces, zero for the default", ceiling),
-		}
-	}
-	if ceiling == 0 {
-		ceiling = DefaultSlotLagCeiling
-	}
-	// The WAL the ceiling lets the slot retain lands on the same volume as
-	// the shadow, so a run that decodes WAL needs room for both, and one
-	// refusal names the whole requirement even when the shadow alone does
-	// not fit. The remainder is compared rather than the sum, which a
-	// ceiling near the int64 limit would overflow; free is positive and the
-	// shadow is not negative, so the remainder cannot wrap.
-	if env.FreeDiskBytes-shadow < ceiling {
-		return &CopySwapEnvironmentError{
-			Cause: CopySwapCauseDiskHeadroom,
-			Detail: fmt.Sprintf("%d bytes are free; a live run needs %d bytes (%d× the table's %d bytes of heap, indexes, and TOAST) for the shadow copy plus the slot lag ceiling of %d bytes of WAL its replication slot may retain; lower the ceiling or free space on the volume",
-				env.FreeDiskBytes, shadow, copySwapDiskHeadroomFactor, f.totalBytes, ceiling),
-			FreeDiskBytes:       env.FreeDiskBytes,
-			RequiredShadowBytes: shadow,
-			SlotLagCeilingBytes: ceiling,
-		}
-	}
-	return nil
+	return refuseCopySwapDisk(f, env)
 }
 
 // refuseLogicalDecoding names the setting that enables logical decoding on
