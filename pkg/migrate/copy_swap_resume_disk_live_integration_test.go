@@ -139,13 +139,13 @@ func TestRunCopySwapResumeIsAskedOnlyForTheDiskLeftToGrow(t *testing.T) {
 		LogicalDecoding: true, FreeDiskBytes: free, SlotLagCeilingBytes: resumedRunCeiling,
 		Held: held,
 	}
-	_, err = schemachange.CheckCopySwap(t.Context(), f.pool, store, schema, table, env, true)
+	_, err = schemachange.CheckCopySwap(t.Context(), f.pool, store, schema, table, env, schemachange.CopySwapRestart)
 	envErr, ok = errors.AsType[*preflight.CopySwapEnvironmentError](err)
 	require.True(t, ok, "a restart at the figure is a disk refusal: %v", err)
 	assert.Equal(t, preflight.CopySwapCauseDiskHeadroom, envErr.Cause)
 	assert.Zero(t, envErr.HeldShadowBytes, "a restart is checked as a fresh run")
 	assert.Zero(t, envErr.HeldWALBytes, "a restart is checked as a fresh run")
-	target, err := schemachange.CheckCopySwap(t.Context(), f.pool, store, schema, table, env, false)
+	target, err := schemachange.CheckCopySwap(t.Context(), f.pool, store, schema, table, env, schemachange.CopySwapResume)
 	require.NoError(t, err, "a resume at the figure is discounted what the stopped run holds")
 	assert.True(t, target.DecodesWAL())
 

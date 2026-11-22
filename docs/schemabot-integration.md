@@ -115,21 +115,28 @@ implementation time):
   what the role must *not* have, is [engine-role.md](engine-role.md)). The adapter surfaces
   this per target: each configured database names its engine-role credentials, and a target
   whose grants stop at Tier 1 can still run in-place changes while copy-and-swap refuses
-  with the exact missing `GRANT`. `preflight.CheckCopySwap` is the one call the adapter
-  makes for the copy-and-swap route: it folds the privilege, shape, and environment checks
-  and returns the `CopySwapTarget` every writing step requires. For a live run, pass in
-  `CopySwapEnvironment.SlotLagCeilingBytes` the ceiling the catch-up will enforce: the disk
-  check counts it beside the shadow, zero counts `preflight.DefaultSlotLagCeiling` (the
-  catch-up's default), and a negative value is refused. A resume checked through
-  `preflight.CheckCopySwap` discounts nothing of what the stopped run holds; to ask it only
-  for what is left to grow, call `schemachange.CheckCopySwap` instead, as `pkg/migrate`
-  does. It runs the same three checks and fills `CopySwapEnvironment.Held` between the
-  shape and the environment check from `schemachange.MeasureResumeHeld` (the shadow's and
-  the slot's sizes, read from the server, zero for a fresh run). Pass its `restart`
-  argument the run's `RunOptions.Restart`: a restart is checked as a fresh run with `Held`
-  zero, because the restart's discard has not freed what the stopped run holds when the
-  preflight runs, and counting it would ask for less than the run will have. Do not
-  rebuild that chain by hand. How to classify each refusal of these checks is in
+  with the exact missing `GRANT`. `schemachange.CheckCopySwap` is the one call the adapter
+  makes for the copy-and-swap route, as `pkg/migrate` does: it folds the privilege, shape,
+  and environment checks and returns the `CopySwapTarget` every writing step requires. For a
+  live run, pass in `CopySwapEnvironment.SlotLagCeilingBytes` the ceiling the catch-up will
+  enforce: the disk check counts it beside the shadow, zero counts
+  `preflight.DefaultSlotLagCeiling` (the catch-up's default), and a negative value is
+  refused. Between the shape and the environment check it fills `CopySwapEnvironment.Held`
+  from `schemachange.MeasureResumeHeld` (the shadow's and the slot's sizes, read from the
+  server, zero for a fresh run), so a resume is asked only for what is left to grow.
+  `preflight.CheckCopySwap` runs the same three checks without that measure, so it asks a
+  resume for the whole requirement again. Pass `schemachange.CopySwapRestart` for a run
+  with `RunOptions.Restart` set and `schemachange.CopySwapResume` for every other run; the
+  zero value is refused. A restart is checked as a fresh run with `Held` zero, because its
+  discard has not freed what the stopped run holds when the preflight runs, and counting it
+  would ask for less than the run will have. The call writes nothing, so it is safe before
+  the first write; it may wait under its context on a lock on the shadow while it measures
+  it. Measure the free disk right before the call: a target checked at plan time is a
+  forecast, and the apply checks again. The slot headroom check still asks a resume for one
+  free replication slot, though a resume reuses the slot it holds; with
+  `max_replication_slots` fully used, the stopped run's slot included, a resume is refused as
+  `copy-and-swap-slot-headroom`. Do not rebuild that chain by hand. How to classify each
+  refusal of these checks is in
   [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause).
 - **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per

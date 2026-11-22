@@ -238,7 +238,11 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 // resume only for the disk left to grow and checks a run that starts over
 // (Restart) as a fresh run.
 func checkCopySwap(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, schema, table string, o CopySwapOptions) (preflight.CopySwapTarget, error) {
-	return schemachange.CheckCopySwap(ctx, pool, store, schema, table, o.environment(), o.Restart != "")
+	start := schemachange.CopySwapResume
+	if o.Restart != "" {
+		start = schemachange.CopySwapRestart
+	}
+	return schemachange.CheckCopySwap(ctx, pool, store, schema, table, o.environment(), start)
 }
 
 // copyAndSwap runs a statement the router assigned to the copy-and-swap
