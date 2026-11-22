@@ -190,9 +190,12 @@ refusal — never a silently wrong or incomplete result:
   which covers one ordinary table plus its indexes per file. A table may
   use them: the file names an object outside the table's schema and
   `public` qualified, or names it bare when `--extension-schema` lists
-  the schema it lives in. The object's own definition is never managed.
-  One change to such an object runs imperatively: `migrate` adds a value
-  to an enum with `ALTER TYPE ... ADD VALUE`, which locks only the type.
+  the schema it lives in. The object's own definition is never managed,
+  with one exception: a desired file can hold one `CREATE TYPE ... AS ENUM`
+  instead of a table, and `diff` and `migrate --desired` add the labels the
+  live type lacks with `ALTER TYPE ... ADD VALUE`, which locks only the
+  type. The type must already exist, and a label is never removed, renamed,
+  or moved; `migrate` also adds a value imperatively.
 - **Dropping a table** is never planned or executed. pg-sprite converges
   one declared table at a time, so a live table with no desired file is
   the whole-schema owner's to enumerate and resolve — see

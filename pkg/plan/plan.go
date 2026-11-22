@@ -49,7 +49,10 @@ import (
 // Version 18 added the dependent-trigger, dependent-generated-column, and
 // partition-key planner reasons and the dependent_triggers,
 // dependent_generated_columns, and partition_key_tables decision fields.
-const FormatVersion = 19
+// Version 19 added the extension_schemas field and its part in the
+// fingerprint. Version 20 added the add-enum-value change kind and the type
+// field, for a plan of a desired enum type file.
+const FormatVersion = 20
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -164,8 +167,13 @@ type Report struct {
 	// not qualify one.
 	Schema string `json:"schema,omitempty"`
 	// Table is the target table; empty when the statement has no single
-	// table target (index maintenance).
+	// table target (index maintenance, an enum type).
 	Table string `json:"table,omitempty"`
+	// Type is the target enum type of a diff-source plan for a desired enum
+	// type file; empty for every other plan. Its statements are ALTER
+	// TYPE ... ADD VALUE, which name the type themselves, so it is not part
+	// of the fingerprint.
+	Type string `json:"type,omitempty"`
 	// ServerVersion is the PostgreSQL server_version the plan was derived
 	// against. Classification is version-sensitive, so a stored or
 	// forwarded report names the server whose rules produced it; empty

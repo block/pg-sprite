@@ -28,6 +28,10 @@ the reviewer's distillation.
   execution verifies convergence before commit, and reviewed execution enforces RS-5
   alongside RS-1..RS-4;
   generic native and create executors must still refuse policy SQL.
+- `statement.DesiredEnumType` is a declaration, never an execution input: a desired enum
+  type plan reaches the database only as `ALTER TYPE ... ADD VALUE` statements run through
+  the imperative pipeline (`preflight.CheckEnumTarget`, ST-7 confirmation), never as SQL
+  built and executed beside it.
 - Invariant enforcement points carry a `// INV: <id>` comment matching
   [docs/invariants.md](../../docs/invariants.md); violations use `ErrInvariantViolation`
   naming the ID and abort fail-closed — never a warning, never retried.

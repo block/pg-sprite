@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	enumTypeFile   = "CREATE TYPE mood AS ENUM ('happy', 'sad');\n"
+	domainFile     = "CREATE DOMAIN email AS text;\n"
+	enumTableFile  = "CREATE TYPE mood AS ENUM ('happy', 'sad');\nCREATE TABLE t (id int);\n"
 	partitionsFile = "CREATE TABLE log_p1 PARTITION OF log FOR VALUES FROM (1) TO (2);\n" +
 		"CREATE TABLE log_p2 PARTITION OF log FOR VALUES FROM (2) TO (3);\n"
 )
@@ -25,7 +26,8 @@ func writeDesiredFile(t *testing.T, sql string) string {
 	return file
 }
 
-// A type file and a file of partitions are refused before anything is
+// A domain file, a table file with an enum type in it, and a file of
+// partitions are refused before anything is
 // planned: diff prints the refusal verdict in each output format and exits
 // with the refusal code, without connecting to the database.
 func TestDiffRefusesADesiredFileBeforePlanning(t *testing.T) {
@@ -35,7 +37,8 @@ func TestDiffRefusesADesiredFileBeforePlanning(t *testing.T) {
 		stmt  string
 		class verdict.Class
 	}{
-		{"enum type file", enumTypeFile, "CREATE TYPE mood AS ENUM ('happy', 'sad')", verdict.ClassNoOnlineSafetyProblem},
+		{"domain file", domainFile, "CREATE DOMAIN email AS text", verdict.ClassNoOnlineSafetyProblem},
+		{"table file with an enum type", enumTableFile, "CREATE TYPE mood AS ENUM ('happy', 'sad')", verdict.ClassNoOnlineSafetyProblem},
 		{"partitions file", partitionsFile, "CREATE TABLE log_p2 PARTITION OF log FOR VALUES FROM (2) TO (3)", verdict.ClassCapabilityBoundary},
 	}
 	for _, tt := range tests {
@@ -69,7 +72,7 @@ func TestDiffRefusesADesiredFileBeforePlanning(t *testing.T) {
 // migrate --desired refuses the same files the same way, before it plans,
 // on a run and on a dry run.
 func TestMigrateDesiredRefusesADesiredFileBeforePlanning(t *testing.T) {
-	file := writeDesiredFile(t, enumTypeFile)
+	file := writeDesiredFile(t, domainFile)
 	for _, dryRun := range []bool{false, true} {
 		var out strings.Builder
 		cmd := &MigrateCmd{Desired: file, DryRun: dryRun, JSON: true}
@@ -79,6 +82,6 @@ func TestMigrateDesiredRefusesADesiredFileBeforePlanning(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 		assert.Equal(t, verdict.ClassNoOnlineSafetyProblem, v.Class)
 		assert.Equal(t, verdict.OwnerDirectOperator, v.Owner)
-		assert.Equal(t, "CREATE TYPE mood AS ENUM ('happy', 'sad')", v.Statement)
+		assert.Equal(t, "CREATE DOMAIN email AS text", v.Statement)
 	}
 }

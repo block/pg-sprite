@@ -1548,10 +1548,12 @@ the plan a rerun would execute. A greenfield create proves its outcome through t
 the create-name checks), because deriving a plan needs `CREATE` on the database.
 *Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`; for a file that declares row
 security, `RunDesiredWithRowSecurity` → `verifyRowSecurityConverged`, whose fresh plan
-includes the row security). Tests: `TestRunDesired`,
+includes the row security; for an enum type file, `RunDesiredEnumType` → `executePlan` →
+`verifyConverged`, whose fresh plan reads the type again). Tests: `TestRunDesired`,
 `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
 `TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`,
-`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`.
+`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`,
+`TestRunDesiredEnumTypeFailsWhenTheTypeChangesAfterTheLastCommit`.
 *Source:* review of desired-state outcome reporting.
 
 ## Refusals and preflight (RF)

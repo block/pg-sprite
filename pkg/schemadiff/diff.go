@@ -25,6 +25,10 @@ var ErrUnsupportedChange = errors.New("unsupported schema change")
 // tables — a caller bug, refused rather than diffed.
 var ErrDifferentTables = errors.New("models describe different tables")
 
+// ErrDifferentTypes is returned when a live enum type and a desired one
+// name different types — a caller bug, refused rather than diffed.
+var ErrDifferentTypes = errors.New("enum types describe different types")
+
 // ChangeKind classifies a derived statement so a consumer can gate whole
 // classes of change (destructive, rewriting, index-building) without
 // parsing SQL.
@@ -74,6 +78,9 @@ const (
 	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
+	// ChangeAddEnumValue adds a label to an enum type (ALTER TYPE ... ADD
+	// VALUE), the one change a desired enum type file plans.
+	ChangeAddEnumValue ChangeKind = "add-enum-value"
 )
 
 // ChangeKinds returns the closed set of ChangeKind values. It is part of
@@ -99,6 +106,7 @@ func ChangeKinds() []ChangeKind {
 		ChangeValidateConstraint,
 		ChangeValidateForeignKey,
 		ChangeCreateIndex,
+		ChangeAddEnumValue,
 	}
 }
 

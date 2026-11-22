@@ -77,6 +77,13 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 		r, ok := desiredFileRefusal(fmt.Errorf("statement 2: %w", &statement.SecondTableError{SQL: "-", Partition: partition}))
 		keys = append(keys, classifiedKey{fmt.Sprintf("desired-file:second-table/partition=%t", partition), r, ok})
 	}
+	for sentinel, err := range map[error]error{
+		statement.ErrEnumTypeAlone: &statement.EnumTypeFileError{SQL: "-"},
+		statement.ErrEnumLabel:     statement.ErrEnumLabel,
+	} {
+		r, ok := desiredFileRefusal(fmt.Errorf("statement 2: %w", err))
+		keys = append(keys, classifiedKey{"desired-file:" + sentinel.Error(), r, ok})
+	}
 	for _, err := range createAdmissionSentinels() {
 		r, ok := createAdmissionRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"create-admission:" + err.Error(), r, ok})
@@ -148,6 +155,9 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 		"desired-file:disallowed " + statement.KindCatalogWork.String(),
 		"desired-file:second-table/partition=true",
 		"unsupported-change:" + string(schemadiff.CauseStorageParameters),
+		"unsupported-change:" + string(schemadiff.CauseEnumValueRemoved),
+		"desired-file:" + statement.ErrEnumTypeAlone.Error(),
+		"desired-file:" + statement.ErrEnumLabel.Error(),
 		"gate:" + statement.KindOther.String() + "/concurrent=false",
 		"site:plan-incoherent",
 		"site:copy-and-swap-not-enabled",

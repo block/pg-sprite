@@ -85,6 +85,12 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   check table equality, and derive SQL through scratch introspection. Preview rolls back
   before target DDL; execution verifies convergence before commit. Reviewed execution also
   checks the exact ordered SQL under the lock (RS-5).
+- `statement.DesiredEnumType` proves declaration syntax only: one unqualified
+  `CREATE TYPE ... AS ENUM` with distinct, non-empty labels. No executor accepts it.
+  `diffplan.PlanEnumType` derives `ALTER TYPE ... ADD VALUE` statements from it, and
+  `migrate.RunDesiredEnumType` runs each back through the imperative `ADD VALUE` path, which
+  resolves the type and checks it with `preflight.CheckEnumTarget` and confirms the label
+  reached that type before commit (ST-7).
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.
 - **Assert the positive and the negative space; pair assertions across boundaries.** Invariant

@@ -37,10 +37,21 @@ func unsupportedChangeRefusal(err error) (verdict.Refusal, bool) {
 // planner does not construct. The rest are shapes the diff does not derive:
 // table identity (partitioning), row security on the table-only path, and
 // column forms the plan cannot carry.
+//
+// An enum type the file declares but the schema lacks is created once with
+// CREATE TYPE, which locks no table, and a label the file dropped is renamed
+// with ALTER TYPE ... RENAME VALUE: both are catalog changes the owner runs
+// directly. A file that lists the live labels in another order asks for
+// nothing PostgreSQL can do, so the file is corrected (by design), and a
+// name that holds another kind of type would have to be replaced, which the
+// planner does not construct.
 func unsupportedCauseRefusal(cause schemadiff.UnsupportedCause) (verdict.Refusal, bool) {
 	switch cause {
-	case schemadiff.CauseStorageParameters, schemadiff.CauseIdentitySequence:
+	case schemadiff.CauseStorageParameters, schemadiff.CauseIdentitySequence,
+		schemadiff.CauseEnumTypeMissing, schemadiff.CauseEnumValueRemoved:
 		return verdict.NoOnlineSafetyProblem(verdict.ReasonUnsupportedStatement, verdict.OwnerDirectOperator), true
+	case schemadiff.CauseEnumValueReordered:
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	case schemadiff.CausePersistence, schemadiff.CauseCollationChange:
 		return rewriteRequiredRefusal(), true
 	case schemadiff.CauseRowSecurity,
@@ -49,7 +60,8 @@ func unsupportedCauseRefusal(cause schemadiff.UnsupportedCause) (verdict.Refusal
 		schemadiff.CauseSerialDefault,
 		schemadiff.CauseAddedColumnCollation,
 		schemadiff.CauseIdentity,
-		schemadiff.CauseGenerated:
+		schemadiff.CauseGenerated,
+		schemadiff.CauseEnumTypeKind:
 		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.Refusal{}, false
