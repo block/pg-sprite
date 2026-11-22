@@ -116,16 +116,28 @@ func TestCatchupEndsWhenTheSlotRetainsMoreThanTheCeiling(t *testing.T) {
 	assert.False(t, status.Lost())
 }
 
+// slowClock runs at a tenth of the wall clock's pace from start.
+type slowClock struct{ start time.Time }
+
+func (c slowClock) Now() time.Time { return c.start.Add(time.Since(c.start) / 10) }
+
 // The grace has a hard edge: a pinned slot whose retained WAL passes three
-// times the ceiling ends the catch-up on the cycle that reads it, long
-// before the grace would run out, since no release the server is about to
-// make accounts for that much WAL (ST-3).
-// The cause names the hard limit, apart from the grace running out.
+// times the ceiling ends the catch-up on the cycle that reads it, however
+// much of the grace is left, since no release the server is about to make
+// accounts for that much WAL (ST-3). The cause names the hard limit, apart
+// from the grace running out. The catch-up's clock runs at a tenth of the
+// wall clock's pace, with a cycle of a tenth of the default, so its cycles
+// end as often as usual while its grace outlasts the test's own deadline:
+// however slowly the steps run, only the hard limit can end the run in time.
 func TestCatchupEndsAtOnceWhenTheSlotRetainsPastTheHardLimit(t *testing.T) {
 	f := newCatchupFixture(t, 20)
 	run := startCatchupWith(t, f, catchupSetup{
 		positions: &switchPosition{pos: allLanded()},
-		opts:      applier.CatchupOptions{SlotLagCeiling: slotLagTestCeiling},
+		opts: applier.CatchupOptions{
+			SlotLagCeiling: slotLagTestCeiling,
+			Clock:          slowClock{start: time.Now()},
+			Interval:       applier.DefaultCatchupInterval / 10,
+		},
 	})
 	run.awaitStatus(t, "complete a cycle under the ceiling", func(s applier.Status) bool {
 		return s.WALEnd > 0

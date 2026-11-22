@@ -36,9 +36,11 @@ const DefaultSlotLagCeiling = preflight.DefaultSlotLagCeiling
 // release the server is about to make accounts for the WAL: the source
 // wrote it faster than the server releases it, a rate the ceiling refuses
 // once the grace runs out anyway, and waiting the grace out only lets the
-// volume fill further. Retained WAL past three times the ceiling is the
-// abort on one reading, and the headroom the volume needs above the
-// ceiling is at most two ceilings whatever the write rate or the grace.
+// volume fill further. A reading of retained WAL past three times the
+// ceiling is the abort on that reading. It is a threshold on what a
+// reading sees, not a cap on the slot: the slot also holds what the cluster
+// writes in the cycle before the reading that crosses it, and it keeps
+// retaining WAL after the abort until the run resumes or is abandoned.
 const RetainedWALHardMultiple int64 = 3
 
 // RestartReleaseInterval is the longest the server goes between the
@@ -94,10 +96,11 @@ const (
 	// SlotLagWALRetainedHardLimit means the WAL the slot keeps on the
 	// volume passed RetainedWALHardMultiple times the ceiling before the
 	// grace ran out, while the unconfirmed WAL is within the ceiling. It is
-	// kept apart from SlotLagWALRetained because it names a different
-	// cause for the operator to look at: the slot holds more than a healthy
-	// release cadence leaves behind, so the source wrote WAL faster than
-	// the server releases it, whatever transaction may also hold WAL back.
+	// kept apart from SlotLagWALRetained because the grace had not run out:
+	// the slot holds more than a healthy release cadence leaves behind,
+	// either because a transaction on the source holds the WAL back, which
+	// the operator looks for first, or because the source wrote WAL faster
+	// than the server releases it.
 	SlotLagWALRetainedHardLimit SlotLagCause = "wal-retained-hard-limit"
 )
 
@@ -136,8 +139,9 @@ func (e *SlotLagExceededError) Error() string {
 		limit := retainedHardLimit(e.Ceiling)
 		return fmt.Sprintf("slot %s retains %s of WAL, past the %s hard limit of %d times the %s ceiling (%d > %d bytes), "+
 			"before the server's time to release WAL the stream confirmed ran out, and the stream itself is %s behind; "+
-			"more than a healthy slot holds just before a release, which is about twice the ceiling: the source wrote WAL faster than the server releases it, "+
-			"so the run needs a higher SlotLagCeiling or a lower write rate on the source",
+			"more than a healthy slot holds just before a release, which is about twice the ceiling; either a transaction on the source holds the WAL back "+
+			"(an open write transaction or a prepared one), and the run can resume once it ends, or the source wrote WAL faster than the server releases it, "+
+			"and the run needs a higher SlotLagCeiling or a lower write rate on the source",
 			e.Slot, humanBytes(e.Retained), humanBytes(limit), RetainedWALHardMultiple, humanBytes(e.Ceiling), e.Retained, limit, humanBytes(e.Unconfirmed))
 	default:
 		return fmt.Sprintf("slot %s is over the %s ceiling (cause %q): retains %s, %s unconfirmed",

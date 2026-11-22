@@ -1129,9 +1129,11 @@ ceiling aborts the schema change before an abandoned slot can fill the volume. T
 hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
 may stand over it for a bounded grace (the server's release interval plus one cycle, the cycle
 itself capped at the release interval) while the server releases what the stream confirmed,
-but never past three times the ceiling, which is hard and judged on one reading. The volume
+and a reading past three times the ceiling ends the run at once, grace or not. The volume
 needs headroom above the ceiling of about the cluster's WAL rate, the copy's own writes
-included, times that grace, and never more than two ceilings. The ceiling must hold that much
+included, times that grace, and at most about two ceilings plus one cycle of that rate, since
+the hard limit is judged on each cycle's reading; the slot keeps retaining WAL after a stop
+until the run resumes or is abandoned. The ceiling must hold that much
 of the cluster's WAL as well, with margin: with a transaction in progress at a
 running-transactions record the server releases the slot only to the record before, so a busy
 source's slot keeps between one and two release intervals of writes while the stream keeps up,

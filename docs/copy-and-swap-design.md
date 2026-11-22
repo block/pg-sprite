@@ -342,9 +342,11 @@ so the second free sender is a margin, not something the run uses.
 Slot lag has a byte ceiling, default 1 GiB; crossing it aborts
 fail closed. It is hard for the WAL the stream has yet to confirm; the WAL the slot retains may
 stand over it for the server's release interval plus one cycle (the cycle capped at the release
-interval), but never past three times the ceiling, which is hard and judged on one reading. The
+interval), and a reading past three times the ceiling ends the run at once, grace or not. The
 volume needs headroom of about the cluster's WAL rate (the copy's own writes and other databases
-included) times that grace above the ceiling, and never more than two ceilings (ST-3). The
+included) times that grace above the ceiling, and at most about two ceilings plus one cycle of
+that rate, since the hard limit is judged on each cycle's reading; the slot keeps retaining WAL
+after a stop until the run resumes or is abandoned (ST-3). The
 ceiling itself must hold that grace's worth of the cluster's WAL too, with margin: while a
 transaction is in progress at a running-transactions record, the server releases the slot only
 to the record before, so on a busy source the slot keeps between one and two release intervals
