@@ -29,7 +29,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **20**: version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **21**: version 21 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -190,6 +190,7 @@ and privilege checks because it needs no connection.
 | Value | Meaning |
 |---|---|
 | `autocommit-each-step` | The steps run one at a time, in order, each in its own implicit transaction — never inside an enclosing transaction block. The CONCURRENTLY forms refuse an enclosing block outright, and a multi-step sequence inside one block holds every earlier step's locks across the steps designed to avoid them. A failed step leaves partial state the runner must detect and recover before retrying (a failed CONCURRENTLY build leaves an invalid index, `pg_index.indisvalid = false`). |
+| `partitioned-index-build` | The one step is a `CREATE INDEX` on a partitioned table, and the executor runs it as the partition-aware index build, never as the statement: the parent's index is created with `ONLY`, each partition's index is built concurrently and attached, and the parent's index turns valid with the last attach. The partitions are listed when the build runs, not when the plan is made, so they are not in `exec_sql`. The statement must not be run as written, which would build every partition's index under a lock that blocks writes to the whole tree. A failed or interrupted run leaves an invalid parent index and the partition indexes built so far; running the same statement again resumes from them. |
 
 ### Dispositions (`disposition`)
 
@@ -320,9 +321,13 @@ The engine computes and reports the fingerprint on every plan; enforcing the pin
 time is the consumer's side of the contract.
 
 The serialization is exact and pinned by test: for each statement in plan order, hash the
-canonical `sql`, `route`, `backend`, and `disposition`, then each `exec_sql` entry — every
-field followed by a unit separator (`0x1F`) — and close each statement with a record
-separator (`0x1E`). Explanatory fields (`decisions`, `kind`, `destructive`, `reason`, `cause`,
+canonical `sql`, `route`, `backend`, and `disposition`, then each `exec_sql` entry, then — only
+for a statement whose `execution` is `partitioned-index-build` — that `execution` value. Every
+field is followed by a unit separator (`0x1F`), and each statement closes with a record
+separator (`0x1E`). The `execution` is hashed for that one value because the build's `exec_sql`
+is the `CREATE INDEX` as written, so the same text run as a literal `CREATE INDEX CONCURRENTLY`
+on a plain table is a different plan; a statement with any other `execution` hashes as it did
+before. Explanatory fields (`decisions`, `kind`, `destructive`, `reason`, `cause`,
 `guidance`, and the report-level `advisories`) are excluded: a reworded reason does not
 change identity, but a rerouted, resequenced, or rewritten plan does. An empty plan has a
 defined identity (the digest of no input) — with or without advisories, since nothing in
@@ -362,7 +367,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -405,7 +410,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -472,7 +477,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

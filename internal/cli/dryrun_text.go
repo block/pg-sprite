@@ -217,6 +217,11 @@ func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner, desiredTabl
 		w.diag("note", "", "the route's preflight — free disk, logical decoding, triggers, dependent views, publication membership — is not part of this dry run; the run reads it before anything executes and refuses with nothing run when it fails")
 		return 1
 	}
+	if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+		w.diag("note", "", runner+" will build the index partition by partition instead of running the statement: create the parent's index with ON ONLY, build each partition's index concurrently and attach it, and the parent's index turns valid with the last attach")
+		w.diag("note", "", "the partitions are listed when the run starts, each step commits on its own, and an interrupted run is resumed by running the same statement again")
+		return 1
+	}
 	if substituted(ps) {
 		w.diag("note", "", runner+" will run a safer online sequence instead:")
 		for n, sql := range ps.ExecSQL {

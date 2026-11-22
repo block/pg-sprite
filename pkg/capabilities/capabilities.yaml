@@ -270,15 +270,14 @@ rows:
   - id: index-build-on-a-partitioned-parent
     area: "indexes"
     operation: "Index build on a **partitioned parent**"
-    tier: "t2"
-    status_mark: "🟡"
+    tier: "t1"
+    status_mark: "✅"
     engine_path: "native_planned_flow"
     online_safety_problem: true
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: unsupported-partitioned-parent
-    reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it, and `--accept-blocking` does not reach it yet). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned"
+      migrate: supported
+      diff: supported
+    reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`, so a `CREATE INDEX` on a partitioned parent runs as the partition-aware build: `CREATE INDEX ON ONLY` the parent, then `CREATE INDEX CONCURRENTLY` on each partition, then `ATTACH PARTITION`. The partitions are listed when the run executes, each step commits on its own, the parent's `ON ONLY` step blocks writers for one catalog insert, and an advisory lock refuses a second pg-sprite run on the same table. The same statement run again resumes from the invalid parent index and the partition indexes already built, and `migrate --desired` plans that same `CREATE INDEX` when the live parent carries an invalid index with the desired definition. It needs a named index and no `IF NOT EXISTS`. The blocking form is never run as submitted: `--force` does not bypass that, and `--accept-blocking` does not reach it. See [partitioned-index-build-design.md](partitioned-index-build-design.md)"
   - id: add-constraint-using-index-on-a-partitioned-parent
     area: "indexes"
     operation: "`ADD CONSTRAINT ... USING INDEX` on a partitioned parent"

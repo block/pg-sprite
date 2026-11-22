@@ -195,3 +195,55 @@ func TestMigrateAlterPartitionedIndexReportsProgress(t *testing.T) {
 	assert.True(t, strings.HasPrefix(stdout.String(), "executed natively"), "stdout carries the verdict: %q", stdout.String())
 	assertIndexBuiltEverywhere(t, pool, schema)
 }
+
+// A desired file that adds an index to a partitioned table builds it
+// partition by partition, and planning the same file again finds nothing to
+// do.
+func TestMigrateDesiredBuildsAPartitionedParentIndexAndConverges(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := partitionedIndexFixture(t, pool, 1000)
+	const desired = "CREATE TABLE p (id int, v text) PARTITION BY RANGE (id);\n" +
+		"CREATE INDEX p_v_idx ON p (v);"
+
+	cmd := desiredCommand(t, url, schema, desired)
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	v := decodeVerdict(t, out.String())
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Contains(t, v.Detail, "converged: all 1 planned statements committed and a fresh plan is empty")
+	assertIndexBuiltEverywhere(t, pool, schema)
+
+	out.Reset()
+	require.NoError(t, desiredCommand(t, url, schema, desired).run(t.Context(), &out))
+	again := decodeVerdict(t, out.String())
+	assert.Equal(t, verdict.OutcomeExecuted, again.Outcome)
+	assert.Contains(t, again.Detail, "already converged: the live table matches the desired schema; nothing to run")
+}
+
+// A desired file whose index is already on the parent but invalid, the
+// leftover of an interrupted build, is resumed instead of reported as done
+// or as drift.
+func TestMigrateDesiredResumesAnUnfinishedPartitionedIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := partitionedIndexFixture(t, pool, 1000)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		`CREATE INDEX p_v_idx ON ONLY %[1]s.p (v);
+		 CREATE INDEX p1_v_idx ON %[1]s.p1 (v);
+		 ALTER INDEX %[1]s.p_v_idx ATTACH PARTITION %[1]s.p1_v_idx`, schema))
+	require.NoError(t, err)
+
+	cmd := desiredCommand(t, url, schema, "CREATE TABLE p (id int, v text) PARTITION BY RANGE (id);\n"+
+		"CREATE INDEX p_v_idx ON p (v);")
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	v := decodeVerdict(t, out.String())
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Contains(t, v.Detail, "converged: all 1 planned statements committed and a fresh plan is empty")
+	assertIndexBuiltEverywhere(t, pool, schema)
+}

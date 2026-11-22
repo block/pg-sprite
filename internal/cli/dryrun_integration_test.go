@@ -119,22 +119,28 @@ func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 	assert.Equal(t, "integer", typ, "dry-run must not execute the change")
 }
 
-func TestMigrateDryRunRefusesPartitionedParentIndexPlan(t *testing.T) {
+// A plain CREATE INDEX on a partitioned parent plans as the partitioned
+// index build: one executable step that is the submitted statement, with no
+// CONCURRENTLY form for the reader to mistake for what runs.
+func TestMigrateDryRunRoutesPartitionedParentIndexPlan(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	defer pool.Close()
 	schema := createPartitionFixture(t, pool)
-	report := dryRunPlan(t, url, fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v)", schema))
-	assert.Equal(t, router.DispositionRefuse, report.Disposition)
-	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
+	sql := fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v)", schema)
+	report := dryRunPlan(t, url, sql)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
-	assert.Equal(t, router.DispositionRefuse, report.Statements[0].Disposition)
-	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Statements[0].Reason)
-	assert.Empty(t, report.Statements[0].ExecSQL)
-	for _, decision := range report.Statements[0].Decisions {
-		assert.Empty(t, decision.SaferSQL)
-		assert.Empty(t, decision.SaferSQLExecution)
+	st := report.Statements[0]
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, planner.ExecutionPartitionedIndexBuild, st.Execution)
+	require.Len(t, st.ExecSQL, 1)
+	assert.NotContains(t, st.ExecSQL[0], "CONCURRENTLY")
+	require.NotEmpty(t, st.Decisions)
+	for _, decision := range st.Decisions {
+		assert.Equal(t, st.ExecSQL, decision.SaferSQL)
+		assert.Equal(t, planner.ExecutionPartitionedIndexBuild, decision.SaferSQLExecution)
 	}
 }
 

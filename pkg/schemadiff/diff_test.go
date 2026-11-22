@@ -532,9 +532,11 @@ func TestDiffInvalidIndexAbsentFromDesiredIsLeftAlone(t *testing.T) {
 }
 
 // On a partitioned parent an invalid index means unattached partition
-// indexes, not an unfinished build, so validity plays no part: a matching
-// entry is delivered and an entry desired no longer names is dropped.
-func TestDiffPartitionedParentComparesIndexesByDefinitionAlone(t *testing.T) {
+// indexes. One whose definition matches the desired one is an unfinished
+// partition-by-partition build, so the same CREATE INDEX is planned and the
+// partitioned index build resumes it; one the desired file no longer names is
+// dropped, as for any index. Nothing is dropped for the one that matches.
+func TestDiffPartitionedParentResumesAnInvalidIndexWithTheDesiredDefinition(t *testing.T) {
 	live := base()
 	live.PartitionKey = "RANGE (id)"
 	live.Indexes[0].Invalid = true
@@ -543,7 +545,11 @@ func TestDiffPartitionedParentComparesIndexesByDefinitionAlone(t *testing.T) {
 
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
-	assert.Empty(t, changes, "an invalid parent index with the desired definition is not rebuilt")
+	require.Equal(t, []string{
+		`CREATE INDEX events_name_idx ON public.events USING btree (name)`,
+	}, sqls(changes))
+	assert.Equal(t, ChangeCreateIndex, changes[0].Kind)
+	assert.False(t, changes[0].Destructive)
 
 	desired.Indexes = nil
 	changes, err = Diff("public", live, desired)
@@ -551,6 +557,19 @@ func TestDiffPartitionedParentComparesIndexesByDefinitionAlone(t *testing.T) {
 	require.Equal(t, []string{
 		`DROP INDEX "public"."events_name_idx"`,
 	}, sqls(changes))
+}
+
+// A valid index on a partitioned parent with the desired definition is
+// delivered: nothing is planned for it.
+func TestDiffPartitionedParentLeavesAValidIndexWithTheDesiredDefinition(t *testing.T) {
+	live := base()
+	live.PartitionKey = "RANGE (id)"
+	desired := base()
+	desired.PartitionKey = "RANGE (id)"
+
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
 }
 
 func TestDiffOrderingDropsBeforeAddsBeforeIndexes(t *testing.T) {

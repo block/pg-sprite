@@ -218,9 +218,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	var changes []Change
 
 	// On a partitioned parent an invalid index means not every partition
-	// has a matching attached index, a state the one-table model does not
-	// describe, so the parent's entries are compared by name and definition
-	// alone. Only a plain table's invalid entry is an unfinished build.
+	// has a matching attached index. One whose definition matches the desired
+	// one is an unfinished partition-by-partition build: the plan carries the
+	// same CREATE INDEX, which the partitioned index build resumes. Any other
+	// entry is compared by name and definition alone, and the diff never
+	// treats a parent's entry as a concurrent build to leave undropped.
 	partitioned := live.PartitionKey != ""
 
 	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
@@ -347,7 +349,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// server-decompiled and unqualified; only the schema qualification is
 	// injected.
 	for _, ix := range desired.Indexes {
-		if indexNeedsCreate(partitioned, liveIdx, ix) {
+		if indexNeedsCreate(liveIdx, ix) {
 			qualified, err := statement.Qualify(ix.Def, schema)
 			if err != nil {
 				return nil, fmt.Errorf("qualify index %s: %w", ix.Name, err)
@@ -685,10 +687,12 @@ func indexesByName(idxs []Index) map[string]Index {
 
 // indexNeedsCreate reports whether the desired index must be built: the
 // live table lacks it, the live definition differs, or the live entry with
-// the desired name and definition is an unfinished concurrent build and so
-// does not deliver the index. partitioned says whether the live table is a
-// partitioned parent, whose invalid entries are not unfinished builds.
-func indexNeedsCreate(partitioned bool, liveIdx map[string]Index, want Index) bool {
+// the desired name and definition is invalid and so does not deliver the
+// index. On a plain table that entry is an unfinished concurrent build; on a
+// partitioned parent it is an unfinished partition-by-partition build, whose
+// definition matching the desired one is what makes the same CREATE INDEX a
+// resume rather than a collision.
+func indexNeedsCreate(liveIdx map[string]Index, want Index) bool {
 	had, ok := liveIdx[want.Name]
 	if !ok {
 		return true
@@ -696,7 +700,7 @@ func indexNeedsCreate(partitioned bool, liveIdx map[string]Index, want Index) bo
 	if had.Def != want.Def {
 		return true
 	}
-	return isUnfinishedBuild(partitioned, had)
+	return had.Invalid
 }
 
 // indexNeedsDrop reports whether a live index must be dropped: desired no

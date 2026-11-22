@@ -166,7 +166,10 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // destructive statement, routes any statement away from execution, or
 // does not match the pinned fingerprint is refused before anything runs,
 // and so is a plan that routes a statement through copy-and-swap when that
-// route's preflight refuses the table or the server as they stand now.
+// route's preflight refuses the table or the server as they stand now. A plan
+// that builds an index on a partitioned table stops whole, with
+// [ErrConnectionRequired] or a [CopySwapConnectionMismatchError], when
+// Options.Connection is unset or reaches another database than the pool.
 // Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
 // refuses or fails, and the result's verdicts disclose exactly how far
@@ -273,6 +276,13 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return runCreate(ctx, pool, req, report, opts)
 	}
 	stopped, admitted, err := admitCopySwap(ctx, pool, report, opts)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
+	}
+	stopped, admitted, err = admitPartitionedIndexBuild(ctx, pool, report, opts)
 	if err != nil {
 		return stopped, err
 	}
