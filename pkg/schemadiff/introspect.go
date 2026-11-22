@@ -550,8 +550,9 @@ func introspectColumns(ctx context.Context, tx Querier, oid uint32) ([]Column, e
 // references it), sequences the column owns, and any other object with a
 // dependency on the column, such as a statistics object. Each is rendered
 // by [Dependent] with the definition that tells a replacement from the
-// original. A column's own default is not listed: the column's definition
-// carries it. Rows are in a stable order.
+// original. A column's own default and NOT NULL are not listed: the
+// column's definition carries them, and PostgreSQL 18 catalogs a NOT NULL as
+// a constraint where earlier versions do not. Rows are in a stable order.
 func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (map[int16][]Dependent, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
@@ -573,6 +574,7 @@ func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (ma
 		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_constraint'::pg_catalog.regclass
 		  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
 		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+		  AND con.contype OPERATOR(pg_catalog.<>) 'n'
 		UNION ALL
 		SELECT d.refobjsubid::pg_catalog.int2,
 		       CASE WHEN d.deptype OPERATOR(pg_catalog.=) 'i' THEN 'identity sequence' ELSE 'owned sequence' END::pg_catalog.text,
