@@ -59,6 +59,13 @@ func (f *partitionedIndexFlow) processLeaf(ctx context.Context, node partitionNo
 	}
 	if idx.oid == 0 {
 		result.Action = PartitionIndexBuilt
+		// The tree was listed when the pass began. A partition renamed,
+		// detached, or replaced since then must not be indexed under the
+		// name it used to have (INV: ST-7), and the build below asserts the
+		// same identity on its own session.
+		if err := f.proveNode(ctx, node); err != nil {
+			return err
+		}
 		if debris {
 			step.start(progress.OperationConcurrentIndex, buildSQL)
 			// The invalid index under the derived name is the debris of an
@@ -77,7 +84,7 @@ func (f *partitionedIndexFlow) processLeaf(ctx context.Context, node partitionNo
 			result.RecoveredDebris = true
 		}
 		step.start(progress.OperationConcurrentIndex, buildSQL)
-		built, err := buildIndexConcurrently(ctx, f.pool, buildSQL, f.budget, f.tracker)
+		built, err := buildIndexConcurrentlyOn(ctx, f.pool, buildSQL, f.budget, f.tracker, node.oid)
 		if err != nil {
 			return fmt.Errorf("build the index of partition %s: %w", node.qualified(), err)
 		}
@@ -261,6 +268,15 @@ func (f *partitionedIndexFlow) ensureSubPartitionIndex(ctx context.Context, node
 	var created relationFacts
 	err = f.tx.run(ctx, "create the index of partition "+node.qualified(), catalogReadPath(), true,
 		func(ctx context.Context, tx pgx.Tx) error {
+			// The partition is locked and proved by identity before the
+			// statement names it, and the index is checked to be on it
+			// before the step commits (INV: ST-7).
+			if err := lockAndProveTable(ctx, tx, onlyIndexTable{oid: node.oid, schema: node.schema, name: node.name}); err != nil {
+				return err
+			}
+			if err := proveNodeIn(ctx, tx, node); err != nil {
+				return err
+			}
 			var err error
 			created, err = createOnlyIndex(ctx, tx, onlyIndexTable{oid: node.oid, schema: node.schema, name: node.name}, node.schema, name, createSQL)
 			return err
@@ -352,21 +368,106 @@ func (f *partitionedIndexFlow) alreadyAttached(ctx context.Context, node partiti
 	return found, err
 }
 
-// attach attaches child, an index on node, to parentIdx. The statement is
-// idempotent on the server, so a rerun after an unknown commit outcome is
-// safe.
+// proveNode checks that the partition the build listed is still what the
+// listing said: the same relation, under the same schema and name, and still
+// a direct partition of the table it was listed under (INV: ST-7).
+func (f *partitionedIndexFlow) proveNode(ctx context.Context, node partitionNode) error {
+	return f.tx.read(ctx, "prove partition "+node.qualified()+" is still in the tree", func(ctx context.Context, q querier) error {
+		return proveNodeIn(ctx, q, node)
+	})
+}
+
+const proveNodeSQL = `SELECT EXISTS (
+		   SELECT 1
+		     FROM pg_catalog.pg_class c
+		     JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		     JOIN pg_catalog.pg_inherits h ON h.inhrelid OPERATOR(pg_catalog.=) c.oid
+		    WHERE c.oid OPERATOR(pg_catalog.=) $1
+		      AND n.nspname OPERATOR(pg_catalog.=) $2
+		      AND c.relname OPERATOR(pg_catalog.=) $3
+		      AND h.inhparent OPERATOR(pg_catalog.=) $4)`
+
+func proveNodeIn(ctx context.Context, q querier, node partitionNode) error {
+	present, err := nodeInTree(ctx, q, node)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return fmt.Errorf("%w: ST-7: partition %s (table %d) is no longer a partition under that name; the partition tree changed since it was listed",
+			ErrInvariantViolation, node.qualified(), node.oid)
+	}
+	return nil
+}
+
+// nodeInTree reports whether the partition is still the relation, under the
+// schema and name, and the direct partition of the parent, that it was
+// listed as.
+func nodeInTree(ctx context.Context, q querier, node partitionNode) (bool, error) {
+	var present bool
+	if err := q.QueryRow(ctx, proveNodeSQL, node.oid, node.schema, node.name, node.parentOID).Scan(&present); err != nil {
+		return false, fmt.Errorf("prove partition %s: %w", node.qualified(), err)
+	}
+	return present, nil
+}
+
+// attach attaches child, an index on node, to parentIdx. Both are named in
+// the statement, and PostgreSQL resolves a name, not an identity, so the
+// transaction first proves under its own snapshot that each name still
+// carries the identity the build resolved (ST-7); an index renamed, dropped,
+// or replaced since is refused. The statement is idempotent on the server,
+// so a rerun after an unknown commit outcome is safe.
 func (f *partitionedIndexFlow) attach(ctx context.Context, node partitionNode, parentIdx, child relationFacts, announce func(sql string)) error {
 	attachSQL := "ALTER INDEX " + pgx.Identifier{parentIdx.schema, parentIdx.name}.Sanitize() +
 		" ATTACH PARTITION " + pgx.Identifier{child.schema, child.name}.Sanitize()
 	announce(attachSQL)
 	err := f.tx.run(ctx, "attach the index of partition "+node.qualified(), catalogReadPath(), true,
 		func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, attachSQL)
-			return err
+			if err := f.proveIdentity(ctx, tx, parentIdx, parentIdx.tableOID); err != nil {
+				return err
+			}
+			if err := f.proveIdentity(ctx, tx, child, node.oid); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, attachSQL); err != nil {
+				return err
+			}
+			// The statement names its indexes and the server resolves names
+			// at execution, so what it attached is read back by identity
+			// before the transaction commits; any other outcome rolls it
+			// back (INV: ST-7).
+			var attached bool
+			if err := tx.QueryRow(ctx, attachReadBackSQL, child.oid, parentIdx.oid).Scan(&attached); err != nil {
+				return fmt.Errorf("read back the attach of %s: %w", qualifiedName(child.schema, child.name), err)
+			}
+			if !attached {
+				return fmt.Errorf("%w: ST-7: after the attach, index %s is not attached to %s; a name resolved to another index",
+					ErrInvariantViolation, qualifiedName(child.schema, child.name), qualifiedName(parentIdx.schema, parentIdx.name))
+			}
+			return nil
 		})
 	if err != nil {
 		return err
 	}
 	f.changes++
+	return nil
+}
+
+const attachReadBackSQL = `SELECT EXISTS (
+		   SELECT 1 FROM pg_catalog.pg_inherits h
+		    WHERE h.inhrelid OPERATOR(pg_catalog.=) $1
+		      AND h.inhparent OPERATOR(pg_catalog.=) $2)`
+
+// proveIdentity checks that the relation the build resolved under a name
+// still has that identity: the same OID under the same name and schema, of
+// the same kind, on the same table.
+func (f *partitionedIndexFlow) proveIdentity(ctx context.Context, q querier, want relationFacts, tableOID uint32) error {
+	got, found, err := relationByOID(ctx, q, want.oid)
+	if err != nil {
+		return err
+	}
+	if !found || got.schema != want.schema || got.name != want.name || got.relkind != want.relkind || got.tableOID != tableOID {
+		return fmt.Errorf("%w: ST-7: index %s no longer has the identity the build resolved",
+			ErrInvariantViolation, qualifiedName(want.schema, want.name))
+	}
 	return nil
 }

@@ -95,8 +95,9 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 	return f.verify(ctx)
 }
 
-// resolveTarget re-reads, under the lock, what the preflight proved before it:
-// the table the statement names exists and is partitioned.
+// resolveTarget re-proves, under the lock, what the preflight proved before it:
+// the table the statement names exists, is partitioned, and has the identity
+// every later read is keyed on.
 func (f *partitionedIndexFlow) resolveTarget(ctx context.Context) error {
 	return f.tx.read(ctx, "resolve the partitioned table", func(ctx context.Context, q querier) error {
 		target, err := resolveTarget(ctx, q, concurrentIndexBuild{index: f.req.index, tableSchema: f.req.schema, table: f.req.table})
@@ -185,7 +186,8 @@ func (f *partitionedIndexFlow) ensureParentIndex(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// checked is the parent's index as the build checked or created it.
+	// checked is the parent's index as the build proved or created it: the
+	// identity and definition every later step may rely on.
 	var checked relationFacts
 	if !found {
 		if checked, err = f.createParentIndex(ctx); err != nil {
@@ -197,13 +199,33 @@ func (f *partitionedIndexFlow) ensureParentIndex(ctx context.Context) error {
 		}
 		checked = existing
 	}
-	key, err := checked.definitionKey()
-	if err != nil {
-		return err
-	}
-	f.parent, f.rootDef, f.rootKey = checked, checked.def, key
-	f.rep.IndexOID = checked.oid
-	return nil
+	// Steps name the index and the server resolves the name, so the relation
+	// under the name must still be the one that was checked or created, with the
+	// definition it was checked with (INV: ST-7).
+	return f.tx.read(ctx, "read the parent index", func(ctx context.Context, q querier) error {
+		parent, found, err := relationByName(ctx, q, f.target.schema, f.req.index)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: parent index %s is gone after it was created or checked",
+				ErrInvariantViolation, qualifiedName(f.target.schema, f.req.index))
+		}
+		if parent.oid != checked.oid || parent.def != checked.def {
+			return fmt.Errorf("%w: ST-7: the index under the name %s is not the parent index the build checked: it was replaced while the build ran",
+				ErrInvariantViolation, qualifiedName(f.target.schema, f.req.index))
+		}
+		if err := f.requireParentIndex(parent); err != nil {
+			return err
+		}
+		key, err := parent.definitionKey()
+		if err != nil {
+			return err
+		}
+		f.parent, f.rootDef, f.rootKey = parent, parent.def, key
+		f.rep.IndexOID = parent.oid
+		return nil
+	})
 }
 
 // requireParentIndex proves a relation is a partitioned index on the target
