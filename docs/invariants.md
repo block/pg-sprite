@@ -58,10 +58,13 @@ left no more keys changing than it may, mints a `VerifiedShadow` that names thos
 (`VerifiedShadow.Carried`) and no `CleanWatermark`. That proof says nothing about a named key;
 comparing each is the swap's, under its lock and after its drain, where no key can change.
 `GateCutover` accepts a proof that names at most `MaxCarryKeys` of them and refuses one that
-names more (`cutover-unverified`). `Cutover` then reads every named key on both sides inside
-the swap transaction (`checksum.CompareCarried`), after the drain and the re-run checklist and
-before any name moves, and refuses the swap, rolled back with the source live, when one
-differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
+names more (`cutover-unverified`), before any catalog read
+(`TestGateCutoverRefusesAProofNamingMoreKeysThanAPassMayLeave`); the compare refuses one that
+names more as an invariant violation before it runs a statement
+(`TestCompareCarriedRefusesAProofNamingMoreKeysThanAPassMayLeave`). `Cutover` then reads
+every named key on both sides inside the swap transaction (`checksum.CompareCarried`), after
+the drain and the re-run checklist and before any name moves, and refuses the swap, rolled
+back with the source live, when one differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
 that differs is a row the live table would hold wrong. The compare refuses a transaction that
 does not hold `ACCESS EXCLUSIVE` on both relations, since without it the two reads are two
 snapshots a writer could commit between (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
@@ -623,7 +626,12 @@ sentinel — the copier as its `copy-conversion-drift`, the verifier and the app
 `copy-conversion-drift`, so a run stopped by a changed catalog reads the same cause whether
 a chunk, a verifying read, or a catch-up flush noticed it. The check and the statements that evaluate the
 expressions are separate statements, so the copier's chunk, the applier's flush, the verifier's
-repair, and the drain recompute it once more after their writes and before they commit. Each
+repair, and the drain recompute it once more after their writes and before they commit. The
+swap's carried-key compare (`checksum.CompareCarried`) checks it before it reads any key and
+again after both reads, so a drift in place at the start is refused before a key is judged
+through it (`TestCompareCarriedRefusesAConversionDriftBeforeItReadsAnyKey`) and one committed
+between the first check and the reads is refused after them
+(`TestCompareCarriedRefusesAConversionDriftCommittedBeforeTheReads`). Each
 of those write transactions is `READ COMMITTED` whatever the server or role configures as
 `default_transaction_isolation` — the copier, the flush, and the repair begin theirs so, and
 the cutover begins its swap transaction so — so that read takes a snapshot after the writes,

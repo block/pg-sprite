@@ -184,7 +184,9 @@ func TestGateCutoverRefusesProofsThatDoNotDescribeTheSameCopy(t *testing.T) {
 // before any catalog read (CO-1). The proof here is a real one with its
 // carried keys overwritten past what the type lets any package set:
 // exactly the bound passes the gate, which leaves the compare to the
-// swap, and one key more is refused.
+// swap, and one key more is refused. The over-bound proof is handed a
+// closed pool, so only a refusal made before the gate's first read names
+// the key count.
 func TestGateCutoverRefusesAProofNamingMoreKeysThanAPassMayLeave(t *testing.T) {
 	f := newShadowFixture(t)
 	f.createOrders(t)
@@ -193,7 +195,10 @@ func TestGateCutoverRefusesAProofNamingMoreKeysThanAPassMayLeave(t *testing.T) {
 	_, err := schemachange.GateCutover(t.Context(), f.pool, orders.lock, orders.built, carrying(t, orders.verified, checksum.MaxCarryKeys), schemachange.Options{})
 	require.NoError(t, err)
 
-	_, err = schemachange.GateCutover(t.Context(), f.pool, orders.lock, orders.built, carrying(t, orders.verified, checksum.MaxCarryKeys+1), schemachange.Options{})
+	closed, err := dbconn.NewPool(t.Context(), f.cfg)
+	require.NoError(t, err)
+	closed.Close()
+	_, err = schemachange.GateCutover(t.Context(), closed, orders.lock, orders.built, carrying(t, orders.verified, checksum.MaxCarryKeys+1), schemachange.Options{})
 	assert.Equal(t, schemachange.CauseCutoverUnverified, schemachange.RefusalCauseOf(err))
 	assert.ErrorContains(t, err, "leaves 1025 keys for the swap to compare, more than the 1024 a pass may leave")
 }

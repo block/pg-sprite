@@ -15,11 +15,14 @@ import (
 
 // No pass leaves more than MaxCarryKeys keys for the swap, so only a
 // forged proof names more, and the compare refuses one as an invariant
-// violation before it reads a row: the bound on the keys is the bound on
-// what the swap reads under ACCESS EXCLUSIVE (CO-1). The proof here is
+// violation before it runs a statement: the bound on the keys is the bound
+// on what the swap reads under ACCESS EXCLUSIVE (CO-1). The proof here is
 // built by hand over two real, empty tables the transaction holds locked,
 // so the compare would otherwise run to the end: exactly MaxCarryKeys
-// keys are compared, every one absent from both sides and so equal.
+// keys are compared, every one absent from both sides and so equal. The
+// proof one key over is handed a transaction already rolled back, which
+// can run no statement, so only a refusal made before the compare touches
+// the server names the key count.
 func TestCompareCarriedRefusesAProofNamingMoreKeysThanAPassMayLeave(t *testing.T) {
 	f := newProofFixture(t)
 	f.exec(t, `
@@ -53,7 +56,10 @@ func TestCompareCarriedRefusesAProofNamingMoreKeysThanAPassMayLeave(t *testing.T
 	require.NoError(t, err)
 	assert.Empty(t, differing, "a key neither side holds is equal")
 
-	differing, err = CompareCarried(t.Context(), tx, target, shadow, carrying(MaxCarryKeys+1))
+	spent, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	require.NoError(t, spent.Rollback(t.Context()))
+	differing, err = CompareCarried(t.Context(), spent, target, shadow, carrying(MaxCarryKeys+1))
 	require.ErrorIs(t, err, ErrInvariantViolation)
 	assert.ErrorContains(t, err, "(CO-1)")
 	assert.ErrorContains(t, err, "leaves 1025 keys for the swap, more than the 1024 a pass may leave")
