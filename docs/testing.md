@@ -338,13 +338,15 @@ removed. The record, `results.json` in the package directory
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
 mutation, and the verdict.
 
-Copy-and-swap at the default table size is not supported yet, and the default run ends in
-`execution-failed`. The table size stops it, not the writes: by the time the copy of a
-table of about 1 GiB ends (`LOAD_PROOF_ROWS=100000` is enough) the slot retains more WAL
-than the slot-lag ceiling allows, and the catch-up stops the run, with or without
-`LOAD_PROOF_HOT`. The defaults stay at this size so the engine fixes are proven by the
-same command. Half that size passes at the default 8 × 100 writes a second, uniform or
-with a fifth of the updates on ten keys:
+Copy-and-swap at the default table size has not yet been shown to pass: the default run
+needs a host with the disk and I/O for two tables of about 10 GiB. The defaults stay at
+this size so the engine is proven at it by the same command. A table of about 1 GiB
+(`LOAD_PROOF_ROWS=100000`) passes at the default 8 × 100 uniform writes a second, where the
+engine before key-by-key settling and slot-lag pacing stopped in the catch-up with the slot
+over its lag ceiling, and so does half that size, where that engine stopped in the live
+verify pass on a chunk that never read equal as a whole
+([the record](copy-and-swap-design.md#evidence-key-by-key-settling-under-the-load-proofs-default-load)).
+Half that size also passes with a fifth of the updates on ten keys:
 `make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_HOT=0.2 LOAD_PROOF_FREE_DISK=10GiB`.
 The hottest of those keys change at every reread of the live verify pass, which leaves
 them for the swap to compare under its lock.

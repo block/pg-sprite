@@ -751,6 +751,50 @@ row stays in `cutover`. The rows are read by primary key, so the lock covers a r
 only other writer; a row whose key moved across a chunk boundary between the two reads is the
 next pass's to catch.
 
+### Evidence: key-by-key settling under the load proof's default load
+
+Recorded 2026-11-22 on a laptop (16 CPUs, Docker VM with about 8 GiB of memory, the compose
+database: PostgreSQL 16.16, `fsync=off`). Every run is the [load proof](testing.md#the-load-proof)
+at its default load, 8 workers × 100 mutations a second spread over the whole table
+(`LOAD_PROOF_HOT` unset), with the row count lowered to one the laptop carries:
+
+```sh
+make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_WORKERS=8 LOAD_PROOF_RATE=100 LOAD_PROOF_FREE_DISK=10GiB
+make load-proof LOAD_PROOF_ROWS=100000 LOAD_PROOF_WORKERS=8 LOAD_PROOF_RATE=100 LOAD_PROOF_FREE_DISK=10GiB
+```
+
+Before is `52a4097`, the load proof itself, which judged a differing chunk as a whole. After is
+`469f1b8`, with the key-by-key settling above and the later engine changes that bear on these
+runs: slot lag judged by unconfirmed WAL, keys left for the swap to compare under its lock, and
+the copy paced by slot lag ([D12](#d12--throttle-by-chunk-time-and-slot-lag)). No run failed
+for an environmental reason. The table lists every run but two that were started at once
+against the one compose database by mistake, and are left out.
+
+| Code | Rows | Run | Result | Stopped in | Chunks compared | Settled key by key | Rereads | `hot` outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| before | 50,000 | 1 | fail, `execution-failed` | live verify, after 31 s | — | — | 3, the bound | chunk [min, 1010]: source 978 rows, shadow 979; no keys named |
+| before | 50,000 | 2 | fail, `execution-failed` | live verify, after 61 s | — | — | 3, the bound | chunk [1008, 3020]: source 1950 rows, shadow 1952; no keys named |
+| before | 100,000 | 1 | fail, `execution-failed` | catch-up: slot over the 1 GiB ceiling | — | — | — | — |
+| after | 50,000 | 1 | pass | — | 42 | 42 | not reported | none |
+| after | 50,000 | 2 | pass | — | 26 | 25 | not reported | none |
+| after | 50,000 | 3 | pass | — | 24 | 23 | not reported | none |
+| after | 100,000 | 1 | pass | — | 49 | 46 | not reported | none |
+| after | 100,000 | 2 | pass | — | 74 | 70 | not reported | none |
+
+"Chunks compared" and "settled key by key" are the verdict's `verified N rows in C chunks
+(S settled against the stream)`; every other chunk matched in the sweep or had keys left for
+the swap. A passing run reports neither its rereads nor the number of keys it left for the swap
+(`Report.Carried`), so neither is shown; a carried key that differed would have refused the
+swap, and none did. Every pass compared the retained and live tables row for row over 52,693
+to 115,777 keys, with 55 to 80 excluded above the swap position and none ambiguous, and its
+only load failures were the eight or nine `0A000` stale prepared statements the swap causes.
+
+Before, a chunk the default load writes at every reread never reads equal as a whole, and the
+pass stops after its three rereads; after, the same load settles differing chunks key by key,
+no run ends `hot`, and the live verify pass passes at both sizes. The evidence is bounded by
+its size: a laptop at 50,000 and 100,000 rows (about 0.5 and 1 GiB a table), not the default
+1,000,000 rows of about 10 GiB, which is a separate run on a host with the disk and I/O for it.
+
 ## Package and proof-type map
 
 | Package | Responsibility and proof types | Invariants |
