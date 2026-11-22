@@ -168,7 +168,7 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // and so is a plan that routes a statement through copy-and-swap when that
 // route's preflight refuses the table or the server as they stand now. A plan
 // that builds an index on a partitioned table stops whole, with
-// [ErrConnectionRequired] or a [CopySwapConnectionMismatchError], when
+// [ErrConnectionRequired] or a [PartitionedIndexConnectionMismatchError], when
 // Options.Connection is unset or reaches another database than the pool.
 // Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
