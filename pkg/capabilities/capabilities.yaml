@@ -237,7 +237,7 @@ rows:
     status_mark: "❌"
     engine_path: "none"
     online_safety_problem: true
-    online_safety_detail: "the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive"
+    online_safety_detail: "`migrate --alter` does not drive the online `CONCURRENTLY` form; `migrate --desired` drives it only for a pinned, acknowledged plan"
     front_doors:
       migrate: refused
       diff: supported

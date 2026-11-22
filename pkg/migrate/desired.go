@@ -619,7 +619,8 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		detail := fmt.Sprintf(
 			"planned statement %d discards live structure (%s); desired-state execution runs a destructive "+
 				"statement only when the run pins the reviewed plan's fingerprint and names the table in the "+
-				"destructive acknowledgement — review the plan, then rerun with ExpectedFingerprint %s and AllowDestructive %s.%s in the request",
+				"destructive acknowledgement — review the plan, then rerun with ExpectedFingerprint %s and AllowDestructive %s.%s in the request "+
+				"(on the command line, --expect-fingerprint %[3]s --allow-destructive %[4]s.%[5]s)",
 			i+1, ps.SQL, report.Fingerprint, report.Schema, report.Table)
 		detail += skippedRestDetail(len(report.Statements) - 1)
 		return refused.refused(destructiveChangeRefusal(), detail), false

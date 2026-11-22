@@ -25,17 +25,22 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 	report, planErr := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
 	diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
 	if c.DryRun {
-		if changesOnlyTheTable(report, planErr) {
+		if changesOnlyTheTable(report, planErr) || c.pinnedAndConverged(report, planErr) {
 			// Preview uses desired-state admission, as for a file without
 			// row security.
 			return c.writeDesiredPreview(out, report)
+		}
+		if errors.Is(planErr, schemadiff.ErrOnlyTableDiffers) {
+			// Only the table definition differs and its plan refused; the
+			// flags belong to that change, so the refusal is shown as is.
+			return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
 		}
 		if err := c.rejectPinOnAtomicRowSecurity(); err != nil {
 			return err
 		}
 		return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
 	}
-	if runsTheTablePlan(report, planErr) {
+	if runsTheTablePlan(report, planErr) || c.pinnedAndConverged(report, planErr) {
 		opts, stopProgress, err := c.startProgress(ctx, c.desiredOptions(c.diag()))
 		if err != nil {
 			return err
@@ -71,6 +76,16 @@ func (c *MigrateCmd) rejectPinOnAtomicRowSecurity() error {
 		return errors.New("--allow-destructive does not apply to this file: its row security change runs in one transaction and acknowledges nothing; it applies to a change to the table definition alone")
 	}
 	return nil
+}
+
+// pinnedAndConverged reports whether a run that carries the pin or the
+// destructive acknowledgement finds the whole file already matching, as it
+// does when the same reviewed command runs again after its table change
+// converged. That run goes through the desired-state checks, which accept
+// an empty plan, rather than to the atomic executor, which takes no flags.
+func (c *MigrateCmd) pinnedAndConverged(report plan.Report, planErr error) bool {
+	flagged := c.ExpectFingerprint != "" || c.AllowDestructive != ""
+	return flagged && planErr == nil && len(report.Statements) == 0
 }
 
 // changesOnlyTheTable reports whether planning a row-security file found

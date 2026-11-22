@@ -169,3 +169,45 @@ func TestMigrateDesiredRejectsThePinWhereItDoesNotApply(t *testing.T) {
 		})
 	}
 }
+
+// A row security file whose policies already match and whose table drops a
+// column runs as a reviewed drop. Once it has converged, running the same
+// reviewed command again, or its dry run, finds nothing to do and succeeds
+// instead of rejecting the flags.
+func TestMigrateDesiredRowSecurityFileRerunsAConvergedReviewedDrop(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %[1]s.documents ADD COLUMN legacy text;
+ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7)`, schema))
+	require.NoError(t, err)
+	const withPolicy = `CREATE TABLE documents (
+ id int PRIMARY KEY,
+ owner_id int NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 7);`
+
+	cmd := desiredCommand(t, url, schema, withPolicy)
+	diff := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: cmd.Desired, JSON: true}
+	var out strings.Builder
+	require.NoError(t, diff.run(t.Context(), &out))
+	var reviewed plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &reviewed))
+	require.Len(t, reviewed.Statements, 1)
+	flags := []string{"--expect-fingerprint", reviewed.Fingerprint, "--allow-destructive", schema + ".documents"}
+
+	out.Reset()
+	require.NoError(t, desiredCommand(t, url, schema, withPolicy, flags...).run(t.Context(), &out), out.String())
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	require.Len(t, after.Columns, 2, "the reviewed drop ran")
+
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry run %v", dryRun), func(t *testing.T) {
+			again := desiredCommand(t, url, schema, withPolicy, flags...)
+			again.DryRun = dryRun
+			var out strings.Builder
+			require.NoError(t, again.run(t.Context(), &out), out.String())
+		})
+	}
+}
