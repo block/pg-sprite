@@ -578,9 +578,10 @@ by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
-ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
+ownership check (`InspectSlot`'s `Own`, the one statement that spells a logical slot of the
+pool's own database), the server proof before every slot command (`proveSameServer`),
 and the publication reads that judge whether the publication of the name is the route's, the
-create-side database guard included, and the slot inspection (`InspectSlot`) that
+create-side database guard included, and the same slot inspection (`InspectSlot`) that
 `InspectResume` adopts or refuses a slot on (ST-3) and treats a missing slot as lost on (ST-4),
 and that the catch-up's slot check reads: a lookalike `name = name` and `name ~~ text` that answer
 true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
@@ -596,8 +597,9 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 `TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
 prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
 the text is held by
-`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
-`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
+`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
+`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
+`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
 character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
@@ -1130,6 +1132,7 @@ attempt to reuse — and drops a slot the server created but did not describe us
 sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
+drops only a slot `InspectSlot` reads as `Own` (the one ownership rule the drop and resume share; any read error refuses the drop, so the drop needs every function the inspection runs — `TestDropSlotRefusedWhenTheOwnershipReadFails`),
 drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
 drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
 reads two measures of WAL on a primary — retained, what the slot keeps on the volume, and
