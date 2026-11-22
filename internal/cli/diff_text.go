@@ -44,9 +44,12 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 	if len(report.Statements) == 0 {
 		writeAdvisoryDiagnostics(w, report.Advisories)
 		w.entry("plan:")
-		if len(report.Advisories) == 0 {
+		switch {
+		case report.Type != "":
+			w.printf("  %s — no changes; the live type carries every label the file lists\n", targetText(report))
+		case len(report.Advisories) == 0:
 			w.printf("  %s — no changes; the live table matches the desired schema\n", targetText(report))
-		} else {
+		default:
 			w.printf("  %s — no changes to run; the live table carries %s the plan leaves alone\n",
 				targetText(report), countNoun(len(report.Advisories), "unfinished index build"))
 		}

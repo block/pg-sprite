@@ -146,13 +146,13 @@ func heldByMatch(cons []Constraint, matched []bool, i int) bool {
 func nextGeneratedCheckName(name string, taken map[string]bool) (string, error) {
 	loc := generatedCheckLabel.FindStringIndex(name)
 	if loc == nil {
-		return "", fmt.Errorf("%w: check constraint %q does not end in a generated label", ErrUnsupportedChange, name)
+		return "", unsupported(CauseGeneratedCheckName, "%w: check constraint %q does not end in a generated label", ErrUnsupportedChange, name)
 	}
 	prefix := name[:loc[0]] + "check"
 	for pass := 1; ; pass++ {
 		candidate := prefix + strconv.Itoa(pass)
 		if len(candidate) > maxIdentifierBytes {
-			return "", fmt.Errorf("%w: no free generated name for check constraint %q within %d bytes", ErrUnsupportedChange, name, maxIdentifierBytes)
+			return "", unsupported(CauseGeneratedCheckName, "%w: no free generated name for check constraint %q within %d bytes", ErrUnsupportedChange, name, maxIdentifierBytes)
 		}
 		if !taken[candidate] {
 			return candidate, nil

@@ -308,9 +308,12 @@ func countNoun(n int, noun string) string {
 // when the statement has one, and the server version the rules ran under.
 func targetText(report plan.Report) string {
 	var b strings.Builder
-	if report.Table != "" {
+	switch {
+	case report.Table != "":
 		fmt.Fprintf(&b, "%s.%s", report.Schema, report.Table)
-	} else {
+	case report.Type != "":
+		fmt.Fprintf(&b, "enum type %s.%s", report.Schema, report.Type)
+	default:
 		b.WriteString("no single table target")
 	}
 	if report.ServerVersion != "" {

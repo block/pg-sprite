@@ -413,8 +413,13 @@ func ParseOne(sql string) (Statement, error) {
 	default:
 		// Parsed statements that are recognized catalog operations are direct
 		// operator work. Truly unknown grammar nodes retain KindOther.
+		// Creating a type (enum, domain, composite, or range) is bootstrap
+		// catalog work: no table holds it yet, so there is no concurrent
+		// access for an engine to protect.
 		if node.GetViewStmt() != nil || node.GetCreateFunctionStmt() != nil || node.GetCreateTrigStmt() != nil ||
-			node.GetCreateExtensionStmt() != nil || node.GetCreateSeqStmt() != nil || node.GetCommentStmt() != nil {
+			node.GetCreateExtensionStmt() != nil || node.GetCreateSeqStmt() != nil || node.GetCommentStmt() != nil ||
+			node.GetCreateEnumStmt() != nil || node.GetCreateDomainStmt() != nil || node.GetCompositeTypeStmt() != nil ||
+			node.GetCreateRangeStmt() != nil {
 			st.kind = KindCatalogWork
 		}
 	}

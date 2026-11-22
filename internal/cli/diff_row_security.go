@@ -38,22 +38,24 @@ func (c *DiffCmd) writeRowSecurityDiff(ctx context.Context, out io.Writer, pool 
 	if errors.Is(err, schemadiff.ErrTableNotFound) {
 		return c.previewCreateWithRowSecurity(ctx, out, pool, desired, b)
 	}
-	return c.writeRowSecurityPlan(out, report, err)
+	return c.writeRowSecurityPlan(out, desired, report, err)
 }
 
 // writeRowSecurityPlan emits the plan for a table that exists, or the
 // refusal or error its planning returned. When the row security matches, a
-// refused table change is the table plan's own error, returned as it is for
-// a file without row security and as migrate --desired returns it.
-func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, report plan.Report, err error) error {
+// refused table change is reported in the table plan's own terms, as for a
+// file without row security and as migrate --desired reports it, naming the
+// file's CREATE TABLE. So is a table shape the planner cannot build.
+func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, desired statement.DesiredWithRowSecurity, report plan.Report, err error) error {
+	create := desired.TableDefinition().Statements()[0].SQL()
 	if err != nil {
 		if errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
-			return err
+			return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, create)
 		}
 		if errors.Is(err, schemadiff.ErrUnsupportedChange) {
 			return c.writeRowSecurityRefusal(out, err)
 		}
-		return err
+		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, create)
 	}
 	return c.writeDiffReport(out, report)
 }
@@ -112,7 +114,7 @@ func (c *DiffCmd) previewCreateWithRowSecurity(ctx context.Context, out io.Write
 		// The table was created after planning found it missing, so it is
 		// previewed as the existing table it now is.
 		report, err := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
-		return c.writeRowSecurityPlan(out, report, err)
+		return c.writeRowSecurityPlan(out, desired, report, err)
 	}
 	if err != nil {
 		refusal, ok := migrate.RowSecurityRefusal(err)

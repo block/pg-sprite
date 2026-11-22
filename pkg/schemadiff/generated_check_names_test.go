@@ -1,6 +1,7 @@
 package schemadiff
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -148,11 +149,19 @@ func TestNextGeneratedCheckName(t *testing.T) {
 	// The server shortens the table and column parts to fit a longer pass
 	// number; the numbering here does not, so it refuses.
 	full := strings.Repeat("a", maxIdentifierBytes-len("_check")) + "_check"
-	_, err = nextGeneratedCheckName(full, map[string]bool{full: true})
-	require.ErrorIs(t, err, ErrUnsupportedChange)
-
-	_, err = nextGeneratedCheckName("events_positive", nil)
-	require.ErrorIs(t, err, ErrUnsupportedChange)
+	for _, tc := range []struct {
+		name  string
+		taken map[string]bool
+	}{
+		{full, map[string]bool{full: true}},
+		{"events_positive", nil},
+	} {
+		_, err = nextGeneratedCheckName(tc.name, tc.taken)
+		require.ErrorIs(t, err, ErrUnsupportedChange)
+		refusal, ok := errors.AsType[*UnsupportedChangeError](err)
+		require.True(t, ok, "%v", err)
+		assert.Equal(t, CauseGeneratedCheckName, refusal.Cause)
+	}
 }
 
 // An unnamed desired check that some live check already prints needs no

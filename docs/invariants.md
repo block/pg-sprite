@@ -558,7 +558,9 @@ lists the source schema do not change the indexes or statistics read; the reads 
 a path pg-sprite did not set — the cutover's backend reads on the caller's pool and the write
 fence function's `format` in the writer's session — are qualified too, pinned by
 `TestCutoverBackendReadsResolveToTheRealCatalog` and
-`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`), `pkg/migrate`
+`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`; the resume's shadow size read in
+`MeasureResumeHeld`, which runs on the caller's pool, qualifies every function, relation, and
+operator, the `pg_total_relation_size(oid)` call included), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
@@ -576,9 +578,10 @@ by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
-ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
+ownership check (`InspectSlot`'s `Own`, the one statement that spells a logical slot of the
+pool's own database), the server proof before every slot command (`proveSameServer`),
 and the publication reads that judge whether the publication of the name is the route's, the
-create-side database guard included, and the slot inspection (`InspectSlot`) that
+create-side database guard included, and the same slot inspection (`InspectSlot`) that
 `InspectResume` adopts or refuses a slot on (ST-3) and treats a missing slot as lost on (ST-4),
 and that the catch-up's slot check reads: a lookalike `name = name` and `name ~~ text` that answer
 true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
@@ -594,8 +597,9 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 `TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
 prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
 the text is held by
-`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
-`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
+`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
+`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
+`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
 character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
@@ -1128,6 +1132,7 @@ attempt to reuse — and drops a slot the server created but did not describe us
 sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
+drops only a slot `InspectSlot` reads as `Own` (the one ownership rule the drop and resume share; any read error refuses the drop, so the drop needs every function the inspection runs — `TestDropSlotRefusedWhenTheOwnershipReadFails`),
 drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
 drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
 reads two measures of WAL on a primary — retained, what the slot keeps on the volume, and
@@ -1345,7 +1350,8 @@ still draw each identity default from the source's sequence). *Source:*
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table, plus the slot lag ceiling for a run that decodes WAL), execute-and-introspect
+(~2× the table, plus the slot lag ceiling for a run that decodes WAL, less what a resumed run
+already holds of each, measured from the server), execute-and-introspect
 workspace, lock LK-1 acquired, and the RF-* refusals
 below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
@@ -1356,7 +1362,8 @@ grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability
 IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement plus, for a run that
-decodes WAL, the slot lag ceiling), chained by type —
+decodes WAL, the slot lag ceiling, each less what `pkg/schemachange` `MeasureResumeHeld`
+reads from the server that a resumed run already holds of it), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
 `migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
@@ -1541,10 +1548,12 @@ the plan a rerun would execute. A greenfield create proves its outcome through t
 the create-name checks), because deriving a plan needs `CREATE` on the database.
 *Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`; for a file that declares row
 security, `RunDesiredWithRowSecurity` → `verifyRowSecurityConverged`, whose fresh plan
-includes the row security). Tests: `TestRunDesired`,
+includes the row security; for an enum type file, `RunDesiredEnumType` → `executePlan` →
+`verifyConverged`, whose fresh plan reads the type again). Tests: `TestRunDesired`,
 `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
 `TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`,
-`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`.
+`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`,
+`TestRunDesiredEnumTypeFailsWhenTheTypeChangesAfterTheLastCommit`.
 *Source:* review of desired-state outcome reporting.
 
 ## Refusals and preflight (RF)

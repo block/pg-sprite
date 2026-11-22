@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/lint"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 func TestLintCleanScriptPrintsNothing(t *testing.T) {
@@ -168,4 +169,98 @@ func TestLintParseFailureIsErrorNotFinding(t *testing.T) {
 	err := cmd.runLint(strings.NewReader("CREATE TABEL t (id int)"), &out)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrLintFindings)
+}
+
+// lint --desired checks a desired schema file with the admission diff and
+// migrate --desired run before they connect, offline: an admitted file is
+// clean even though, read as a script, its row security is unrecognized and
+// its index would block writes, and an enum type file is clean, while a
+// domain file, a table file with an enum type in it, or a partitions file is
+// refused with its class and exit 2 instead of passing or failing untyped.
+func TestLintDesiredReportsTheAdmissionVerdict(t *testing.T) {
+	const admitted = `CREATE TABLE documents (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ owner_id bigint NOT NULL
+);
+CREATE INDEX documents_owner_idx ON documents (owner_id);
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY owners ON documents FOR ALL USING (owner_id = current_setting('app.user')::bigint);
+`
+	t.Run("admitted", func(t *testing.T) {
+		var out strings.Builder
+		require.ErrorIs(t, (&LintCmd{}).runLint(strings.NewReader(admitted), &out), ErrLintFindings,
+			"read as a script, the file has error findings")
+
+		out.Reset()
+		require.NoError(t, (&LintCmd{Desired: true}).runLint(strings.NewReader(admitted), &out))
+		assert.Empty(t, out.String())
+
+		require.NoError(t, (&LintCmd{Desired: true, JSON: true}).runLint(strings.NewReader(admitted), &out))
+		var report lint.Report
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+		assert.Equal(t, lint.EmptyReport(), report)
+	})
+
+	t.Run("enum type", func(t *testing.T) {
+		var out strings.Builder
+		require.NoError(t, (&LintCmd{Desired: true}).runLint(strings.NewReader(
+			"CREATE TYPE status AS ENUM ('active', 'closed');\n"), &out))
+		assert.Empty(t, out.String())
+	})
+
+	cases := []struct {
+		name      string
+		file      string
+		class     verdict.Class
+		owner     verdict.Owner
+		statement string
+	}{
+		{
+			name:      "domain file",
+			file:      "CREATE DOMAIN account_email AS text;",
+			class:     verdict.ClassNoOnlineSafetyProblem,
+			owner:     verdict.OwnerDirectOperator,
+			statement: "CREATE DOMAIN account_email AS text",
+		},
+		{
+			name:      "table file with an enum type",
+			file:      "CREATE TYPE status AS ENUM ('active', 'closed');\nCREATE TABLE accounts (id bigint PRIMARY KEY, status status);",
+			class:     verdict.ClassNoOnlineSafetyProblem,
+			owner:     verdict.OwnerDirectOperator,
+			statement: "CREATE TYPE status AS ENUM ('active', 'closed')",
+		},
+		{
+			name: "partitions file",
+			file: `CREATE TABLE events (id int NOT NULL, at date NOT NULL) PARTITION BY RANGE (at);
+CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');`,
+			class:     verdict.ClassCapabilityBoundary,
+			statement: "CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			err := (&LintCmd{Desired: true, JSON: true}).runLint(strings.NewReader(tc.file), &out)
+			require.ErrorIs(t, err, verdict.ErrRefused)
+			var v verdict.Verdict
+			require.NoError(t, json.Unmarshal([]byte(out.String()), &v), out.String())
+			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+			assert.Equal(t, tc.class, v.Class)
+			assert.Equal(t, tc.owner, v.Owner)
+			assert.Equal(t, tc.statement, v.Statement)
+
+			out.Reset()
+			err = (&LintCmd{Desired: true}).runLint(strings.NewReader(tc.file), &out)
+			require.ErrorIs(t, err, verdict.ErrRefused)
+		})
+	}
+
+	t.Run("syntax error", func(t *testing.T) {
+		var out strings.Builder
+		err := (&LintCmd{Desired: true}).runLint(strings.NewReader("CREATE TABLE ("), &out)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, verdict.ErrRefused, "invalid SQL is an input error, not a refusal")
+		assert.Empty(t, out.String())
+	})
 }

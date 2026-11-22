@@ -91,7 +91,8 @@ lint:
 
 `lint` reads only the text, so it runs in any CI job. It exits 1 when a file
 has error-severity findings, the statements pg-sprite would refuse; warnings
-alone exit 0. Each code is listed in the [lint report contract](lint-report.md).
+alone exit 0. A desired schema file is not a script: check it with
+`lint --desired` (see [Manage tables from schema files](#manage-tables-from-schema-files)). Each code is listed in the [lint report contract](lint-report.md).
 
 ### Get the safer form
 
@@ -341,7 +342,12 @@ CREATE INDEX orders_total_idx ON orders USING btree (total);
 faithfully. A `diff` against a freshly pulled file reports no changes, which
 proves the baseline. [pull.md](pull.md) covers the refused shapes.
 `pg-sprite fmt schema/orders.sql` prints a hand-edited file in canonical form,
-without a database.
+without a database. `pg-sprite lint --desired schema/orders.sql` runs, also
+without a database, the file admission `diff` and `migrate --desired` share: a
+file it refuses, such as a domain or partitions file, prints the same refusal
+verdict and exits 2. Passing it does not mean planning will succeed: `diff`
+can still refuse a table shape or a difference from the live table that `lint`
+does not inspect.
 
 ### Review the plan for an edited file
 
@@ -412,6 +418,12 @@ destructive changes go through `--alter`.
 
 - A file that also declares the table's row security policies is covered in
   [declarative-row-security.md](declarative-row-security.md).
+- A file can declare one enum type instead of a table. The type must already
+  exist; `diff` plans an `ALTER TYPE ... ADD VALUE` for each label the file
+  lists that the live type lacks, `BEFORE` the next live label when the file
+  inserts it ahead of one, and `migrate --desired` runs them. A file that
+  drops, renames, or reorders a live label is refused, since PostgreSQL cannot
+  remove or move one.
 - Extension types named without a schema, such as `citext` installed in
   `extensions`, need `--extension-schema extensions`.
 
@@ -508,7 +520,7 @@ and row, checksum, and catch-up counters directly; that snapshot is the
 $ pg-sprite migrate --dry-run --json --alter "ALTER TABLE orders ADD COLUMN ref text UNIQUE" > plan.json; echo $?
 2
 $ jq -c '{format_version, table, disposition}' plan.json
-{"format_version":19,"table":"orders","disposition":"rewrite-required"}
+{"format_version":20,"table":"orders","disposition":"rewrite-required"}
 ```
 
 The exit code answers the question a pipeline asks first, without parsing
