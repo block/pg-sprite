@@ -273,8 +273,8 @@ func buildIndexConcurrentlyOn(ctx context.Context, pool *pgxpool.Pool, sql strin
 // it runs, which no transaction can pin because a concurrent build cannot
 // run in one, so a table renamed away and replaced under the same name after
 // the proof receives the index. The verification therefore also reads which
-// table the index is on, and an index on any other table is removed and
-// refused (INV: ST-7): see removeMisplacedIndex.
+// table the index is on, and an index on any other table is refused
+// (INV: ST-7): see misplacedIndexRefusal.
 func verifiedBuildReport(ctx context.Context, conn *pgxpool.Conn, build concurrentIndexBuild, target indexTarget, expectTableOID uint32, elapsed time.Duration) (IndexBuildReport, error) {
 	rep := IndexBuildReport{Schema: target.schema, Index: build.index}
 	var oid, tableOID uint32
@@ -291,7 +291,7 @@ func verifiedBuildReport(ctx context.Context, conn *pgxpool.Conn, build concurre
 			Cleanup: fmt.Errorf("verify built index %s.%s: %w", target.schema, build.index, err)}
 	}
 	if expectTableOID != 0 && tableOID != expectTableOID {
-		return rep, removeMisplacedIndex(ctx, conn, build, target, expectTableOID, oid, tableOID)
+		return rep, misplacedIndexRefusal(build, target, expectTableOID, oid, tableOID)
 	}
 	if !valid {
 		return rep, &InvalidIndexError{Schema: target.schema, Index: build.index, Cleanup: ErrBuildLeftInvalidIndex}
@@ -302,58 +302,17 @@ func verifiedBuildReport(ctx context.Context, conn *pgxpool.Conn, build concurre
 	return rep, nil
 }
 
-// removeMisplacedIndex removes the index a build created on a table other
-// than the one the caller proved, and returns the refusal. The index is
-// ours: the build admitted the name only because nothing held it, a build
-// that found it taken fails instead of succeeding, and the entry is the valid
-// one the build just created in the target's own schema. It is dropped
-// concurrently so the unrelated table is not blocked, by the identity the
-// verification read: the entry must still be that OID, on that table, under
-// that name, immediately before the drop, and the drop is confirmed by OID
-// afterwards. When the removal itself fails, the refusal says which index
-// remains on which table so an operator can remove it.
-func removeMisplacedIndex(ctx context.Context, conn *pgxpool.Conn, build concurrentIndexBuild, target indexTarget, expectTableOID, indexOID, tableOID uint32) error {
-	name := qualifiedName(target.schema, build.index)
-	refusal := fmt.Errorf("%w: ST-7: %s resolved to table %d when the index was built, not to the table %d the caller proved",
-		ErrInvariantViolation, qualifiedName(target.schema, target.table), tableOID, expectTableOID)
-	cleanup := func() error {
-		var stillThere bool
-		if err := conn.QueryRow(ctx, misplacedIndexSQL, indexOID, target.schema, build.index, tableOID).Scan(&stillThere); err != nil {
-			return fmt.Errorf("re-verify index %s before removing it: %w", name, err)
-		}
-		if !stillThere {
-			return fmt.Errorf("index %s no longer has the identity that was verified, so it was not dropped", name)
-		}
-		if _, err := conn.Exec(ctx, "DROP INDEX CONCURRENTLY "+pgx.Identifier{target.schema, build.index}.Sanitize()); err != nil {
-			return fmt.Errorf("drop index %s: %w", name, err)
-		}
-		var remaining int
-		if err := conn.QueryRow(ctx, `SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1`, indexOID).Scan(&remaining); err != nil {
-			return fmt.Errorf("verify the drop of index %s: %w", name, err)
-		}
-		if remaining != 0 {
-			return fmt.Errorf("index %s is still in the catalog after its drop", name)
-		}
-		return nil
-	}
-	if err := cleanup(); err != nil {
-		return errors.Join(refusal, fmt.Errorf("the index %s (%d) was left on table %d and must be removed by an operator: %w", name, indexOID, tableOID, err))
-	}
-	return refusal
+// misplacedIndexRefusal refuses a build whose index name resolved, at
+// verification, to an index on a table other than the one the caller proved.
+// The build cannot prove that index is the one it created: another session
+// may have renamed the build's index and given the name to an index of its
+// own. So nothing is dropped, and the refusal names the index and the table
+// it is on for an operator to inspect.
+func misplacedIndexRefusal(build concurrentIndexBuild, target indexTarget, expectTableOID, indexOID, tableOID uint32) error {
+	return fmt.Errorf("%w: ST-7: %s resolved to table %d when the index was built, not to the table %d the caller proved; index %s (%d) on table %d was left in place for an operator to inspect",
+		ErrInvariantViolation, qualifiedName(target.schema, target.table), tableOID, expectTableOID,
+		qualifiedName(target.schema, build.index), indexOID, tableOID)
 }
-
-// misplacedIndexSQL re-reads, by identity, the index removeMisplacedIndex is
-// about to drop: the OID ($1) must still carry the name ($3) in the schema
-// ($2) and be on the table ($4) the verification found it on.
-const misplacedIndexSQL = `SELECT EXISTS (
-		   SELECT 1
-		     FROM pg_catalog.pg_index i
-		     JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
-		     JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
-		    WHERE c.oid OPERATOR(pg_catalog.=) $1
-		      AND n.nspname OPERATOR(pg_catalog.=) $2
-		      AND c.relname OPERATOR(pg_catalog.=) $3
-		      AND i.indrelid OPERATOR(pg_catalog.=) $4)`
 
 // failedBuildVerdict decides, read-only, what a failed build left behind: a
 // build that failed after creating its catalog entry leaves the entry

@@ -457,7 +457,14 @@ func (f *partitionedIndexFlow) attach(ctx context.Context, node partitionNode, p
 				return fmt.Errorf("%w: ST-7: after the attach, index %s is not attached to %s; a name resolved to another index",
 					ErrInvariantViolation, qualifiedName(child.schema, child.name), qualifiedName(parentIdx.schema, parentIdx.name))
 			}
-			return nil
+			// The pair can already be attached by another session, so the
+			// readback alone does not prove which indexes the names resolved
+			// to. The statement now holds locks on what it attached, and each
+			// name must still resolve to the identity proven above.
+			if err := proveNameBinding(ctx, tx, parentIdx); err != nil {
+				return err
+			}
+			return proveNameBinding(ctx, tx, child)
 		})
 	if err != nil {
 		return err
@@ -470,6 +477,20 @@ const attachReadBackSQL = `SELECT EXISTS (
 		   SELECT 1 FROM pg_catalog.pg_inherits h
 		    WHERE h.inhrelid OPERATOR(pg_catalog.=) $1
 		      AND h.inhparent OPERATOR(pg_catalog.=) $2)`
+
+// proveNameBinding checks that the name the build resolved still names the
+// same relation.
+func proveNameBinding(ctx context.Context, q querier, want relationFacts) error {
+	got, found, err := relationByName(ctx, q, want.schema, want.name)
+	if err != nil {
+		return err
+	}
+	if !found || got.oid != want.oid {
+		return fmt.Errorf("%w: ST-7: after the attach, the name %s no longer resolves to index %d; a name resolved to another index",
+			ErrInvariantViolation, qualifiedName(want.schema, want.name), want.oid)
+	}
+	return nil
+}
 
 // proveIdentity checks that the relation the build resolved under a name
 // still has that identity: the same OID under the same name and schema, of
