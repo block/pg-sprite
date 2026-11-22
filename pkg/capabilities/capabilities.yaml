@@ -408,7 +408,7 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: unsupported-statement
+    refusal_reason: not-native-safe-rewrite-required
     reason_notes: "Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety"
   - id: explicit-column-collations
     area: "declarative_model"
@@ -420,15 +420,16 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: unsupported-statement
+    refusal_reason: not-native-safe-rewrite-required
     reason_notes: "Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite"
   - id: table-storage-parameters
     area: "declarative_model"
     operation: "Table storage parameters (`WITH (fillfactor = ...)`, `toast.*`)"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
-    online_safety_problem: true
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling (`ALTER TABLE ... SET (...)`, then declare the result in the file)"
     front_doors:
       migrate: refused
       diff: refused
@@ -437,10 +438,11 @@ rows:
   - id: column-owned-sequence-declarations
     area: "declarative_model"
     operation: "Identity and serial sequences declared away from the defaults (`START WITH`, `MAXVALUE`, ...)"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
-    online_safety_problem: true
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling (`ALTER TABLE ... ALTER COLUMN ... SET ...`, then declare the result in the file)"
     front_doors:
       migrate: refused
       diff: refused

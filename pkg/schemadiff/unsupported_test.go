@@ -17,7 +17,8 @@ import (
 // Every ErrUnsupportedChange the package returns from the table diff goes
 // through unsupported, so it carries a cause a caller can classify. The one
 // function allowed to wrap the sentinel itself is the row-security
-// comparison, whose refusals are classified by the row-security path.
+// comparison, whose refusals are classified by the row-security path. The
+// error type's own methods name the sentinel to match it and are skipped.
 func TestEveryUnsupportedChangeCarriesACause(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
@@ -31,7 +32,7 @@ func TestEveryUnsupportedChangeCarriesACause(t *testing.T) {
 		require.NoError(t, err)
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
+			if !ok || fn.Body == nil || isUnsupportedChangeErrorMethod(fn) {
 				continue
 			}
 			if wrapsSentinelOutsideUnsupported(fn.Body) {
@@ -43,26 +44,35 @@ func TestEveryUnsupportedChangeCarriesACause(t *testing.T) {
 	assert.Equal(t, []string{"DiffWithRowSecurity"}, wrapping)
 }
 
-// wrapsSentinelOutsideUnsupported reports whether body passes
-// ErrUnsupportedChange to any call other than unsupported or errors.Is.
+// wrapsSentinelOutsideUnsupported reports whether body names
+// ErrUnsupportedChange anywhere other than inside a call to unsupported or
+// errors.Is: passed to another call, returned bare, or assigned.
 func wrapsSentinelOutsideUnsupported(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if isCallTo(call, "", "unsupported") || isCallTo(call, "errors", "Is") {
+		if call, ok := n.(*ast.CallExpr); ok && (isCallTo(call, "", "unsupported") || isCallTo(call, "errors", "Is")) {
 			return false
 		}
-		for _, arg := range call.Args {
-			if id, ok := arg.(*ast.Ident); ok && id.Name == "ErrUnsupportedChange" {
-				found = true
-			}
+		if id, ok := n.(*ast.Ident); ok && id.Name == "ErrUnsupportedChange" {
+			found = true
 		}
 		return true
 	})
 	return found
+}
+
+// isUnsupportedChangeErrorMethod reports a method declared on
+// UnsupportedChangeError, by value or pointer receiver.
+func isUnsupportedChangeErrorMethod(fn *ast.FuncDecl) bool {
+	if fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return false
+	}
+	typ := fn.Recv.List[0].Type
+	if star, ok := typ.(*ast.StarExpr); ok {
+		typ = star.X
+	}
+	id, ok := typ.(*ast.Ident)
+	return ok && id.Name == "UnsupportedChangeError"
 }
 
 func isCallTo(call *ast.CallExpr, pkg, name string) bool {

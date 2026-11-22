@@ -124,12 +124,14 @@ func (c *MigrateCmd) writeDesiredResult(out io.Writer, result migrate.DesiredRes
 	return writeDesiredSummary(out, pal, result)
 }
 
-// writeDesiredSummary writes the run's closing line. A classified refusal
-// gets the verdict layout's headline, class, owner, and cause, because a
-// whole-run refusal (a file refused before anything planned) carries no
-// statement verdict that would show them; every other outcome is one line.
+// writeDesiredSummary writes the run's closing line. A whole-run refusal
+// (a file refused before anything planned) gets the verdict layout's
+// headline, class, owner, and cause, because it carries no statement verdict
+// that would show them. A refusal partway through a run already printed
+// them in its statement's verdict, so it and every other outcome get one
+// line.
 func writeDesiredSummary(out io.Writer, pal palette, result migrate.DesiredResult) error {
-	if result.Outcome != verdict.OutcomeRefused || result.Reason == "" {
+	if !isWholeRunRefusal(result) {
 		if _, err := fmt.Fprintf(out, "%s: %s\n", result.Outcome, result.Detail); err != nil {
 			return fmt.Errorf("write desired result: %w", err)
 		}
@@ -149,4 +151,10 @@ func writeDesiredSummary(out io.Writer, pal palette, result migrate.DesiredResul
 		return fmt.Errorf("write desired result: %w", err)
 	}
 	return nil
+}
+
+// isWholeRunRefusal reports a classified refusal that no statement verdict
+// carries: the run was refused before any statement was planned or run.
+func isWholeRunRefusal(result migrate.DesiredResult) bool {
+	return result.Outcome == verdict.OutcomeRefused && result.Reason != "" && len(result.Verdicts) == 0
 }
