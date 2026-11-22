@@ -152,10 +152,9 @@ ST-7 when a name moved:
   build repeats the check on its own session, after it resolves the table name.
   A concurrent build cannot run in a transaction, so one that lands on a
   replacement table is found afterwards, from the index's own `indrelid`, and
-  that index is dropped (`DROP INDEX CONCURRENTLY` by schema and name, after
-  reading again that the name still resolves to the misplaced index's OID). The
-  flow then refuses. If the drop cannot complete, the error names the index left
-  on the replacement table.
+  the flow refuses. Nothing is dropped, because the flow cannot prove that index
+  is the one it created: the error names the index and the table it is on for an
+  operator to inspect.
 - **`ON ONLY` statements** (the parent's, a sub-partitioned partition's, and the
   probe's). One transaction locks the table by name under the bounded
   `lock_timeout`, proves it is still the partitioned table with the expected OID,

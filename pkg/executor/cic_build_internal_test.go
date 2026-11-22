@@ -95,6 +95,21 @@ func TestVerifiedBuildReportFailsClosed(t *testing.T) {
 		assert.Equal(t, "idx_c", invalidErr.Index)
 	})
 
+	// The build's name resolving to an index on a table other than the one
+	// the caller proved is refused, and that index is left in place: the
+	// build cannot prove it created it.
+	t.Run("an index on another table under the build's name is refused and left in place", func(t *testing.T) {
+		var tableOID uint32
+		require.NoError(t, pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", schema+".t").Scan(&tableOID))
+		_, err := verifiedBuildReport(t.Context(), conn, build, target, tableOID+1, time.Second)
+		require.ErrorIs(t, err, ErrInvariantViolation)
+		assert.Contains(t, err.Error(), "ST-7")
+		assert.Contains(t, err.Error(), "left in place")
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(), "SELECT to_regclass($1) IS NOT NULL", schema+".idx_c").Scan(&exists))
+		assert.True(t, exists, "the index is not dropped")
+	})
+
 	t.Run("an unreadable catalog fails closed", func(t *testing.T) {
 		cancelledCtx, cancel := context.WithCancel(t.Context())
 		cancel()

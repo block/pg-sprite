@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -58,8 +59,9 @@ func TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved(t *testing.T)
 	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
 		// The concurrent build cannot run in a transaction, so nothing stops
 		// it creating the index on the table now holding the name. The build
-		// finds that out from the index and drops exactly that index.
-		t.Run("a concurrent build that landed on a replacement table removes its index", func(t *testing.T) {
+		// finds that out from the index and refuses. It cannot prove that
+		// index is its own, so it drops nothing and names it for an operator.
+		t.Run("a concurrent build that landed on a replacement table is refused and leaves the index for an operator", func(t *testing.T) {
 			f := newFixture(t)
 			partitions := f.ordersByRegion(t)
 			fired := false
@@ -79,12 +81,18 @@ func TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved(t *testing.T)
 			require.True(t, fired, "the swap must happen between the build's check and its statement")
 			require.ErrorIs(t, err, executor.ErrInvariantViolation)
 			assert.Contains(t, err.Error(), "ST-7")
+			assert.Contains(t, err.Error(), "left in place for an operator to inspect")
+			landed := 0
 			for _, p := range partitions {
-				assert.Zero(t, f.indexCount(t, p), "the replacement table %s must be left without the index", p)
+				landed += f.indexCount(t, p)
+				for name, r := range f.indexesOn(t, p) {
+					assert.Empty(t, r.parent, "index %s on the replacement table %s must not be attached", name, p)
+				}
 				for name, r := range f.indexesOn(t, p+"_old") {
 					assert.Empty(t, r.parent, "index %s on the original partition must not be attached", name)
 				}
 			}
+			assert.Equal(t, 1, landed, "the first build is refused, and its index stays where it landed")
 		})
 
 		// The parent's ON ONLY index is created in a transaction that locks
@@ -189,10 +197,9 @@ func TestBuildPartitionedIndexRefusesALockHeldInAnotherDatabase(t *testing.T) {
 			_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `DROP DATABASE IF EXISTS `+pgx.Identifier{other}.Sanitize()+` WITH (FORCE)`)
 			assert.NoError(t, err)
 		})
-		u, err := url.Parse(f.cfg.URL)
+		dsn, err := withDatabase(f.cfg.URL, other)
 		require.NoError(t, err)
-		u.Path = "/" + other
-		elsewhere := dbconn.Config{URL: u.String()}
+		elsewhere := dbconn.Config{URL: dsn}
 
 		_, err = executor.BuildPartitionedIndex(t.Context(), elsewhere, f.pool, mustPreflight(t, f.pool, f.schema, "orders"),
 			fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema), buildBudget)
@@ -201,4 +208,40 @@ func TestBuildPartitionedIndexRefusesALockHeldInAnotherDatabase(t *testing.T) {
 		assert.Contains(t, err.Error(), "LK-1")
 		f.requireNothingBuilt(t, "orders", partitions...)
 	})
+}
+
+// withDatabase points a connection string, in URL or keyword form, at another
+// database and keeps every other setting. In the keyword form a later setting
+// overrides an earlier one.
+func withDatabase(dsn, database string) (string, error) {
+	if !strings.Contains(dsn, "://") {
+		return dsn + " dbname='" + database + "'", nil
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	u.Path = "/" + database
+	return u.String(), nil
+}
+
+func TestWithDatabaseKeepsEveryOtherSetting(t *testing.T) {
+	for name, dsn := range map[string]string{
+		"url":     "postgres://u:p@db.example:5433/first?sslmode=require&application_name=probe",
+		"keyword": "host=db.example port=5433 user=u password=p dbname=first sslmode=require application_name=probe",
+	} {
+		t.Run(name, func(t *testing.T) {
+			moved, err := withDatabase(dsn, "second")
+			require.NoError(t, err)
+			cfg, err := pgconn.ParseConfig(moved)
+			require.NoError(t, err)
+			assert.Equal(t, "second", cfg.Database)
+			assert.Equal(t, "db.example", cfg.Host)
+			assert.Equal(t, uint16(5433), cfg.Port)
+			assert.Equal(t, "u", cfg.User)
+			assert.Equal(t, "p", cfg.Password)
+			assert.NotNil(t, cfg.TLSConfig, "sslmode is kept")
+			assert.Equal(t, "probe", cfg.RuntimeParams["application_name"])
+		})
+	}
 }
