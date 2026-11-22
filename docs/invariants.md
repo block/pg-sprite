@@ -595,8 +595,9 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
 the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
-`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
-character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
+`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which walk each read's parse
+tree and reject every operator, the keyword comparisons included, not spelled
+`OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
