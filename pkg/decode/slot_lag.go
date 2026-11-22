@@ -41,6 +41,8 @@ const DefaultSlotLagCeiling = preflight.DefaultSlotLagCeiling
 // reading sees, not a cap on the slot: the slot also holds what the cluster
 // writes in the cycle before the reading that crosses it, and it keeps
 // retaining WAL after the abort until the run resumes or is abandoned.
+// The multiple is a safety bound, not an option: no setting changes it.
+// RetainedHardLimit gives it in bytes for a ceiling.
 const RetainedWALHardMultiple int64 = 3
 
 // RestartReleaseInterval is the longest the server goes between the
@@ -76,8 +78,24 @@ var ErrSlotLagUnknown = errors.New("replication slot's retained WAL cannot be me
 
 // SlotLagCause is which measure of a slot crossed the ceiling, and so
 // what an operator looks at. The set of causes can grow, so a caller that
-// switches on it keeps a default branch.
+// switches on it keeps a default branch. SlotLagWALRetained and
+// SlotLagWALRetainedHardLimit are one family, the slot keeping more WAL
+// than the ceiling while the stream kept up, with the same remedy; a caller
+// that acts on the family tests RetainsWAL rather than either constant.
 type SlotLagCause string
+
+// RetainsWAL reports whether the cause is the server keeping WAL back
+// while the stream kept up, by the grace running out or the hard limit:
+// a transaction on the source holding the WAL, or a write rate the ceiling
+// cannot hold, rather than a stream that fell behind.
+func (c SlotLagCause) RetainsWAL() bool {
+	switch c {
+	case SlotLagWALRetained, SlotLagWALRetainedHardLimit:
+		return true
+	default:
+		return false
+	}
+}
 
 const (
 	// SlotLagStreamBehind means the WAL the slot's consumer has yet to
@@ -136,7 +154,7 @@ func (e *SlotLagExceededError) Error() string {
 			"and the run needs a higher SlotLagCeiling, with margin above that much WAL",
 			e.Slot, humanBytes(e.Retained), humanBytes(e.Ceiling), e.Retained, e.Ceiling, humanBytes(e.Unconfirmed))
 	case SlotLagWALRetainedHardLimit:
-		limit := retainedHardLimit(e.Ceiling)
+		limit := RetainedHardLimit(e.Ceiling)
 		return fmt.Sprintf("slot %s retains %s of WAL, past the %s hard limit of %d times the %s ceiling (%d > %d bytes), "+
 			"before the server's time to release WAL the stream confirmed ran out, and the stream itself is %s behind; "+
 			"more than a healthy slot holds just before a release, which is about twice the ceiling; either a transaction on the source holds the WAL back "+
@@ -209,12 +227,15 @@ func NewSlotLagWatch(ceiling int64, grace time.Duration) (*SlotLagWatch, error) 
 	if grace < 0 {
 		return nil, fmt.Errorf("%w: ST-3: slot lag grace %s is negative", ErrInvariantViolation, grace)
 	}
-	return &SlotLagWatch{ceiling: ceiling, hardLimit: retainedHardLimit(ceiling), grace: grace}, nil
+	return &SlotLagWatch{ceiling: ceiling, hardLimit: RetainedHardLimit(ceiling), grace: grace}, nil
 }
 
-// retainedHardLimit is RetainedWALHardMultiple times ceiling, held at the
-// largest byte count for a ceiling so large the product would overflow.
-func retainedHardLimit(ceiling int64) int64 {
+// RetainedHardLimit is the retained WAL, in bytes, past which a reading of
+// a slot under ceiling ends the run at once: RetainedWALHardMultiple times
+// ceiling, held at the largest byte count for a ceiling so large the
+// product would overflow. A caller sizing a volume uses it instead of
+// multiplying the constant itself.
+func RetainedHardLimit(ceiling int64) int64 {
 	if ceiling > math.MaxInt64/RetainedWALHardMultiple {
 		return math.MaxInt64
 	}

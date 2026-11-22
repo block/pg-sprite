@@ -119,6 +119,24 @@ func TestSlotLagWatchHardLimitDoesNotOverflow(t *testing.T) {
 	require.NoError(t, watch.Judge(reading(math.MaxInt64, 0), lagTestStart))
 }
 
+// The hard limit a caller sizes a volume by is the one the watch judges
+// against: three times the ceiling, held at the largest byte count where
+// the product would overflow.
+func TestRetainedHardLimitIsThreeCeilingsWithoutOverflow(t *testing.T) {
+	assert.Equal(t, int64(3<<30), decode.RetainedHardLimit(1<<30))
+	assert.Equal(t, int64(math.MaxInt64), decode.RetainedHardLimit(math.MaxInt64/3+1))
+}
+
+// Both retained-WAL causes are one family for a caller acting on the stop,
+// and a stream that fell behind, or a cause this engine does not know, is
+// not in it.
+func TestSlotLagCauseRetainsWALNamesTheRetainedFamily(t *testing.T) {
+	assert.True(t, decode.SlotLagWALRetained.RetainsWAL())
+	assert.True(t, decode.SlotLagWALRetainedHardLimit.RetainsWAL())
+	assert.False(t, decode.SlotLagStreamBehind.RetainsWAL())
+	assert.False(t, decode.SlotLagCause("future-cause").RetainsWAL())
+}
+
 // A reading within the ceiling ends the grace: the server released the
 // WAL, so a later reading over it starts a new grace rather than inherit
 // the old one.

@@ -168,8 +168,8 @@ func (o CatchupOptions) validate() error {
 		return fmt.Errorf("%w: interval %s is below one millisecond; use zero for the default", ErrInvalidCatchupOptions, o.Interval)
 	}
 	if o.Interval > MaxCatchupInterval {
-		return fmt.Errorf("%w: interval %s is above the %s maximum, which bounds the slot lag grace; use zero for the default",
-			ErrInvalidCatchupOptions, o.Interval, MaxCatchupInterval)
+		return fmt.Errorf("%w: interval %s is above the %s maximum, which bounds the slot lag grace; use a value up to %s, or zero for the %s default",
+			ErrInvalidCatchupOptions, o.Interval, MaxCatchupInterval, MaxCatchupInterval, DefaultCatchupInterval)
 	}
 	if o.MaxChanges < 1 {
 		return fmt.Errorf("%w: max changes %d is below one", ErrInvalidCatchupOptions, o.MaxChanges)
