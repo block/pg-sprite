@@ -5,6 +5,9 @@ import "errors"
 // Typed refusals for the partitioned index build. Each says what the catalog
 // or the statement decided, so a caller branches on the cause, not on text.
 var (
+	// ErrNotCreateIndex is returned when the statement is not a single
+	// CREATE INDEX.
+	ErrNotCreateIndex = errors.New("statement is not a CREATE INDEX")
 	// ErrNotPartitionedTable is returned when the target is not a partitioned
 	// table, at admission or when the catalog is read under the table lock. A
 	// plain table's index is the concurrent build's job.

@@ -1,16 +1,28 @@
-// The partitioned index build is the online way to add an index to a
-// partitioned table. PostgreSQL cannot build one concurrently, and a plain
+// This file is the partitioned index build: the online way to add an index to
+// a partitioned table. PostgreSQL cannot build one concurrently, and a plain
 // CREATE INDEX on a partitioned table blocks writes to the whole tree. The
 // documented alternative is three steps: create the parent's index with ONLY,
 // which builds nothing; build each partition's index concurrently; attach each
-// one. This executor runs them partition by partition
-// (docs/partitioned-index-build-design.md). A partition's build is the
+// one. This executor runs them partition by partition under the parent's table
+// lock (docs/partitioned-index-build-design.md). A partition's build is the
 // concurrent build executor's own (cic_build.go), with the same budget and
 // failure verdict as an index on a plain table.
 
 package executor
 
-import "time"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
+	"github.com/block/pg-sprite/pkg/statement"
+)
 
 // PartitionIndexAction says what the build did to give one partition an index
 // attached to the parent's.
@@ -59,9 +71,146 @@ type PartitionedIndexReport struct {
 	ServerVersion string `json:"server_version"`
 }
 
+// BuildPartitionedIndex adds the index a CREATE INDEX statement describes to a
+// partitioned table, online, and returns once the parent's index is valid and
+// every partition has an index attached to it.
+//
+// The statement is one named, schema-qualified CREATE INDEX on the preflighted
+// partitioned table, with or without CONCURRENTLY and ON ONLY; every form asks
+// for a complete index on the whole table. The build holds the parent's advisory
+// table lock (LK-1) for its whole run, so a second run on the same parent is
+// refused with a *dbconn.TableLockHeldError; cfg is the connection target that
+// lock's dedicated session dials, the same Config the pool was made from. Under
+// the lock it:
+//
+//  1. creates the parent's index with ON ONLY, refusing a name that is already
+//     taken (ErrPartitionedIndexNameTaken);
+//  2. gives each partition an index built concurrently under a derived name,
+//     then attached;
+//  3. re-reads the parent's index and returns only when it is valid.
+//
+// A failure at any point leaves a valid prefix. The build never drops an index.
+//
+// Every partition's build is bounded by b, one budget per partition; every
+// other statement runs under the pool's own bounded lock and statement
+// timeouts. The pool must come from pkg/dbconn and hold at least two
+// connections, the concurrent build's own minimum. Partitions are listed from
+// the catalog at run time, not from a plan, because they can change between
+// planning and running.
+func BuildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget) (PartitionedIndexReport, error) {
+	return buildPartitionedIndex(ctx, cfg, pool, pt, sql, b, nil)
+}
+
+// BuildPartitionedIndexWithProgress runs a partitioned index build while
+// updating tracker, which the caller may poll concurrently. A step is one
+// partition, the parent's index being step one, and total_steps is the
+// partitions found plus one. It is an upper bound: a partition that already has
+// its index attached takes no step.
+func BuildPartitionedIndexWithProgress(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget, tracker *progress.Tracker) (rep PartitionedIndexReport, err error) {
+	if tracker == nil {
+		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
+	}
+	tracker.Start(1, progress.OperationBrief)
+	defer func() { tracker.Finish(err) }()
+	return buildPartitionedIndex(ctx, cfg, pool, pt, sql, b, tracker)
+}
+
+func buildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget, tracker *progress.Tracker) (PartitionedIndexReport, error) {
+	var rep PartitionedIndexReport
+	if err := b.validate(); err != nil {
+		return rep, err
+	}
+	// INV: LK-2 — caller-owned mode is bounded by the caller's cancellation
+	// signal, so a context without one is refused before any session use.
+	if b.CallerOwned && ctx.Done() == nil {
+		return rep, ErrCallerOwnedNeedsCancellableContext
+	}
+	req, err := admitPartitionedIndex(sql, pt)
+	if err != nil {
+		return rep, err
+	}
+	// INV: LK-2 — a partition's build needs its session and the reserved
+	// verdict session at once; a smaller pool would make every failed build
+	// indeterminate or wait on itself.
+	if pool.Config().MaxConns < buildMinConns {
+		return rep, fmt.Errorf("partitioned index build needs %d connections (build session and reserved verdict session), pool holds %d: %w",
+			buildMinConns, pool.Config().MaxConns, ErrPoolTooSmall)
+	}
+
+	start := time.Now()
+	if tracker != nil {
+		start = tracker.Now()
+	}
+	// INV: LK-1 — the parent's advisory lock excludes a second run on the same
+	// parent for the whole build.
+	lock, err := dbconn.AcquireTableLock(ctx, cfg, req.schema, req.table)
+	if err != nil {
+		return rep, fmt.Errorf("lock %s for the partitioned index build: %w", qualifiedName(req.schema, req.table), err)
+	}
+	// Everything the lock protects runs under a context that ends when the
+	// lock is lost, so no statement outlives the exclusion it relied on.
+	lockedCtx, stop := lock.Bind(ctx)
+	rep, err = runPartitionedIndex(lockedCtx, pool, req, sql, b, tracker)
+	stop()
+	// INV: LK-1 — a lock lost while the build ran voids what it did under the
+	// exclusion, whatever else it reported.
+	if lost := lock.Err(); lost != nil {
+		err = errors.Join(fmt.Errorf("%w (LK-1): %w: %w", ErrInvariantViolation, dbconn.ErrTableLockLost, lost), err)
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCleanupTimeout)
+	defer cancel()
+	if releaseErr := lock.Release(releaseCtx); releaseErr != nil {
+		err = errors.Join(err, fmt.Errorf("release the table lock for %s: %w", qualifiedName(req.schema, req.table), releaseErr))
+	}
+	rep.Duration = elapsedSince(tracker, start)
+	return rep, err
+}
+
 // partitionedIndexRequest is the admitted statement's identity facts.
 type partitionedIndexRequest struct {
 	schema string
 	table  string
 	index  string
+}
+
+// admitPartitionedIndex is the executor's own admission check: exactly one
+// named CREATE INDEX, without IF NOT EXISTS, on the schema-qualified table the
+// preflight verified, which must be partitioned. Each refusal is typed and
+// nothing is executed on one.
+func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partitionedIndexRequest, error) {
+	var req partitionedIndexRequest
+	st, err := statement.ParseOne(sql)
+	if err != nil {
+		return req, err
+	}
+	if st.Kind() != statement.KindCreateIndex {
+		return req, fmt.Errorf("%w: got %s", ErrNotCreateIndex, st.Kind())
+	}
+	ops, err := statement.ParseOps(sql)
+	if err != nil {
+		return req, err
+	}
+	// A CREATE INDEX yields exactly one operation; anything else is
+	// parse-boundary version skew and is refused rather than guessed.
+	if len(ops) != 1 || ops[0].Kind != statement.OpCreateIndex {
+		return req, ErrNotCreateIndex
+	}
+	switch {
+	case ops[0].Name == "":
+		return req, ErrUnnamedIndex
+	case ops[0].IfNotExists:
+		return req, ErrIfNotExistsUnsupported
+	case st.Schema() == "":
+		return req, ErrUnqualifiedTable
+	}
+	// INV: ST-7 — the executor runs exactly the statement that was gated, and
+	// only against the table the preflight proof verified.
+	if st.Table() == "" || st.Schema() != pt.Schema() || st.Table() != pt.Table() {
+		return req, fmt.Errorf("%w: ST-7: statement targets %q but preflight verified %q",
+			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(pt.Schema(), pt.Table()))
+	}
+	if !pt.Partitioned() {
+		return req, fmt.Errorf("%w: %s", ErrNotPartitionedTable, qualifiedName(pt.Schema(), pt.Table()))
+	}
+	return partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: ops[0].Name}, nil
 }

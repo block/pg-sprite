@@ -348,6 +348,9 @@ concurrently is.
 | `invalid-index-not-droppable` | yes | The INVALID index under the requested name is one `DROP INDEX CONCURRENTLY` cannot remove — a partitioned table's index, an index partition, or a constraint's index — so it is not a failed concurrent build's debris; an operator resolves it |
 | `invalid-index-builder-unobservable` | no | An INVALID index under the requested name sits on the target table and this role cannot see whether a backend is building it; `RebuildAbandonedIndex` decides under the table lock |
 | `invalid-index-unproven` | no | An INVALID index may remain but the catalog state could not be proven, or a recovery could not carry its proof through to the removal |
+| `not-create-index` | yes | The statement handed to the partitioned index build is not a single `CREATE INDEX` |
+| `not-partitioned-table` | yes | The target of a partitioned index build is not a partitioned table; a plain table's index is the concurrent build's job |
+| `partitioned-index-name-taken` | yes | A name the partitioned index build needs is held by a relation that is not the requested index: another kind of relation, an index of another definition, or an index on another table, under the parent index's name or a partition index's derived name. The occupant is left for an operator |
 | `empty-sequence` | yes | The sequence had no steps to run |
 | `unsupported-sequence-step` | yes | A step is not a shape the sequence executor can run safely |
 | `unsupported-partitioned-parent` | yes | Partitioned-parent admission refusal |
