@@ -229,6 +229,98 @@ func TestBuildPartitionedIndex(t *testing.T) {
 			f.requireCovered(t, "events_2024_us", f.derived(t, "idx_events_region", "events_2024_us"), "events_2024_us_h0", "events_2024_us_h1")
 		})
 
+		// A rerun of a finished build has nothing to do: it creates nothing,
+		// lists no partition as worked, and still verifies the parent.
+		t.Run("a rerun of a finished build changes nothing", func(t *testing.T) {
+			f := newFixture(t)
+			partitions := f.ordersByRegion(t)
+			stmt := fmt.Sprintf("CREATE INDEX idx_orders_total ON ONLY %s.orders (total)", f.schema)
+			first := f.build(t, "orders", stmt)
+
+			second := f.build(t, "orders", stmt)
+
+			assert.False(t, second.ParentCreated)
+			assert.Empty(t, second.Worked)
+			assert.Equal(t, 3, second.Partitions)
+			assert.Equal(t, first.IndexOID, second.IndexOID)
+			assert.Equal(t, 1, second.Passes)
+			f.requireCovered(t, "orders", "idx_orders_total", partitions...)
+		})
+
+		// A crash leaves a valid prefix: the parent's invalid index, one
+		// partition attached, one with an index built under the derived
+		// name but not attached. A rerun takes each as it is.
+		t.Run("resumes what an earlier run left", func(t *testing.T) {
+			f := newFixture(t)
+			partitions := f.ordersByRegion(t)
+			f.exec(t, `CREATE INDEX idx_orders_total ON ONLY %s.orders USING btree (total)`, f.schema)
+			attached := f.derived(t, "idx_orders_total", "orders_eu")
+			f.exec(t, `CREATE INDEX %s ON %s.orders_eu (total)`, attached, f.schema)
+			f.exec(t, `ALTER INDEX %s.idx_orders_total ATTACH PARTITION %s.%s`, f.schema, f.schema, attached)
+			unattached := f.derived(t, "idx_orders_total", "orders_us")
+			f.exec(t, `CREATE INDEX %s ON %s.orders_us (total)`, unattached, f.schema)
+			require.False(t, f.indexesOn(t, "orders")["idx_orders_total"].valid, "the parent index is invalid until every partition is attached")
+
+			rep := f.build(t, "orders", fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema))
+
+			assert.False(t, rep.ParentCreated)
+			assert.Equal(t, 3, rep.Partitions)
+			require.Len(t, rep.Worked, 2)
+			byTable := map[string]executor.PartitionIndexResult{}
+			for _, w := range rep.Worked {
+				byTable[w.Table] = w
+			}
+			assert.Equal(t, executor.PartitionIndexReused, byTable["orders_us"].Action)
+			assert.Equal(t, unattached, byTable["orders_us"].Index)
+			assert.Equal(t, executor.PartitionIndexBuilt, byTable["orders_ap"].Action)
+			f.requireCovered(t, "orders", "idx_orders_total", partitions...)
+		})
+
+		// The partition's own index with the requested definition is adopted
+		// under its own name, and the report says so. From then on it is a
+		// partition of the parent's index. One that differs, or that backs a
+		// constraint, is left alone and a new index is built.
+		t.Run("adopts a matching index and leaves the others alone", func(t *testing.T) {
+			f := newFixture(t)
+			f.ordersByRegion(t)
+			f.exec(t, `CREATE INDEX orders_eu_total ON %s.orders_eu (total)`, f.schema)
+			f.exec(t, `CREATE INDEX orders_us_total_desc ON %s.orders_us (total DESC)`, f.schema)
+			f.exec(t, `ALTER TABLE %s.orders_ap ADD CONSTRAINT orders_ap_total_key UNIQUE (total, region, id)`, f.schema)
+			f.exec(t, `CREATE UNIQUE INDEX orders_ap_total_idx ON %s.orders_ap (total, region, id)`, f.schema)
+
+			rep := f.build(t, "orders", fmt.Sprintf("CREATE UNIQUE INDEX idx_orders_uq ON ONLY %s.orders (total, region, id)", f.schema))
+
+			byTable := map[string]executor.PartitionIndexResult{}
+			for _, w := range rep.Worked {
+				byTable[w.Table] = w
+			}
+			assert.Equal(t, executor.PartitionIndexBuilt, byTable["orders_eu"].Action, "a non-unique index is not the unique one requested")
+			assert.Equal(t, executor.PartitionIndexBuilt, byTable["orders_us"].Action)
+			assert.Equal(t, executor.PartitionIndexAdopted, byTable["orders_ap"].Action, "the plain unique index with the same key is adopted")
+			assert.Equal(t, "orders_ap_total_idx", byTable["orders_ap"].Index)
+			f.requireCovered(t, "orders", "idx_orders_uq", "orders_eu", "orders_us", "orders_ap")
+			assert.Empty(t, f.indexesOn(t, "orders_ap")["orders_ap_total_key"].parent, "the constraint's index is not attached")
+			assert.Empty(t, f.indexesOn(t, "orders_eu")["orders_eu_total"].parent)
+			assert.Empty(t, f.indexesOn(t, "orders_us")["orders_us_total_desc"].parent)
+		})
+
+		// A partition created after the parent's index exists comes with an
+		// index already attached, cloned by the server, so a rerun finds
+		// nothing to do for it.
+		t.Run("a partition created later is covered by the server", func(t *testing.T) {
+			f := newFixture(t)
+			partitions := f.ordersByRegion(t)
+			stmt := fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema)
+			f.build(t, "orders", stmt)
+			f.exec(t, `CREATE TABLE %[1]s.orders_sa PARTITION OF %[1]s.orders FOR VALUES IN ('sa')`, f.schema)
+
+			rep := f.build(t, "orders", stmt)
+
+			assert.Equal(t, 4, rep.Partitions)
+			assert.Empty(t, rep.Worked)
+			f.requireCovered(t, "orders", "idx_orders_total", append(partitions, "orders_sa")...)
+		})
+
 		// NULLS NOT DISTINCT is part of the printed definition from
 		// PostgreSQL 15 on, so a unique index that sets it must keep it on
 		// every partition. Earlier servers do not have the option, so the

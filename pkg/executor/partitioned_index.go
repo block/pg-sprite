@@ -4,9 +4,10 @@
 // documented alternative is three steps: create the parent's index with ONLY,
 // which builds nothing; build each partition's index concurrently; attach each
 // one. This executor runs them partition by partition under the parent's table
-// lock (docs/partitioned-index-build-design.md). A partition's build is the
-// concurrent build executor's own (cic_build.go), with the same budget and
-// failure verdict as an index on a plain table.
+// lock, resumable at every step (docs/partitioned-index-build-design.md). A
+// partition's build is the concurrent build executor's own (cic_build.go), with
+// the same budget, failure verdict, and debris proofs as an index on a plain
+// table.
 
 package executor
 
@@ -38,14 +39,23 @@ const (
 	// PartitionIndexBuilt means the build created the partition's index
 	// concurrently, then attached it.
 	PartitionIndexBuilt PartitionIndexAction = "built"
+	// PartitionIndexReused means the partition already had a valid index of
+	// the requested definition, under the derived name, that no partitioned
+	// index owned: one an earlier run built and did not attach.
+	PartitionIndexReused PartitionIndexAction = "reused"
+	// PartitionIndexAdopted means the partition already had a valid index of
+	// the requested definition under another name, and the build attached it
+	// instead of building one. From then on it is a partition of the parent's
+	// index, which the server refuses to drop on its own.
+	PartitionIndexAdopted PartitionIndexAction = "adopted"
 	// PartitionIndexOnly means the partition is itself partitioned, so the
 	// build gave it a metadata-only index, filled by its partitions' indexes,
 	// and attached that.
 	PartitionIndexOnly PartitionIndexAction = "partitioned"
 )
 
-// PartitionIndexResult is one partition the build gave an index. A partition
-// that already had its index attached is counted in
+// PartitionIndexResult is one partition the build had work to do on. A
+// partition that already had its index attached is counted in
 // PartitionedIndexReport.Partitions and not listed here.
 type PartitionIndexResult struct {
 	// Schema and Table identify the partition.
@@ -57,6 +67,10 @@ type PartitionIndexResult struct {
 	IndexOID uint32 `json:"index_oid"`
 	// Action says how the partition got its index.
 	Action PartitionIndexAction `json:"action"`
+	// RecoveredDebris is true when the build first removed the invalid
+	// leftover of an earlier failed build of this partition's index, under the
+	// proof RebuildAbandonedIndex gives.
+	RecoveredDebris bool `json:"recovered_debris,omitempty"`
 }
 
 // PartitionedIndexReport says what a partitioned index build did. It is
@@ -68,7 +82,8 @@ type PartitionedIndexReport struct {
 	Index  string `json:"index"`
 	// IndexOID is the verified index's catalog identity.
 	IndexOID uint32 `json:"index_oid"`
-	// ParentCreated is true when this run created the parent's index.
+	// ParentCreated is true when this run created the parent's index, and
+	// false when it resumed one an earlier run left invalid.
 	ParentCreated bool `json:"parent_created"`
 	// Partitions is the number of partitions in the tree, at every depth.
 	Partitions int `json:"partitions"`
@@ -85,7 +100,7 @@ type PartitionedIndexReport struct {
 
 // BuildPartitionedIndex adds the index a CREATE INDEX statement describes to a
 // partitioned table, online, and returns once the parent's index is valid and
-// every partition has an index attached to it.
+// every partition in the tree has an index attached to it.
 //
 // The statement is one named, schema-qualified CREATE INDEX on the preflighted
 // partitioned table, with or without CONCURRENTLY and ON ONLY; every form asks
@@ -96,16 +111,22 @@ type PartitionedIndexReport struct {
 // the lock it:
 //
 //  1. refuses a tree that holds a foreign table (ErrForeignTablePartition);
-//  2. creates the parent's index with ON ONLY, refusing a name that is already
-//     taken (ErrPartitionedIndexNameTaken);
-//  3. gives each partition an attached index, recursively: a leaf gets an index
-//     built concurrently under a derived name, and a sub-partitioned partition
-//     gets its own ON ONLY index, filled the same way, before it is attached;
+//  2. creates the parent's index with ON ONLY, or resumes one an earlier run
+//     left when it is a partitioned index of the requested definition
+//     (ErrPartitionedIndexNameTaken otherwise);
+//  3. gives each partition an attached index, recursively: a leaf reuses or
+//     adopts a matching valid index or builds one concurrently under the
+//     derived name, and a sub-partitioned partition gets its own ON ONLY index,
+//     filled the same way, before it is attached;
 //  4. walks the tree again, up to a fixed number of passes, for partitions
-//     created meanwhile (ErrPartitionedIndexUnsettled when they keep appearing);
+//     created or attached meanwhile (ErrPartitionedIndexUnsettled when they keep
+//     appearing);
 //  5. re-reads the parent's index and returns only when it is valid.
 //
-// A failure at any point leaves a valid prefix. The build never drops an index.
+// A failure at any point leaves a valid prefix, and rerunning the same
+// statement resumes from it. An index adopted from a partition is attached, not
+// copied: it is removed with the parent's index or by detaching its partition.
+// The build never drops an index it did not prove abandoned.
 //
 // Every partition's build is bounded by b, one budget per partition; every
 // other statement runs under the pool's own bounded lock and statement
@@ -121,7 +142,8 @@ func BuildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool
 // updating tracker, which the caller may poll concurrently. A step is one
 // partition, the parent's index being step one, and total_steps is the
 // partitions found plus one, growing when the build finds more. It is an upper
-// bound: a partition that already has its index attached takes no step.
+// bound: a partition that already has its index attached takes no step, so a
+// resumed run finishes below it.
 func BuildPartitionedIndexWithProgress(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget, tracker *progress.Tracker) (rep PartitionedIndexReport, err error) {
 	if tracker == nil {
 		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
