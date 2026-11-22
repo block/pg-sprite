@@ -274,8 +274,8 @@ func desiredStatementRefusal(kind statement.Kind) (verdict.Refusal, bool) {
 
 // DesiredFileRefusal reports whether err is a refusal of the desired file
 // itself, returned by [statement.ParseDesiredFile] before anything is
-// planned or by the planner while it builds the desired table, and returns
-// the refusal verdict for it. sql is the refused statement when err does
+// planned, by the planner while it builds the desired table, or by the diff
+// for a change it does not derive, and returns the refusal verdict for it. sql is the refused statement when err does
 // not name one (the file's CREATE TABLE for a planner refusal); a parse
 // refusal that names its statement reports that one instead. ok is false
 // for every other error, including a syntax error, which is an input error
@@ -283,7 +283,7 @@ func desiredStatementRefusal(kind statement.Kind) (verdict.Refusal, bool) {
 func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 	ref, ok := desiredFileRefusal(err)
 	if !ok {
-		ref, ok = desiredShapeRefusal(err)
+		ref, ok = desiredPlanRefusal(err)
 	}
 	if !ok {
 		return verdict.Verdict{}, false

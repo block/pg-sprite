@@ -77,7 +77,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 16, "the doc publishes sixteen captured --json outputs")
+	require.Len(t, blocks, 17, "the doc publishes seventeen captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -209,9 +209,17 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	typeFileRefused, ok := migrate.DesiredFileRefusal(typeFileErr, "")
 	require.True(t, ok, "a type file is a desired-file refusal: %v", typeFileErr)
 
+	accounts, err := statement.ParseDesiredFile("CREATE TABLE accounts (\n  id bigint PRIMARY KEY,\n  status text NOT NULL\n);\n")
+	require.NoError(t, err)
+	_, tunedErr := schemadiff.Diff("app",
+		schemadiff.Model{Table: "accounts", Options: []string{"fillfactor=70"}},
+		schemadiff.Model{Table: "accounts"})
+	tunedRefused, ok := migrate.DesiredFileRefusal(tunedErr, accounts.Statements()[0].SQL())
+	require.True(t, ok, "a storage parameter difference is a desired-file refusal: %v", tunedErr)
+
 	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, rewriteRequired,
 		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
-		lintReport, diff, typeFileRefused}
+		lintReport, diff, typeFileRefused, tunedRefused}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
 		require.NoError(t, err)

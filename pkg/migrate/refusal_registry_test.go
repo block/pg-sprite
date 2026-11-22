@@ -29,7 +29,8 @@ type classifiedKey struct {
 // deriveRefusalKeys walks every closed set the registry is keyed on —
 // executor.CreateShapeCauses(), preflight.PartitionRefusalCauses(),
 // preflight.CopySwapRefusalCauses(), schemachange.RefusalCauses(), the two
-// admission sentinel sets, statement.Kinds() (with and without CONCURRENTLY,
+// admission sentinel sets, schemadiff.UnsupportedCauses(), statement.Kinds()
+// (with and without CONCURRENTLY,
 // and as a statement a desired file may not hold), the desired file's second
 // table, and the site walk — and classifies each key through the production
 // registry. Admitted statement kinds are returned with ok false and are the
@@ -58,6 +59,10 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 	for _, err := range desiredShapeSentinels() {
 		r, ok := desiredShapeRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"desired-shape:" + err.Error(), r, ok})
+	}
+	for _, c := range schemadiff.UnsupportedCauses() {
+		r, ok := desiredPlanRefusal(fmt.Errorf("wrapped: %w", &schemadiff.UnsupportedChangeError{Cause: c}))
+		keys = append(keys, classifiedKey{"unsupported-change:" + string(c), r, ok})
 	}
 	for _, k := range statement.Kinds() {
 		r, ok := desiredFileRefusal(fmt.Errorf("statement 2: %w", &statement.DisallowedStatementError{SQL: "-", Kind: k}))
@@ -123,6 +128,7 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 	require.NotEmpty(t, createAdmissionSentinels())
 	require.NotEmpty(t, desiredShapeSentinels())
 	require.NotEmpty(t, desiredFileSentinels())
+	require.NotEmpty(t, schemadiff.UnsupportedCauses())
 	require.NotEmpty(t, siteRefusals())
 	require.Greater(t, len(keys), 20, "the walk covers causes, sentinels, kinds, and sites")
 	require.ElementsMatch(t, []string{
@@ -141,6 +147,7 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 		"create-admission:" + executor.ErrDuplicateCreateName.Error(),
 		"desired-file:disallowed " + statement.KindCatalogWork.String(),
 		"desired-file:second-table/partition=true",
+		"unsupported-change:" + string(schemadiff.CauseStorageParameters),
 		"gate:" + statement.KindOther.String() + "/concurrent=false",
 		"site:plan-incoherent",
 		"site:copy-and-swap-not-enabled",

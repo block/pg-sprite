@@ -13,8 +13,9 @@ refuse the statement before planning it, or refuse its routed steps from their s
 an unsupported statement kind, an unnamed or `IF NOT EXISTS` index build, a `DETACH
 PARTITION`. `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
 file itself is refused before a plan exists: a statement the file may not hold (a type, a data
-change), a second table, partitions of a table, or a table shape the planner cannot build. That
-verdict exits 2 and carries no `format_version`, `fingerprint`, or `exec_sql`; a consumer
+change), a second table, partitions of a table, a table shape the planner cannot build, or a
+difference the diff does not converge (storage parameters, persistence, a collation, an identity,
+a generated column, a serial column). That verdict exits 2 and carries no `format_version`, `fingerprint`, or `exec_sql`; a consumer
 branches on the exit code and on whether `format_version` is present before reading the output
 as a report. ([CLI output examples](cli-output-examples.md) shows
 both shapes.)

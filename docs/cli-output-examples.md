@@ -803,6 +803,38 @@ $ pg-sprite diff --desired /tmp/account_status.sql --json
 }
 ```
 
+### Refused: a difference the diff does not converge (`unsupported-statement`) — exit 2
+
+Some differences between a live table and its desired file are compared but
+never converged: storage parameters, persistence, a column's collation, an
+identity or its sequence, a generated column. `diff` refuses the file with
+the refusal verdict instead of a plan report, classed by what differs. A
+tuned storage parameter is the owner's to change directly, so it names
+`direct-operator`; a persistence or collation change needs a rewrite the
+planner does not construct, so it is a capability boundary.
+`migrate --desired` refuses the same file the same way, and nothing runs.
+
+```sql
+-- live: CREATE TABLE app.accounts (...) WITH (fillfactor = 70);
+-- /tmp/accounts.sql
+CREATE TABLE accounts (
+  id bigint PRIMARY KEY,
+  status text NOT NULL
+);
+```
+
+```console
+$ pg-sprite diff --schema app --desired /tmp/accounts.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "no-online-safety-problem",
+  "owner": "direct-operator",
+  "statement": "CREATE TABLE accounts (id bigint PRIMARY KEY, status text NOT NULL)",
+  "detail": "table storage parameters differ between live (fillfactor=70) and desired (none); declare the live parameters in the desired file: unsupported schema change; nothing was planned or executed"
+}
+```
+
 ## Capabilities
 
 `capabilities` needs no database: it prints the embedded support matrix
