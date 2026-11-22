@@ -30,7 +30,7 @@ func TestExecuteNativeAsStepRefusesATrackerWithNoStep(t *testing.T) {
 func TestRunSequenceAsStepRefusesAStepWithNoTracker(t *testing.T) {
 	_, err := executor.RunSequenceAsStep(t.Context(), nil, preflight.PreflightedTable{},
 		[]string{"ALTER TABLE s.t ADD COLUMN v int"}, executor.SequenceBudget{}, executor.DefaultRetryPolicy(),
-		nil, nil, executor.RunStep{Step: 2})
+		nil, nil, nil, executor.RunStep{Step: 2})
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
 
@@ -39,6 +39,6 @@ func TestRunSequenceAsStepRefusesAStepWithNoTracker(t *testing.T) {
 func TestRunSequenceAsStepRefusesBothAnAdoptionAndAValidation(t *testing.T) {
 	_, err := executor.RunSequenceAsStep(t.Context(), nil, preflight.PreflightedTable{},
 		[]string{"ALTER TABLE s.t ADD COLUMN v int"}, executor.SequenceBudget{}, executor.DefaultRetryPolicy(),
-		&schemadiff.IndexAdoption{Index: "i"}, &schemadiff.ConstraintValidation{Constraint: "c"}, executor.RunStep{})
+		&schemadiff.IndexAdoption{Index: "i"}, &schemadiff.ConstraintValidation{Constraint: "c"}, nil, executor.RunStep{})
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
