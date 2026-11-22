@@ -850,9 +850,11 @@ that ends mid-query closes the connection; `Tracker.CancelBuild` signals the sam
 `TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`);
 `pkg/executor` `BuildPartitionedIndex` runs every step except a partition's concurrent build in
 its own transaction and refuses the step when the session's `lock_timeout` or `statement_timeout`
-is 0, so its `ALTER INDEX ... ATTACH PARTITION`, which holds `ACCESS EXCLUSIVE` on the partition's
-index until it commits, waits behind running statements on that partition and holds back new ones
-only for the bounded `lock_timeout`
+is 0. Its `ALTER INDEX ... ATTACH PARTITION` holds `ACCESS EXCLUSIVE` on the partition's index
+until it commits: `lock_timeout` bounds how long it waits to acquire that lock behind running
+statements on the partition, and `statement_timeout` bounds each statement of the brief
+transaction, so new statements on that partition are held back for at most the transaction's
+statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.

@@ -490,19 +490,16 @@ func (f *partitionedIndexFlow) attach(ctx context.Context, node partitionNode, p
 	return nil
 }
 
-// detachedBeforeAttach is the refusal for a partition that left the tree
-// after the build listed it. The index the build made on it before the attach
-// stays on the table that left, and the error names both so an operator can
-// drop it, or keep it for that table.
+// detachedBeforeAttach is the refusal for a partition that is no longer in
+// the tree as the build listed it: detached, renamed, dropped, or replaced.
+// The names the build captured may no longer name those relations, and a
+// derived name does not prove this run made the index, so the error gives
+// them as last-known names and asks an operator to inspect the catalog.
 // INV: ST-7 — the build never attaches an index of a table it did not prove
-// to be in the tree, and says what it left behind.
+// to be in the tree, and says what it may have left behind.
 func (f *partitionedIndexFlow) detachedBeforeAttach(node partitionNode, child relationFacts, cause error) error {
-	leftover := qualifiedName(child.schema, child.name)
-	if child.name == derivedPartitionIndexName(f.req.index, node.oid) {
-		return fmt.Errorf("%w; the index %s that the build made on %s was not attached and stays on that table",
-			cause, leftover, node.qualified())
-	}
-	return fmt.Errorf("%w; the index %s on %s was not attached", cause, leftover, node.qualified())
+	return fmt.Errorf("%w; the index last known as %s (%d) on the partition last known as %s (table %d) was not attached; inspect the catalog for it before dropping or keeping it",
+		cause, qualifiedName(child.schema, child.name), child.oid, node.qualified(), node.oid)
 }
 
 const attachReadBackSQL = `SELECT EXISTS (
