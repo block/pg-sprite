@@ -280,7 +280,10 @@ func (r replayer) run(ctx context.Context, tx pgx.Tx, stmts []string) error {
 // the text a desired file pulled from the live table carries, one replay
 // behind what building that file prints. The live text is replayed in a
 // savepoint that is always rolled back, so the scratch table keeps the
-// settled texts. A live table that does not exist yet has nothing to match.
+// settled texts. A check the file leaves unnamed is compared with every
+// live check the file does not name (livePrecursorCandidates), since its
+// live copy may hold another generated name. A live table that does not
+// exist yet has nothing to match.
 func (r replayer) recordLivePrecursors(ctx context.Context, target string, settled Model) (Model, error) {
 	if target == "" {
 		return settled, nil
@@ -312,24 +315,24 @@ func (r replayer) recordLivePrecursors(ctx context.Context, target string, settl
 			settled.Columns[i].DefaultReplays = append(settled.Columns[i].DefaultReplays, l.Default)
 		}
 	}
-	liveCons := constraintsByName(live.Constraints)
 	for i, c := range settled.Constraints {
-		l, ok := liveCons[c.Name]
-		if !ok || !strings.HasPrefix(c.Def, "CHECK ") {
+		if !strings.HasPrefix(c.Def, "CHECK ") {
 			continue
 		}
-		def := liveDefWithoutNotValid(l)
-		if !strings.HasPrefix(def, "CHECK ") || onChain(def, c.Def, c.DefReplays) {
-			continue
-		}
-		candidate := c
-		candidate.Def = def
-		after, ok, err := r.replayInSavepoint(ctx, Model{Constraints: []Constraint{candidate}})
-		if err != nil {
-			return Model{}, err
-		}
-		if ok && onChain(constraintsByName(after.Constraints)[c.Name].Def, c.Def, c.DefReplays) {
-			settled.Constraints[i].DefReplays = append(settled.Constraints[i].DefReplays, def)
+		for _, l := range livePrecursorCandidates(live, settled, c) {
+			def := liveDefWithoutNotValid(l)
+			if !strings.HasPrefix(def, "CHECK ") || onChain(def, c.Def, settled.Constraints[i].DefReplays) {
+				continue
+			}
+			candidate := c
+			candidate.Def = def
+			after, ok, err := r.replayInSavepoint(ctx, Model{Constraints: []Constraint{candidate}})
+			if err != nil {
+				return Model{}, err
+			}
+			if ok && onChain(constraintsByName(after.Constraints)[c.Name].Def, c.Def, c.DefReplays) {
+				settled.Constraints[i].DefReplays = append(settled.Constraints[i].DefReplays, def)
+			}
 		}
 	}
 	liveIdx := indexesByName(live.Indexes)
@@ -353,6 +356,35 @@ func (r replayer) recordLivePrecursors(ctx context.Context, target string, settl
 		}
 	}
 	return settled, nil
+}
+
+// livePrecursorCandidates returns the live constraints whose text may be a
+// precursor of the desired check c. A check the file names is compared
+// with the live constraint of that name only. A check the server named on
+// the scratch table may sit under a different generated name on the live
+// table (matchGeneratedCheckNames), so every live constraint is a
+// candidate except one whose name the file states, which belongs to that
+// declaration.
+func livePrecursorCandidates(live, settled Model, c Constraint) []Constraint {
+	if !c.GeneratedName {
+		if l, ok := constraintsByName(live.Constraints)[c.Name]; ok {
+			return []Constraint{l}
+		}
+		return nil
+	}
+	stated := make(map[string]bool)
+	for _, d := range settled.Constraints {
+		if !d.GeneratedName {
+			stated[d.Name] = true
+		}
+	}
+	var candidates []Constraint
+	for _, l := range live.Constraints {
+		if !stated[l.Name] {
+			candidates = append(candidates, l)
+		}
+	}
+	return candidates
 }
 
 // replayInSavepoint replays m's expressions on the scratch table in a

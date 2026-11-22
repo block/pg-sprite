@@ -91,3 +91,55 @@ CREATE TABLE requests (
 	require.NoError(t, err)
 	assert.Empty(t, changes)
 }
+
+// A desired file written from the live table holds each check's live text.
+// For a nested row comparison, building that text prints the next, more
+// expanded text, one replay ahead of the live one. When the unnamed checks
+// also sit under shifted names, each desired check still finds its live
+// text under the other name and the plan is empty.
+func TestDiffMatchesAShiftedUnnamedCheckWrittenFromItsLiveText(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, sql := range []string{
+		`CREATE TABLE %[1]s.t (
+			a int, b int, c int, d int, e int,
+			CHECK (((a, b), (c, d), e) IS DISTINCT FROM ((1, 2), (3, 4), 5))
+		)`,
+		`ALTER TABLE %[1]s.t ADD CHECK (((a, b), (c, d), e) IS DISTINCT FROM ((1, 2), (3, 4), 6))`,
+	} {
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(sql, schema))
+		require.NoError(t, err)
+	}
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	liveDefs := make(map[string]string)
+	for _, c := range live.Constraints {
+		liveDefs[c.Name] = c.Def
+	}
+	require.Contains(t, liveDefs, "t_check")
+	require.Contains(t, liveDefs, "t_check1")
+
+	// The file declares the live texts in the opposite order, so each one
+	// takes the other's generated name.
+	ds, err := statement.ParseDesired(fmt.Sprintf(`
+CREATE TABLE t (
+  a int, b int, c int, d int, e int,
+  %s,
+  %s
+);
+`, liveDefs["t_check1"], liveDefs["t_check"]))
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	for _, c := range desired.Constraints {
+		require.NotEqual(t, liveDefs["t_check"], c.Def, "building the live text must print the next text, or this case tests nothing")
+		require.NotEqual(t, liveDefs["t_check1"], c.Def, "building the live text must print the next text, or this case tests nothing")
+	}
+
+	changes, err := schemadiff.Diff(schema, live, desired)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+}
