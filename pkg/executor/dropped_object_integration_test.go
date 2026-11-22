@@ -1,13 +1,16 @@
 package executor_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -163,6 +166,7 @@ func TestRunSequenceDroppingRefusesAStatementThatDoesNotDropTheObject(t *testing
 		"another column":    fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN other", schema),
 		"another kind":      fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN extra int", schema),
 		"two drops at once": fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note, DROP COLUMN other", schema),
+		"cascade":           fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note CASCADE", schema),
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := runDropping(t, pool, schema, d, sql)
@@ -302,4 +306,86 @@ func TestRunSequenceDroppingRefusesAReplacedDependent(t *testing.T) {
 	require.ErrorIs(t, err, executor.ErrDroppedObjectDrift)
 	assert.Contains(t, err.Error(), "UNIQUE")
 	assert.True(t, columnExists(t, pool, schema, "t", "note"))
+}
+
+// Only one step's drop is checked against the plan, so a plan in which a
+// second step drops the same name again is refused before anything runs.
+func TestRunSequenceDroppingRefusesTwoStepsThatDropTheObject(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`, schema))
+	require.NoError(t, err)
+	d := modeltest.PlannedDrop(t, pool, schema, "t", schemadiff.DroppedColumn, "note")
+	pt := mustPreflight(t, pool, schema, "t")
+
+	_, err = executor.RunSequenceDropping(t.Context(), pool, pt, []string{
+		fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema),
+		fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN note int", schema),
+		fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema),
+	}, runBudget, executor.DefaultRetryPolicy(), d)
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.True(t, columnExists(t, pool, schema, "t", "note"))
+}
+
+// A column drop on a table with an inheritance child drops the child's
+// copy of the column too, which the plan did not review. It is refused,
+// read under the table's lock, and every copy stays.
+func TestRunSequenceDroppingRefusesAColumnOnATableWithChildren(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`, schema))
+	require.NoError(t, err)
+	d := modeltest.PlannedDrop(t, pool, schema, "t", schemadiff.DroppedColumn, "note")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t_child () INHERITS (%[1]s.t);
+		CREATE INDEX t_child_note_idx ON %[1]s.t_child (note)`, schema))
+	require.NoError(t, err)
+
+	err = runDropping(t, pool, schema, d, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema))
+	require.ErrorIs(t, err, executor.ErrDroppedColumnHasDescendants)
+	assert.Equal(t, executor.CodeDroppedColumnHasDescendants, executor.OutcomeCode(err))
+	assert.True(t, columnExists(t, pool, schema, "t", "note"))
+	assert.True(t, columnExists(t, pool, schema, "t_child", "note"))
+}
+
+// The definition is read after the table lock is granted, not before. A
+// session that holds the lock while it replaces the column commits before
+// the read, so the reviewed NOT NULL drop sees the new column and refuses,
+// and the new column keeps its NOT NULL.
+func TestRunSequenceDroppingReadsTheNotNullAfterTheLock(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t (id int PRIMARY KEY, b int NOT NULL)`, schema))
+	require.NoError(t, err)
+	d := modeltest.PlannedDrop(t, pool, schema, "t", schemadiff.DroppedNotNull, "b")
+	pt := mustPreflight(t, pool, schema, "t")
+
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), fmt.Sprintf(`
+		LOCK TABLE %[1]s.t IN ACCESS EXCLUSIVE MODE;
+		ALTER TABLE %[1]s.t DROP COLUMN b;
+		ALTER TABLE %[1]s.t ADD COLUMN b int NOT NULL DEFAULT 0`, schema))
+	require.NoError(t, err)
+
+	budget := runBudget
+	budget.Brief.LockTimeout = 30 * time.Second
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.RunSequenceDropping(t.Context(), pool, pt,
+			[]string{fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN b DROP NOT NULL", schema)},
+			budget, executor.DefaultRetryPolicy(), d)
+		done <- err
+	}()
+	require.Eventually(t, func() bool {
+		blocked, err := testutil.BlockedBy(t.Context(), pool, holder.Conn().PgConn().PID())
+		return err == nil && blocked
+	}, 30*time.Second, 25*time.Millisecond, "the drop must be waiting on the holder's lock")
+	require.NoError(t, holder.Commit(t.Context()))
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, executor.ErrDroppedObjectDrift)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the drop must finish once the holder commits")
+	}
+	assert.True(t, columnNotNull(t, pool, schema, "t", "b"), "the replacement column's NOT NULL must survive")
 }
