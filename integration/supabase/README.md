@@ -12,7 +12,7 @@ results to the workflows you can use today and includes commands to run the suit
 | Succeeds | pg-sprite executed the requested change and the database checks matched the expected result |
 | Requires unavailable copy-and-swap | pg-sprite refused the change with `backend-unavailable`; it did not execute the requested DDL |
 | Routes to copy-and-swap | With the route opened, its preflight refused the change with `copy-and-swap-refused` before writing anything, and the desired plan routes it to copy-and-swap |
-| Refuses a destructive desired plan | The entire plan was refused, including any supported additions in the same plan |
+| Refuses a destructive desired plan | Run without a pinned fingerprint and acknowledgement, the entire plan was refused, including any supported additions in the same plan |
 | Execution fails | The expected error occurred, and the test verified the durable state left behind |
 
 A passing refusal test does **not** mean the change is supported. When the engine

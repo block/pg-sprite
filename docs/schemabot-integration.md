@@ -788,7 +788,9 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   refused whole with `destructive-change`, class `by-design`, and nothing runs, unless the
   request carries both `DesiredRequest.ExpectedFingerprint`, the `plan.Report` fingerprint of
   the plan the operator reviewed, and `DesiredRequest.AllowDestructive`, the desired file's
-  resolved schema-qualified table. The acknowledgement is not the `Options` field, which
+  resolved schema-qualified table. A preview that has been through `plan.RefuseDestructive`,
+  as the CLI's dry-run JSON has, carries a `Fingerprint` that covers the refused plan and
+  cannot be pinned: pin its `PinnableFingerprint` (`pinnable_fingerprint`) instead. The acknowledgement is not the `Options` field, which
   `RunDesired` still rejects. `AllowDestructive` without `ExpectedFingerprint` is
   `migrate.ErrAllowDestructiveNeedsFingerprint` before any database work, and one naming
   another table is `migrate.ErrAllowDestructiveMismatch` before any statement runs, even
