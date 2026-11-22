@@ -664,6 +664,35 @@ not permanent, yet belong in neither group. The change may have committed, so a 
 can replay it onto its own result or resume a sequence from a step that already ran; route
 them to catalog inspection before any retry.
 
+## Outcomes of a partitioned index build
+
+`executor.BuildPartitionedIndex` builds one index on a partitioned table, partition by
+partition, under the table's advisory lock. It stops at the first error and keeps what it
+finished: every partition index already attached stays attached, and the parent's index stays
+invalid until every partition has one. **Running the same statement again resumes from there**,
+so "what persists" below is also what the rerun builds on. Route each outcome by its code
+(`executor.OutcomeCode`), never by error text:
+
+| Outcome | Persists | Retry | Orchestrator action |
+| --- | --- | --- | --- |
+| `not-create-index` | nothing | no, permanent | The statement is not a single `CREATE INDEX`; fix the caller, not the database |
+| `not-partitioned-table` | nothing | no, permanent | The target is not a partitioned table (it changed since the plan, or it was never one); re-plan so the change routes to the concurrent build instead |
+| `foreign-table-partition` | nothing | no, permanent | A foreign table in the tree cannot carry an index, so the parent's index could never become valid; surface to an operator to detach or replace that partition, then re-plan |
+| `partitioned-index-tablespace` | nothing | no, permanent | The statement has a `TABLESPACE` clause, which would reach the parent's index and not the partitions' indexes; remove the clause from the desired file (a partition's tablespace is chosen when the partition is created), then re-plan |
+| `partitioned-index-name-taken` | whatever was finished | no, permanent | A relation that is not the requested index holds a name the build needs. The build never renames or drops it; an operator removes or renames the occupant, then the same statement resumes |
+| `partitioned-index-unsettled` | everything finished | yes, after a wait | Partitions kept appearing faster than the build covered them. Retry the same statement; if it repeats, involve an operator to stop whatever is creating partitions |
+| `invariant-violation` whose text names ST-7 | whatever was finished; nothing on the table that was swapped in | no | A table, partition, or index changed under the build while it ran, and the build refused to act on the other relation (a concurrent build that already landed on a replacement table has its index dropped again). A partition detached after its index was built is refused the same way; the error names the index the build left on the detached table, which the operator drops or keeps for that table. Re-plan against the current catalog, then rerun; surface to an operator if it repeats |
+| `invariant-violation` whose text names LK-1 | nothing | no | The table lock is not held in the pool's database, or it was lost mid-run: the `dbconn.Config` and the pool point at different databases, or the lock session dropped. Fix the wiring or reconnect, then rerun. A lost lock joins `dbconn.ErrTableLockLost`, and it decides the code even when the partition build it cancelled left an invalid index, so a lost lock is never an `invalid-index-*` outcome. The rerun removes that leftover under its own proof |
+| `invariant-violation`, any other | whatever was finished | no | A partition's attached index is invalid, the catalog printed a definition the build does not recognize, or the parent index is invalid with every partition attached. The error names what to repair; an operator repairs it, then the statement resumes |
+| `invalid-index-*` | the invalid index | per the [invalid-index table](#invalid-index-outcomes-of-a-concurrent-index-build) | A partition's concurrent build left an invalid index. A rerun removes a leftover it proves abandoned and builds again, so there is no separate recovery call; the codes that say no (`invalid-index-build-in-flight`, `invalid-index-other-table`, `invalid-index-not-droppable`, `invalid-index-unproven`) route as in that table |
+| `commit-outcome-unknown` | unknown for the last step | no, inspect first | A step's `COMMIT` did not return success. Read the catalog (the parent's index and its partitions) before rerunning |
+| `budget-lock-exceeded`, `budget-statement-exceeded` | whatever was finished | yes | A step's lock or statement bound ran out. Retry the same statement later; the finished partitions are not redone |
+| `*dbconn.TableLockHeldError` (no code) | nothing | yes, after a wait | Another session holds the table's lock; the error names the backend. Wait and retry |
+
+An adapter that enumerates `executor.Codes()` exhaustively must map every row above; the set
+is the contract, and [execution-model](execution-model.md#outcome-codes) is its canonical
+list. The design is in [partitioned-index-build-design](partitioned-index-build-design.md).
+
 ## Execution-mode verdicts and direct execution
 
 SchemaBot records a per-statement **execution-mode verdict** on each planned `TableChange`:

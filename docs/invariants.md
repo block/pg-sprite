@@ -768,13 +768,18 @@ preflight and before the lock session opens, that `CopySwapOptions.Connection` r
 pool's database (the cluster's system identifier and `current_database()` on both sides), and
 stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
 database does not exclude a run in this one (another-database, another-cluster, unreachable,
-and unidentifiable tests).
+and unidentifiable tests); `pkg/executor` `BuildPartitionedIndex` holds the parent's lock for the
+whole build, confirms from the pool that the backend holding it is in the pool's database
+(`ErrInvariantViolation` otherwise), runs every step under the session's `Bind` context, and
+reports a lost lock as `ErrInvariantViolation` wrapping `dbconn.ErrTableLockLost` whatever the
+cancelled step reported, so a build the loss cancelled never carries a retryable invalid-index
+code (`TestBuildPartitionedIndexReportsALostTableLockAsAnInvariantViolation`).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
 ### LK-2 — Exactly one `ACCESS EXCLUSIVE` window, and every strong lock is bounded
 
-The cutover swap is the only `ACCESS EXCLUSIVE` acquisition in the happy path, and **every**
+The cutover swap is the only `ACCESS EXCLUSIVE` acquisition on a table in the happy path, and **every**
 strong-lock acquisition (swap, catalog flips, trigger install if trigger capture is ever built) runs under
 `lock_timeout` + bounded retry/backoff so the engine never sits at the head of the lock queue
 ([mysql-vs-postgresql § the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue)).
@@ -814,7 +819,13 @@ that ends mid-query closes the connection; `Tracker.CancelBuild` signals the sam
 *Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
 `TestProgressRunsTheBuildReadDetachedFromTheObserver`,
 `TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
-`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`);
+`pkg/executor` `BuildPartitionedIndex` runs every step except a partition's concurrent build in
+its own transaction and refuses the step when the session's `lock_timeout` or `statement_timeout`
+is 0, so its `ALTER INDEX ... ATTACH PARTITION`, which holds `ACCESS EXCLUSIVE` on the partition's
+index until it commits, waits behind running statements on that partition and holds back new ones
+only for the bounded `lock_timeout`
+(`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1415,7 +1426,15 @@ operations with the shadow as its sole target —
 inside the build's transaction and before the statement runs, a `USING` expression the server
 does not classify as immutable, tried as a stored generated column's expression on the empty
 shadow and rolled back, since the copy, the recopy, and the catch-up evaluate the expression
-again and must get the same answer).
+again and must get the same answer); `pkg/executor` `BuildPartitionedIndex` admits only a
+named `CREATE INDEX` on the preflighted partitioned table, and proves by identity, inside the
+transaction that runs each statement, the table, partition, and index it names: a partition
+replaced under its name or detached from the tree after it was listed, an index swapped under its
+name, or an index created on another table refuses the run, and a concurrent build that landed on
+a replacement table has its index dropped again by proven identity
+(`TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved` and
+`TestBuildPartitionedIndexTreeChangesDuringARun`, which detaches a partition between its build
+and its attach).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof

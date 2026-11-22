@@ -204,7 +204,7 @@ func buildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool
 	// INV: LK-1 — a lock lost while the build ran voids what it did under the
 	// exclusion, whatever else it reported.
 	if lost := lock.Err(); lost != nil {
-		err = errors.Join(fmt.Errorf("%w (LK-1): %w: %w", ErrInvariantViolation, dbconn.ErrTableLockLost, lost), err)
+		err = lockLostError(lost, err)
 	}
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCleanupTimeout)
 	defer cancel()
@@ -213,6 +213,21 @@ func buildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool
 	}
 	rep.Duration = elapsedSince(tracker, start)
 	return rep, err
+}
+
+// lockLostError is the error of a build whose table lock was lost. The step
+// that was running when the lock went usually failed too, because the lost
+// lock cancels its context, and its typed error (an invalid index its
+// cancelled build left, an expired budget) would decide the outcome code
+// ahead of the invariant violation. The step's error is therefore kept as
+// text for the operator and not as a cause, so the code is always
+// invariant-violation and errors.Is finds dbconn.ErrTableLockLost.
+func lockLostError(lost, stepErr error) error {
+	lockErr := fmt.Errorf("%w (LK-1): %w: %w", ErrInvariantViolation, dbconn.ErrTableLockLost, lost)
+	if stepErr == nil {
+		return lockErr
+	}
+	return fmt.Errorf("%w; the step that was running then failed: %s", lockErr, stepErr.Error())
 }
 
 // confirmLockInPoolDatabase proves, from a pool session, that the backend
@@ -268,6 +283,8 @@ func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partition
 		return req, ErrUnnamedIndex
 	case ops[0].IfNotExists:
 		return req, ErrIfNotExistsUnsupported
+	case ops[0].Tablespace != "":
+		return req, fmt.Errorf("%w: TABLESPACE %q", ErrPartitionedIndexTablespace, ops[0].Tablespace)
 	case st.Schema() == "":
 		return req, ErrUnqualifiedTable
 	}

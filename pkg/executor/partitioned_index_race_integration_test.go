@@ -161,6 +161,52 @@ func TestBuildPartitionedIndexTreeChangesDuringARun(t *testing.T) {
 			assert.Zero(t, f.indexCount(t, "orders_us_old"), "the detached-by-name partition was not built either")
 		})
 
+		// A partition detached after its index was built and before the
+		// attach is no longer in the tree. The build refuses it with ST-7,
+		// attaches nothing, and names the index it left on the detached
+		// table; a rerun covers the partitions that remain.
+		t.Run("a partition detached between its build and its attach is refused and its leftover index named", func(t *testing.T) {
+			f := newFixture(t)
+			partitions := f.ordersByRegion(t)
+			stmt := fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema)
+			var detached, leftover string
+			hook := func() bool {
+				if !inFlow("partitionedIndexFlow).attach") {
+					return false
+				}
+				for _, p := range partitions {
+					name := f.derived(t, "idx_orders_total", p)
+					if row, ok := f.indexesOn(t, p)[name]; ok && row.parent == "" {
+						detached, leftover = p, name
+					}
+				}
+				require.NotEmpty(t, detached, "the hook must act after a partition's index is built and before it is attached")
+				f.exec(t, `ALTER TABLE %s.orders DETACH PARTITION %s.%s`, f.schema, f.schema, detached)
+				return true
+			}
+
+			_, err := f.runWithHook(t, "orders", stmt, hook)
+
+			require.ErrorIs(t, err, executor.ErrInvariantViolation)
+			assert.Equal(t, executor.CodeInvariantViolation, executor.OutcomeCode(err))
+			assert.Contains(t, err.Error(), "ST-7")
+			assert.Contains(t, err.Error(), f.schema+"."+detached, "the error names the detached partition")
+			assert.Contains(t, err.Error(), f.schema+"."+leftover, "the error names the index left on it")
+			row, ok := f.indexesOn(t, detached)[leftover]
+			require.True(t, ok, "the leftover index stays on the detached table")
+			assert.Empty(t, row.parent, "the leftover index is not attached")
+			assert.False(t, f.indexesOn(t, "orders")["idx_orders_total"].valid, "the parent's index stays invalid")
+
+			var remaining []string
+			for _, p := range partitions {
+				if p != detached {
+					remaining = append(remaining, p)
+				}
+			}
+			f.build(t, "orders", stmt)
+			f.requireCovered(t, "orders", "idx_orders_total", remaining...)
+		})
+
 		// An index renamed away and replaced under its name after the build
 		// chose it is not the index the build chose. The attach refuses it
 		// and attaches nothing.

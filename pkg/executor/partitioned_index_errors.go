@@ -23,6 +23,13 @@ var (
 	// never become valid; the build refuses the whole tree before it creates
 	// anything.
 	ErrForeignTablePartition = errors.New("the partition tree holds a foreign table, which cannot carry an index")
+	// ErrPartitionedIndexTablespace is returned when the statement has a
+	// TABLESPACE clause. A partition's index is built from the definition the
+	// server prints for the parent's index, and that definition never names a
+	// tablespace, so the clause would place the parent's index and leave every
+	// partition's index in the default tablespace. The build refuses the
+	// statement before it creates anything.
+	ErrPartitionedIndexTablespace = errors.New("a partitioned index build does not support a TABLESPACE clause")
 	// ErrPartitionedIndexUnsettled is returned when partitions kept appearing
 	// without an attached index for as long as the build's bounded number of
 	// passes. What the build finished stays attached.

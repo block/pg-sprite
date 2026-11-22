@@ -87,6 +87,10 @@ const (
 	// CodeForeignTablePartition: the partition tree holds a foreign table,
 	// which cannot carry an index; nothing was created.
 	CodeForeignTablePartition Code = "foreign-table-partition"
+	// CodePartitionedIndexTablespace: the partitioned index statement has a
+	// TABLESPACE clause, which would reach the parent's index and not the
+	// partitions' indexes; nothing was created.
+	CodePartitionedIndexTablespace Code = "partitioned-index-tablespace"
 	// CodePartitionedIndexUnsettled: partitions kept appearing without an
 	// index until the build ran out of passes; a rerun resumes.
 	CodePartitionedIndexUnsettled Code = "partitioned-index-unsettled"
@@ -230,6 +234,7 @@ func Codes() []Code {
 		CodeNotPartitionedTable,
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
+		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
@@ -281,6 +286,7 @@ func (c Code) Permanent() bool {
 		CodeNotPartitionedTable,
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
+		CodePartitionedIndexTablespace,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -377,6 +383,8 @@ func sentinelCode(err error) Code {
 		return CodePartitionedIndexNameTaken
 	case errors.Is(err, ErrForeignTablePartition):
 		return CodeForeignTablePartition
+	case errors.Is(err, ErrPartitionedIndexTablespace):
+		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
 		return CodePartitionedIndexUnsettled
 	case errors.Is(err, ErrEmptySequence):
