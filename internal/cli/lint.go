@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/block/pg-sprite/pkg/lint"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // ErrLintFindings is returned by lint when the script has error-severity
@@ -32,6 +33,9 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 	} else if src, err = os.ReadFile(c.Path); err != nil {
 		return fmt.Errorf("read DDL file: %w", err)
 	}
+	if c.Desired {
+		return c.lintDesired(out, string(src))
+	}
 	report, err := lint.Check(string(src))
 	if err != nil {
 		return err
@@ -47,6 +51,34 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 	}
 	if report.Errors > 0 {
 		return fmt.Errorf("%w: %d", ErrLintFindings, report.Errors)
+	}
+	return nil
+}
+
+// lintDesired checks a desired schema file offline with the file admission
+// diff and migrate --desired share before they connect. A file that declares
+// a second table or partitions, or holds a statement such a file may not
+// hold, is refused with its verdict and exits 2. Any other rejection (a
+// schema-qualified name, CREATE INDEX CONCURRENTLY, an index on another
+// table, no CREATE TABLE, an invalid row-security rule, or invalid SQL) is an
+// input error, as it is for diff: it exits 1 with the error and prints no
+// verdict. An admitted file is clean: text prints nothing and JSON prints the
+// empty lint report. Its statements are declarations, not operations, so the
+// script rules do not apply to them; how the file differs from a live table
+// is diff's to report, because only diff reads the table, and so is a table
+// shape refused when the server builds it: admission does not mean planning
+// will succeed.
+func (c *LintCmd) lintDesired(out io.Writer, src string) error {
+	if _, err := statement.ParseDesiredFile(src); err != nil {
+		return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, "")
+	}
+	if !c.JSON {
+		return nil
+	}
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(lint.EmptyReport()); err != nil {
+		return fmt.Errorf("write lint report: %w", err)
 	}
 	return nil
 }

@@ -137,7 +137,8 @@ senders under `max_wal_senders` (the run holds one at a time;
 is headroom). Both apply only to a run
 that decodes WAL; a run that blocks writes skips them. The same check compares the free disk the
 caller measured on the database volume — PostgreSQL has no function that reports it —
-against the shadow copy's headroom, and
+against the shadow copy's headroom, less what a stopped run being resumed already holds on
+the volume, read from the server, and
 refuses an unmeasured volume rather than assuming it is large enough. The figure is the
 bytes the volume can still absorb before writes fail: on a fixed-size volume, the free
 space the host reports for the data directory; on a managed volume that grows on demand
@@ -189,6 +190,10 @@ GRANT USAGE, CREATE ON SCHEMA app TO app_owner;  -- if the owner lacks it
 -- Tier 3, only when copy-and-swap decodes WAL: one of
 GRANT rds_replication TO pgsprite_engine;          -- Aurora/RDS
 ALTER ROLE pgsprite_engine WITH REPLICATION;       -- self-managed
+-- The slot's inspection, and its drop, which judges the slot by that
+-- inspection, run pg_is_in_recovery(), pg_current_wal_lsn() and
+-- pg_wal_lsn_diff(). PUBLIC may execute them by default; a server that
+-- revokes that must grant EXECUTE on them to the role.
 
 -- Not grants, but checked alongside them for a run that decodes WAL:
 --   wal_level = logical          (rds.logical_replication = 1 on Aurora/RDS; both need a restart;

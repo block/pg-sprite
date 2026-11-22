@@ -240,8 +240,11 @@ func TestZeroDesiredFileOffersNoPlannerInput(t *testing.T) {
 	var file DesiredFile
 	_, isSchema := file.Schema()
 	_, isRowSecurity := file.RowSecurity()
+	_, isEnumType := file.EnumType()
 	assert.False(t, isSchema)
 	assert.False(t, isRowSecurity)
+	assert.False(t, isEnumType)
+	assert.Empty(t, file.Statements())
 }
 
 // FormatDesired refuses a commented row-security file with ErrCommentLoss and

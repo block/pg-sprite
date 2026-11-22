@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -216,6 +217,101 @@ func desiredShapeRefusal(err error) (verdict.Refusal, bool) {
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
+}
+
+// desiredFileSentinels is the closed set of whole-file refusals
+// statement.ParseDesiredFile returns for a file the declarative front door
+// does not admit, before anything is planned. desiredFileRefusal walks this
+// set for membership before it classifies.
+func desiredFileSentinels() []error {
+	return []error{
+		statement.ErrMultipleCreateTables,
+		statement.ErrDesiredPartitions,
+		statement.ErrDisallowedStatement,
+		statement.ErrEnumTypeAlone,
+		statement.ErrEnumLabel,
+	}
+}
+
+// desiredFileRefusal classifies a whole-file refusal from the desired-file
+// parser. A statement the file may not hold is classed as the imperative
+// gate classes it when the gate refuses that kind too: a data change, a
+// provisioning or catalog statement goes to its owner, and an unnamed
+// statement is a capability boundary. A statement the gate admits (a
+// change such as ALTER TABLE or DROP INDEX) is refused by design here, since
+// a desired file declares state and the imperative door runs changes.
+// Partitions are a capability boundary, as a desired PARTITION OF is; a
+// second unrelated table is refused by design, since the model is one table
+// per file. ok is false for an error outside desiredFileSentinels(), and for
+// a disallowed statement that does not carry its kind.
+func desiredFileRefusal(err error) (verdict.Refusal, bool) {
+	if !isInSentinelSet(err, desiredFileSentinels()) {
+		return verdict.Refusal{}, false
+	}
+	switch {
+	case errors.Is(err, statement.ErrDesiredPartitions):
+		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
+	case errors.Is(err, statement.ErrMultipleCreateTables),
+		errors.Is(err, statement.ErrEnumTypeAlone),
+		errors.Is(err, statement.ErrEnumLabel):
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
+	disallowed, ok := errors.AsType[*statement.DisallowedStatementError](err)
+	if !ok {
+		return verdict.Refusal{}, false
+	}
+	return desiredStatementRefusal(disallowed.Kind)
+}
+
+// desiredStatementRefusal classifies a statement kind a desired file may not
+// hold. ok is false for the two kinds the file admits.
+func desiredStatementRefusal(kind statement.Kind) (verdict.Refusal, bool) {
+	switch kind {
+	case statement.KindCreateTable, statement.KindCreateIndex:
+		return verdict.Refusal{}, false
+	case statement.KindDataChange, statement.KindProvisioning, statement.KindCatalogWork, statement.KindOther:
+		return gateRefusal(kind, false, statement.IndexTargetNone)
+	default:
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
+}
+
+// DesiredFileRefusal reports whether err is a refusal of the desired file
+// itself, returned by [statement.ParseDesiredFile] before anything is
+// planned, by the planner while it builds the desired table, or by the diff
+// for a change it does not derive, and returns the refusal verdict for it. sql is the refused statement when err does
+// not name one (the file's CREATE TABLE for a planner refusal); a parse
+// refusal that names its statement reports that one instead. ok is false
+// for every other error, including a syntax error, which is an input error
+// and not a refusal.
+func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
+	ref, ok := desiredFileRefusal(err)
+	if !ok {
+		ref, ok = desiredPlanRefusal(err)
+	}
+	if !ok {
+		return verdict.Verdict{}, false
+	}
+	detail := fmt.Sprintf("%v; nothing was planned or executed", err)
+	if disallowed, isStatement := errors.AsType[*statement.DisallowedStatementError](err); isStatement {
+		sql = disallowed.SQL
+		detail = "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, " +
+			"so this statement is not allowed in it; nothing was planned or executed"
+	}
+	if extra, isExtra := errors.AsType[*statement.EnumTypeFileError](err); isExtra {
+		sql = extra.SQL
+		detail = "a desired enum type file holds exactly one CREATE TYPE ... AS ENUM, so this statement belongs " +
+			"in a file of its own; nothing was planned or executed"
+	}
+	if second, isTable := errors.AsType[*statement.SecondTableError](err); isTable {
+		sql = second.SQL
+		detail = "a desired file holds exactly one CREATE TABLE; nothing was planned or executed"
+		if second.Partition {
+			detail = "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan " +
+				"partitions; nothing was planned or executed"
+		}
+	}
+	return verdict.Verdict{Statement: sql, Detail: detail}.WithRefusal(ref), true
 }
 
 // createAdmissionSentinels is the closed set of the create path's static

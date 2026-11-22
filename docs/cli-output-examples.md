@@ -31,7 +31,7 @@ COLUMN`, `DROP CONSTRAINT`, `DROP NOT NULL`) is one of those refusals until
 Exit 2 covers every refusal cause; the exit code answers *should this
 proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
-(warnings alone exit 0), and `diff` prints the plan and exits 2 when it
+(warnings alone exit 0) and `lint --desired` exits 2 when it refuses a desired file, and `diff` prints the plan and exits 2 when it
 contains a statement execution would refuse — a missing table is diff's
 greenfield case (the plan creates the table), not a refusal, unlike the
 dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
@@ -137,7 +137,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; desired-state execution runs no destructive statement, so run the drop deliberately through `migrate --alter` instead ([execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
-| `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. |
+| `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. A table refused with `copy-and-swap-pk-unsupported` because it has no primary key also carries `"guidance": "add-integer-primary-key"`, and its `detail` links the [steps to add one online](primary-keys.md#add-a-primary-key-online). |
 | `create-collision` | The greenfield create plan's table name or a claimed index, constraint-index, or sequence name is occupied. Nothing runs; re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal. Catalog absence checks handle existing occupants. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff. |
 
 Two codes that look like refusals are not: `create-name-mismatch` and
@@ -163,7 +163,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -204,7 +204,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -397,7 +397,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -439,7 +439,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -513,7 +513,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -550,7 +550,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -615,7 +615,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -702,6 +702,32 @@ $ pg-sprite lint /tmp/changes.sql --json
 }
 ```
 
+### A desired file refused offline (`lint --desired`) — exit 2
+
+`lint --desired` checks a desired file instead of a script: it runs the file
+admission `diff` and `migrate --desired` share before they connect, with no
+database. A file it refuses prints the same refusal verdict and exits 2; an
+admitted file is clean and exits 0. Planning can still refuse what admission
+does not inspect: a table shape built on the server, or a difference from the
+live table.
+
+```sql
+-- /tmp/events.sql
+CREATE TABLE events (id bigint NOT NULL, at date NOT NULL) PARTITION BY RANGE (at);
+CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+```
+
+```console
+$ pg-sprite lint --desired /tmp/events.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "capability-boundary",
+  "statement": "CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+  "detail": "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed"
+}
+```
+
 ## Pull
 
 `pull` exports every renderable table in a schema as a separate desired-state
@@ -743,7 +769,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 19,
+  "format_version": 21,
   "source": "diff",
   "schema": "public",
   "table": "users",
@@ -773,6 +799,66 @@ $ pg-sprite diff --desired /tmp/users.sql --json
       "execution": "autocommit-each-step"
     }
   ]
+}
+```
+
+### Refused before planning: a file that is not one table or one enum type (`unsupported-statement`) — exit 2
+
+A desired file holds one `CREATE TABLE`, its indexes, and its row security,
+or one `CREATE TYPE ... AS ENUM`. A file that holds anything else is refused
+before `diff` connects or plans, with the refusal verdict instead of a plan
+report. The class comes from the refused statement's kind, as the imperative
+front door would class it: a domain goes to the operator who runs catalog
+work, a data change to the data change runner. A second table, or a table in
+an enum type file, is refused by design, and partitions of a table as a
+capability boundary. `migrate --desired` refuses the same files the same way.
+
+```sql
+-- /tmp/account_email.sql
+CREATE DOMAIN account_email AS text;
+```
+
+```console
+$ pg-sprite diff --desired /tmp/account_email.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "no-online-safety-problem",
+  "owner": "direct-operator",
+  "statement": "CREATE DOMAIN account_email AS text",
+  "detail": "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"
+}
+```
+
+### Refused: a difference the diff does not converge (`unsupported-statement`) — exit 2
+
+Some differences between a live table and its desired file are compared but
+never converged: storage parameters, persistence, a column's collation, an
+identity or its sequence, a generated column. `diff` refuses the file with
+the refusal verdict instead of a plan report, classed by what differs. A
+tuned storage parameter is the owner's to change directly, so it names
+`direct-operator`; a persistence or collation change needs a rewrite the
+planner does not construct, so it is a capability boundary.
+`migrate --desired` refuses the same file the same way, and nothing runs.
+
+```sql
+-- live: CREATE TABLE app.accounts (...) WITH (fillfactor = 70);
+-- /tmp/accounts.sql
+CREATE TABLE accounts (
+  id bigint PRIMARY KEY,
+  status text NOT NULL
+);
+```
+
+```console
+$ pg-sprite diff --schema app --desired /tmp/accounts.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "no-online-safety-problem",
+  "owner": "direct-operator",
+  "statement": "CREATE TABLE accounts (id bigint PRIMARY KEY, status text NOT NULL)",
+  "detail": "table storage parameters differ between live (fillfactor=70) and desired (none); declare the live parameters in the desired file: unsupported schema change; nothing was planned or executed"
 }
 ```
 

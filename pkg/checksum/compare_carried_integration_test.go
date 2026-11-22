@@ -239,6 +239,85 @@ func TestCompareCarriedRefusesWhenAConversionResolvesDifferentlyThanAtTheBuild(t
 	assert.Empty(t, differing, "nothing was compared through the planted operator")
 }
 
+// A drift already in place when the compare starts is refused before any
+// key is read: the fingerprint check before the reads sees the planted
+// zero-answering integer * integer, so no key is judged through it (CO-9).
+// The statement hook would drop the operator just before the source read,
+// so a compare that skipped the first check would read through it, find
+// the catalog restored by the second check, and return keys judged by it.
+func TestCompareCarriedRefusesAConversionDriftBeforeItReadsAnyKey(t *testing.T) {
+	f := newVerifierFixture(t)
+	f.createOrders(t)
+	target := f.prove(t, "orders")
+	lock := f.lock(t, "orders")
+	shadow := f.build(t, lock, target, `
+		ALTER TABLE %s
+			DROP COLUMN note,
+			ALTER COLUMN qty TYPE bigint USING (qty * 1)::bigint`)
+	f.copy(t, target, shadow, lock)
+	verified := f.leaveForSwap(t, target, shadow, lock, touchOrders, 7)
+	f.exec(t, `
+		CREATE FUNCTION %s.times_zero(integer, integer) RETURNS integer
+			LANGUAGE sql IMMUTABLE
+			AS 'SELECT 0'`)
+	f.exec(t, `CREATE OPERATOR %s.* (LEFTARG = integer, RIGHTARG = integer, FUNCTION = %s.times_zero)`)
+	read := false
+	pool := f.poolHookedBeforeStatement(t, `SELECT "id", `, func() {
+		read = true
+		f.exec(t, `DROP OPERATOR %s.* (integer, integer)`)
+		f.exec(t, `DROP FUNCTION %s.times_zero(integer, integer)`)
+	})
+	tx, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context()))) })
+	f.execIn(t, tx, `LOCK TABLE %s.orders, `+f.shadowName(shadow)+` IN ACCESS EXCLUSIVE MODE`)
+
+	differing, err := checksum.CompareCarried(t.Context(), tx, target, shadow, verified)
+	require.ErrorIs(t, err, checksum.ErrConversionDrift)
+	assert.False(t, read, "no key was read once the drift was in place")
+	assert.Empty(t, differing)
+}
+
+// The compare confirms the build's fingerprint before it reads the keys
+// and again after: under the swap's READ COMMITTED transaction the source
+// read resolves the conversion afresh, so an operator committed after the
+// first check reaches the read unchecked. Here a concurrent session plants
+// the zero-answering integer * integer just as the source read is about
+// to be sent, after the first check passed; the second check sees it and
+// the compare refuses as an invariant violation naming the drift (CO-9),
+// instead of returning keys judged through the planted operator.
+func TestCompareCarriedRefusesAConversionDriftCommittedBeforeTheReads(t *testing.T) {
+	f := newVerifierFixture(t)
+	f.createOrders(t)
+	target := f.prove(t, "orders")
+	lock := f.lock(t, "orders")
+	shadow := f.build(t, lock, target, `
+		ALTER TABLE %s
+			DROP COLUMN note,
+			ALTER COLUMN qty TYPE bigint USING (qty * 1)::bigint`)
+	f.copy(t, target, shadow, lock)
+	verified := f.leaveForSwap(t, target, shadow, lock, touchOrders, 7)
+	planted := false
+	pool := f.poolHookedBeforeStatement(t, `SELECT "id", `, func() {
+		f.exec(t, `
+			CREATE FUNCTION %s.times_zero(integer, integer) RETURNS integer
+				LANGUAGE sql IMMUTABLE
+				AS 'SELECT 0'`)
+		f.exec(t, `CREATE OPERATOR %s.* (LEFTARG = integer, RIGHTARG = integer, FUNCTION = %s.times_zero)`)
+		planted = true
+	})
+	tx, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context()))) })
+	f.execIn(t, tx, `LOCK TABLE %s.orders, `+f.shadowName(shadow)+` IN ACCESS EXCLUSIVE MODE`)
+
+	differing, err := checksum.CompareCarried(t.Context(), tx, target, shadow, verified)
+	require.True(t, planted, "the operator was planted just before the source read")
+	require.ErrorIs(t, err, checksum.ErrInvariantViolation)
+	assert.ErrorIs(t, err, checksum.ErrConversionDrift, "the breach names itself as drift")
+	assert.Empty(t, differing, "no key judged through the planted operator is returned")
+}
+
 // The compare reads each side in a statement of its own, so only ACCESS
 // EXCLUSIVE on both relations makes the two reads one moment. A
 // transaction that holds no lock, or the lock on the source alone, is
