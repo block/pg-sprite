@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // A unique build over duplicates fails after it creates its catalog entry.
@@ -244,5 +245,55 @@ func TestBuildPartitionedIndexQuotesEveryName(t *testing.T) {
 		}
 		assert.Equal(t, map[string]string{"Orders EU": other, "Orders US": f.schema}, schemas)
 		assert.True(t, f.indexesOn(t, "Mixed Orders")["Idx Total"].valid)
+	})
+}
+
+// A sub-partitioned partition whose index an earlier run created but did not
+// attach is resumed, and it still gets a progress step of its own: the run
+// ends on its last step, one for the parent's index and one per partition.
+func TestBuildPartitionedIndexGivesAResumedSubPartitionItsOwnStep(t *testing.T) {
+	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
+		f := newFixture(t)
+		f.exec(t, `CREATE TABLE %s.events (id bigint NOT NULL, region text NOT NULL) PARTITION BY LIST (region)`, f.schema)
+		f.exec(t, `CREATE TABLE %[1]s.events_eu PARTITION OF %[1]s.events FOR VALUES IN ('eu') PARTITION BY HASH (id)`, f.schema)
+		f.exec(t, `CREATE TABLE %[1]s.events_eu_0 PARTITION OF %[1]s.events_eu FOR VALUES WITH (MODULUS 2, REMAINDER 0)`, f.schema)
+		f.exec(t, `CREATE TABLE %[1]s.events_eu_1 PARTITION OF %[1]s.events_eu FOR VALUES WITH (MODULUS 2, REMAINDER 1)`, f.schema)
+		f.exec(t, `CREATE TABLE %[1]s.events_us PARTITION OF %[1]s.events FOR VALUES IN ('us')`, f.schema)
+		f.exec(t, `CREATE INDEX idx_events_id ON ONLY %s.events USING btree (id)`, f.schema)
+		resumed := f.derived(t, "idx_events_id", "events_eu")
+		f.exec(t, `CREATE INDEX %s ON ONLY %s.events_eu USING btree (id)`, resumed, f.schema)
+		tracker, err := progress.NewTracker(progress.WallClock{})
+		require.NoError(t, err)
+
+		rep, err := executor.BuildPartitionedIndexWithProgress(t.Context(), f.cfg, f.pool, mustPreflight(t, f.pool, f.schema, "events"),
+			fmt.Sprintf("CREATE INDEX idx_events_id ON %s.events (id)", f.schema), buildBudget, tracker)
+
+		require.NoError(t, err)
+		assert.Contains(t, workedTables(rep), "events_eu", "the resumed partition is reported")
+		snapshot, err := tracker.Progress(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 5, snapshot.TotalSteps, "the parent's index and four partitions")
+		assert.Equal(t, snapshot.TotalSteps, snapshot.Step, "every partition, the resumed one too, takes its own step")
+		f.requireCovered(t, "events", "idx_events_id", "events_eu", "events_us")
+	})
+}
+
+// An index under the derived name that backs a constraint is not the build's
+// to attach, even when its definition matches: attaching it under a parent
+// index that is not a constraint's would change what it is. The build refuses
+// the name and leaves the constraint as it stands.
+func TestBuildPartitionedIndexRefusesAConstraintIndexUnderTheDerivedName(t *testing.T) {
+	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
+		f := newFixture(t)
+		f.ordersByRegion(t)
+		taken := f.derived(t, "idx_orders_uq", "orders_eu")
+		f.exec(t, `ALTER TABLE %s.orders_eu ADD CONSTRAINT %s UNIQUE (total, region, id)`, f.schema, taken)
+
+		_, err := f.buildErr(t, "orders", fmt.Sprintf("CREATE UNIQUE INDEX idx_orders_uq ON %s.orders (total, region, id)", f.schema))
+
+		require.ErrorIs(t, err, executor.ErrPartitionedIndexNameTaken)
+		assert.Contains(t, err.Error(), "backs a constraint")
+		idx := f.indexesOn(t, "orders_eu")[taken]
+		assert.True(t, idx.valid, "the constraint's index is left as it stands")
 	})
 }
