@@ -137,19 +137,11 @@ type onlyIndexTable struct {
 func (t onlyIndexTable) qualified() string { return qualifiedName(t.schema, t.name) }
 
 // createOnlyIndex runs a CREATE INDEX ... ON ONLY statement in tx and returns
-// the index it created, read under the catalog-only search_path. A name that a
-// relation already holds is refused, never reused. The index is checked before
-// the transaction can commit: it must be a partitioned index on the table, and
-// any other outcome fails the step, which rolls back.
+// the index it created, read under the catalog-only search_path. The caller has
+// checked that no relation holds the name. The index is checked before the
+// transaction can commit: it must be a partitioned index on the table, and any
+// other outcome fails the step, which rolls back.
 func createOnlyIndex(ctx context.Context, tx pgx.Tx, table onlyIndexTable, indexSchema, indexName, createSQL string) (relationFacts, error) {
-	occupant, taken, err := relationByName(ctx, tx, indexSchema, indexName)
-	if err != nil {
-		return relationFacts{}, err
-	}
-	if taken {
-		return relationFacts{}, fmt.Errorf("%w: %s is %s, not an index the build created on %s",
-			ErrPartitionedIndexNameTaken, qualifiedName(indexSchema, indexName), describeRelation(occupant), table.qualified())
-	}
 	if _, err := tx.Exec(ctx, createSQL); err != nil {
 		return relationFacts{}, err
 	}
