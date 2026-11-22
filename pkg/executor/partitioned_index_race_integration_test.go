@@ -95,3 +95,32 @@ func TestBuildPartitionedIndexPicksUpAPartitionCreatedDuringARun(t *testing.T) {
 		f.requireCovered(t, "orders", "idx_orders_total", append(partitions, "orders_late")...)
 	})
 }
+
+// A tree with no partitions when it is listed can gain its first one before
+// the parent's index exists. The first pass has nothing to build, so the
+// build still lists the tree again: the second pass builds the new
+// partition's index and a third confirms nothing is left.
+func TestBuildPartitionedIndexPicksUpAFirstPartitionCreatedDuringARun(t *testing.T) {
+	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
+		f := newFixture(t)
+		f.exec(t, `CREATE TABLE %[1]s.orders (id bigint NOT NULL, region text NOT NULL, total int, note text) PARTITION BY LIST (region)`, f.schema)
+		hook := func() bool {
+			if !f.tableLockHeld(t, "orders") {
+				return false
+			}
+			require.False(t, f.relationExists(t, "idx_orders_total"), "the hook must act before the parent's index exists")
+			f.exec(t, `CREATE TABLE %[1]s.orders_late PARTITION OF %[1]s.orders FOR VALUES IN ('late')`, f.schema)
+			return true
+		}
+		tracker := f.trackerWithHook(t, hook)
+
+		rep, err := executor.BuildPartitionedIndexWithProgress(t.Context(), f.cfg, f.pool, mustPreflight(t, f.pool, f.schema, "orders"),
+			fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema), buildBudget, tracker)
+
+		require.NoError(t, err)
+		assert.Equal(t, 1, rep.Partitions)
+		assert.Equal(t, 3, rep.Passes)
+		assert.ElementsMatch(t, []string{"orders_late"}, workedTables(rep))
+		f.requireCovered(t, "orders", "idx_orders_total", "orders_late")
+	})
+}
