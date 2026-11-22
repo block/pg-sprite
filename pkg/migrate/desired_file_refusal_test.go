@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -81,5 +82,62 @@ func TestDesiredFileRefusalLeavesInputErrorsAlone(t *testing.T) {
 		require.Error(t, err)
 		_, ok := DesiredFileRefusal(err, "")
 		assert.False(t, ok, "%q is not a refusal: %v", sql, err)
+	}
+}
+
+// A change the diff does not derive is refused as a desired-file refusal,
+// classed by the cause the diff names: a storage parameter or identity
+// sequence difference is the owner's to change directly, a persistence
+// change needs a rewrite, and a partitioning difference waits on a
+// capability. The detail keeps the diff's message.
+func TestDesiredFileRefusalClassesUnsupportedChanges(t *testing.T) {
+	model := func(edit func(*schemadiff.Model)) schemadiff.Model {
+		m := schemadiff.Model{Table: "events", Columns: []schemadiff.Column{{Name: "id", Type: "bigint", NotNull: true}}}
+		edit(&m)
+		return m
+	}
+	identity := func(maxValue int64) func(*schemadiff.Model) {
+		return func(m *schemadiff.Model) {
+			m.Columns[0].Identity = schemadiff.IdentityAlways
+			m.Columns[0].Sequence = &schemadiff.SequenceOptions{
+				Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: maxValue, Cache: 1,
+			}
+		}
+	}
+	unchanged := func(*schemadiff.Model) {}
+	tests := []struct {
+		name    string
+		live    schemadiff.Model
+		desired schemadiff.Model
+		cause   schemadiff.UnsupportedCause
+		class   verdict.Class
+		reason  verdict.Reason
+		owner   verdict.Owner
+	}{
+		{"storage parameters", model(unchanged), model(func(m *schemadiff.Model) { m.Options = []string{"fillfactor=70"} }),
+			schemadiff.CauseStorageParameters, verdict.ClassNoOnlineSafetyProblem, verdict.ReasonUnsupportedStatement, verdict.OwnerDirectOperator},
+		{"identity sequence", model(identity(9223372036854775807)), model(identity(5000)),
+			schemadiff.CauseIdentitySequence, verdict.ClassNoOnlineSafetyProblem, verdict.ReasonUnsupportedStatement, verdict.OwnerDirectOperator},
+		{"persistence", model(unchanged), model(func(m *schemadiff.Model) { m.Unlogged = true }),
+			schemadiff.CausePersistence, verdict.ClassCapabilityBoundary, verdict.ReasonRewriteRequired, ""},
+		{"partition key", model(unchanged), model(func(m *schemadiff.Model) { m.PartitionKey = "RANGE (id)" }),
+			schemadiff.CausePartitionKey, verdict.ClassCapabilityBoundary, verdict.ReasonUnsupportedStatement, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := schemadiff.Diff("public", tt.live, tt.desired)
+			require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+			refused, isRefusal := errors.AsType[*schemadiff.UnsupportedChangeError](err)
+			require.True(t, isRefusal, "the diff names its cause: %v", err)
+			assert.Equal(t, tt.cause, refused.Cause)
+			v, ok := DesiredFileRefusal(fmt.Errorf("plan: %w", err), "CREATE TABLE events (id bigint NOT NULL)")
+			require.True(t, ok, "classified: %v", err)
+			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+			assert.Equal(t, tt.reason, v.Reason)
+			assert.Equal(t, tt.class, v.Class)
+			assert.Equal(t, tt.owner, v.Owner)
+			assert.Equal(t, "CREATE TABLE events (id bigint NOT NULL)", v.Statement)
+			assert.Equal(t, fmt.Sprintf("plan: %v; nothing was planned or executed", err), v.Detail)
+		})
 	}
 }

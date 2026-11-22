@@ -234,7 +234,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return DesiredResult{}, err
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
-	if ref, ok := desiredShapeRefusal(err); ok {
+	if ref, ok := desiredPlanRefusal(err); ok {
 		return DesiredResult{}.refused(ref, fmt.Sprintf("%v; nothing was planned or executed", err)), nil
 	}
 	if err != nil {

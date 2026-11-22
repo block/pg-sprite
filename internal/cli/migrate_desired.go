@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
@@ -114,11 +115,46 @@ func (c *MigrateCmd) writeDesiredResult(out io.Writer, result migrate.DesiredRes
 		}
 		return nil
 	}
+	pal := c.palette(out)
 	for _, v := range result.Verdicts {
-		if err := writeVerdictText(out, c.palette(out), v); err != nil {
+		if err := writeVerdictText(out, pal, v); err != nil {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(out, "%s: %s\n", result.Outcome, result.Detail)
-	return err
+	return writeDesiredSummary(out, pal, result)
+}
+
+// writeDesiredSummary writes the run's closing line. A whole-run refusal
+// (a file refused before anything planned) gets the verdict layout's
+// headline, class, owner, and cause, because it carries no statement verdict
+// that would show them. A refusal partway through a run already printed
+// them in its statement's verdict, so it and every other outcome get one
+// line.
+func writeDesiredSummary(out io.Writer, pal palette, result migrate.DesiredResult) error {
+	if !isWholeRunRefusal(result) {
+		if _, err := fmt.Fprintf(out, "%s: %s\n", result.Outcome, result.Detail); err != nil {
+			return fmt.Errorf("write desired result: %w", err)
+		}
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(pal.severity("error", fmt.Sprintf("refused (%s)", result.Reason)))
+	fmt.Fprintf(&b, "\n  %s  %s", pal.bold("class:"), result.Class)
+	if result.Owner != "" {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("owner:"), result.Owner)
+	}
+	if result.Cause != verdict.CauseNone {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("cause:"), result.Cause)
+	}
+	fmt.Fprintf(&b, "\n  %s %s", pal.bold("detail:"), result.Detail)
+	if _, err := fmt.Fprintln(out, b.String()); err != nil {
+		return fmt.Errorf("write desired result: %w", err)
+	}
+	return nil
+}
+
+// isWholeRunRefusal reports a classified refusal that no statement verdict
+// carries: the run was refused before any statement was planned or run.
+func isWholeRunRefusal(result migrate.DesiredResult) bool {
+	return result.Outcome == verdict.OutcomeRefused && result.Reason != "" && len(result.Verdicts) == 0
 }
