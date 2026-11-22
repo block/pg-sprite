@@ -12,11 +12,17 @@ import (
 type PartitionRefusalCause string
 
 const (
-	// PartitionCauseConcurrentIndexBuild means a step attempts a concurrent
-	// index build on the parent.
+	// PartitionCauseConcurrentIndexBuild means a step list attempts a
+	// concurrent index build on the parent, which PostgreSQL has no
+	// statement for. The front doors send a CREATE INDEX on a partitioned
+	// table to the partition-aware build before this check
+	// (RoutesToPartitionedIndexBuild), so only a step list that bypasses the
+	// routing carries one.
 	PartitionCauseConcurrentIndexBuild PartitionRefusalCause = "parent-concurrent-index-build"
 	// PartitionCauseBlockingIndexBuild means a step would build an index on
-	// the parent while holding ACCESS EXCLUSIVE.
+	// the parent while holding a lock that blocks writes to the whole tree.
+	// A CREATE INDEX reaches it only when the operator forced the submitted
+	// form, which overrides the routing to the partition-aware build.
 	PartitionCauseBlockingIndexBuild PartitionRefusalCause = "parent-blocking-index-build"
 	// PartitionCauseIndexAdoption means a step adopts an existing index as a
 	// primary-key or unique constraint on the parent.
@@ -41,9 +47,9 @@ func PartitionRefusalCauses() []PartitionRefusalCause {
 
 // Class is the routing class of the cause, from docs/refusal-classes.md:
 // what kind of boundary the consumer is looking at. The two index-build
-// causes are a capability boundary — the partition-aware concurrent index
-// flow is a planned engine capability, and refusing the blocking substitute
-// is the policy half of the same gap. Index adoption is by design: no
+// causes are a capability boundary: the partition-aware build is the
+// supported route for an index on a partitioned parent, and these are the
+// forms of the same request it does not run as written. Index adoption is by design: no
 // supported server adopts an index as a constraint on a partitioned parent,
 // so waiting for an engine release waits for nothing. The NOT VALID foreign
 // key is environmental: the same statement runs on a newer server, so the
@@ -82,14 +88,34 @@ func (e *UnsupportedPartitionedParentError) Error() string {
 	case PartitionCauseIndexAdoption:
 		return "PostgreSQL does not support ALTER TABLE ... ADD CONSTRAINT ... USING INDEX on partitioned tables in any supported version"
 	case PartitionCauseBlockingIndexBuild:
-		return "PostgreSQL supports a blocking parent-level index build, but pg-sprite refuses to run it under ACCESS EXCLUSIVE; " +
-			"the partition-aware concurrent flow is not yet supported"
+		return "PostgreSQL supports a blocking parent-level index build, but pg-sprite refuses to run it as written because it blocks writes to the whole table; " +
+			"a CREATE INDEX on a partitioned table, without the force override, is built partition by partition instead"
 	case PartitionCauseConcurrentIndexBuild:
-		return "PostgreSQL cannot build parent-level indexes concurrently; pg-sprite does not yet support " +
-			"the partition-aware CREATE INDEX ON ONLY, per-partition CREATE INDEX CONCURRENTLY, and ATTACH PARTITION flow"
+		return "PostgreSQL cannot build parent-level indexes concurrently, so a sequence of steps cannot carry one on a partitioned table; " +
+			"a CREATE INDEX on a partitioned table is built partition by partition instead"
 	default:
 		return "pg-sprite refuses an unsupported operation on a partitioned table"
 	}
+}
+
+// RoutesToPartitionedIndexBuild reports whether the steps planned for one
+// statement are the one CREATE INDEX that the partition-aware index build
+// carries when the statement's target is a partitioned table: a CREATE
+// INDEX in any form, with or without CONCURRENTLY or ONLY. A front door asks
+// it after it knows the target is partitioned, and runs the build with the
+// statement itself, not with the steps, which are a plain table's substitute
+// (a concurrent build) and would fail on a partitioned one. Any other step
+// list is false. A step that does not parse is an error, as it is for
+// RefusesPartitionedParent.
+func RoutesToPartitionedIndexBuild(execSQL []string) (bool, error) {
+	if len(execSQL) != 1 {
+		return false, nil
+	}
+	st, err := statement.ParseOne(execSQL[0])
+	if err != nil {
+		return false, fmt.Errorf("check partitioned index build routing: %w", err)
+	}
+	return st.Kind() == statement.KindCreateIndex, nil
 }
 
 // CheckPartitionSupport verifies that the execution steps are safe
