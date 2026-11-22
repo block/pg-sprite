@@ -126,6 +126,16 @@ free space on its own volume over SQL, so you pass it with `--free-disk` (binary
 `copy-and-swap-disk-headroom`; for a live run the detail names both the shadow's figure and
 the ceiling's.
 
+- **Self-managed PostgreSQL:** run `df -h` on the volume holding the data directory.
+- **Amazon RDS for PostgreSQL:** read the instance's `FreeStorageSpace` metric in CloudWatch.
+- **Aurora PostgreSQL:** the cluster volume grows on demand, but only up to a maximum. Read the
+  cluster's `AuroraVolumeBytesLeftTotal` metric in CloudWatch, the space left before that
+  maximum, and pass the lower of it and any storage quota you set.
+
+Never pass a made-up large value: the check is the only thing between the copy and a full
+volume. We would like to remove this flag by reading the free space where the platform exposes
+it. Until then it stays required.
+
 A resumed run is asked only for what is left to grow. The space the stopped run already holds
 is gone from the free space you measure, so the resume's preflight subtracts it from the
 requirement: the shadow's size so far, and, for a live run, the WAL its replication slot
@@ -138,16 +148,6 @@ any run. Neither discount goes past its own requirement, and anything pg-sprite 
 nothing held, so the check falls back to a fresh run's figure. A run with
 `--restart SCHEMA.TABLE` is checked as a fresh run: it discards what the stopped run held
 before it builds anew.
-
-- **Self-managed PostgreSQL:** run `df -h` on the volume holding the data directory.
-- **Amazon RDS for PostgreSQL:** read the instance's `FreeStorageSpace` metric in CloudWatch.
-- **Aurora PostgreSQL:** the cluster volume grows on demand, but only up to a maximum. Read the
-  cluster's `AuroraVolumeBytesLeftTotal` metric in CloudWatch, the space left before that
-  maximum, and pass the lower of it and any storage quota you set.
-
-Never pass a made-up large value: the check is the only thing between the copy and a full
-volume. We would like to remove this flag by reading the free space where the platform exposes
-it. Until then it stays required.
 
 ## Slot lag ceiling
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -193,6 +194,16 @@ func (f liveFixture) slotRetained(t *testing.T, slot string) int64 {
 // fixture's table to hold, through the same proofs the route takes.
 func (f liveFixture) measureHeld(t *testing.T) preflight.CopySwapHeld {
 	t.Helper()
+	shape, store := f.measureInputs(t)
+	held, err := schemachange.MeasureResumeHeld(t.Context(), f.pool, store, shape, true)
+	require.NoError(t, err)
+	return held
+}
+
+// measureInputs is the shape proof and the checkpoint store the route's
+// preflight hands MeasureResumeHeld for the fixture's table.
+func (f liveFixture) measureInputs(t *testing.T) (preflight.CopySwapShape, *checkpoint.Store) {
+	t.Helper()
 	role, err := preflight.CheckPrivileges(t.Context(), f.pool, f.table.Schema, f.table.Table,
 		preflight.Requirement{Tier: preflight.TierCopyAndSwap, LogicalDecoding: true})
 	require.NoError(t, err)
@@ -200,7 +211,68 @@ func (f liveFixture) measureHeld(t *testing.T) preflight.CopySwapHeld {
 	require.NoError(t, err)
 	store, err := checkpoint.NewStore(f.pool, checkpoint.Options{})
 	require.NoError(t, err)
-	held, err := schemachange.MeasureResumeHeld(t.Context(), f.pool, store, shape, true)
+	return shape, store
+}
+
+// A shadow dropped while the resume's preflight measures it counts as
+// nothing held. The size read waits on the lock of the transaction that
+// drops the shadow, as it would on a restart of the same table discarding
+// the stopped run, and then finds no relation: the same answer as no
+// shadow at all, not a failed preflight. The slot is untouched, so its
+// retained WAL is still counted.
+func TestMeasureResumeHeldCountsAShadowDroppedMidReadAsNothingHeld(t *testing.T) {
+	f := newLiveFixture(t, testutil.WorkloadShape{})
+	st := parseOne(t, fmt.Sprintf(`ALTER TABLE %s ALTER COLUMN amount TYPE numeric(14,4)`, f.table.Qualified()))
+	stopped := f.options()
+	stopped.CopySwap.OnCheckpoint = func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCatchingUp {
+			return errStopAtCatchUp
+		}
+		return nil
+	}
+	_, err := migrate.Run(t.Context(), f.pool, st, stopped)
+	require.ErrorIs(t, err, errStopAtCatchUp)
+	shape, store := f.measureInputs(t)
+
+	drop, err := f.pool.Begin(t.Context())
 	require.NoError(t, err)
-	return held
+	t.Cleanup(func() { releaseLeftover(t, drop) })
+	_, err = drop.Exec(t.Context(), `DROP TABLE `+f.shadowName())
+	require.NoError(t, err)
+
+	type measured struct {
+		held preflight.CopySwapHeld
+		err  error
+	}
+	done := make(chan measured, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	wg.Go(func() {
+		held, err := schemachange.MeasureResumeHeld(t.Context(), f.pool, store, shape, true)
+		done <- measured{held: held, err: err}
+	})
+	pollUntil(t, f.shadowSizeReadWaitsOnALock, "the shadow's size read waiting on the drop's lock")
+	require.NoError(t, drop.Commit(t.Context()))
+
+	m := <-done
+	require.NoError(t, m.err, "a shadow that vanished mid-read counts as nothing held")
+	assert.Zero(t, m.held.ShadowBytes)
+	assert.Positive(t, m.held.RetainedWALBytes, "the stopped run's slot still retains the copy's WAL")
+}
+
+// shadowSizeReadWaitsOnALock reports whether a session's shadow size read
+// is waiting on a lock.
+func (f liveFixture) shadowSizeReadWaitsOnALock(ctx context.Context) (bool, error) {
+	var waiting bool
+	err := f.pool.QueryRow(ctx, `
+		SELECT count(*) > 0
+		FROM pg_catalog.pg_stat_activity
+		WHERE datname = current_database()
+		  AND wait_event_type = 'Lock'
+		  AND position('pg_total_relation_size' IN query) > 0
+		  AND pid <> pg_backend_pid()`).Scan(&waiting)
+	if err != nil {
+		return false, fmt.Errorf("find the waiting shadow size read: %w", err)
+	}
+	return waiting, nil
 }

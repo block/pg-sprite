@@ -91,12 +91,12 @@ func remainingNeed(shadowNeed, walNeed int64) int64 {
 }
 
 // heldClause names, in a refusal's prose, what a resumed run already holds
-// and what is still needed beyond it; a fresh run holds nothing and gets
-// no clause.
+// and the free space the volume must have once that is counted; a fresh
+// run holds nothing and gets no clause.
 func heldClause(heldShadow, heldWAL, need int64) string {
 	if heldShadow == 0 && heldWAL == 0 {
 		return ""
 	}
-	return fmt.Sprintf(", less the %d bytes of shadow and %d bytes of retained WAL the stopped run being resumed already holds on the volume, so %d bytes more are needed",
+	return fmt.Sprintf(", less the %d bytes of shadow and %d bytes of retained WAL the stopped run being resumed already holds on the volume, so %d bytes must be free",
 		heldShadow, heldWAL, need)
 }

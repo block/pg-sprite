@@ -558,7 +558,9 @@ lists the source schema do not change the indexes or statistics read; the reads 
 a path pg-sprite did not set — the cutover's backend reads on the caller's pool and the write
 fence function's `format` in the writer's session — are qualified too, pinned by
 `TestCutoverBackendReadsResolveToTheRealCatalog` and
-`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`), `pkg/migrate`
+`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`; the resume's shadow size read in
+`MeasureResumeHeld`, which runs on the caller's pool, qualifies every function, relation, and
+operator, the `pg_total_relation_size(oid)` call included), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;

@@ -34,6 +34,10 @@ func TestCountsRetainedWAL(t *testing.T) {
 	unknown.Retained = decode.RetainedWAL{}
 	assert.False(t, countsRetainedWAL(unknown, true), "an unmeasured figure is not read as held WAL")
 
+	unknownWithBytes := own
+	unknownWithBytes.Retained = decode.RetainedWAL{Bytes: 3 << 20, Known: false}
+	assert.False(t, countsRetainedWAL(unknownWithBytes, true), "a figure the server marked unknown is not held WAL, whatever its bytes say")
+
 	extended := own
 	extended.WALStatus = decode.WALStatusExtended
 	assert.True(t, countsRetainedWAL(extended, true), "a slot past max_wal_size still holds its WAL")

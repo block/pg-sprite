@@ -125,8 +125,10 @@ implementation time):
   is left to grow, call `CheckPrivileges` and `CheckCopySwapShape`, fill
   `CopySwapEnvironment.Held` from `schemachange.MeasureResumeHeld` (the shadow's and the
   slot's sizes, read from the server, zero for a fresh run), then call
-  `CheckCopySwapEnvironment`, as `pkg/migrate` does. How to classify each of its
-  refusals is in
+  `CheckCopySwapEnvironment`, as `pkg/migrate` does. Skip the measure for a run that
+  starts over (`RunOptions.Restart`) and leave `Held` zero: the restart's discard has not
+  freed what the stopped run holds when the preflight runs, so counting it would ask for
+  less than the run will have. How to classify each refusal of these checks is in
   [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause).
 - **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
