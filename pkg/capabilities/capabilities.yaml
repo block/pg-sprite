@@ -303,7 +303,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. A desired file for a partition that already exists is refused before planning builds anything, since the scratch build would attach to the live parent. The partition-aware flow is planned"
+    reason_notes: "Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. A desired file for a partition that already exists is refused before planning builds anything, since the scratch build would attach to the live parent, and a desired file that declares several partitions, or a parent with its partitions, is refused at parse as a `capability-boundary`. The partition-aware flow is planned"
   - id: attach-partition
     area: "partitioned_tables"
     operation: "`ATTACH PARTITION`"
@@ -539,7 +539,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code"
+    reason_notes: "Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code. Both doors refuse a type as catalog work owned by the direct operator: `migrate` refuses the statement, and `diff` and `migrate --desired` refuse a desired file that declares one before anything is planned"
   - id: views-materialized-views-create-and-replace
     area: "types_and_non_table_objects"
     operation: "Views, materialized views (create and replace)"

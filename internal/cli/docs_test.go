@@ -77,7 +77,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 15, "the doc publishes fifteen captured --json outputs")
+	require.Len(t, blocks, 16, "the doc publishes sixteen captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -205,9 +205,13 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
+	_, typeFileErr := statement.ParseDesiredFile("CREATE TYPE account_status AS ENUM ('active', 'closed');\n")
+	typeFileRefused, ok := migrate.DesiredFileRefusal(typeFileErr, "")
+	require.True(t, ok, "a type file is a desired-file refusal: %v", typeFileErr)
+
 	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, rewriteRequired,
 		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
-		lintReport, diff}
+		lintReport, diff, typeFileRefused}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
 		require.NoError(t, err)

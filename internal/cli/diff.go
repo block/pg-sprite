@@ -32,7 +32,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	file, err := statement.ParseDesiredFile(string(raw))
 	if err != nil {
-		return err
+		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, "")
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
 		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
@@ -57,7 +57,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: c.Schema, Desired: ds})
 	if err != nil {
-		return err
+		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, ds.Statements()[0].SQL())
 	}
 	logger.Debug("diff derived",
 		"schema", report.Schema, "table", report.Table, "changes", len(report.Statements),
