@@ -76,7 +76,11 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 		if err := f.processChildren(ctx, f.target.tableOID, f.parent, tree); err != nil {
 			return false, err
 		}
-		return f.changes != before, nil
+		// Pass 1 walks the tree read before the parent's index existed, so a
+		// partition created in between is missing from its list even when
+		// the pass changes nothing. Only a later pass, which rereads the
+		// tree, can confirm the build has settled.
+		return pass == 1 || f.changes != before, nil
 	})
 	f.rep.Passes = passes
 	if errors.Is(err, ErrPartitionedIndexUnsettled) {
