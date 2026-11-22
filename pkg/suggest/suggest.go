@@ -157,7 +157,8 @@ const (
 	// no primary key. The route chunks the copy and keys the change buffer
 	// on one integer-family primary-key column, so add one online — over a
 	// column that already identifies each row, or over a new bigint column
-	// filled from a sequence — and run the change again. Carried by a
+	// filled from a sequence — and run the change again, which checks the
+	// table's other shape facts, since the key is decided first. Carried by a
 	// copy-and-swap-pk-unsupported refusal for a keyless table, never by a
 	// suggestion; a uuid, text, composite, or DEFERRABLE key carries none,
 	// since a table has one primary key and no online route replaces it.
@@ -222,7 +223,8 @@ func ManualPath(g Guidance) string {
 			"dropping and re-adding it discards every value it holds"
 	case GuidanceAddIntegerPrimaryKey:
 		return "add a single-column integer primary key online — over a column that already identifies each row, " +
-			"or over a new bigint column filled from a sequence — then run the change again; the steps are at " +
+			"or over a new bigint column filled from a sequence — then run the change again, which checks the table's " +
+			"other shape facts, such as its replica identity and foreign keys, against copy-and-swap; the steps are at " +
 			primaryKeysGuideURL
 	}
 	return string(g)

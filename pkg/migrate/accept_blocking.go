@@ -18,7 +18,8 @@ import (
 
 var (
 	// ErrAcceptBlockingMismatch means the acknowledgement named a table other
-	// than the one the accepted statement locks. Nothing has executed.
+	// than the one the accepted statement locks. Nothing has executed. The
+	// error is an [AcknowledgementMismatchError] carrying both tables.
 	ErrAcceptBlockingMismatch = errors.New("the accept-blocking acknowledgement must name the table the statement locks")
 	// ErrAcceptBlockingRelationNotFound means the index or table the
 	// accepted statement names does not exist or is not visible on the
@@ -75,8 +76,7 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	}
 	table := locked.qualified()
 	if table != opts.AcceptBlocking {
-		return verdict.Verdict{}, fmt.Errorf("%w: %s locks %q, got %q; nothing was executed",
-			ErrAcceptBlockingMismatch, st.Kind(), table, opts.AcceptBlocking)
+		return verdict.Verdict{}, acceptBlockingMismatch(table, opts.AcceptBlocking, st.Kind())
 	}
 	if opts.AllowDestructive != "" {
 		if err := checkAllowDestructiveAck(table, opts.AllowDestructive); err != nil {

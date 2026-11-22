@@ -35,8 +35,9 @@ const copySwapWALSenders = 2
 
 // copySwapDiskHeadroomFactor is the multiple of the source's total size
 // (heap, indexes, TOAST) the volume must have free: the shadow grows to the
-// source's size, and the retained WAL, the old table kept until the
-// post-commit drop, and index-build spill all need room beyond it.
+// source's size, and the old table kept until the post-commit drop and
+// index-build spill need room beyond it. A run that decodes WAL needs its
+// slot lag ceiling on top (CopySwapEnvironment.SlotLagCeilingBytes).
 const copySwapDiskHeadroomFactor = 2
 
 // walLevelLogical is the wal_level value that enables logical decoding.
@@ -77,7 +78,42 @@ type CopySwapEnvironment struct {
 	// reports it. A value that is not positive is refused as unmeasured
 	// rather than treated as unlimited.
 	FreeDiskBytes int64
+	// SlotLagCeilingBytes is the WAL, in bytes, a run that decodes WAL lets
+	// its slot retain before it stops: the ceiling the caller's catch-up
+	// will enforce. Zero is DefaultSlotLagCeiling, the catch-up's own
+	// default, and a negative value is refused. A run that decodes WAL needs
+	// the ceiling free on the volume beside the shadow copy, so it is added
+	// to the disk requirement; a quiesced run holds no slot, and the value
+	// is ignored.
+	SlotLagCeilingBytes int64
+	// Held is what a stopped run that this run resumes already holds on
+	// the volume, which the free space the caller measured already
+	// excludes; the disk check requires only what is left to grow. The
+	// zero value is a fresh run and discounts nothing.
+	Held CopySwapHeld
 }
+
+// CopySwapHeld is the space a stopped copy-and-swap run already occupies on
+// the volume when the run being checked resumes it: the shadow it built so
+// far and the WAL its replication slot retains. Both figures must be read
+// from the server, never from a checkpoint row, and a figure that could
+// not be read is zero, so the check discounts no more than the volume
+// truly holds. A negative figure is refused.
+type CopySwapHeld struct {
+	// ShadowBytes is the shadow table's total size (heap, indexes, TOAST)
+	// as the server reports it.
+	ShadowBytes int64
+	// RetainedWALBytes is the WAL the stopped run's slot retains, from its
+	// restart position to the server's write position. It is counted only
+	// for a run that decodes WAL; a quiesced run holds no slot.
+	RetainedWALBytes int64
+}
+
+// DefaultSlotLagCeiling is the slot lag ceiling, in bytes, a catch-up
+// enforces when its caller sets none (decode.DefaultSlotLagCeiling is this
+// value). It lives here so the disk check counts the same default without
+// importing the package that enforces it.
+const DefaultSlotLagCeiling int64 = 1 << 30
 
 // CopySwapEnvironmentError reports that the cluster or the volume cannot
 // carry a copy-and-swap of the proven target. Setting names the server
@@ -91,6 +127,24 @@ type CopySwapEnvironmentError struct {
 	Setting CopySwapSetting
 	// Detail is the measurement behind the cause.
 	Detail string
+	// The disk figures a measured disk-headroom refusal was decided on, and
+	// zero for every other refusal: the free space the caller passed, the
+	// space required for the shadow copy (copySwapDiskHeadroomFactor times
+	// the table, more than the shadow itself takes), and, for a run that
+	// decodes WAL, the effective slot lag ceiling counted beside it. The
+	// ceiling is zero only for a quiesced run.
+	FreeDiskBytes       int64
+	RequiredShadowBytes int64
+	SlotLagCeilingBytes int64
+	// The part of each requirement a resumed run already holds, discounted
+	// from it (CopySwapEnvironment.Held): the shadow built so far, at most
+	// RequiredShadowBytes, and the WAL the stopped run's slot retains, at
+	// most SlotLagCeilingBytes and zero for a quiesced run. Both are zero
+	// for a fresh run. The space the run was refused for is
+	// RequiredShadowBytes − HeldShadowBytes + SlotLagCeilingBytes −
+	// HeldWALBytes.
+	HeldShadowBytes int64
+	HeldWALBytes    int64
 }
 
 // Error implements the error interface.
@@ -120,7 +174,8 @@ type copySwapEnvironmentFacts struct {
 // logical decoding is enabled, no other database holds the slot name the
 // route derives for the target, and a slot and the WAL senders for the
 // route's two replication connections are free; in every run the
-// caller-measured free disk covers the shadow copy. A run
+// caller-measured free disk covers the shadow copy, and in a run that
+// decodes WAL it covers the slot lag ceiling beside it. A run
 // that decodes WAL must present a shape whose privilege proof verified
 // replication access, or it is a proof mismatch, as is a pool on any
 // database other than the one the shape was proven in. On success it mints the
@@ -180,20 +235,7 @@ func refuseCopySwapEnvironment(f copySwapEnvironmentFacts, env CopySwapEnvironme
 			}
 		}
 	}
-	if env.FreeDiskBytes <= 0 {
-		return &CopySwapEnvironmentError{
-			Cause:  CopySwapCauseDiskHeadroom,
-			Detail: fmt.Sprintf("free disk space was not measured (%d bytes reported); the volume's free space must be passed in", env.FreeDiskBytes),
-		}
-	}
-	required := f.totalBytes * copySwapDiskHeadroomFactor
-	if env.FreeDiskBytes < required {
-		return &CopySwapEnvironmentError{
-			Cause:  CopySwapCauseDiskHeadroom,
-			Detail: fmt.Sprintf("%d bytes are free; %d bytes (%d× the table's %d bytes of heap, indexes, and TOAST) are required", env.FreeDiskBytes, required, copySwapDiskHeadroomFactor, f.totalBytes),
-		}
-	}
-	return nil
+	return refuseCopySwapDisk(f, env)
 }
 
 // refuseLogicalDecoding names the setting that enables logical decoding on

@@ -562,6 +562,19 @@ type Verdict struct {
 	// reports false, since the table kept taking writes. False for every
 	// other verdict, including a live run's.
 	WritesBlocked bool `json:"writes_blocked,omitempty"`
+	// SwapLSN is set on an executed-via-copy-and-swap verdict whose run
+	// committed the swap itself: the server's WAL insert position, in
+	// PostgreSQL's pg_lsn text form (for example "0/1A2B3C8"), read inside
+	// the swap transaction while its ACCESS EXCLUSIVE lock kept every other
+	// session off the table, right before it committed. A write to the
+	// table that committed below this position is in the retained source
+	// and was carried into the new table; an orchestrator can use it to
+	// state "writes after this position exist only in the new table".
+	// Compare it with another position as pg_lsn, not as text. Empty when
+	// the run did not hear its own swap commit: a run resumed after the
+	// swap had committed, or one that lost its connection and learned of
+	// the commit from the catalog. Empty for every other verdict.
+	SwapLSN string `json:"swap_lsn,omitempty"`
 	// TableCreated is true on an executed verdict whose run created the
 	// table, committing it in the same transaction as its row security, so
 	// automation can tell a create from a run that converged a table that

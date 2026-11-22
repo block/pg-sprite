@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"testing"
 	"time"
@@ -23,6 +24,126 @@ func TestSlotLagGraceIsTheReleaseIntervalPlusOneCycle(t *testing.T) {
 	assert.Equal(t, 17*time.Second, slotLagGrace(CatchupOptions{Interval: 2 * time.Second}))
 }
 
+// busySourceSnapshotInterval is how often the modelled server logs a
+// running-transactions record: PostgreSQL's background writer interval,
+// written out rather than read from decode.RestartReleaseInterval so the
+// model stays the server's if the constant drifts.
+const busySourceSnapshotInterval = 15 * time.Second
+
+// busySourceRate is the modelled source's write rate, in WAL bytes a second.
+const busySourceRate = int64(1 << 20)
+
+// busySourceBytes is the WAL the modelled source writes in d.
+func busySourceBytes(d time.Duration) int64 {
+	return d.Microseconds() * busySourceRate / int64(time.Second/time.Microsecond)
+}
+
+// busySourceRun is what judging a busy source's slot came to: the watch's
+// first error, and the most WAL the slot retained before it.
+type busySourceRun struct {
+	err         error
+	maxRetained int64
+}
+
+// busySourceTiming is when the modelled server logs its records and how
+// far the stream runs behind the write position.
+type busySourceTiming struct {
+	record    time.Duration
+	streamLag time.Duration
+}
+
+// onTime is the server logging a record every busySourceSnapshotInterval
+// with the stream one cycle behind.
+func onTime(opts CatchupOptions) busySourceTiming {
+	return busySourceTiming{record: busySourceSnapshotInterval, streamLag: opts.Interval}
+}
+
+// judgeBusySource judges, one reading a cycle for span, the slot of a
+// source that writes at busySourceRate with a transaction in progress at
+// every running-transactions record the server logs at timing.record, and
+// a stream timing.streamLag behind it. With a transaction in progress, the server moves the
+// restart position at a record only to the record before
+// (SnapBuildProcessRunningXacts restarts from the oldest such
+// transaction's last serialized snapshot), and only once the stream has
+// confirmed past the record (LogicalConfirmReceivedLocation). The slot
+// is created at time zero, where its restart position stands until the
+// second record releases it to the first.
+func judgeBusySource(t *testing.T, opts CatchupOptions, timing busySourceTiming, ceiling int64, span time.Duration) busySourceRun {
+	t.Helper()
+	watch, err := decode.NewSlotLagWatch(ceiling, slotLagGrace(opts))
+	require.NoError(t, err)
+	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	var run busySourceRun
+	for at := opts.Interval; at <= span; at += opts.Interval {
+		write := busySourceBytes(at)
+		confirmedAt := max(at-timing.streamLag, 0)
+		confirmed := busySourceBytes(confirmedAt)
+		confirmedRecords := int64(confirmedAt / timing.record)
+		restart := busySourceBytes(time.Duration(max(confirmedRecords-1, 0)) * timing.record)
+		retained := write - restart
+		run.err = watch.Judge(decode.SlotStatus{
+			Name:        "pgsprite_0123abcd",
+			WALStatus:   decode.WALStatusReserved,
+			Retained:    decode.RetainedWAL{Bytes: retained, Known: true},
+			Unconfirmed: decode.RetainedWAL{Bytes: write - confirmed, Known: true},
+		}, start.Add(at))
+		if run.err != nil {
+			return run
+		}
+		run.maxRetained = max(run.maxRetained, retained)
+	}
+	return run
+}
+
+// A busy source's slot retains up to two of the server's release
+// intervals of writes while its stream keeps up, since each release
+// moves the restart position only to the record before. A ceiling that
+// holds one grace of the source's writes is the least that lets the
+// release that follows bring the retained WAL back within it, and the
+// grace then outlasts every stretch over the ceiling, release after
+// release.
+func TestSlotLagGraceOutlastsABusySourceWhoseCeilingHoldsOneGraceOfWrites(t *testing.T) {
+	opts := CatchupOptions{}.withDefaults()
+	run := judgeBusySource(t, opts, onTime(opts), busySourceBytes(slotLagGrace(opts)), 10*busySourceSnapshotInterval)
+	require.NoError(t, run.err)
+	assert.Equal(t, busySourceBytes(2*busySourceSnapshotInterval), run.maxRetained,
+		"the slot retains two release intervals of writes just before each release, well over the ceiling")
+}
+
+// The least ceiling holds only on time: a record the server logs a little
+// late, or a stream a cycle slower, keeps the slot over it past the grace.
+// Ten percent above one grace of writes survives both together, which is
+// the margin the guide asks for.
+func TestSlotLagGraceNeedsMarginAboveTheLeastCeiling(t *testing.T) {
+	opts := CatchupOptions{}.withDefaults()
+	least := busySourceBytes(slotLagGrace(opts))
+	late := busySourceTiming{record: busySourceSnapshotInterval + 200*time.Millisecond, streamLag: 2 * opts.Interval}
+	span := 10 * busySourceSnapshotInterval
+
+	var exceeded *decode.SlotLagExceededError
+	require.ErrorAs(t, judgeBusySource(t, opts, late, least, span).err, &exceeded,
+		"the least ceiling is crossed for good once a record is late and the stream a cycle slower")
+	assert.Equal(t, decode.SlotLagWALRetained, exceeded.Cause)
+	require.NoError(t, judgeBusySource(t, opts, late, least*11/10, span).err,
+		"ten percent of margin outlasts the same timing")
+}
+
+// A ceiling that holds one release interval of a busy source's writes but
+// not one grace of them is crossed for good: each release leaves the slot
+// holding a release interval and a cycle of writes, still over it, so the
+// run ends wal-retained once the grace has passed, with the stream only a
+// cycle behind.
+func TestSlotLagGraceEndsABusySourceWhoseCeilingHoldsLessThanOneGraceOfWrites(t *testing.T) {
+	opts := CatchupOptions{}.withDefaults()
+	ceiling := busySourceBytes(busySourceSnapshotInterval)
+	run := judgeBusySource(t, opts, onTime(opts), ceiling, 10*busySourceSnapshotInterval)
+	var exceeded *decode.SlotLagExceededError
+	require.ErrorAs(t, run.err, &exceeded)
+	assert.Equal(t, decode.SlotLagWALRetained, exceeded.Cause)
+	assert.Equal(t, busySourceBytes(opts.Interval), exceeded.Unconfirmed, "the stream is one cycle behind")
+	assert.Greater(t, exceeded.Retained, ceiling)
+}
+
 func TestCatchupOptionsDefaults(t *testing.T) {
 	opts := CatchupOptions{}.withDefaults()
 	assert.Equal(t, DefaultCatchupInterval, opts.Interval)
@@ -30,18 +151,25 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 	assert.Equal(t, progress.WallClock{}, opts.Clock)
 	assert.Equal(t, decode.DefaultSlotLagCeiling, opts.SlotLagCeiling)
 	assert.Equal(t, DefaultDeadlockAttempts, opts.DeadlockAttempts)
+	require.NotNil(t, opts.Logger, "a caller that wired no logger gets a discarding one")
+	assert.Equal(t, slog.DiscardHandler, opts.Logger.Handler())
+	assert.Equal(t, DefaultDeadlockBackoff, opts.DeadlockBackoff)
 	require.NoError(t, opts.validate())
 
-	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20, DeadlockAttempts: 3}.withDefaults()
+	logger := slog.New(slog.DiscardHandler)
+	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20, DeadlockAttempts: 3, DeadlockBackoff: time.Minute, Logger: logger}.withDefaults()
 	assert.Equal(t, time.Second, given.Interval)
 	assert.Equal(t, 5, given.MaxChanges)
 	assert.Equal(t, int64(1<<20), given.SlotLagCeiling)
 	assert.Equal(t, 3, given.DeadlockAttempts)
+	assert.Same(t, logger, given.Logger)
+	assert.Equal(t, time.Minute, given.DeadlockBackoff)
 }
 
 // An interval the clock cannot time, a change bound that would never let
 // a cycle end, a slot lag ceiling that would abort every slot, or a
-// deadlock bound below one, which counts no cycles at all, is refused
+// deadlock bound below one, which counts no flushes at all, or a negative
+// deadlock backoff, which would retry before the deadlock, is refused
 // rather than defaulted; the ceiling cannot be switched off. Zero takes
 // the default deadlock bound, and one, the least, is accepted.
 func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
@@ -50,6 +178,7 @@ func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
 		"negative max changes":         {MaxChanges: -1},
 		"negative slot lag ceiling":    {SlotLagCeiling: -1},
 		"negative deadlock attempts":   {DeadlockAttempts: -1},
+		"negative deadlock backoff":    {DeadlockBackoff: -time.Millisecond},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {

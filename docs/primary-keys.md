@@ -98,7 +98,7 @@ $ pg-sprite migrate --copy-and-swap --free-disk 1GiB --json \
   "cause": "copy-and-swap-pk-unsupported",
   "statement": "ALTER TABLE public.events ALTER COLUMN amount TYPE bigint",
   "table": "public.events",
-  "detail": "copy-and-swap refuses the table shape (copy-and-swap-pk-unsupported): the primary key has 0 columns; exactly one is required; to run it through copy-and-swap, add a single-column integer primary key online — over a column that already identifies each row, or over a new bigint column filled from a sequence — then run the change again; the steps are at https://github.com/block/pg-sprite/blob/main/docs/primary-keys.md#add-a-primary-key-online (guidance add-integer-primary-key)",
+  "detail": "copy-and-swap refuses the table shape (copy-and-swap-pk-unsupported): the primary key has 0 columns; exactly one is required; to run it through copy-and-swap, add a single-column integer primary key online — over a column that already identifies each row, or over a new bigint column filled from a sequence — then run the change again, which checks the table's other shape facts, such as its replica identity and foreign keys, against copy-and-swap; the steps are at https://github.com/block/pg-sprite/blob/main/docs/primary-keys.md#add-a-primary-key-online (guidance add-integer-primary-key)",
   "guidance": "add-integer-primary-key"
 }
 ```
@@ -260,7 +260,7 @@ The column then behaves like a `bigserial` key, and a rewrite runs through copy-
 the table passes the route's other shape checks:
 
 ```console
-$ pg-sprite migrate --copy-and-swap --free-disk 1GiB \
+$ pg-sprite migrate --copy-and-swap --free-disk 2GiB \
     --alter 'ALTER TABLE public.audit_log ALTER COLUMN note TYPE varchar(64)'
 executed via copy-and-swap
   table:     public.audit_log

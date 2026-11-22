@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // DefaultSlotLagCeiling is the most WAL a slot may hold before the route
@@ -13,9 +16,12 @@ import (
 // bound is hard for the WAL the stream has yet to confirm, judged on one
 // reading. The WAL the slot retains may stand over it for a grace while
 // the server releases what the stream confirmed, so the volume needs
-// headroom above the ceiling of about the source's write rate times that
-// grace (see SlotLagWatch).
-const DefaultSlotLagCeiling int64 = 1 << 30
+// headroom above the ceiling of about the cluster's WAL rate times that
+// grace (see SlotLagWatch), and the ceiling itself must hold that much of
+// the cluster's WAL, the copy's own writes included, with margin, since a
+// release on a busy source keeps about that much back (see
+// RestartReleaseInterval).
+const DefaultSlotLagCeiling = preflight.DefaultSlotLagCeiling
 
 // RestartReleaseInterval is the longest the server goes between the
 // running-transactions records it logs on a primary, busy or quiet (the
@@ -24,7 +30,12 @@ const DefaultSlotLagCeiling int64 = 1 << 30
 // confirmed past one, so WAL the consumer has confirmed is released in
 // steps at most this far apart: a slot that retains more than its
 // consumer has yet to confirm has not necessarily been left behind by
-// anyone until this long has passed.
+// anyone until this long has passed. While a transaction is in progress
+// at a record, the server moves the restart position only to the record
+// before, where that transaction can be decoded from again; a busy source
+// has one in progress at nearly every record, so its slot retains between
+// one and two of these intervals of writes even while the consumer keeps
+// up.
 const RestartReleaseInterval = 15 * time.Second
 
 // ErrSlotLagCeiling is the sentinel a SlotLagExceededError unwraps to: the
@@ -57,8 +68,10 @@ const (
 	// stayed over the ceiling for longer than the server takes to release
 	// what its consumer confirmed, while the unconfirmed WAL itself is
 	// within it: the server is keeping WAL back, as for a transaction
-	// still open on the source, or the source writes WAL faster than the
-	// ceiling allows for the server's release interval.
+	// still open on the source, or the source writes more WAL in the
+	// server's release interval and the consumer's cycle than the ceiling
+	// holds, so that a release, which keeps that much back, leaves the
+	// slot still over it.
 	SlotLagWALRetained SlotLagCause = "wal-retained"
 )
 
@@ -73,6 +86,12 @@ type SlotLagExceededError struct {
 	Retained    int64
 	Unconfirmed int64
 	Ceiling     int64
+	// CopyPaced is how far the stopped run's copy was held back by the WAL
+	// its stream had yet to confirm, as schemachange.Runner records it on
+	// a live run's stop. It is the zero Paced for a run that made no copy,
+	// for a copy the stream kept up with, and for an abort from a catch-up
+	// no Runner drives.
+	CopyPaced copier.Paced
 }
 
 func (e *SlotLagExceededError) Error() string {
@@ -84,8 +103,8 @@ func (e *SlotLagExceededError) Error() string {
 	case SlotLagWALRetained:
 		return fmt.Sprintf("slot %s retains %s of WAL, over the %s ceiling (%d > %d bytes), for longer than the server takes to release WAL the stream confirmed, "+
 			"and the stream itself is %s behind; either a transaction on the source holds the WAL back (an open write transaction or a prepared one), "+
-			"and the run can resume once it ends, or the source writes more WAL per release interval than the ceiling allows, "+
-			"and the run needs a higher SlotLagCeiling",
+			"and the run can resume once it ends, or the cluster writes more WAL per release interval and catch-up cycle than the ceiling holds, "+
+			"and the run needs a higher SlotLagCeiling, with margin above that much WAL",
 			e.Slot, humanBytes(e.Retained), humanBytes(e.Ceiling), e.Retained, e.Ceiling, humanBytes(e.Unconfirmed))
 	default:
 		return fmt.Sprintf("slot %s is over the %s ceiling (cause %q): retains %s, %s unconfirmed",
@@ -182,8 +201,8 @@ func (w *SlotLagWatch) Judge(s SlotStatus, now time.Time) error {
 	}
 	// INV: ST-3 — retained WAL is the one measure let stand over the
 	// ceiling, and only for the grace: it includes WAL the stream already
-	// confirmed, which the server releases at its next running-transactions
-	// record. A stream that stops confirming is caught above, with no grace.
+	// confirmed, which the server releases at its running-transactions
+	// records. A stream that stops confirming is caught above, with no grace.
 	if now.Sub(w.overSince) < w.grace {
 		return nil
 	}

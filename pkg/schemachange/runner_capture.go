@@ -99,6 +99,7 @@ func captureFailed(err error) bool {
 		decode.ErrStreamEnded,
 		decode.ErrSlotLost,
 		decode.ErrSlotLagCeiling,
+		decode.ErrSlotLagUnknown,
 		decode.ErrUnsupportedChange,
 		decode.ErrSourceShapeChanged,
 	}

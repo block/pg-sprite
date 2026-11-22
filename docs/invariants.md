@@ -318,12 +318,16 @@ cycle by rolling one back. The rolled-back pass committed nothing and leaves the
 unchanged, so the chunk takes its next pass, on every path including the `DEFERRABLE` rerun
 below. Both sides of the cycle are retried: when the server picks the flush as the victim, the
 flush returns `applier.ErrBatchDeadlocked` with the shadow unchanged, the catch-up requeues the
-batch whole and flushes it again on the catch-up's next cycle, with no wait beyond the cycle's
-own, and `Status.BatchesDeadlocked` counts the requeue. A retry that waits on the copier's pass
-past the flush session's `lock_timeout` ends the catch-up with the server's lock-timeout error
-(SQLSTATE `55P03`). A flush rolled back as the victim
-`applier.CatchupOptions.DeadlockAttempts` cycles in a row ends the catch-up with that error,
-since the flush is losing every round and another cycle would hold the slot's WAL for nothing.
+batch whole and flushes it again once `applier.CatchupOptions.DeadlockBackoff` has passed on
+the catch-up's clock, each deadlock in a row waiting one backoff longer than the one before, as
+the copier's passes do, and `Status.BatchesDeadlocked` counts the requeue. The cycles inside the
+backoff keep reading and confirming the stream but neither drain nor flush. A retry that waits
+on the copier's pass past the flush session's `lock_timeout` ends the catch-up with the server's
+lock-timeout error (SQLSTATE `55P03`). A flush rolled back as the victim
+`applier.CatchupOptions.DeadlockAttempts` times in a row ends the catch-up with that error,
+since the flush is losing every round and another cycle would hold the slot's WAL for nothing;
+a flush that commits, or that a constraint refuses, starts the count again. The victim may be
+the column-wise upsert or the whole-row fallback (CO-6) alike.
 A chunk whose pending keys outlast
 `copier.Options.CollisionAttempts` passes stops the copy with the latest pass's error and no cause
 of its own. The chunk stays in flight with its keys pending, so a checkpoint records none of it
@@ -554,7 +558,9 @@ lists the source schema do not change the indexes or statistics read; the reads 
 a path pg-sprite did not set — the cutover's backend reads on the caller's pool and the write
 fence function's `format` in the writer's session — are qualified too, pinned by
 `TestCutoverBackendReadsResolveToTheRealCatalog` and
-`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`), `pkg/migrate`
+`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`; the resume's shadow size read in
+`MeasureResumeHeld`, which runs on the caller's pool, qualifies every function, relation, and
+operator, the `pg_total_relation_size(oid)` call included), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
@@ -572,19 +578,28 @@ by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
-ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
+ownership check (`InspectSlot`'s `Own`, the one statement that spells a logical slot of the
+pool's own database), the server proof before every slot command (`proveSameServer`),
 and the publication reads that judge whether the publication of the name is the route's, the
-create-side database guard included: a lookalike `name = name` and `name ~~ text` that answer
+create-side database guard included, and the same slot inspection (`InspectSlot`) that
+`InspectResume` adopts or refuses a slot on (ST-3) and treats a missing slot as lost on (ST-4),
+and that the catch-up's slot check reads: a lookalike `name = name` and `name ~~ text` that answer
 true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
-as this database's orphan and let the drop take it, or match every publication and let the drop
-take someone else's `FOR ALL TABLES` one, and a lookalike `text = text` and `text <> text` that
+as this database's orphan and let the drop take it, match every publication and let the drop
+take someone else's `FOR ALL TABLES` one, or read another database's slot as `Own` and a
+missing slot as found, and a lookalike `text = text` and `text <> text` that
 answer false would read a live row as terminal and let the reaper drop its slot,
 `TestReaperLeavesAnotherDatabasesSlotUnderALookalikeEquals`,
 `TestReaperKeepsALiveRowsSlotUnderLookalikeTextComparisons`,
-`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`, and
-`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`, and the text is held by
-`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
-`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
+`TestDropIdleSlotRefusesAnotherDatabasesSlotUnderALookalikeEquals`,
+`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
+`TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
+`TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
+prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
+the text is held by
+`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
+`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
+`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
 character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
@@ -960,11 +975,12 @@ exactly that table: a `DROP INDEX ... CASCADE` also drops the objects that depen
 such as a foreign key on another table, so it is not a single-relation statement and the
 executor refuses it (`ErrUnsupportedAcceptedBlocking`) before opening a transaction.
 *Enforced:* `pkg/migrate`
-(`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
+(`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`, built as an
+`AcknowledgementMismatchError` by `acceptBlockingMismatch` in `ack_mismatch.go`,
 `ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
 `pkg/executor` (`acceptedBlockingIneligibility`), `pkg/statement` (`ParseOne` classifies a
 cascading drop as `IndexTargetOther`),
-`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`,
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestAcceptBlockingMismatchNamesTheLockingStatement`, `TestRelationKindMatches`,
 `TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`,
 `TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer`,
 `TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer`.
@@ -1105,7 +1121,10 @@ ceiling aborts the schema change before an abandoned slot can fill the volume. T
 hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
 may stand over it for a bounded grace (the server's release interval plus one cycle) while the
 server releases what the stream confirmed, so the volume needs headroom above the ceiling of
-about the source's write rate times that grace. No exit path
+about the cluster's WAL rate, the copy's own writes included, times that grace. The ceiling must
+hold that much of the cluster's WAL as well, with margin: with a transaction in progress at a running-transactions record the
+server releases the slot only to the record before, so a busy source's slot keeps between one
+and two release intervals of writes while the stream keeps up. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
 attempt to reuse — and drops a slot the server created but did not describe usably;
@@ -1113,6 +1132,7 @@ attempt to reuse — and drops a slot the server created but did not describe us
 sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
+drops only a slot `InspectSlot` reads as `Own` (the one ownership rule the drop and resume share; any read error refuses the drop, so the drop needs every function the inspection runs — `TestDropSlotRefusedWhenTheOwnershipReadFails`),
 drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
 drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
 reads two measures of WAL on a primary — retained, what the slot keeps on the volume, and
@@ -1330,7 +1350,9 @@ still draw each identity default from the source's sequence). *Source:*
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table), execute-and-introspect workspace, lock LK-1 acquired, and the RF-* refusals
+(~2× the table, plus the slot lag ceiling for a run that decodes WAL, less what a resumed run
+already holds of each, measured from the server), execute-and-introspect
+workspace, lock LK-1 acquired, and the RF-* refusals
 below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
 checkpoint fingerprint uses the rolled-back, transaction-scoped `pkg/schemadiff` scratch schema.
@@ -1339,7 +1361,9 @@ declarative diff; for the copy-and-swap route, `pkg/preflight` `CheckPrivileges`
 grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability, `REPLICA
 IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
-caller-measured disk headroom against the shadow copy's requirement), chained by type —
+caller-measured disk headroom against the shadow copy's requirement plus, for a run that
+decodes WAL, the slot lag ceiling, each less what `pkg/schemachange` `MeasureResumeHeld`
+reads from the server that a resumed run already holds of it), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
 `migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
@@ -1524,10 +1548,12 @@ the plan a rerun would execute. A greenfield create proves its outcome through t
 the create-name checks), because deriving a plan needs `CREATE` on the database.
 *Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`; for a file that declares row
 security, `RunDesiredWithRowSecurity` → `verifyRowSecurityConverged`, whose fresh plan
-includes the row security). Tests: `TestRunDesired`,
+includes the row security; for an enum type file, `RunDesiredEnumType` → `executePlan` →
+`verifyConverged`, whose fresh plan reads the type again). Tests: `TestRunDesired`,
 `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
 `TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`,
-`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`.
+`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`,
+`TestRunDesiredEnumTypeFailsWhenTheTypeChangesAfterTheLastCommit`.
 *Source:* review of desired-state outcome reporting.
 
 ## Refusals and preflight (RF)
@@ -1628,7 +1654,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
-  run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
+  run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`, returned as an
+  `AcknowledgementMismatchError` from `ack_mismatch.go`; `TestEachMismatchIsAnAcknowledgementMismatchError`), `RunDesired`'s admission
   and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/planner`
   (`destructiveOp`, which decides every shape in `statement.OpKinds()` explicitly and
   treats an unclassified one as destructive;
@@ -1706,15 +1733,17 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
   refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel its wrong-target check wraps;
+  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel, a case for it in
+  `mismatchErr`, and a wrong-target check returning `AcknowledgementMismatchError`;
   a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
   (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
   `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
-  `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`),
-  `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
+  `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`, each the
+  `Unwrap` of an `AcknowledgementMismatchError` through `mismatchErr`;
+  `TestEveryAcknowledgementKindUnwrapsToItsOwnMismatchSentinel`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
   registry's shape and the desired-state rejections;
   `TestEveryOpKindIsClassifiedForDestructiveness` and

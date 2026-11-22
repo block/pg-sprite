@@ -204,7 +204,8 @@ has no primary key at all.
 Copy-and-swap copies the table in ranges of one `smallint`, `integer`, or `bigint`
 primary-key column and keys the changes it replays on it. Add that key online, over a
 column that already identifies each row or over a new `bigint` column filled from a
-sequence, then run the change again: [primary-keys.md](primary-keys.md#add-a-primary-key-online)
+sequence, then run the change again, which checks the table's other shape facts, such as its
+replica identity and foreign keys: [primary-keys.md](primary-keys.md#add-a-primary-key-online)
 walks both. A table whose key is `uuid`, text, composite, or `DEFERRABLE` is refused under
 the same cause with no guidance: a table has one primary key, and pg-sprite has no online
 route that replaces it

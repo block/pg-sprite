@@ -159,8 +159,8 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 	assert.Equal(t,
 		"slot pgsprite_0123abcd retains 1.5 KiB of WAL, over the 1000 B ceiling (1536 > 1000 bytes), for longer than the server takes to release WAL the stream confirmed, "+
 			"and the stream itself is 512 B behind; either a transaction on the source holds the WAL back (an open write transaction or a prepared one), "+
-			"and the run can resume once it ends, or the source writes more WAL per release interval than the ceiling allows, "+
-			"and the run needs a higher SlotLagCeiling",
+			"and the run can resume once it ends, or the cluster writes more WAL per release interval and catch-up cycle than the ceiling holds, "+
+			"and the run needs a higher SlotLagCeiling, with margin above that much WAL",
 		retained.Error())
 
 	unknown := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: "future-cause",

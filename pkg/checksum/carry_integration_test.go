@@ -70,6 +70,28 @@ func TestCheckLiveLeavesKeysThatKeepChangingForTheSwap(t *testing.T) {
 	assert.Empty(t, outcome.Repairs, "a chunk left for the swap is not repaired")
 }
 
+// A chunk that leaves more keys changing than its error names leaves every
+// one of them for the swap, not just the few the message shows: the error
+// caps the keys it names, and the keys left for the swap are the full set.
+func TestCheckLiveLeavesEveryKeyThatKeepsChangingNotOnlyTheOnesItNames(t *testing.T) {
+	f := newLiveFixture(t)
+	f.holdShadow(t)
+	touch := "UPDATE " + f.table.Qualified() + " SET amount = amount + 1 WHERE id BETWEEN 1 AND 5"
+	f.exec(t, touch)
+
+	v := f.verifier(t, checksum.Options{})
+	outcome, err := f.checkLive(t, v, checksum.DivergenceRepair, checksum.LiveOptions{
+		Confirmed: touchOnEveryAsk(t, f, touch),
+		Attempts:  2,
+		CarryKeys: 8,
+	})
+	require.NoError(t, err)
+
+	verified, minted := outcome.VerifiedShadow()
+	require.True(t, minted, "the pass judged every key but the five it names")
+	assert.Equal(t, []int64{1, 2, 3, 4, 5}, verified.Carried(), "all five keys, more than an error names")
+}
+
 // The same two keys against a pass that may leave only one: the pass is
 // over what the swap would compare, so it leaves nothing and reports the
 // first chunk it gave up on, as a pass that may leave no key does.

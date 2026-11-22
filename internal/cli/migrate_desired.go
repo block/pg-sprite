@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
@@ -47,7 +48,10 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 	}
 	file, err := statement.ParseDesiredFile(string(raw))
 	if err != nil {
-		return err
+		return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, "")
+	}
+	if enumType, ok := file.EnumType(); ok {
+		return c.runDesiredEnumType(ctx, out, enumType)
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
 		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
@@ -70,7 +74,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 	if c.DryRun {
 		report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: c.Schema, Desired: desired})
 		if err != nil {
-			return err
+			return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, desired.Statements()[0].SQL())
 		}
 		// Preview uses desired-state admission: a routed native step can still
 		// discard live structure, which RunDesired refuses before execution.
@@ -83,6 +87,32 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, opts)
+	stopProgress()
+	return c.finishDesired(out, result, runErr)
+}
+
+// runDesiredEnumType converges a desired enum type file: a dry run prints
+// the plan diff prints, and a run adds each label the live type lacks. As
+// for diff, --extension-schema has no effect on an enum type file.
+func (c *MigrateCmd) runDesiredEnumType(ctx context.Context, out io.Writer, desired statement.DesiredEnumType) error {
+	pool, err := dbconn.NewPool(ctx, c.Config())
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if c.DryRun {
+		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
+		report, err := diffplan.PlanEnumType(ctx, pool, c.Schema, desired)
+		if err != nil {
+			return desiredFileRefusal(out, c.palette(out), c.JSON, false, err, desired.Statements()[0].SQL())
+		}
+		return diff.writeDiffReport(out, report)
+	}
+	opts, stopProgress, err := c.startProgress(ctx, c.options(c.diag()))
+	if err != nil {
+		return err
+	}
+	result, runErr := migrate.RunDesiredEnumType(ctx, pool, migrate.EnumTypeRequest{Schema: c.Schema, Desired: desired}, opts)
 	stopProgress()
 	return c.finishDesired(out, result, runErr)
 }
@@ -114,11 +144,46 @@ func (c *MigrateCmd) writeDesiredResult(out io.Writer, result migrate.DesiredRes
 		}
 		return nil
 	}
+	pal := c.palette(out)
 	for _, v := range result.Verdicts {
-		if err := writeVerdictText(out, c.palette(out), v); err != nil {
+		if err := writeVerdictText(out, pal, v); err != nil {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(out, "%s: %s\n", result.Outcome, result.Detail)
-	return err
+	return writeDesiredSummary(out, pal, result)
+}
+
+// writeDesiredSummary writes the run's closing line. A whole-run refusal
+// (a file refused before anything planned) gets the verdict layout's
+// headline, class, owner, and cause, because it carries no statement verdict
+// that would show them. A refusal partway through a run already printed
+// them in its statement's verdict, so it and every other outcome get one
+// line.
+func writeDesiredSummary(out io.Writer, pal palette, result migrate.DesiredResult) error {
+	if !isWholeRunRefusal(result) {
+		if _, err := fmt.Fprintf(out, "%s: %s\n", result.Outcome, result.Detail); err != nil {
+			return fmt.Errorf("write desired result: %w", err)
+		}
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString(pal.severity("error", fmt.Sprintf("refused (%s)", result.Reason)))
+	fmt.Fprintf(&b, "\n  %s  %s", pal.bold("class:"), result.Class)
+	if result.Owner != "" {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("owner:"), result.Owner)
+	}
+	if result.Cause != verdict.CauseNone {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("cause:"), result.Cause)
+	}
+	fmt.Fprintf(&b, "\n  %s %s", pal.bold("detail:"), result.Detail)
+	if _, err := fmt.Fprintln(out, b.String()); err != nil {
+		return fmt.Errorf("write desired result: %w", err)
+	}
+	return nil
+}
+
+// isWholeRunRefusal reports a classified refusal that no statement verdict
+// carries: the run was refused before any statement was planned or run.
+func isWholeRunRefusal(result migrate.DesiredResult) bool {
+	return result.Outcome == verdict.OutcomeRefused && result.Reason != "" && len(result.Verdicts) == 0
 }

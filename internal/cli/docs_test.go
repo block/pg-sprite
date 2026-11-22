@@ -77,7 +77,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 15, "the doc publishes fifteen captured --json outputs")
+	require.Len(t, blocks, 18, "the doc publishes eighteen captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -148,6 +148,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		Statement: "ALTER TABLE users ALTER COLUMN id TYPE text",
 		Table:     "public.users",
 		Detail:    "verified 1000 rows in 2 chunks; the retained source is dropped",
+		SwapLSN:   "0/1A2B3C8",
 	}
 	// A live plan proves the default against the server; clock_timestamp()
 	// is computed per row, so the probe reports the default rewrites.
@@ -204,9 +205,29 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
+	_, typeFileErr := statement.ParseDesiredFile("CREATE DOMAIN account_email AS text;\n")
+	typeFileRefused, ok := migrate.DesiredFileRefusal(typeFileErr, "")
+	require.True(t, ok, "a domain file is a desired-file refusal: %v", typeFileErr)
+
+	var lintDesiredOut strings.Builder
+	lintDesiredErr := (&LintCmd{Desired: true, JSON: true}).runLint(strings.NewReader(
+		"CREATE TABLE events (id bigint NOT NULL, at date NOT NULL) PARTITION BY RANGE (at);\n"+
+			"CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');\n"), &lintDesiredOut)
+	require.ErrorIs(t, lintDesiredErr, verdict.ErrRefused)
+	var partitionsRefused verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(lintDesiredOut.String()), &partitionsRefused))
+
+	accounts, err := statement.ParseDesiredFile("CREATE TABLE accounts (\n  id bigint PRIMARY KEY,\n  status text NOT NULL\n);\n")
+	require.NoError(t, err)
+	_, tunedErr := schemadiff.Diff("app",
+		schemadiff.Model{Table: "accounts", Options: []string{"fillfactor=70"}},
+		schemadiff.Model{Table: "accounts"})
+	tunedRefused, ok := migrate.DesiredFileRefusal(tunedErr, accounts.Statements()[0].SQL())
+	require.True(t, ok, "a storage parameter difference is a desired-file refusal: %v", tunedErr)
+
 	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, rewriteRequired,
 		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
-		lintReport, diff}
+		lintReport, partitionsRefused, diff, typeFileRefused, tunedRefused}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
 		require.NoError(t, err)

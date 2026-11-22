@@ -448,3 +448,23 @@ func TestManualPathStatesStepsForEveryGuidance(t *testing.T) {
 	}
 	assert.Equal(t, "not-a-guidance", suggest.ManualPath("not-a-guidance"))
 }
+
+// The guidance vocabulary is a closed set a consumer validates against, and
+// the tests that range over Guidances() cover only what it lists, so the
+// list is pinned: a code dropped from it, or added without a format_version
+// bump, fails here.
+func TestGuidancesIsTheClosedSet(t *testing.T) {
+	assert.Equal(t, []suggest.Guidance{
+		suggest.GuidanceSplitStatement,
+		suggest.GuidanceAddColumnThenConstraint,
+		suggest.GuidancePrevalidatedCheck,
+		suggest.GuidanceNotNullScaffold,
+		suggest.GuidanceNameConstraintThenValidate,
+		suggest.GuidanceUniqueIndexThenConstraint,
+		suggest.GuidanceExpandContractColumn,
+		suggest.GuidanceCoordinatedTableRename,
+		suggest.GuidanceCoordinatedConstraintRename,
+		suggest.GuidanceAlterColumnTypeInPlace,
+		suggest.GuidanceAddIntegerPrimaryKey,
+	}, suggest.Guidances())
+}

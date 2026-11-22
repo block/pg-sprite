@@ -32,7 +32,10 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	file, err := statement.ParseDesiredFile(string(raw))
 	if err != nil {
-		return err
+		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, "")
+	}
+	if enumType, ok := file.EnumType(); ok {
+		return c.runEnumTypeDiff(ctx, out, enumType)
 	}
 	if rowSecurity, ok := file.RowSecurity(); ok {
 		if rowSecurity, err = rowSecurity.WithExtensionSchemas(c.ExtensionSchema...); err != nil {
@@ -57,13 +60,33 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: c.Schema, Desired: ds})
 	if err != nil {
-		return err
+		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, ds.Statements()[0].SQL())
 	}
 	logger.Debug("diff derived",
 		"schema", report.Schema, "table", report.Table, "changes", len(report.Statements),
 		"table_exists", report.TableExists != nil && *report.TableExists,
 		"disposition", string(report.Disposition))
 
+	return c.writeDiffReport(out, report)
+}
+
+// runEnumTypeDiff is the diff flow for a desired enum type file: the plan
+// adds the labels the live type lacks. --extension-schema widens how a
+// table file's names resolve, and an enum type file names nothing to
+// resolve, so the flag has no effect here.
+func (c *DiffCmd) runEnumTypeDiff(ctx context.Context, out io.Writer, desired statement.DesiredEnumType) error {
+	logger := c.diag()
+	logger.Debug("desired enum type parsed", "type", desired.Name(), "labels", len(desired.Labels()))
+	pool, err := dbconn.NewPool(ctx, c.Config())
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	report, err := diffplan.PlanEnumType(ctx, pool, c.Schema, desired)
+	if err != nil {
+		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, desired.Statements()[0].SQL())
+	}
+	logger.Debug("enum type diff derived", "schema", report.Schema, "type", report.Type, "changes", len(report.Statements))
 	return c.writeDiffReport(out, report)
 }
 
@@ -118,6 +141,12 @@ func writeJSON(out io.Writer, report plan.Report) error {
 // plan does not claim the table converged.
 func writePlanText(out io.Writer, report plan.Report) error {
 	if len(report.Statements) == 0 {
+		if report.Type != "" {
+			if _, err := fmt.Fprintln(out, sqlDiagnosticComment(fmt.Sprintf("no changes: enum type %s.%s carries every label the file lists", report.Schema, report.Type))); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
+			return nil
+		}
 		if len(report.Advisories) == 0 {
 			if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
 				return fmt.Errorf("write plan: %w", err)
@@ -235,8 +264,8 @@ func annotate(ps plan.Statement) string {
 	return s
 }
 
-// runFmt canonicalizes a desired-state schema file: every statement is
-// parsed through the PostgreSQL grammar, admitted by ParseDesiredFile — the
+// runFmt canonicalizes a desired-state schema file with
+// statement.FormatDesired: the file is admitted by ParseDesiredFile — the
 // same front door diff and migrate --desired use, so a file that declares row
 // security is accepted too — and printed back in the deparser's canonical
 // form, in the order the admitted file reports its statements (policy
@@ -253,17 +282,12 @@ func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 	} else if src, err = os.ReadFile(c.Path); err != nil {
 		return fmt.Errorf("read schema file: %w", err)
 	}
-	if err := statement.CheckNoComments(string(src)); err != nil {
-		return err
-	}
-	file, err := statement.ParseDesiredFile(string(src))
+	formatted, err := statement.FormatDesired(string(src))
 	if err != nil {
 		return err
 	}
-	for _, st := range file.Statements() {
-		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL()); err != nil {
-			return fmt.Errorf("write formatted schema: %w", err)
-		}
+	if _, err := io.WriteString(out, formatted); err != nil {
+		return fmt.Errorf("write formatted schema: %w", err)
 	}
 	return nil
 }

@@ -153,6 +153,16 @@ type Report struct {
 	Warnings int `json:"warnings"`
 }
 
+// EmptyReport is the report of a script with no findings, at the current
+// contract version.
+func EmptyReport() Report {
+	return Report{
+		FormatVersion:    FormatVersion,
+		PostgresVersions: planner.RulesPostgresVersions,
+		Findings:         []Finding{},
+	}
+}
+
 // Check lints a DDL script: every statement is parsed with the PostgreSQL
 // grammar and classified with zero live facts beyond the constraint names
 // the script's earlier statements claim (planner.ScriptClassifier). A parse failure is an
@@ -163,11 +173,7 @@ func Check(sql string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	report := Report{
-		FormatVersion:    FormatVersion,
-		PostgresVersions: planner.RulesPostgresVersions,
-		Findings:         []Finding{},
-	}
+	report := EmptyReport()
 	inBlock := false
 	var locked lockedTables
 	var classifier planner.ScriptClassifier

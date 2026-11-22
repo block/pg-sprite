@@ -23,7 +23,8 @@ import (
 var (
 	// ErrAllowDestructiveMismatch means the destructive acknowledgement
 	// named a table other than the statement's resolved target. Nothing has
-	// executed.
+	// executed. The error is an [AcknowledgementMismatchError] carrying both
+	// tables.
 	ErrAllowDestructiveMismatch = errors.New("the destructive acknowledgement must name the resolved target table")
 	// ErrAllowDestructiveNotSupported is returned by [RunDesired] when
 	// Options.AllowDestructive is set: desired-state execution refuses a
@@ -40,7 +41,7 @@ func checkAllowDestructiveAck(table, ack string) error {
 	if ack == table {
 		return nil
 	}
-	return fmt.Errorf("%w %q, got %q; nothing was executed", ErrAllowDestructiveMismatch, table, ack)
+	return ackAllowDestructive.mismatch(table, ack)
 }
 
 // destructiveOperations returns the labels of the routed statement's

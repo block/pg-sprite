@@ -694,5 +694,6 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeValidateConstraint,
 		ChangeValidateForeignKey,
 		ChangeCreateIndex,
+		ChangeAddEnumValue,
 	}, ChangeKinds())
 }

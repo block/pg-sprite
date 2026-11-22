@@ -31,7 +31,7 @@ COLUMN`, `DROP CONSTRAINT`, `DROP NOT NULL`) is one of those refusals until
 Exit 2 covers every refusal cause; the exit code answers *should this
 proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
-(warnings alone exit 0), and `diff` prints the plan and exits 2 when it
+(warnings alone exit 0) and `lint --desired` exits 2 when it refuses a desired file, and `diff` prints the plan and exits 2 when it
 contains a statement execution would refuse — a missing table is diff's
 greenfield case (the plan creates the table), not a refusal, unlike the
 dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
@@ -163,7 +163,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -204,7 +204,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -369,7 +369,7 @@ statement and rerun with `--restart SCHEMA.TABLE`. A consumer branches on the
 ([execution model](execution-model.md)):
 
 ```console
-$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)' --copy-and-swap --free-disk 1GiB --json
+$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(32)' --copy-and-swap --free-disk 2GiB --json
 {
   "outcome": "failed",
   "code": "data-fault",
@@ -397,7 +397,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -439,7 +439,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -472,11 +472,21 @@ the run (the route is in preview; without the flag the front door refuses with
 `copy-and-swap-refused` / cause `copy-and-swap-not-enabled` before the route's
 preflight runs or anything is written), `--free-disk` (the preflight refuses with `copy-and-swap-refused` /
 cause `copy-and-swap-disk-headroom` when the shadow and its indexes would not
-fit the declared space), and either logical decoding on the server or
+fit the declared space, or, for a live run, would not fit beside the slot lag
+ceiling), and either logical decoding on the server or
 `--block-writes SCHEMA.TABLE`, which names the table whose writes it blocks
 until the swap. The verdict's outcome is distinct
-from `executed-natively`, and `detail` says what the verification pass
-covered and what became of the retained source:
+from `executed-natively`, `detail` says what the verification pass
+covered and what became of the retained source, and `swap_lsn` is the
+server's WAL position read inside the swap transaction, under its lock,
+right before it committed. A write to the table that committed below that
+position is in the retained source and was carried into the new table;
+writes after it exist only in the new table. Compare it with another
+position as `pg_lsn`. A run that resumed after its swap had committed, or
+learned of the commit from the catalog after losing its connection, has no
+position from inside the swap and leaves `swap_lsn` out. The field is for
+programs that line the run up with other WAL positions, so only `--json`
+carries it; the text verdict does not print it:
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy-and-swap --free-disk 20GiB --json
@@ -484,7 +494,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE users ALTER COLUMN id TYPE text",
   "table": "public.users",
-  "detail": "verified 1000 rows in 2 chunks; the retained source is dropped"
+  "detail": "verified 1000 rows in 2 chunks; the retained source is dropped",
+  "swap_lsn": "0/1A2B3C8"
 }
 ```
 
@@ -502,7 +513,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -539,7 +550,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -604,7 +615,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -691,6 +702,32 @@ $ pg-sprite lint /tmp/changes.sql --json
 }
 ```
 
+### A desired file refused offline (`lint --desired`) — exit 2
+
+`lint --desired` checks a desired file instead of a script: it runs the file
+admission `diff` and `migrate --desired` share before they connect, with no
+database. A file it refuses prints the same refusal verdict and exits 2; an
+admitted file is clean and exits 0. Planning can still refuse what admission
+does not inspect: a table shape built on the server, or a difference from the
+live table.
+
+```sql
+-- /tmp/events.sql
+CREATE TABLE events (id bigint NOT NULL, at date NOT NULL) PARTITION BY RANGE (at);
+CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+```
+
+```console
+$ pg-sprite lint --desired /tmp/events.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "capability-boundary",
+  "statement": "CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
+  "detail": "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed"
+}
+```
+
 ## Pull
 
 `pull` exports every renderable table in a schema as a separate desired-state
@@ -732,7 +769,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 20,
+  "format_version": 21,
   "source": "diff",
   "schema": "public",
   "table": "users",
@@ -762,6 +799,66 @@ $ pg-sprite diff --desired /tmp/users.sql --json
       "execution": "autocommit-each-step"
     }
   ]
+}
+```
+
+### Refused before planning: a file that is not one table or one enum type (`unsupported-statement`) — exit 2
+
+A desired file holds one `CREATE TABLE`, its indexes, and its row security,
+or one `CREATE TYPE ... AS ENUM`. A file that holds anything else is refused
+before `diff` connects or plans, with the refusal verdict instead of a plan
+report. The class comes from the refused statement's kind, as the imperative
+front door would class it: a domain goes to the operator who runs catalog
+work, a data change to the data change runner. A second table, or a table in
+an enum type file, is refused by design, and partitions of a table as a
+capability boundary. `migrate --desired` refuses the same files the same way.
+
+```sql
+-- /tmp/account_email.sql
+CREATE DOMAIN account_email AS text;
+```
+
+```console
+$ pg-sprite diff --desired /tmp/account_email.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "no-online-safety-problem",
+  "owner": "direct-operator",
+  "statement": "CREATE DOMAIN account_email AS text",
+  "detail": "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"
+}
+```
+
+### Refused: a difference the diff does not converge (`unsupported-statement`) — exit 2
+
+Some differences between a live table and its desired file are compared but
+never converged: storage parameters, persistence, a column's collation, an
+identity or its sequence, a generated column. `diff` refuses the file with
+the refusal verdict instead of a plan report, classed by what differs. A
+tuned storage parameter is the owner's to change directly, so it names
+`direct-operator`; a persistence or collation change needs a rewrite the
+planner does not construct, so it is a capability boundary.
+`migrate --desired` refuses the same file the same way, and nothing runs.
+
+```sql
+-- live: CREATE TABLE app.accounts (...) WITH (fillfactor = 70);
+-- /tmp/accounts.sql
+CREATE TABLE accounts (
+  id bigint PRIMARY KEY,
+  status text NOT NULL
+);
+```
+
+```console
+$ pg-sprite diff --schema app --desired /tmp/accounts.sql --json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "class": "no-online-safety-problem",
+  "owner": "direct-operator",
+  "statement": "CREATE TABLE accounts (id bigint PRIMARY KEY, status text NOT NULL)",
+  "detail": "table storage parameters differ between live (fillfactor=70) and desired (none); declare the live parameters in the desired file: unsupported schema change; nothing was planned or executed"
 }
 ```
 

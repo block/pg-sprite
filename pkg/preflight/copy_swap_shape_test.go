@@ -161,6 +161,12 @@ func TestCopySwapShapeErrorMarksOnlyAKeylessTable(t *testing.T) {
 	assert.Equal(t, CopySwapCausePKUnsupported, shapeErr.Cause)
 	assert.False(t, shapeErr.NoPrimaryKey)
 
+	composite := supportedCopySwapShape()
+	composite.pkColumns = 2
+	require.ErrorAs(t, copySwapShapeError(composite), &shapeErr)
+	assert.Equal(t, CopySwapCausePKUnsupported, shapeErr.Cause)
+	assert.False(t, shapeErr.NoPrimaryKey, "a table with a composite key already has its one primary key")
+
 	unloggedKeyless := keyless
 	unloggedKeyless.relpersistence = "u"
 	require.ErrorAs(t, copySwapShapeError(unloggedKeyless), &shapeErr)

@@ -116,9 +116,15 @@ without writes for the run.
 ## Free disk space
 
 The shadow table is a full second copy of the table and its indexes, so the preflight requires
-free space of at least twice the table's heap, indexes, and TOAST. PostgreSQL cannot report the
+free space of at least twice the table's heap, indexes, and TOAST. A live run also needs room
+for the WAL its replication slot may retain, so its preflight adds the
+[slot lag ceiling](#slot-lag-ceiling) to that figure: 1 GiB unless you pass
+`--slot-lag-ceiling`. A live run on a 10 GiB table therefore needs 21 GiB free by default; an
+offline run (`--block-writes`) holds no slot and needs 20 GiB. PostgreSQL cannot report the
 free space on its own volume over SQL, so you pass it with `--free-disk` (binary units: `MiB`,
-`GiB`, `TiB`). A run without it is refused with cause `copy-and-swap-disk-headroom`.
+`GiB`, `TiB`). A run without it, or with less than it needs, is refused with cause
+`copy-and-swap-disk-headroom`; for a live run the detail names both the shadow's figure and
+the ceiling's.
 
 - **Self-managed PostgreSQL:** run `df -h` on the volume holding the data directory.
 - **Amazon RDS for PostgreSQL:** read the instance's `FreeStorageSpace` metric in CloudWatch.
@@ -130,12 +136,31 @@ Never pass a made-up large value: the check is the only thing between the copy a
 volume. We would like to remove this flag by reading the free space where the platform exposes
 it. Until then it stays required.
 
+A resumed run is asked only for what is left to grow. The space the stopped run already holds
+is gone from the free space you measure, so the resume's preflight subtracts it from the
+requirement: the shadow's size so far, and, for a live run, the WAL its replication slot
+retains. pg-sprite reads both from the server, not from the saved progress. Say a live run on
+a 10 GiB table stopped with 6 GiB of shadow built and 1.5 GiB of WAL in its slot, and you
+resume it with `--slot-lag-ceiling 2GiB`. The resume needs 20 − 6 = 14 GiB for the shadow and
+2 − 1.5 = 0.5 GiB for the slot, 14.5 GiB in all. Pass the free space the volume has now, as for
+any run. Neither discount goes past its own requirement, and anything pg-sprite cannot read
+(no shadow, a slot that is gone or lost, a server that cannot measure the WAL) counts as
+nothing held, so the check falls back to a fresh run's figure. A run with
+`--restart SCHEMA.TABLE` is checked as a fresh run: it discards what the stopped run held
+before it builds anew.
+
 ## Slot lag ceiling
 
 A live run's replication slot keeps WAL on the server until pg-sprite has applied the changes
 in it. The run stops when the slot holds more than the slot lag ceiling: 1 GiB unless you pass
 `--slot-lag-ceiling SIZE` (`CopySwapOptions.SlotLagCeilingBytes` as a library caller). An
-offline run holds no slot, so the flag is refused with `--block-writes`.
+offline run holds no slot, so the flag is refused with `--block-writes`. The ceiling, the
+1 GiB default included, counts against `--free-disk` beside the shadow (see
+[Free disk space](#free-disk-space)), so a ceiling the volume cannot hold is refused with cause
+`copy-and-swap-disk-headroom` before anything is built. That check is a floor on the free
+space, not a guarantee the slot cannot fill the volume: as the next paragraph says, the slot can
+stand over the ceiling, so leave headroom above it of about one release interval and a cycle
+of the cluster's WAL.
 
 The ceiling is a stop threshold pg-sprite checks once per catch-up cycle, not a limit
 PostgreSQL enforces on the slot. The slot can hold more than the ceiling by the time a cycle
@@ -150,8 +175,10 @@ ceiling only with free space on the volume for that much WAL, read the way
 `MiB`, `GiB`, or `TiB`, case-insensitive; `KB`, `MB`, `GB`, and `TB` mean the same binary
 multiples. `2GiB` and `2147483648` are the same ceiling. Zero, negative values, fractions such
 as `1.5GiB`, and other units are refused as a usage error (exit 1) before anything runs. There
-is no minimum beyond one byte, as in the library; a ceiling well below the default stops a
-busy run sooner, not more safely.
+is no lower limit beyond one byte, as in the library, but a live run needs more than about 15
+seconds and a catch-up cycle of the cluster's WAL, with margin, or it stops `wal-retained` even
+while pg-sprite keeps up (see below); a ceiling well below the default stops a busy run sooner,
+not more safely.
 
 The run stops with a failed verdict (exit 1) whose detail says which of two measures crossed
 the ceiling; the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
@@ -164,9 +191,19 @@ slot and the saved progress stay, so running the same command again resumes the 
   for longer than it takes to release WAL pg-sprite has confirmed. Look for a transaction holding
   it back first: an open write transaction (`pg_stat_activity` where `backend_xid IS NOT
   NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`). End it, then
-  resume. If there is none, the source writes more WAL per release interval than the ceiling
-  allows: resume with a higher ceiling, above the retained WAL the detail reports, and with
-  room on the volume for that much WAL:
+  resume. If there is none, the cluster writes more WAL per release interval and cycle than the
+  ceiling holds. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a busy source
+  each step stops one step short, so the slot keeps between 15 and 30 seconds of the cluster's
+  WAL even while pg-sprite keeps up. That is everything the server logs, not only the
+  application's writes: the copy's own inserts into the shadow and other databases count too.
+  The ceiling must hold more than 15 seconds and a catch-up cycle of it, with margin (ten
+  percent covers a record the server logs late or a stream a cycle slower). To read your slot
+  the same way, compare `pg_current_wal_lsn()` with `restart_lsn` (retained) and
+  `confirmed_flush_lsn` (unconfirmed) from `pg_replication_slots`; `make slot-release-proof`
+  logs the same three on a busy test source. Resume with a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
+  that much WAL. The resume's preflight counts the new ceiling against
+  `--free-disk` beside the shadow, less the shadow already built and the WAL the slot already
+  retains (see [Free disk space](#free-disk-space)), so pass the free space the volume has now:
 
 ```sh
 pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
@@ -200,9 +237,13 @@ A successful run prints one verdict, `executed-via-copy-and-swap`, and exits 0. 
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
   "table": "public.order_archive",
-  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run"
+  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run",
+  "swap_lsn": "0/3F2A1B8"
 }
 ```
+
+`swap_lsn` is the server's WAL position read inside the swap transaction, under its lock:
+writes to the table after it exist only in the new table.
 
 The old table is dropped once the swap commits. Add `--keep-old` to keep it under its `_old`
 name for a rollback window; you drop it yourself when the window ends.
