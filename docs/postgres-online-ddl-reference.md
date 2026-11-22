@@ -834,9 +834,18 @@ manual online plan.
 |---|---|---|---|
 | refused — never executed | — | — | 2 |
 
-The routed plan builds an index concurrently, and the target is a partitioned
-parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` on a partitioned table.
-Refused; build the index on each partition concurrently, then attach.
+The target is a partitioned parent and the statement would do what PostgreSQL
+cannot do online there: adopt an existing index as a constraint (`ADD
+CONSTRAINT ... USING INDEX`, not supported on a partitioned table in any
+version), add a foreign key `NOT VALID` before PostgreSQL 18, or build an index
+as a blocking statement. Refused; nothing executes.
+
+A plain `CREATE INDEX` on a partitioned parent is not one of these: PostgreSQL
+cannot run `CREATE INDEX CONCURRENTLY` there, so the plan carries the
+statement itself with the `partitioned-index-build` execution, and the run
+creates the parent's index with `ON ONLY`, builds each partition's index
+concurrently, and attaches it. Running the same statement again resumes an
+interrupted build ([design](partitioned-index-build-design.md)).
 
 ### `unsupported-statement`
 
