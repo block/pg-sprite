@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
@@ -59,6 +60,12 @@ var ErrDroppedIndexReplaced = errors.New("the drop removed an index the plan did
 // or marks it invalid; an invalid leftover is debris the diff reports as an
 // advisory, never as a drop. It needs one pool connection.
 func ExecuteDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, b ConcurrentBudget) (DroppedIndex, error) {
+	return executeDropIndexConcurrently(ctx, pool, schema, table, index, definition, b, progress.WallClock{})
+}
+
+// executeDropIndexConcurrently is ExecuteDropIndexConcurrently with the
+// clock it reads once, after the pre-drop checks and right before the drop.
+func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, b ConcurrentBudget, clock progress.Clock) (DroppedIndex, error) {
 	if err := b.validate(); err != nil {
 		return DroppedIndex{}, err
 	}
@@ -135,8 +142,28 @@ func ExecuteDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schem
 		return DroppedIndex{}, fmt.Errorf("%w: index %s is now %q, not the %q the plan reviewed; re-plan",
 			ErrDroppedIndexDrift, ref.Sanitize(), live.Definition, definition)
 	}
+	// The definition was read by name in a statement of its own, so the name
+	// must still resolve to the OID whose flags were checked: otherwise the
+	// definition compared above may belong to an index that took the name in
+	// between.
+	var nowOID uint32
+	err = conn.QueryRow(ctx,
+		`SELECT c.oid FROM pg_catalog.pg_class c
+		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`,
+		schema, index).Scan(&nowOID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return DroppedIndex{}, fmt.Errorf("%w: %s has no index %s on %s any more; re-plan",
+			ErrDroppedIndexDrift, schema, ref.Sanitize(), tableRef.Sanitize())
+	case err != nil:
+		return DroppedIndex{}, fmt.Errorf("confirm index %s before dropping it: %w", ref.Sanitize(), err)
+	case nowOID != oid:
+		return DroppedIndex{}, fmt.Errorf("%w: the name %s moved from oid %d to oid %d while it was checked; re-plan",
+			ErrDroppedIndexDrift, ref.Sanitize(), oid, nowOID)
+	}
 
-	start := time.Now()
+	start := clock.Now()
 	_, dropErr := conn.Exec(ctx, "DROP INDEX CONCURRENTLY "+ref.Sanitize())
 	elapsed := time.Since(start)
 	if dropErr != nil {
@@ -148,7 +175,8 @@ func ExecuteDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schem
 	if err := conn.QueryRow(ctx,
 		`SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1`,
 		oid).Scan(&remaining); err != nil {
-		return DroppedIndex{}, fmt.Errorf("look up the index checked before the drop of %s: %w", ref.Sanitize(), err)
+		return DroppedIndex{}, fmt.Errorf("DROP INDEX CONCURRENTLY %s completed, but the check that it dropped the reviewed index (oid %d) "+
+			"failed, so inspect the indexes of %s before retrying: %w", ref.Sanitize(), oid, tableRef.Sanitize(), err)
 	}
 	if remaining != 0 {
 		return DroppedIndex{}, fmt.Errorf("%w: %s was dropped by name, but the index the plan checked (oid %d) is still in the catalog, "+
