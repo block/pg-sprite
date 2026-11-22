@@ -13,8 +13,9 @@ import (
 // server prints names every schema its objects live in, and every relation and
 // operator is pg_catalog-qualified (CO-9).
 
-// partitionNode is one partition under the target, as the catalog lists it.
-// relkind is 'r' for a leaf and 'p' for a sub-partitioned partition.
+// partitionNode is one partition in the tree under the target, as the catalog
+// lists it. relkind is 'r' for a leaf, 'p' for a sub-partitioned partition, and
+// 'f' for a foreign table.
 type partitionNode struct {
 	oid       uint32
 	parentOID uint32
@@ -24,6 +25,7 @@ type partitionNode struct {
 }
 
 func (n partitionNode) subPartitioned() bool { return n.relkind == "p" }
+func (n partitionNode) foreign() bool        { return n.relkind == "f" }
 func (n partitionNode) qualified() string    { return qualifiedName(n.schema, n.name) }
 
 // listPartitionTree returns every partition under the table with the given
@@ -71,6 +73,17 @@ func childrenOf(tree []partitionNode, parentOID uint32) []partitionNode {
 		}
 	}
 	return children
+}
+
+// foreignPartitions names every foreign table in the tree.
+func foreignPartitions(tree []partitionNode) []string {
+	var names []string
+	for _, n := range tree {
+		if n.foreign() {
+			names = append(names, n.qualified())
+		}
+	}
+	return names
 }
 
 // relationFacts is what one catalog read says about a relation found by name

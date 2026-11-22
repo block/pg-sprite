@@ -24,6 +24,12 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
+// maxPartitionedIndexPasses bounds how many times the build walks the
+// partition tree. The first pass does the work and a later one confirms there
+// is nothing left; the rest are the room other sessions' partition changes get
+// before the build refuses instead of chasing them for ever.
+const maxPartitionedIndexPasses = 5
+
 // PartitionIndexAction says what the build did to give one partition an index
 // attached to the parent's.
 type PartitionIndexAction string
@@ -32,6 +38,10 @@ const (
 	// PartitionIndexBuilt means the build created the partition's index
 	// concurrently, then attached it.
 	PartitionIndexBuilt PartitionIndexAction = "built"
+	// PartitionIndexOnly means the partition is itself partitioned, so the
+	// build gave it a metadata-only index, filled by its partitions' indexes,
+	// and attached that.
+	PartitionIndexOnly PartitionIndexAction = "partitioned"
 )
 
 // PartitionIndexResult is one partition the build gave an index. A partition
@@ -60,10 +70,12 @@ type PartitionedIndexReport struct {
 	IndexOID uint32 `json:"index_oid"`
 	// ParentCreated is true when this run created the parent's index.
 	ParentCreated bool `json:"parent_created"`
-	// Partitions is the number of partitions in the table.
+	// Partitions is the number of partitions in the tree, at every depth.
 	Partitions int `json:"partitions"`
 	// Worked lists the partitions this run gave an index, in order.
 	Worked []PartitionIndexResult `json:"worked,omitempty"`
+	// Passes is how many times the build walked the tree.
+	Passes int `json:"passes"`
 	// Duration is the wall-clock time of the whole build. It encodes as
 	// integer nanoseconds.
 	Duration time.Duration `json:"duration_ns"`
@@ -77,17 +89,21 @@ type PartitionedIndexReport struct {
 //
 // The statement is one named, schema-qualified CREATE INDEX on the preflighted
 // partitioned table, with or without CONCURRENTLY and ON ONLY; every form asks
-// for a complete index on the whole table. The build holds the parent's advisory
+// for a complete index on the whole tree. The build holds the parent's advisory
 // table lock (LK-1) for its whole run, so a second run on the same parent is
 // refused with a *dbconn.TableLockHeldError; cfg is the connection target that
 // lock's dedicated session dials, the same Config the pool was made from. Under
 // the lock it:
 //
-//  1. creates the parent's index with ON ONLY, refusing a name that is already
+//  1. refuses a tree that holds a foreign table (ErrForeignTablePartition);
+//  2. creates the parent's index with ON ONLY, refusing a name that is already
 //     taken (ErrPartitionedIndexNameTaken);
-//  2. gives each partition an index built concurrently under a derived name,
-//     then attached;
-//  3. re-reads the parent's index and returns only when it is valid.
+//  3. gives each partition an attached index, recursively: a leaf gets an index
+//     built concurrently under a derived name, and a sub-partitioned partition
+//     gets its own ON ONLY index, filled the same way, before it is attached;
+//  4. walks the tree again, up to a fixed number of passes, for partitions
+//     created meanwhile (ErrPartitionedIndexUnsettled when they keep appearing);
+//  5. re-reads the parent's index and returns only when it is valid.
 //
 // A failure at any point leaves a valid prefix. The build never drops an index.
 //
@@ -104,8 +120,8 @@ func BuildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool
 // BuildPartitionedIndexWithProgress runs a partitioned index build while
 // updating tracker, which the caller may poll concurrently. A step is one
 // partition, the parent's index being step one, and total_steps is the
-// partitions found plus one. It is an upper bound: a partition that already has
-// its index attached takes no step.
+// partitions found plus one, growing when the build finds more. It is an upper
+// bound: a partition that already has its index attached takes no step.
 func BuildPartitionedIndexWithProgress(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget, tracker *progress.Tracker) (rep PartitionedIndexReport, err error) {
 	if tracker == nil {
 		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
