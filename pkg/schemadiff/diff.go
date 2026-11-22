@@ -25,6 +25,10 @@ var ErrUnsupportedChange = errors.New("unsupported schema change")
 // tables — a caller bug, refused rather than diffed.
 var ErrDifferentTables = errors.New("models describe different tables")
 
+// ErrDifferentTypes is returned when a live enum type and a desired one
+// name different types — a caller bug, refused rather than diffed.
+var ErrDifferentTypes = errors.New("enum types describe different types")
+
 // ChangeKind classifies a derived statement so a consumer can gate whole
 // classes of change (destructive, rewriting, index-building) without
 // parsing SQL.

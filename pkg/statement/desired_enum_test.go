@@ -2,6 +2,7 @@ package statement
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -54,18 +55,6 @@ func TestParseDesiredFileRefusesAnEnumTypeFileThatHoldsMore(t *testing.T) {
 		stmt string
 	}{
 		{
-			name: "a table after the type",
-			sql:  "CREATE TYPE status AS ENUM ('a'); CREATE TABLE t (s status)",
-			err:  ErrEnumTypeAlone,
-			stmt: "CREATE TABLE t (s status)",
-		},
-		{
-			name: "a table before the type",
-			sql:  "CREATE TABLE t (id int); CREATE TYPE status AS ENUM ('a')",
-			err:  ErrEnumTypeAlone,
-			stmt: "CREATE TABLE t (id int)",
-		},
-		{
 			name: "a second type",
 			sql:  "CREATE TYPE a AS ENUM ('x'); CREATE TYPE b AS ENUM ('y')",
 			err:  ErrEnumTypeAlone,
@@ -80,6 +69,7 @@ func TestParseDesiredFileRefusesAnEnumTypeFileThatHoldsMore(t *testing.T) {
 		{name: "a qualified name", sql: "CREATE TYPE app.status AS ENUM ('a')", err: ErrQualifiedName},
 		{name: "a label listed twice", sql: "CREATE TYPE status AS ENUM ('a', 'b', 'a')", err: ErrEnumLabel},
 		{name: "the empty label", sql: "CREATE TYPE status AS ENUM ('a', '')", err: ErrEnumLabel},
+		{name: "a label longer than 63 bytes", sql: "CREATE TYPE status AS ENUM ('a', '" + strings.Repeat("x", 64) + "')", err: ErrEnumLabel},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

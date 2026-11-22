@@ -130,5 +130,5 @@ func TestDiffEnumTypeRefusesWhatPostgreSQLCannotDo(t *testing.T) {
 // diffed.
 func TestDiffEnumTypeRefusesAnotherType(t *testing.T) {
 	_, err := DiffEnumType(EnumType{Schema: "app", Name: "a"}, desiredEnum(t, "CREATE TYPE b AS ENUM ('x')"))
-	require.ErrorIs(t, err, ErrDifferentTables)
+	require.ErrorIs(t, err, ErrDifferentTypes)
 }

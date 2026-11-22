@@ -175,7 +175,7 @@ func TestLintParseFailureIsErrorNotFinding(t *testing.T) {
 // migrate --desired run before they connect, offline: an admitted file is
 // clean even though, read as a script, its row security is unrecognized and
 // its index would block writes, and an enum type file is clean, while a
-// domain file, an enum type file with a table in it, or a partitions file is
+// domain file, a table file with an enum type in it, or a partitions file is
 // refused with its class and exit 2 instead of passing or failing untyped.
 func TestLintDesiredReportsTheAdmissionVerdict(t *testing.T) {
 	const admitted = `CREATE TABLE documents (
@@ -223,10 +223,11 @@ CREATE POLICY owners ON documents FOR ALL USING (owner_id = current_setting('app
 			statement: "CREATE DOMAIN account_email AS text",
 		},
 		{
-			name:      "enum type file with a table",
+			name:      "table file with an enum type",
 			file:      "CREATE TYPE status AS ENUM ('active', 'closed');\nCREATE TABLE accounts (id bigint PRIMARY KEY, status status);",
-			class:     verdict.ClassByDesign,
-			statement: "CREATE TABLE accounts (id bigint PRIMARY KEY, status status)",
+			class:     verdict.ClassNoOnlineSafetyProblem,
+			owner:     verdict.OwnerDirectOperator,
+			statement: "CREATE TYPE status AS ENUM ('active', 'closed')",
 		},
 		{
 			name: "partitions file",

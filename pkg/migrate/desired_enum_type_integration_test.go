@@ -223,3 +223,37 @@ func TestRunDesiredEnumTypeRefusesAStalePlan(t *testing.T) {
 	assert.Empty(t, res.Verdicts)
 	assert.Equal(t, []string{"new", "shipped"}, liveEnumLabels(t, pool, schema, "order_status"))
 }
+
+// A run reports executed only when the type, read again after its last
+// commit, matches the file. Here an event trigger stands in for another
+// session: when the run adds a label, it adds one the file does not list.
+// The fresh plan is then a refusal, since PostgreSQL cannot drop a label,
+// so the run fails with convergence unverifiable rather than reporting
+// executed, and the label it added stays committed with its verdict
+// executed.
+func TestRunDesiredEnumTypeFailsWhenTheTypeChangesAfterTheLastCommit(t *testing.T) {
+	pool := enumPool(t)
+	schema := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.order_status AS ENUM ('new')`, schema))
+	require.NoError(t, err)
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "add_stray_label", fmt.Sprintf(`
+		IF TG_TAG = 'ALTER TYPE'
+			AND NOT EXISTS (SELECT FROM pg_catalog.pg_enum e
+				JOIN pg_catalog.pg_type ty ON ty.oid = e.enumtypid
+				JOIN pg_catalog.pg_namespace n ON n.oid = ty.typnamespace
+				WHERE n.nspname = '%[1]s' AND ty.typname = 'order_status' AND e.enumlabel = 'stray') THEN
+			ALTER TYPE %[1]s.order_status ADD VALUE 'stray';
+		END IF;`, schema))
+	desired := parseEnumType(t, `CREATE TYPE order_status AS ENUM ('new', 'paid');`)
+
+	res, err := migrate.RunDesiredEnumType(t.Context(), pool,
+		migrate.EnumTypeRequest{Schema: schema, Desired: desired}, runOptions())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, migrate.ErrNotConverged)
+	assert.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceUnverifiable}, res.Convergence)
+	require.Len(t, res.Verdicts, 1)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
+	assert.Equal(t, []string{"new", "paid", "stray"}, liveEnumLabels(t, pool, schema, "order_status"))
+}

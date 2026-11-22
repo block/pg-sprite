@@ -26,7 +26,7 @@ func writeDesiredFile(t *testing.T, sql string) string {
 	return file
 }
 
-// A domain file, an enum type file with a table in it, and a file of
+// A domain file, a table file with an enum type in it, and a file of
 // partitions are refused before anything is
 // planned: diff prints the refusal verdict in each output format and exits
 // with the refusal code, without connecting to the database.
@@ -38,7 +38,7 @@ func TestDiffRefusesADesiredFileBeforePlanning(t *testing.T) {
 		class verdict.Class
 	}{
 		{"domain file", domainFile, "CREATE DOMAIN email AS text", verdict.ClassNoOnlineSafetyProblem},
-		{"enum type file with a table", enumTableFile, "CREATE TABLE t (id int)", verdict.ClassByDesign},
+		{"table file with an enum type", enumTableFile, "CREATE TYPE mood AS ENUM ('happy', 'sad')", verdict.ClassNoOnlineSafetyProblem},
 		{"partitions file", partitionsFile, "CREATE TABLE log_p2 PARTITION OF log FOR VALUES FROM (2) TO (3)", verdict.ClassCapabilityBoundary},
 	}
 	for _, tt := range tests {

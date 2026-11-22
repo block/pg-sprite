@@ -79,7 +79,7 @@ func IntrospectEnumType(ctx context.Context, db *pgxpool.Pool, schema, name stri
 // with [CauseEnumValueReordered]. An empty result means the type matches.
 func DiffEnumType(live EnumType, desired statement.DesiredEnumType) ([]Change, error) {
 	if live.Name != desired.Name() {
-		return nil, fmt.Errorf("%w: live enum type %q, desired %q", ErrDifferentTables, live.Name, desired.Name())
+		return nil, fmt.Errorf("%w: live enum type %q, desired %q", ErrDifferentTypes, live.Name, desired.Name())
 	}
 	labels := desired.Labels()
 	if err := liveLabelsKept(live.Schema+"."+live.Name, live.Labels, labels); err != nil {

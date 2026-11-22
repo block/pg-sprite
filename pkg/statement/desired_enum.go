@@ -17,10 +17,11 @@ var (
 	// parser returns it inside an [*EnumTypeFileError], which names the
 	// refused statement.
 	ErrEnumTypeAlone = errors.New("a desired enum type file holds exactly one CREATE TYPE ... AS ENUM and nothing else")
-	// ErrEnumLabel is returned when a desired enum type lists a label twice
-	// or lists the empty label: a plan places each new label next to a
-	// neighbor it names, so every label must be one the plan can name.
-	ErrEnumLabel = errors.New("a desired enum type's labels must be distinct and non-empty")
+	// ErrEnumLabel is returned when a desired enum type lists a label twice,
+	// lists the empty label, or lists one longer than PostgreSQL stores: a
+	// plan places each new label next to a neighbor it names, so every label
+	// must be one the plan can name and the server can add.
+	ErrEnumLabel = errors.New("a desired enum type's labels must be distinct, non-empty, and at most 63 bytes")
 )
 
 // EnumTypeFileError is [ErrEnumTypeAlone] for one statement of a desired
@@ -39,7 +40,7 @@ func (e *EnumTypeFileError) Unwrap() error { return ErrEnumTypeAlone }
 
 // DesiredEnumType proves a desired-state schema file declares exactly one
 // enum type: a single unqualified CREATE TYPE ... AS ENUM whose labels are
-// distinct and non-empty. Only [ParseDesiredFile] produces a non-zero
+// distinct, non-empty, and at most 63 bytes. Only [ParseDesiredFile] produces a non-zero
 // value.
 //
 // The labels are the type's desired values in their declared order, which
@@ -63,11 +64,16 @@ func (d DesiredEnumType) Labels() []string { return slices.Clone(d.labels) }
 // deparser's canonical form. The slice is a copy.
 func (d DesiredEnumType) Statements() []Statement { return []Statement{d.statement} }
 
-// declaresEnumType reports whether any statement of a parsed file is a
-// CREATE TYPE ... AS ENUM, which selects the enum type front door.
+// declaresEnumType reports whether a parsed file selects the enum type
+// front door: some statement is a CREATE TYPE ... AS ENUM and none is a
+// CREATE TABLE. A table file that also holds a type stays a table file, so
+// its refusal names the CREATE TYPE, with the class the gate gives catalog
+// work, rather than naming the table.
 func declaresEnumType(tree *pganalyze.ParseResult) bool {
 	return slices.ContainsFunc(tree.GetStmts(), func(raw *pganalyze.RawStmt) bool {
 		return raw.GetStmt().GetCreateEnumStmt() != nil
+	}) && !slices.ContainsFunc(tree.GetStmts(), func(raw *pganalyze.RawStmt) bool {
+		return raw.GetStmt().GetCreateStmt() != nil
 	})
 }
 
@@ -124,8 +130,14 @@ func enumTypeName(create *pganalyze.CreateEnumStmt) (string, error) {
 	}
 }
 
+// maxEnumLabelBytes is PostgreSQL's NAMEDATALEN - 1: an enum label is
+// stored as a name, and the server refuses a longer one when it is added.
+const maxEnumLabelBytes = 63
+
 // enumLabels returns the labels of a CREATE TYPE ... AS ENUM in declared
-// order, refusing a duplicate or the empty label.
+// order, refusing a duplicate, the empty label, or a label longer than the
+// server stores, so a plan never commits some labels and then fails on one
+// it could have refused before running anything.
 func enumLabels(create *pganalyze.CreateEnumStmt) ([]string, error) {
 	labels := make([]string, 0, len(create.GetVals()))
 	seen := make(map[string]bool, len(create.GetVals()))
@@ -134,6 +146,8 @@ func enumLabels(create *pganalyze.CreateEnumStmt) ([]string, error) {
 		switch {
 		case label == "":
 			return nil, fmt.Errorf("%w: the empty label", ErrEnumLabel)
+		case len(label) > maxEnumLabelBytes:
+			return nil, fmt.Errorf("%w: %q is %d bytes", ErrEnumLabel, label, len(label))
 		case seen[label]:
 			return nil, fmt.Errorf("%w: %q is listed twice", ErrEnumLabel, label)
 		}
