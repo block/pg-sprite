@@ -340,11 +340,12 @@ mutation, and the verdict.
 
 Copy-and-swap at the default table size has not yet been shown to pass: the default run
 needs a host with the disk and I/O for two tables of about 10 GiB. The defaults stay at
-this size so the engine is proven at it by the same command. A table of about 1 GiB
-(`LOAD_PROOF_ROWS=100000`) passes at the default 8 × 100 uniform writes a second, where the
-engine before key-by-key settling and slot-lag pacing stopped in the catch-up with the slot
-over its lag ceiling, and so does half that size, where that engine stopped in the live
-verify pass on a chunk that never read equal as a whole
+this size so the engine is proven at it by the same command. On a laptop with `fsync=off`,
+a table of about 1 GiB (`LOAD_PROOF_ROWS=100000`) passed both of its runs at the default
+8 × 100 uniform writes a second, where the engine before key-by-key settling and slot-lag
+pacing stopped in the catch-up with the slot over its lag ceiling, and half that size passed
+all three of its runs, where that engine stopped in the live verify pass on a chunk that
+never read equal as a whole, in both of its runs
 ([the record](copy-and-swap-design.md#evidence-key-by-key-settling-under-the-load-proofs-default-load)).
 Half that size also passes with a fifth of the updates on ten keys:
 `make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_HOT=0.2 LOAD_PROOF_FREE_DISK=10GiB`.
