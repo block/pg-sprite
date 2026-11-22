@@ -591,7 +591,7 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	if forced {
 		err = executor.ExecuteNativeAsStep(ctx, pool, pt, st, opts.Budget.Brief, retry, opts.runStep(step))
 	} else {
-		rep, err = executor.RunSequenceAsStep(ctx, pool, pt, execSQL, opts.Budget, retry, adopts, validates, opts.runStep(step))
+		rep, err = executor.RunSequenceAsStep(ctx, pool, pt, execSQL, opts.Budget, retry, adopts, validates, nil, opts.runStep(step))
 	}
 	elapsed := time.Since(start)
 	if v, refused := execRefusal(st, err, substituted, forced, onlineIdiomPlan(plan)); refused {
