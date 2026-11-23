@@ -483,6 +483,9 @@ const (
 	// CauseParentNotValidForeignKey identifies a NOT VALID foreign key on a
 	// partitioned parent.
 	CauseParentNotValidForeignKey Cause = "parent-not-valid-foreign-key"
+	// CauseParentConcurrentIndexDrop identifies a concurrent drop of an
+	// index of a partitioned parent, which PostgreSQL does not support.
+	CauseParentConcurrentIndexDrop Cause = "parent-concurrent-index-drop"
 	// CauseCopyAndSwapNotEnabled: the statement routes to the copy-and-swap
 	// backend, which the caller has not opted into; nothing was read or
 	// executed. The route is in preview, so it runs only when the policy
@@ -599,10 +602,14 @@ type Verdict struct {
 	// the source — write fence or replication slot — is released, and the
 	// checkpoint row is deleted, so nothing remains and the corrected
 	// statement runs from the beginning without any acknowledgement. A
-	// data-fault verdict with it false is a run whose abandon did not
-	// finish: the row and the hold stand as far as the discard got, and
-	// the run is started over with the restart acknowledgement. It is the
-	// field automation branches on; Detail says the same for a reader.
+	// copy-and-swap data-fault verdict with it false is a run whose abandon
+	// did not finish: the row and the hold stand as far as the discard got,
+	// and the run is started over with the restart acknowledgement. A
+	// data-fault verdict that carries FailedStep is a native concurrent
+	// index build that failed on the rows, not a copy-and-swap run: there
+	// is no run to abandon or restart, and the build's invalid index is
+	// the leftover Detail names. It is the field automation branches on;
+	// Detail says the same for a reader.
 	// False for every other verdict, including a refusal: a run whose lock
 	// session is lost after its discard finished comes back as the
 	// shadow-lock-lost refusal, with nothing left behind but no field to say

@@ -617,7 +617,9 @@ func (c *Catchup) checkSlot(ctx context.Context, pool *pgxpool.Pool) error {
 			&decode.SlotLostError{Slot: c.stream.Slot()})
 	}
 	// INV: ST-3 — the ceiling is judged every cycle, fail closed.
-	if err := c.slotLag.Judge(status, c.opts.Clock.Now()); err != nil {
+	now := c.opts.Clock.Now()
+	if err := c.slotLag.Judge(status, now); err != nil {
+		err = recordDeadlocks(err, c.deadlocks, c.retryAt, now)
 		return fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
 	return nil
@@ -703,12 +705,21 @@ func confirmBound(delivered decode.LSN, oldestPending decode.LSN, hasPending boo
 	return delivered
 }
 
+// walEndSQL reads the server's write position. It runs on the caller's
+// pool, whatever its search_path, so the cast is spelled through
+// pg_catalog as well as the function: a lookalike text type on the path
+// would otherwise reshape the position the lag is measured against
+// (CO-9).
+//
+// INV: CO-9
+const walEndSQL = `SELECT pg_catalog.pg_current_wal_lsn()::pg_catalog.text`
+
 // measureWALEnd reads the server's write position on pool: the far end of
 // the lag. It runs after the cycle's confirmation, so the position it
 // returns is never below the one confirmed.
 func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) (decode.LSN, error) {
 	var text string
-	if err := pool.QueryRow(ctx, `SELECT pg_catalog.pg_current_wal_lsn()::text`).Scan(&text); err != nil {
+	if err := pool.QueryRow(ctx, walEndSQL).Scan(&text); err != nil {
 		return 0, fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
 	walEnd, err := decode.ParseLSN(text)
