@@ -157,10 +157,9 @@ ST-7 when a name moved:
   build repeats the check on its own session, after it resolves the table name.
   A concurrent build cannot run in a transaction, so one that lands on a
   replacement table is found afterwards, from the index's own `indrelid`, and
-  that index is dropped (`DROP INDEX CONCURRENTLY` by schema and name, after
-  reading again that the name still resolves to the misplaced index's OID). The
-  flow then refuses. If the drop cannot complete, the error names the index left
-  on the replacement table.
+  the flow refuses. Nothing is dropped, because the flow cannot prove that index
+  is the one it created: the error names the index and the table it is on for an
+  operator to inspect.
 - **`ON ONLY` statements** (the parent's, a sub-partitioned partition's, and the
   probe's). One transaction locks the table by name under the bounded
   `lock_timeout`, proves it is still the partitioned table with the expected OID,
@@ -203,8 +202,12 @@ ST-7 when a name moved:
 - The table lock is taken on a session of its own, dialed from the
   `dbconn.Config`, and every step runs on the pool. Before the first step the
   flow asks the pool's database which backend holds the lock, and refuses with
-  LK-1 unless it is the lock session's backend, so a config and a pool that point
-  at different databases are caught before anything is created.
+  LK-1 unless it is the lock session's backend, matched by PID and backend
+  start, so a config and a pool that point at different databases or servers
+  are caught before anything is created. When the pool's role cannot see that
+  session's backend start, which `pg_stat_activity` hides from another role
+  without `pg_read_all_stats`, the flow refuses with `ErrTableLockUnconfirmed`
+  instead.
 - A lock that is lost voids the run: the flow's context ends with it, and the
   error joins `ErrInvariantViolation` and `dbconn.ErrTableLockLost` (LK-1),
   whatever the interrupted step reported, so a lost lock is never a retryable
@@ -237,7 +240,7 @@ predicate.
   dedicated session the pool cannot supply. It is admitted only for a
   partitioned target (ST-7). Its refusals are typed: `ErrNotPartitionedTable`,
   `ErrPartitionedIndexNameTaken`, `ErrForeignTablePartition`,
-  `ErrUniqueIndexPartitionKey`,
+  `ErrUniqueIndexPartitionKey`, `ErrTableLockUnconfirmed`,
   `ErrPartitionedIndexTablespace`, and `ErrPartitionedIndexUnsettled`, beside the
   concurrent build's own. The report lists each partition the run gave an index
   (`built`, `reused`, `adopted`, or `partitioned`) and whether it recovered

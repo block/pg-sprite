@@ -29,6 +29,12 @@ var (
 	// own, so the build refuses the whole tree before it creates anything
 	// rather than fail at the first level that does not match.
 	ErrUniqueIndexPartitionKey = errors.New("a unique index must contain the partition key of every partitioned table in the tree")
+	// ErrTableLockUnconfirmed is returned when the pool's role cannot see
+	// when the session holding the build's table lock started. The build
+	// identifies that session by its PID and start time, so it refuses
+	// before any step rather than accept a PID that another server could
+	// share. Nothing was created.
+	ErrTableLockUnconfirmed = errors.New("the pool cannot confirm that the build's own session holds the table lock")
 	// ErrPartitionedIndexUnsettled is returned when partitions kept appearing
 	// without an attached index for as long as the build's bounded number of
 	// passes. What the build finished stays attached.
