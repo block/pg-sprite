@@ -34,6 +34,10 @@ const (
 	// CodeCommitOutcomeUnknown requires catalog inspection before retry: a
 	// bounded attempt's COMMIT did not return success and may have landed.
 	CodeCommitOutcomeUnknown Code = "commit-outcome-unknown"
+	// CodeDropOutcomeUnknown requires catalog inspection before retry: a
+	// reviewed index drop completed, but the check of which index it
+	// dropped failed.
+	CodeDropOutcomeUnknown Code = "drop-outcome-unknown"
 	// CodeInvalidBlockingBudget identifies an unrepresentable or disabled bound.
 	CodeInvalidBlockingBudget Code = "invalid-blocking-budget"
 	// CodeUnsupportedAcceptedBlocking identifies a statement outside this narrow path.
@@ -147,6 +151,17 @@ const (
 	// planning, read again under the table's lock; nothing was attached.
 	// Re-plan against the index as it stands.
 	CodeAdoptedIndexDrift Code = "adopted-index-drift"
+	// CodeDroppedIndexDrift: the index a reviewed plan drops is no longer
+	// the plain, valid index of the plan's table that the plan named, read
+	// again on the session that drops it; nothing was dropped. Re-plan
+	// against the catalog as it stands and review the new plan.
+	CodeDroppedIndexDrift Code = "dropped-index-drift"
+	// CodeDroppedIndexReplaced: a drop that passed its pre-drop read removed
+	// an index the plan did not review, because another session gave the
+	// name to a different index in the round trip between the read and the
+	// drop. Unlike the drift codes, something was dropped: inspect the
+	// table's indexes and recreate the dropped one if it should stay.
+	CodeDroppedIndexReplaced Code = "dropped-index-replaced"
 	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
 	// CONSTRAINT validates was dropped or replaced after planning, read
 	// again under the table's lock; nothing was validated. Re-plan against
@@ -212,6 +227,7 @@ func Codes() []Code {
 		CodeBudgetStatementExceeded,
 		CodeBlockingOutcomeUnknown,
 		CodeCommitOutcomeUnknown,
+		CodeDropOutcomeUnknown,
 		CodeRowSecurityPlanChanged,
 		CodeRowSecurityRefused,
 		CodeRowSecurityOutcomeUnknown,
@@ -244,6 +260,8 @@ func Codes() []Code {
 		CodePoolTooSmall,
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
+		CodeDroppedIndexDrift,
+		CodeDroppedIndexReplaced,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -290,6 +308,8 @@ func (c Code) Permanent() bool {
 		CodePoolTooSmall,
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
+		CodeDroppedIndexDrift,
+		CodeDroppedIndexReplaced,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -330,6 +350,9 @@ func OutcomeCode(err error) Code {
 	}
 	if _, ok := errors.AsType[*CommitOutcomeUnknownError](err); ok {
 		return CodeCommitOutcomeUnknown
+	}
+	if _, ok := errors.AsType[*DropOutcomeUnknownError](err); ok {
+		return CodeDropOutcomeUnknown
 	}
 	return sentinelCode(err)
 }
@@ -395,6 +418,10 @@ func sentinelCode(err error) Code {
 		return CodeReplicaIdentityDrop
 	case errors.Is(err, ErrAdoptedIndexDrift):
 		return CodeAdoptedIndexDrift
+	case errors.Is(err, ErrDroppedIndexDrift):
+		return CodeDroppedIndexDrift
+	case errors.Is(err, ErrDroppedIndexReplaced):
+		return CodeDroppedIndexReplaced
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
