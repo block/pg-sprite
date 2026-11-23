@@ -1715,9 +1715,17 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   schema-qualified table; a mismatched acknowledgement is a typed usage error and nothing
   executes. The acknowledgement covers only the data loss: the statement still meets every
   other gate, and an acknowledged run is audited at warn level and carries
-  `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
-  and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
-  reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
+  `allowed_destructive: true` on its verdict. The declarative path takes the acknowledgement
+  on its request only, bound to the reviewed plan's pinned fingerprint ([RF-12](#rf-12)), and
+  without both refuses a destructive plan whole. Each destructive statement of an admitted
+  plan is audited and carries the verdict, and the plan's fingerprint covers the definition
+  of the object it removes and, for a column, what the drop removes with it, which the run
+  reads again under the statement's own lock and refuses to drop if it differs or if
+  something the plan did not list would go with it. A column, constraint, or `NOT NULL` drop then runs through
+  this same gate. An index drop runs as `DROP INDEX CONCURRENTLY`, never holding the table's
+  blocking lock, and so does not pass through `run`: it meets the pin, the acknowledgement,
+  the audit, the verdict, and its own re-read of the index, and no other `run` gate. A planner refusal runs
+  nothing and keeps its own reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
   accepts that refusal, the drop still runs only if `--allow-destructive` names the same
   owning table, and otherwise it is refused with `destructive-change` before anything
   executes, the detail listing the checks that catch an index the application still uses and
@@ -1728,7 +1736,16 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`, returned as an
   `AcknowledgementMismatchError` from `ack_mismatch.go`; `TestEachMismatchIsAnAcknowledgementMismatchError`), `RunDesired`'s admission
-  and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/planner`
+  and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/executor`
+  (`ExecuteDropIndexConcurrently`, which re-reads the index on the session that drops it;
+  `TestExecuteDropIndexConcurrentlyNeverBlocksTheTable`; `refuseDroppedObjectDrift`, which
+  re-reads a dropped column, constraint, or `NOT NULL`, and a column's dependents, under the
+  statement's lock; `ErrDroppedIndexDrift` for a refused index drop and
+  `ErrDroppedIndexReplaced` for one that dropped an unreviewed index),
+  `pkg/migrate` (`executePlan`, which runs no destructive statement that carries no dropped
+  definition), `pkg/schemadiff` (`ReadDroppedObject`, `UnlistedDependents`; `Diff` plans every `NOT NULL`
+  drop ahead of any statement that can rebuild the table), `pkg/plan` (`Fingerprint`, which
+  hashes `Drops` and its dependents), `pkg/planner`
   (`destructiveOp`, which decides every shape in `statement.OpKinds()` explicitly and
   treats an unclassified one as destructive;
   `TestEveryOpKindIsClassifiedForDestructiveness`,
@@ -1744,6 +1761,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestReadIndexUsageSumsAPartitionedIndexsLeafIndexes`,
   `TestCheckLeafStatisticsListedRefusesAnUnlistedLeaf`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
+  `TestRunDesiredAppliesAReviewedDrop`, `TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop`,
+  `TestRunDesiredReviewedIndexDropLeavesWritesUnblocked`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)
   ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),
@@ -1787,8 +1806,20 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   discarded, and a leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
   nothing, typed by its own sentinel so an embedder tells it from any other error.
-  Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
-  own sentinel before any database work, and `migrate --desired` rejects each flag. A new
+  Desired-state execution takes exactly one acknowledgement, the destructive one, and only
+  bound to a pinned plan fingerprint: `RunDesired` admits a plan holding a destructive
+  statement only when the request pins the reviewed plan's fingerprint and names the desired
+  table in its own destructive acknowledgement (`DesiredRequest.AllowDestructive`), and each
+  destructive statement then runs under that acknowledgement, audited and carrying the
+  verdict as on `migrate --alter` (RF-10). The pin binds what each drop removes, not only
+  its name, since the fingerprint covers the removed object's definition. A pinned plan that
+  also routes a statement to copy-and-swap is refused whole with `destructive-change`, since its
+  drops would commit before copy-and-swap is checked. Without the acknowledgement the plan is refused whole with `destructive-change`; an
+  acknowledgement without the fingerprint, or naming another table, is a usage error before
+  any statement runs, in a dry run and for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The other four, and
+  the destructive acknowledgement in `Options`, are rejected: `RunDesired` returns each one's
+  own sentinel before any database work, and `migrate --desired` rejects each flag, taking
+  `--allow-destructive` only with `--expect-fingerprint`. A new
   string or bool field reachable from `Options`, nested structs and pointers included, not
   declared as no acknowledgement, a
   new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI
@@ -1804,20 +1835,26 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   dropping an index `DropAbandonedIndex` has proven abandoned (`ErrAbandonmentUnproven`
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
-  refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel, a case for it in
+  refusal, and desired-state decision (admitted under a pinned plan, or rejected); a case in
+  `ackKinds` and `rejectDesiredAcks` with its own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel, a case for it in
   `mismatchErr`, and a wrong-target check returning `AcknowledgementMismatchError`;
   a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
-  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
+  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`, `AdmitPlan` and
+  `checkDesiredAllowDestructive` for the one admitted acknowledgement,
+  `CheckDesiredAllowDestructiveTable`, which `RunDesired`, `RunDesiredWithRowSecurity` (before
+  its converged-table return), and the CLI's dry run all apply to the resolved table,
+  `ErrAllowDestructiveNeedsFingerprint`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
   `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
   `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`, each the
   `Unwrap` of an `AcknowledgementMismatchError` through `mismatchErr`;
   `TestEveryAcknowledgementKindUnwrapsToItsOwnMismatchSentinel`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
-  registry's shape and the desired-state rejections;
+  registry's shape, the desired-state rejections, and the one admitted acknowledgement;
+  `TestAdmitPlanDestructiveAcknowledgement` and `TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop`
+  for admission needing the pin, the table, and the acknowledgement together;
   `TestEveryOpKindIsClassifiedForDestructiveness` and
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
   derives; `TestIrreversibleOperationsAreGated` for each entry's refusal and wrong-target usage
@@ -1825,7 +1862,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   restart's unrecorded leftover left standing;
   `TestEveryAcknowledgementFlagMapsToARegistryEntry` for every `migrate` flag being an
   acknowledgement or declared not one, each acknowledgement flag reaching exactly its own
-  field and sentinel, and every registry acknowledgement having a flag; and
+  field and sentinel, `--allow-destructive` with `--desired` needing `--expect-fingerprint`,
+  and every registry acknowledgement having a flag; and
   `TestAcknowledgementsNamesTheRegistry` and
   `TestOptionsAcknowledgementsNamesWhatThePolicyCarries` for the exported view.
   *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
@@ -1920,7 +1958,7 @@ about **how we write and review the code**.
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
-| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, desired-state execution rejects every acknowledgement, demo refusal smoke |
+| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, desired-state execution rejects every `Options` acknowledgement and takes the destructive one only with a pinned fingerprint, demo refusal smoke |
 | AB-3, AB-4, AB-5, RF-9 | accepted-blocking rollout step 4 | catalog-resolved acknowledgement, mismatch executes nothing, ineligible refusals untouched, grammar rejects `--force`/`--dry-run`/missing budget, accepted verdict identity and exit 3, demo exit-code smoke |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
@@ -1932,5 +1970,5 @@ about **how we write and review the code**.
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | RF-11 | table usage primitive (ahead of any drop path) | per-branch window-edge and partition-aggregation unit tests; recent, lock-holder, version, reset, and partitioned-table integration tests on 14 → 18 |
-| RF-12 | irreversible-operations registry | registry completeness and desired-state rejection unit tests; per-entry refusal and wrong-target integration test; CLI flag-to-entry walk |
+| RF-12 | irreversible-operations registry | registry completeness and desired-state rejection unit tests; per-entry refusal and wrong-target integration test; reviewed desired drop of each destructive kind, its fingerprint and table checks, the definition-binding and drift tests for every dropped object, and the concurrent index drop integration tests; CLI flag-to-entry walk |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

@@ -26,9 +26,10 @@ func routeOne(t *testing.T, sql string) (statement.Statement, router.Statement) 
 	return st, router.Route([]planner.Plan{classified}).Statements[0]
 }
 
-// Desired-state execution refuses a destructive plan whole, so the
-// acknowledgement has nothing to acknowledge there and is rejected as a
-// typed sentinel before any database work.
+// The policy's destructive acknowledgement accepts the loss of a statement
+// the operator wrote, which desired-state execution never runs, so it is
+// rejected as a typed sentinel before any database work. A destructive
+// desired-state plan runs through the request's own acknowledgement.
 func TestRunDesiredRejectsAllowDestructive(t *testing.T) {
 	opts := DefaultOptions()
 	opts.AllowDestructive = "public.t"

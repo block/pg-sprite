@@ -56,8 +56,10 @@ import (
 // copy-and-swap-pk-unsupported refusal verdict for a keyless table
 // carries; no report emits it, but the report embeds the whole guidance
 // vocabulary. Version 22 added the statement-level
-// drops field and its part in the fingerprint. Version 23 added the
-// partitioned-index-build execution contract and its part in the fingerprint.
+// drops field and its part in the fingerprint, and the report-level
+// pinnable_fingerprint field.
+// Version 23 added the partitioned-index-build execution contract and its
+// part in the fingerprint.
 const FormatVersion = 23
 
 // Source identifies which front door derived the plan.
@@ -214,6 +216,13 @@ type Report struct {
 	// reviewer approves is the plan that executes" is enforced across
 	// storage and forwarding.
 	Fingerprint string `json:"fingerprint"`
+	// PinnableFingerprint is set only on a desired-state preview that
+	// withdrew a plan holding a destructive statement (RefuseDestructive):
+	// the identity the plan had before the withdrawal, which is the value a
+	// run pins with the acknowledgement to execute it. Fingerprint then
+	// identifies the withdrawn, refused plan, which no run executes.
+	// Explanatory: excluded from the fingerprint.
+	PinnableFingerprint string `json:"pinnable_fingerprint,omitempty"`
 	// ExtensionSchemas are the schemas the desired file's unqualified names
 	// also resolved against (statement.DesiredSchema.WithExtensionSchemas),
 	// in the order they were searched. A table that does not exist yet is
