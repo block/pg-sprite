@@ -190,9 +190,12 @@ refusal — never a silently wrong or incomplete result:
   which covers one ordinary table plus its indexes per file. A table may
   use them: the file names an object outside the table's schema and
   `public` qualified, or names it bare when `--extension-schema` lists
-  the schema it lives in. The object's own definition is never managed.
-  One change to such an object runs imperatively: `migrate` adds a value
-  to an enum with `ALTER TYPE ... ADD VALUE`, which locks only the type.
+  the schema it lives in. The object's own definition is never managed,
+  with one exception: a desired file can hold one `CREATE TYPE ... AS ENUM`
+  instead of a table, and `diff` and `migrate --desired` add the labels the
+  live type lacks with `ALTER TYPE ... ADD VALUE`, which locks only the
+  type. The type must already exist, and a label is never removed, renamed,
+  or moved; `migrate` also adds a value imperatively.
 - **Dropping a table** is never planned or executed. pg-sprite converges
   one declared table at a time, so a live table with no desired file is
   the whole-schema owner's to enumerate and resolve — see
@@ -309,7 +312,7 @@ read-only or fully offline.
 | `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
 | `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
-| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone |
+| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone; `--desired` runs the desired-file admission `diff` and `migrate --desired` share and prints the refusal verdict for a file it refuses; planning can still refuse what admission does not inspect |
 | `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, exits 0 on any script it can parse |
 
 The offline commands have no connection flags at all, so they cannot be
@@ -344,11 +347,11 @@ Four rules follow from the table, and one note for embedders:
   every code above. Allow 3 explicitly only where a maintenance-window
   blocking change is intended; exit 0 is never borrowed for it.
 - **Refusal is one code, whichever command produced it.** `migrate`, its dry
-  run, `diff`, and `pull` all exit 2 on a refusal; exit 3 can come only from
-  `migrate`, because no other command executes DDL. The offline `lint` exits
-  1 when a script has error-severity findings (warnings alone exit 0), and
-  `suggest` exits 0 on any script it can parse — findings never gate; only an
-  unreadable or unparsable script exits 1.
+  run, `diff`, `pull`, and `lint --desired` all exit 2 on a refusal; exit 3
+  can come only from `migrate`, because no other command executes DDL. The
+  offline `lint` exits 1 when a script has error-severity findings (warnings
+  alone exit 0), and `suggest` exits 0 on any script it can parse — findings
+  never gate; only an unreadable or unparsable script exits 1.
 - **Exit 2 means nothing *committed*, not nothing ran.** An optimistic
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the

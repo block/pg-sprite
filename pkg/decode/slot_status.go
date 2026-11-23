@@ -151,8 +151,10 @@ type RetainedWAL struct {
 // once. The read runs on the caller's pool, whatever its search_path, so
 // every function, cast, and operator is spelled through pg_catalog: a
 // lookalike = on name would otherwise find a slot for a name nobody holds
-// and call another database's slot this one's (CO-9), which InspectResume
-// would then adopt as its own (ST-3) or not see as lost (ST-4).
+// and call another database's slot this one's (CO-9), which the drop would
+// then take or InspectResume adopt as its own (ST-3), or not see as lost
+// (ST-4). The ownership column is the one spelling of "a logical slot of
+// the pool's own database" the drop and resume both judge a slot by.
 const inspectSlotSQL = `
 	SELECT s.database, s.slot_type OPERATOR(pg_catalog.=) 'logical',
 	       s.slot_type OPERATOR(pg_catalog.=) 'logical'

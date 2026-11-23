@@ -10,6 +10,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,4 +136,28 @@ func TestMigrateDesiredRefusesExtensionSchemaBeforeConnecting(t *testing.T) {
 			assert.Empty(t, out.String())
 		})
 	}
+}
+
+// A desired file refused before anything was planned has no statement
+// verdict, so the text summary itself names the reason, class, owner, and
+// cause a consumer routes the refusal by.
+func TestDesiredTextSummaryShowsAWholeRunRefusalsClass(t *testing.T) {
+	result := migrate.DesiredResult{
+		Outcome: verdict.OutcomeRefused,
+		Reason:  verdict.ReasonUnsupportedStatement,
+		Class:   verdict.ClassNoOnlineSafetyProblem,
+		Owner:   verdict.OwnerDirectOperator,
+		Detail:  "table storage parameters differ; nothing was planned or executed",
+	}
+	var out strings.Builder
+	require.NoError(t, writeDesiredSummary(&out, palette{}, result))
+	assert.Equal(t, "refused (unsupported-statement)\n"+
+		"  class:  no-online-safety-problem\n"+
+		"  owner:  direct-operator\n"+
+		"  detail: table storage parameters differ; nothing was planned or executed\n", out.String())
+
+	out.Reset()
+	executed := migrate.DesiredResult{Outcome: verdict.OutcomeExecuted, Detail: "converged"}
+	require.NoError(t, writeDesiredSummary(&out, palette{}, executed))
+	assert.Equal(t, "executed-natively: converged\n", out.String())
 }

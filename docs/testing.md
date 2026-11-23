@@ -338,13 +338,16 @@ removed. The record, `results.json` in the package directory
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
 mutation, and the verdict.
 
-Copy-and-swap at the default table size is not supported yet, and the default run ends in
-`execution-failed`. The table size stops it, not the writes: by the time the copy of a
-table of about 1 GiB ends (`LOAD_PROOF_ROWS=100000` is enough) the slot retains more WAL
-than the slot-lag ceiling allows, and the catch-up stops the run, with or without
-`LOAD_PROOF_HOT`. The defaults stay at this size so the engine fixes are proven by the
-same command. Half that size passes at the default 8 × 100 writes a second, uniform or
-with a fifth of the updates on ten keys:
+Copy-and-swap at the default table size has not yet been shown to pass: the default run
+needs a host with the disk and I/O for two tables of about 10 GiB. The defaults stay at
+this size so the engine is proven at it by the same command. On a laptop with `fsync=off`,
+a table of about 1 GiB (`LOAD_PROOF_ROWS=100000`) passed both of its runs at the default
+8 × 100 uniform writes a second, where the engine before key-by-key settling and slot-lag
+pacing stopped in the catch-up with the slot over its lag ceiling, and half that size passed
+all three of its runs, where that engine stopped in the live verify pass on a chunk that
+never read equal as a whole, in both of its runs
+([the record](copy-and-swap-design.md#evidence-key-by-key-settling-under-the-load-proofs-default-load)).
+Half that size also passes with a fifth of the updates on ten keys:
 `make load-proof LOAD_PROOF_ROWS=50000 LOAD_PROOF_HOT=0.2 LOAD_PROOF_FREE_DISK=10GiB`.
 The hottest of those keys change at every reread of the live verify pass, which leaves
 them for the swap to compare under its lock.
@@ -516,7 +519,7 @@ same package cover the rest of it.
 | Native / copy-and-swap / refuse classification and safer SQL | [pkg/planner](../pkg/planner/planner_test.go) |
 | Backend routing and copy-and-swap unavailable disposition | [pkg/router](../pkg/router/router_test.go) |
 | Plan report contract: exact JSON shape, versioning, field omissions | [pkg/plan](../pkg/plan/plan_test.go) |
-| Offline lint findings: typed codes, severities, counts, JSON contract; CLI exit contract | [pkg/lint](../pkg/lint/lint_test.go), [CLI lint](../internal/cli/lint_test.go) |
+| Offline lint findings: typed codes, severities, counts, JSON contract; CLI exit contract; `--desired` admission verdicts | [pkg/lint](../pkg/lint/lint_test.go), [CLI lint](../internal/cli/lint_test.go) |
 | Script splitting through the grammar (canonical statements, parse failures) | [pkg/statement](../pkg/statement/split_test.go) |
 | Scratch execute-and-introspect, ordered diff, and convergence (`TestDiffConverges`) | [pkg/schemadiff](../pkg/schemadiff/schemadiff_integration_test.go), [diff tests](../pkg/schemadiff/diff_test.go) |
 | CLI `diff`, `fmt`, and classified `migrate --dry-run`, including applying text output and re-diffing to empty (`TestDiffTextPlanIsExecutableSQL`) | [diff integration](../internal/cli/diff_integration_test.go), [fmt](../internal/cli/diff_test.go), [dry-run integration](../internal/cli/dryrun_integration_test.go) |

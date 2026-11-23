@@ -17,12 +17,17 @@ import (
 // collation changes on an existing column, a persistence (unlogged) or
 // storage-parameter difference, or a partitioning difference (partition key or partition
 // attachment) — table identity that no ALTER converges. The caller
-// surfaces it; nothing is guessed.
+// surfaces it; nothing is guessed. Diff returns it as an
+// *UnsupportedChangeError that names the cause.
 var ErrUnsupportedChange = errors.New("unsupported schema change")
 
 // ErrDifferentTables is returned when the two models describe different
 // tables — a caller bug, refused rather than diffed.
 var ErrDifferentTables = errors.New("models describe different tables")
+
+// ErrDifferentTypes is returned when a live enum type and a desired one
+// name different types — a caller bug, refused rather than diffed.
+var ErrDifferentTypes = errors.New("enum types describe different types")
 
 // ChangeKind classifies a derived statement so a consumer can gate whole
 // classes of change (destructive, rewriting, index-building) without
@@ -73,6 +78,9 @@ const (
 	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
+	// ChangeAddEnumValue adds a label to an enum type (ALTER TYPE ... ADD
+	// VALUE), the one change a desired enum type file plans.
+	ChangeAddEnumValue ChangeKind = "add-enum-value"
 )
 
 // ChangeKinds returns the closed set of ChangeKind values. It is part of
@@ -98,6 +106,7 @@ func ChangeKinds() []ChangeKind {
 		ChangeValidateConstraint,
 		ChangeValidateForeignKey,
 		ChangeCreateIndex,
+		ChangeAddEnumValue,
 	}
 }
 
@@ -168,29 +177,33 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		return nil, fmt.Errorf("%w: %q vs %q", ErrDifferentTables, live.Table, desired.Table)
 	}
 	if desired.RowSecurity.present() {
-		return nil, fmt.Errorf("desired row security is not managed: %w", ErrUnsupportedChange)
+		return nil, unsupported(CauseRowSecurity, "desired row security is not managed: %w", ErrUnsupportedChange)
+	}
+	desired, err := matchGeneratedCheckNames(live, desired)
+	if err != nil {
+		return nil, err
 	}
 	desired = adoptReplayedText(live, desired)
 	// Partitioning is table identity, not an alterable attribute: no ALTER
 	// can add, remove, or change a partition key or a partition attachment
 	// in place, so a mismatch fails closed instead of diffing to silence.
 	if live.PartitionKey != desired.PartitionKey {
-		return nil, fmt.Errorf("partition key %q vs %q: %w", live.PartitionKey, desired.PartitionKey, ErrUnsupportedChange)
+		return nil, unsupported(CausePartitionKey, "partition key %q vs %q: %w", live.PartitionKey, desired.PartitionKey, ErrUnsupportedChange)
 	}
 	if live.IsPartition != desired.IsPartition {
-		return nil, fmt.Errorf("partition attachment differs between live and desired: %w", ErrUnsupportedChange)
+		return nil, unsupported(CausePartitionAttachment, "partition attachment differs between live and desired: %w", ErrUnsupportedChange)
 	}
 	// Persistence is convergeable only by a full table rewrite (SET LOGGED
 	// / SET UNLOGGED), which the engine does not derive — a mismatch fails
 	// closed instead of diffing to silence.
 	if live.Unlogged != desired.Unlogged {
-		return nil, fmt.Errorf("table persistence (unlogged) differs between live and desired: %w", ErrUnsupportedChange)
+		return nil, unsupported(CausePersistence, "table persistence (unlogged) differs between live and desired: %w", ErrUnsupportedChange)
 	}
 	// Storage parameters are not converged: a mismatch fails closed, so a
 	// parameter the file declares is never reported as applied and a tuned
 	// live parameter the file omits is never reported as matching.
 	if !slices.Equal(live.Options, desired.Options) {
-		return nil, fmt.Errorf("table storage parameters differ between live (%s) and desired (%s); declare the live parameters in the desired file: %w",
+		return nil, unsupported(CauseStorageParameters, "table storage parameters differ between live (%s) and desired (%s); declare the live parameters in the desired file: %w",
 			formatOptions(live.Options), formatOptions(desired.Options), ErrUnsupportedChange)
 	}
 	table := pgx.Identifier{schema, live.Table}.Sanitize()
@@ -267,15 +280,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	for _, col := range desired.Columns {
 		if _, ok := liveCols[col.Name]; !ok {
 			if col.SequenceDefault {
-				return nil, fmt.Errorf("%w: column %q has a sequence-backed default (serial); the plan cannot create its sequence", ErrUnsupportedChange, col.Name)
+				return nil, unsupported(CauseSerialDefault, "%w: column %q has a sequence-backed default (serial); the plan cannot create its sequence", ErrUnsupportedChange, col.Name)
 			}
 			// columnDef carries no COLLATE clause, so emitting the add
 			// would silently drop the collation — refuse instead.
 			if col.Collation != "" {
-				return nil, fmt.Errorf("%w: column %q has an explicit collation (%s); the plan cannot carry it", ErrUnsupportedChange, col.Name, col.Collation)
+				return nil, unsupported(CauseAddedColumnCollation, "%w: column %q has an explicit collation (%s); the plan cannot carry it", ErrUnsupportedChange, col.Name, col.Collation)
 			}
 			if err := identityExpressible(col); err != nil {
-				return nil, fmt.Errorf("%w: %w", ErrUnsupportedChange, err)
+				return nil, unsupported(CauseIdentity, "%w: %w", ErrUnsupportedChange, err)
 			}
 			changes = append(changes, Change{
 				SQL:  "ALTER TABLE " + table + " ADD COLUMN " + columnDef(col),
@@ -356,13 +369,13 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 // refuses that statement, so the drift is reviewable and never executes.
 func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	if live.Identity != desired.Identity {
-		return nil, fmt.Errorf("%w: column %q identity change", ErrUnsupportedChange, live.Name)
+		return nil, unsupported(CauseIdentity, "%w: column %q identity change", ErrUnsupportedChange, live.Name)
 	}
 	if live.Generated != desired.Generated {
-		return nil, fmt.Errorf("%w: column %q generated change", ErrUnsupportedChange, live.Name)
+		return nil, unsupported(CauseGenerated, "%w: column %q generated change", ErrUnsupportedChange, live.Name)
 	}
 	if live.Virtual != desired.Virtual {
-		return nil, fmt.Errorf("%w: column %q virtual generated change", ErrUnsupportedChange, live.Name)
+		return nil, unsupported(CauseGenerated, "%w: column %q virtual generated change", ErrUnsupportedChange, live.Name)
 	}
 	// An identity's sequence declaration is part of what the file states,
 	// and the diff does not converge it, so a difference fails closed. A
@@ -373,7 +386,7 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	// live is compared as the type change would leave it.
 	if desired.Identity != IdentityNone {
 		if after := identitySequenceAfterRetype(live, desired.Type); !sameSequence(after, desired.Sequence) {
-			return nil, fmt.Errorf("%w: column %q identity sequence differs between live (%s) and desired (%s)",
+			return nil, unsupported(CauseIdentitySequence, "%w: column %q identity sequence differs between live (%s) and desired (%s)",
 				ErrUnsupportedChange, live.Name, formatSequence(after), formatSequence(desired.Sequence))
 		}
 	}
@@ -381,10 +394,10 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	// the engine does not derive it, so a delta fails closed instead of
 	// diffing to silence.
 	if live.Collation != desired.Collation {
-		return nil, fmt.Errorf("%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
+		return nil, unsupported(CauseCollationChange, "%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
 	}
 	if desired.IsGenerated() && live.Type != desired.Type {
-		return nil, fmt.Errorf("%w: column %q generated column type change", ErrUnsupportedChange, live.Name)
+		return nil, unsupported(CauseGenerated, "%w: column %q generated column type change", ErrUnsupportedChange, live.Name)
 	}
 	col := pgx.Identifier{live.Name}.Sanitize()
 	var changes []Change
@@ -407,7 +420,7 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 		// relation the plan never creates — or worse, silently bind to an
 		// unrelated live sequence of the same name.
 		if desired.SequenceDefault {
-			return nil, fmt.Errorf("%w: column %q would adopt a sequence-backed default (serial); the plan cannot create its sequence", ErrUnsupportedChange, live.Name)
+			return nil, unsupported(CauseSerialDefault, "%w: column %q would adopt a sequence-backed default (serial); the plan cannot create its sequence", ErrUnsupportedChange, live.Name)
 		}
 		if desired.Default == "" {
 			changes = append(changes, Change{

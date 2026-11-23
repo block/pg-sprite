@@ -204,13 +204,18 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 	// Each acknowledgement accepts a loss for one statement the operator
 	// wrote; desired-state execution runs statements the plan derived, so
 	// it rejects every one before any database work, even when it names
-	// the right table.
+	// the right table. Both desired-state entry points are walked, and the
+	// nil pool proves the rejection comes before any database access.
 	t.Run("desired-state execution rejects every acknowledgement", func(t *testing.T) {
 		for _, a := range acks {
 			opts := withAck(t, DefaultOptions(), a, "public.t")
 			res, err := RunDesired(t.Context(), nil, DesiredRequest{Schema: "public"}, opts)
 			require.ErrorIs(t, err, a.desiredErr(), "acknowledgement %q", a)
 			assert.Equal(t, DesiredResult{}, res)
+
+			res, err = RunDesiredEnumType(t.Context(), nil, EnumTypeRequest{Schema: "public"}, opts)
+			require.ErrorIs(t, err, a.desiredErr(), "enum type run, acknowledgement %q", a)
+			assert.Equal(t, DesiredResult{}, res, "enum type run, acknowledgement %q", a)
 		}
 	})
 

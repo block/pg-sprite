@@ -185,6 +185,12 @@ type Constraint struct {
 	// and a live text that prints as Def or one of those; see
 	// settleDesired. Only a desired model carries them.
 	DefReplays []string `json:"-"`
+	// GeneratedName reports a check constraint the desired file declares
+	// without a name, so its Name is the one the server chose on the
+	// scratch table. The file asks only for the definition, so the diff
+	// matches it to a live check constraint by definition rather than by
+	// name. Only a desired model carries it.
+	GeneratedName bool `json:"-"`
 }
 
 // Index is one non-constraint index: its name plus the server-decompiled

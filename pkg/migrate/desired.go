@@ -234,7 +234,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return DesiredResult{}, err
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
-	if ref, ok := desiredShapeRefusal(err); ok {
+	if ref, ok := desiredPlanRefusal(err); ok {
 		return DesiredResult{}.refused(ref, fmt.Sprintf("%v; nothing was planned or executed", err)), nil
 	}
 	if err != nil {
@@ -268,7 +268,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		// The table does not exist: the plan is the desired schema itself
 		// and converging it means creating the table. The create path runs
 		// the whole plan through the executor's greenfield sequence — the
-		// per-statement Run pipeline below states facts about an existing
+		// per-statement Run pipeline executePlan runs states facts about an existing
 		// table and its gate refuses CREATE TABLE outright.
 		return runCreate(ctx, pool, req, report, opts)
 	}
@@ -280,6 +280,15 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return stopped, nil
 	}
 
+	return executePlan(ctx, pool, report, opts, func(ctx context.Context) (plan.Report, error) {
+		return diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
+	})
+}
+
+// executePlan runs every statement of an admitted plan back through [Run],
+// in order, stopping at the first refusal or failure, and then verifies
+// convergence with replan, the same planner that derived the plan.
+func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options, replan func(context.Context) (plan.Report, error)) (DesiredResult, error) {
 	result := DesiredResult{Plan: report}
 	for i, ps := range report.Statements {
 		st, err := statement.ParseOne(ps.SQL)
@@ -322,7 +331,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	}
 	// INV: ST-12 — executed only when a plan derived after the last commit
 	// is empty.
-	convergence, err := verifyConverged(ctx, pool, req)
+	convergence, err := verifyConverged(ctx, replan)
 	result.Convergence = &convergence
 	if err != nil {
 		return result.unproven(len(report.Statements), err)
@@ -332,17 +341,17 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	return result, nil
 }
 
-// verifyConverged derives the plan again from the live table and returns
-// a nil error only when it is empty. Every statement committing is not
+// verifyConverged derives the plan again from the live table (or type)
+// with replan and returns a nil error only when it is empty. Every statement committing is not
 // proof the table matches the desired schema: a statement can commit and
 // leave the table short of what the plan modeled, and another session can
 // change the table between the last commit and the end of the run. The
 // fresh plan is the same comparison the next run would make, so a run
 // reports converged only when its rerun would plan nothing. The returned
 // Convergence states the outcome either way.
-func verifyConverged(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest) (Convergence, error) {
+func verifyConverged(ctx context.Context, replan func(context.Context) (plan.Report, error)) (Convergence, error) {
 	// INV: ST-12 — the fresh plan is the convergence proof.
-	again, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
+	again, err := replan(ctx)
 	if err != nil {
 		return Convergence{Status: ConvergenceUnverifiable}, fmt.Errorf("derive the plan again to verify convergence: %w", err)
 	}
