@@ -87,7 +87,9 @@ var (
 	// proof could destroy another actor's index registered under the same
 	// name in the same window. The recovery is RebuildAbandonedIndex, which
 	// carries that proof, or the operator's explicit DROP INDEX
-	// CONCURRENTLY (see docs/invalid-index-recovery.md).
+	// CONCURRENTLY (see docs/invalid-index-recovery.md). A build that
+	// failed on its rows is not recoverable until they are corrected
+	// ((*InvalidIndexError).Recoverable).
 	ErrBuildLeftInvalidIndex = errors.New("the build left an invalid index behind")
 	// ErrAbandonmentUnproven is returned (inside an *InvalidIndexError)
 	// when a recovery could not carry its proof through to the removal:

@@ -554,9 +554,16 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		// runs an ALTER TABLE drop when the operator states it, but it
 		// refuses a plain DROP INDEX in favor of the concurrent idiom — so
 		// an index drop is pointed straight at that idiom instead of at a
-		// door that would bounce it.
+		// door that would bounce it. A partitioned parent's index has no
+		// concurrent drop, so its deliberate path is the plain drop with
+		// both acknowledgements.
 		deliberatePath := "run it deliberately through the imperative front door"
-		if ps.Kind == schemadiff.ChangeDropIndex {
+		switch {
+		case ps.Kind == schemadiff.ChangeDropIndex && ps.Reason == verdict.ReasonUnsupportedPartitionedParent:
+			deliberatePath = "PostgreSQL has no concurrent drop for an index of a partitioned table; drop it deliberately " +
+				"with this plain DROP INDEX through the imperative front door, acknowledging both the blocking lock on the " +
+				"parent and every partition and the destructive drop for the table, then rerun"
+		case ps.Kind == schemadiff.ChangeDropIndex:
 			deliberatePath = "drop it deliberately with DROP INDEX CONCURRENTLY, then rerun"
 		}
 		detail := fmt.Sprintf(

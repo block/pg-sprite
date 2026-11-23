@@ -133,11 +133,16 @@ type row struct {
 }
 
 // loadSQL reads the target's row. The LSN comes back in its text form; pgx
-// has no codec for pg_lsn and decode.ParseLSN is the one reader of it.
+// has no codec for pg_lsn and decode.ParseLSN is the one reader of it. The
+// store runs on whatever pool the caller passes, so the cast and the
+// comparisons are spelled through pg_catalog: a lookalike text type on a
+// shadowing path would cut the position to 0/1, which ParseLSN accepts,
+// and a lookalike = would find no row (CO-9).
+// INV: CO-9
 const loadSQL = `SELECT format_version, shadow_table, slot_name, publication_name,
-	watermark, last_applied_lsn::text, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof,
+	watermark, last_applied_lsn::pg_catalog.text, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof,
 	statement
-FROM ` + tableIdent + ` WHERE schema_name = $1 AND table_name = $2`
+FROM ` + tableIdent + ` WHERE schema_name OPERATOR(pg_catalog.=) $1 AND table_name OPERATOR(pg_catalog.=) $2`
 
 // readRow performs one read of the target's row and returns pgx.ErrNoRows
 // unwrapped when there is none, so callers can tell absence from failure.

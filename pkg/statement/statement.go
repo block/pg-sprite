@@ -108,6 +108,7 @@ type Statement struct {
 	renamedTo     string
 	enumType      TypeName
 	enumValue     string
+	enumNeighbor  string
 	cascades      bool
 	buildsIndex   bool
 }
@@ -229,6 +230,12 @@ func (s Statement) EnumType() TypeName { return s.enumType }
 // AddedEnumValue returns the label an ALTER TYPE ... ADD VALUE adds, as the
 // grammar spelled it; empty for every other statement.
 func (s Statement) AddedEnumValue() string { return s.enumValue }
+
+// EnumValueNeighbor returns the label an ALTER TYPE ... ADD VALUE places its
+// value BEFORE or AFTER; empty when the statement names no position, and
+// for every other statement. A position next to the empty label is not an
+// enum value add, so a set position is never the empty label.
+func (s Statement) EnumValueNeighbor() string { return s.enumNeighbor }
 
 // Cascades reports whether a DROP INDEX used CASCADE, which also drops the
 // objects that depend on the index. It is always false for other statements.
@@ -362,6 +369,7 @@ func ParseOne(sql string) (Statement, error) {
 		st.kind = KindAddEnumValue
 		st.enumType = name
 		st.enumValue = enum.GetNewVal()
+		st.enumNeighbor = enum.GetNewValNeighbor()
 	case node.GetAlterObjectSchemaStmt() != nil:
 		// ALTER TABLE ... SET SCHEMA parses as AlterObjectSchemaStmt; only
 		// the table-targeted form is KindAlterTable.
