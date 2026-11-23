@@ -119,6 +119,85 @@ func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
 	}
 }
 
+// Dropping an index of a partitioned parent plans the plain DROP INDEX as
+// refused by design, with no concurrent rewrite: PostgreSQL rejects DROP
+// INDEX CONCURRENTLY for a partitioned index, so the only drop there is the
+// plain one, which the bounded blocking path may run.
+func TestPlanRefusesConcurrentDropOfPartitionedParentIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint,
+			name text
+		) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100);
+		CREATE INDEX events_name_idx ON %[1]s.events (name);`, schema))
+	require.NoError(t, err)
+
+	// The desired state omits events_name_idx.
+	ds := parseDesired(t, `
+		CREATE TABLE events (
+			id bigint,
+			name text
+		) PARTITION BY RANGE (id);`)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+
+	require.Len(t, report.Statements, 1)
+	ch := report.Statements[0]
+	assert.Equal(t, fmt.Sprintf("DROP INDEX %s.events_name_idx", schema), ch.SQL)
+	assert.Equal(t, schemadiff.ChangeDropIndex, ch.Kind)
+	assert.True(t, ch.Destructive)
+	assert.Equal(t, router.DispositionRefuse, ch.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, ch.Reason)
+	assert.Equal(t, verdict.ClassByDesign, ch.Class)
+	require.NotNil(t, ch.BlockingPassthroughEligible)
+	assert.True(t, *ch.BlockingPassthroughEligible, "the plain drop may run under the bounded blocking path")
+	assert.Empty(t, ch.ExecSQL, "no DROP INDEX CONCURRENTLY is offered")
+	for _, decision := range ch.Decisions {
+		assert.Empty(t, decision.SaferSQL)
+	}
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
+}
+
+// The control: dropping an index of a plain table keeps the concurrent drop
+// as the safer sequence, the online idiom PostgreSQL accepts there.
+func TestPlanDropsPlainTableIndexConcurrently(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint,
+			name text
+		);
+		CREATE INDEX events_name_idx ON %[1]s.events (name);`, schema))
+	require.NoError(t, err)
+
+	// The desired state omits events_name_idx.
+	ds := parseDesired(t, `
+		CREATE TABLE events (
+			id bigint,
+			name text
+		);`)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+
+	require.Len(t, report.Statements, 1)
+	ch := report.Statements[0]
+	assert.Equal(t, fmt.Sprintf("DROP INDEX %s.events_name_idx", schema), ch.SQL)
+	assert.Equal(t, router.DispositionExecute, ch.Disposition)
+	assert.Empty(t, ch.Reason)
+	assert.Equal(t, []string{fmt.Sprintf("DROP INDEX CONCURRENTLY %s.events_name_idx", schema)}, ch.ExecSQL)
+}
+
 // A stored generated column whose desired expression differs from the live
 // one plans a single refused SET EXPRESSION statement. The plan shows the
 // drift instead of failing, and the index built on the column is left alone:

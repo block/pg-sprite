@@ -114,6 +114,9 @@ refusal — never a silently wrong or incomplete result:
   ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+  An index of a partitioned table has no concurrent drop at all: drop it with
+  the plain `DROP INDEX` under `--accept-blocking` and `--allow-destructive`,
+  which locks the parent and every partition while it runs.
 - **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
   instant in the catalog but break every running application instance that
   still uses the old name, and no safer sequence can be built from the

@@ -1600,7 +1600,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   for an eligible policy refusal (AB-3..AB-5). *Source:* [high-level-design § advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one),
   [lock-budgeted passthrough](lock-budgeted-passthrough.md).
 - **RF-6** — A partitioned-parent sequence is refused before its first step when it would build
-  an index, or on PostgreSQL before 18 when it would add a foreign key `NOT VALID`. pg-sprite
+  an index, drop an index concurrently (PostgreSQL has no concurrent drop for a partitioned
+  index), or on PostgreSQL before 18 when it would add a foreign key `NOT VALID`. pg-sprite
   does not substitute a blocking parent build for the missing partition-aware online flow.
   *Enforced:* preflight and sequence-executor admission. *Source:* PostgreSQL relation-kind and
   version capabilities.

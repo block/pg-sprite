@@ -47,7 +47,7 @@ func CreateShapeRefusal(cause executor.CreateShapeCause) (verdict.Refusal, bool)
 
 // PartitionRefusal classifies a partitioned-parent refusal by its cause. The
 // closed key set is preflight.PartitionRefusalCauses(); ok is false outside
-// it. The four causes span three classes, which is why the plan carries the
+// it. The causes span three classes, which is why the plan carries the
 // cause rather than a bare refused flag. The refusal keeps its typed cause,
 // so every consumer of the proof — both front doors and the accepted-blocking
 // eligibility registry — reads one narrowing instead of re-deriving it from
@@ -72,6 +72,11 @@ func PartitionRefusal(cause preflight.PartitionRefusalCause) (verdict.Refusal, b
 		// a server upgrade, not an engine release.
 		return verdict.Environmental(verdict.ReasonUnsupportedPartitionedParent).
 			WithCause(verdict.CauseParentNotValidForeignKey), true
+	case preflight.PartitionCauseConcurrentIndexDrop:
+		// No supported PostgreSQL version drops a partitioned index
+		// concurrently; the drop PostgreSQL accepts is the plain, blocking one.
+		return verdict.ByDesign(verdict.ReasonUnsupportedPartitionedParent).
+			WithCause(verdict.CauseParentConcurrentIndexDrop), true
 	default:
 		return verdict.Refusal{}, false
 	}
