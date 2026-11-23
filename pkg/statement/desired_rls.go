@@ -11,12 +11,17 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// ErrRowSecurityDeclaration reports an incomplete or contradictory RLS declaration.
+// ErrRowSecurityDeclaration reports an incomplete or contradictory RLS
+// declaration, including a file with no table definition, which arrives as
+// ErrRowSecurityTableDefinitionRequired and matches this error too. Match
+// both with errors.Is; their text is for people and may change.
 var ErrRowSecurityDeclaration = errors.New("desired row security requires one explicit ENABLE or DISABLE on the desired table")
 
 // ErrRowSecurityTableDefinitionRequired identifies a missing table definition in an RLS file.
 // It also matches ErrRowSecurityDeclaration, whose sentence it does not print:
-// the file may well hold its ENABLE.
+// the file may well hold its ENABLE. It is one value, not a chain of two,
+// so match it with errors.Is rather than errors.Unwrap; its text is for
+// people and may change.
 var ErrRowSecurityTableDefinitionRequired error = rowSecurityTableDefinitionError{}
 
 type rowSecurityTableDefinitionError struct{}
