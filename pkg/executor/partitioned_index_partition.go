@@ -405,7 +405,8 @@ const proveNodeSQL = `SELECT EXISTS (
 		    WHERE c.oid OPERATOR(pg_catalog.=) $1
 		      AND n.nspname OPERATOR(pg_catalog.=) $2
 		      AND c.relname OPERATOR(pg_catalog.=) $3
-		      AND h.inhparent OPERATOR(pg_catalog.=) $4)`
+		      AND h.inhparent OPERATOR(pg_catalog.=) $4
+		      AND NOT h.inhdetachpending)`
 
 func proveNodeIn(ctx context.Context, q querier, node partitionNode) error {
 	present, err := nodeInTree(ctx, q, node)

@@ -23,6 +23,11 @@ type partitionNode struct {
 	schema    string
 	name      string
 	relkind   string
+	// detachPending is true while a DETACH PARTITION CONCURRENTLY that did
+	// not finish leaves the partition in pg_inherits. The server leaves such
+	// a partition out when it attaches an index, so no index can be attached
+	// for it.
+	detachPending bool
 }
 
 func (n partitionNode) subPartitioned() bool { return n.relkind == "p" }
@@ -40,7 +45,7 @@ func listPartitionTree(ctx context.Context, q querier, tableOID uint32) ([]parti
 	var nodes []partitionNode
 	for rows.Next() {
 		var n partitionNode
-		if err := rows.Scan(&n.oid, &n.parentOID, &n.schema, &n.name, &n.relkind); err != nil {
+		if err := rows.Scan(&n.oid, &n.parentOID, &n.schema, &n.name, &n.relkind, &n.detachPending); err != nil {
 			return nil, fmt.Errorf("scan partitions of table %d: %w", tableOID, err)
 		}
 		nodes = append(nodes, n)
@@ -52,14 +57,14 @@ func listPartitionTree(ctx context.Context, q querier, tableOID uint32) ([]parti
 }
 
 const listPartitionTreeSQL = `WITH RECURSIVE tree AS (
-		        SELECT h.inhrelid AS oid, h.inhparent AS parent, 1 AS depth
+		        SELECT h.inhrelid AS oid, h.inhparent AS parent, 1 AS depth, h.inhdetachpending AS detach_pending
 		          FROM pg_catalog.pg_inherits h
 		         WHERE h.inhparent OPERATOR(pg_catalog.=) $1
 		        UNION ALL
-		        SELECT h.inhrelid, h.inhparent, tree.depth OPERATOR(pg_catalog.+) 1
+		        SELECT h.inhrelid, h.inhparent, tree.depth OPERATOR(pg_catalog.+) 1, h.inhdetachpending
 		          FROM pg_catalog.pg_inherits h
 		          JOIN tree ON h.inhparent OPERATOR(pg_catalog.=) tree.oid)
-		 SELECT tree.oid, tree.parent, n.nspname, c.relname, c.relkind::pg_catalog.text
+		 SELECT tree.oid, tree.parent, n.nspname, c.relname, c.relkind::pg_catalog.text, tree.detach_pending
 		   FROM tree
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.oid
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
@@ -113,6 +118,18 @@ func foreignPartitions(tree []partitionNode) []string {
 	var names []string
 	for _, n := range tree {
 		if n.foreign() {
+			names = append(names, n.qualified())
+		}
+	}
+	return names
+}
+
+// detachPendingPartitions names the partitions whose detach has not
+// finished.
+func detachPendingPartitions(tree []partitionNode) []string {
+	var names []string
+	for _, n := range tree {
+		if n.detachPending {
 			names = append(names, n.qualified())
 		}
 	}

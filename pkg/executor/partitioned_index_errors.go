@@ -42,6 +42,12 @@ var (
 	// partition's index in the default tablespace. The build refuses the
 	// statement before it creates anything.
 	ErrPartitionedIndexTablespace = errors.New("a partitioned index build does not support a TABLESPACE clause")
+	// ErrPartitionDetachPending is returned when the partition tree holds a
+	// partition whose DETACH PARTITION CONCURRENTLY did not finish. The
+	// server leaves that partition out when it attaches an index, so the
+	// parent's index could never become valid; an operator finishes the
+	// detach with FINALIZE.
+	ErrPartitionDetachPending = errors.New("the partition tree holds a partition whose detach has not finished")
 	// ErrPartitionedIndexUnsettled is returned when partitions kept appearing
 	// without an attached index for as long as the build's bounded number of
 	// passes. What the build finished stays attached.

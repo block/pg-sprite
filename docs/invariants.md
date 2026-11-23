@@ -856,6 +856,8 @@ statements on the partition, and `statement_timeout` bounds each statement of th
 transaction, so new statements on that partition are held back for at most the transaction's
 statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
+The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
+same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1474,7 +1476,8 @@ named `CREATE INDEX` on the preflighted partitioned table, and proves by identit
 transaction that runs each statement, the table, partition, and index it names: a partition
 replaced under its name or detached from the tree after it was listed, an index swapped under its
 name, or an index created on another table refuses the run, and a concurrent build that landed on
-a replacement table has its index dropped again by proven identity
+a replacement table is refused with its index left in place and named for an operator, because
+the build cannot prove the index is its own
 (`TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved` and
 `TestBuildPartitionedIndexTreeChangesDuringARun`, which detaches a partition between its build
 and its attach).

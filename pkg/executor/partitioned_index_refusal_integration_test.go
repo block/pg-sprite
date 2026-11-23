@@ -70,6 +70,25 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 			f.requireNothingBuilt(t, "orders", partitions...)
 		})
 
+		// A DETACH PARTITION CONCURRENTLY that was interrupted leaves its
+		// partition in the tree, and the server leaves that partition out
+		// when it attaches an index, so the parent's index could never
+		// become valid. The refusal names the partition and comes before the
+		// parent's index exists. The test marks the detach pending in the
+		// catalog, which is the state an interrupted detach leaves.
+		t.Run("a tree with a partition whose detach did not finish", func(t *testing.T) {
+			f := newFixture(t)
+			partitions := f.ordersByRegion(t)
+			f.exec(t, `UPDATE pg_catalog.pg_inherits SET inhdetachpending = true WHERE inhrelid = '%s.orders_us'::regclass`, f.schema)
+
+			_, err := f.buildErr(t, "orders", fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema))
+
+			require.ErrorIs(t, err, executor.ErrPartitionDetachPending)
+			assert.Equal(t, executor.CodePartitionDetachPending, executor.OutcomeCode(err))
+			assert.Contains(t, err.Error(), f.schema+".orders_us")
+			f.requireNothingBuilt(t, "orders", partitions...)
+		})
+
 		// PostgreSQL checks a unique index against each partitioned table's
 		// partition key only when that table gets its index, so a key that
 		// misses a level below the parent would fail part-way through the

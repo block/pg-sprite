@@ -100,6 +100,10 @@ const (
 	// holding the build's table lock started, so the build cannot confirm
 	// the lock is its own; nothing was created.
 	CodeTableLockUnconfirmed Code = "table-lock-unconfirmed"
+	// CodePartitionDetachPending: the partition tree holds a partition
+	// whose concurrent detach did not finish, so no index can be attached
+	// for it.
+	CodePartitionDetachPending Code = "partition-detach-pending"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
@@ -276,6 +280,7 @@ func Codes() []Code {
 		CodeForeignTablePartition,
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
+		CodePartitionDetachPending,
 		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
 		CodeEmptySequence,
@@ -334,6 +339,7 @@ func (c Code) Permanent() bool {
 		CodeForeignTablePartition,
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
+		CodePartitionDetachPending,
 		CodePartitionedIndexTablespace,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
@@ -447,6 +453,8 @@ func sentinelCode(err error) Code {
 		return CodeUniqueIndexPartitionKey
 	case errors.Is(err, ErrTableLockUnconfirmed):
 		return CodeTableLockUnconfirmed
+	case errors.Is(err, ErrPartitionDetachPending):
+		return CodePartitionDetachPending
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
