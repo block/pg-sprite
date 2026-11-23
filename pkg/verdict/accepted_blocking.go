@@ -25,6 +25,11 @@ func AcceptedBlockingDecision(r Refusal) (eligible, decided bool) {
 		switch r.Cause() {
 		case CauseParentBlockingIndexBuild:
 			return r.Class() == ClassCapabilityBoundary, true
+		case CauseParentConcurrentIndexDrop:
+			// The refused form is the concurrent drop; the bounded path
+			// is the plain DROP INDEX of the one index, the drop
+			// PostgreSQL accepts on a partitioned parent.
+			return r.Class() == ClassByDesign, true
 		case CauseParentConcurrentIndexBuild, CauseParentIndexAdoption, CauseParentNotValidForeignKey:
 			return false, true
 		default:

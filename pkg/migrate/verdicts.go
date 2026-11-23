@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/block/pg-sprite/pkg/executor"
@@ -324,12 +325,16 @@ func failureVerdict(st statement.Statement, err error,
 		Detail:    "execution failed; nothing committed — a started bounded attempt rolls back",
 	}
 	unknown := errors.As(err, new(*executor.CommitOutcomeUnknownError))
+	leftover, buildFault := indexBuildDataFaultDetail(err)
 	var stepErr *executor.SequenceStepError
 	if !errors.As(err, &stepErr) {
-		if unknown {
+		switch {
+		case unknown:
 			v.Detail = fmt.Sprintf("outcome unknown: the COMMIT did not return success, "+
 				"so whether the change committed cannot be established from the client — inspect the catalog for %s before retrying",
 				v.Table)
+		case buildFault:
+			v.Detail = leftover
 		}
 		return v
 	}
@@ -349,14 +354,42 @@ func failureVerdict(st statement.Statement, err error,
 			stepErr.Step, stepErr.Total, len(v.ExecutedSQL), v.Table)
 		return v
 	}
-	if len(v.ExecutedSQL) > 0 {
+	switch {
+	case len(v.ExecutedSQL) > 0:
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; the %d committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
 			stepErr.Step, stepErr.Total, len(v.ExecutedSQL))
-	} else {
+	case buildFault:
+		v.Detail = fmt.Sprintf("sequence step %d of %d failed; no earlier steps had committed",
+			stepErr.Step, stepErr.Total)
+	default:
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; no earlier steps had committed — Code names the outcome and any state the failed step itself left",
 			stepErr.Step, stepErr.Total)
 	}
+	if buildFault {
+		v.Detail += "; " + leftover
+	}
 	return v
+}
+
+// indexBuildDataFaultDetail says what a concurrent index build that failed
+// on the table's rows left, for the failed verdict's detail: its code is
+// data-fault, which names the rows rather than the invalid index the
+// build left under the requested name, so the detail names that index and
+// how it is removed once the rows are corrected. It reports false for
+// every other failure.
+func indexBuildDataFaultDetail(err error) (string, bool) {
+	invalidErr, ok := errors.AsType[*executor.InvalidIndexError](err)
+	if !ok || invalidErr.Code() != executor.CodeDataFault {
+		return "", false
+	}
+	index := pgx.Identifier{invalidErr.Schema, invalidErr.Index}.Sanitize()
+	if !errors.Is(invalidErr.Cleanup, executor.ErrBuildLeftInvalidIndex) {
+		return fmt.Sprintf("the table's rows violate index %s, so its concurrent build failed and every rerun meets the same rows until they are corrected; "+
+			"an invalid index remains under that name which the run could not prove its own — inspect it before any removal, see docs/invalid-index-recovery.md", index), true
+	}
+	return fmt.Sprintf("the table's rows violate index %s, so its concurrent build failed and every rerun meets the same rows until they are corrected; "+
+		"the failed build left the index behind invalid, which blocks a rerun under that name — correct the rows, then DROP INDEX CONCURRENTLY %s and run the change again",
+		index, index), true
 }
 
 // WithServerError records on a failed verdict the server error that

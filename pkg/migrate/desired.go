@@ -616,6 +616,16 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		if !ps.Destructive || acknowledged {
 			continue
 		}
+		if isPartitionedIndexDrop(ps) {
+			detail := fmt.Sprintf(
+				"planned statement %d discards live structure (%s); PostgreSQL has no concurrent drop for an index "+
+					"of a partitioned table, so desired-state execution never runs it — drop it deliberately with this "+
+					"plain DROP INDEX through the imperative front door, acknowledging both the blocking lock on the "+
+					"parent and every partition and the destructive drop for the table, then rerun",
+				i+1, ps.SQL)
+			detail += skippedRestDetail(len(report.Statements) - 1)
+			return refused.refused(destructiveChangeRefusal(), detail), false
+		}
 		detail := fmt.Sprintf(
 			"planned statement %d discards live structure (%s); desired-state execution runs a destructive "+
 				"statement only when the run pins the reviewed plan's fingerprint and names the table in the "+
@@ -633,6 +643,14 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		return refused.refused(r, detail), false
 	}
 	return DesiredResult{}, true
+}
+
+// isPartitionedIndexDrop reports whether ps drops an index of a partitioned
+// table. PostgreSQL has no concurrent drop for one, so the plan refuses the
+// statement by design and a reviewed run cannot carry it; its deliberate path
+// is the plain drop through the imperative front door.
+func isPartitionedIndexDrop(ps plan.Statement) bool {
+	return ps.Kind == schemadiff.ChangeDropIndex && ps.Reason == verdict.ReasonUnsupportedPartitionedParent
 }
 
 // refuseDestructiveWithCopySwap refuses a plan that both drops something and

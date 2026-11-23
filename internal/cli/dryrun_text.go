@@ -414,6 +414,11 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			"create the table without the foreign key, then add it with pg-sprite migrate --alter, " +
 			"naming the referenced table with its schema"
 	}
+	if r == verdict.ReasonUnsupportedPartitionedParent && ps.Kind == schemadiff.ChangeDropIndex {
+		return "PostgreSQL has no concurrent drop for an index of a partitioned table; the drop is this plain DROP INDEX, " +
+			"which takes ACCESS EXCLUSIVE on the parent, every partition, and every partition's index — run it with " +
+			"pg-sprite migrate --alter, --accept-blocking, and --allow-destructive naming the table"
+	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)
 	}

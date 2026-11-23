@@ -218,6 +218,7 @@ func TestRefusedStatementsReportAcceptedBlockingEligibility(t *testing.T) {
 	}{
 		{"blocking parent index", preflight.PartitionCauseBlockingIndexBuild, true},
 		{"concurrent parent index", preflight.PartitionCauseConcurrentIndexBuild, false},
+		{"concurrent parent index drop", preflight.PartitionCauseConcurrentIndexDrop, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := plan.NewReport(plan.SourceAlter)

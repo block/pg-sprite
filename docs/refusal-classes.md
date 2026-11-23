@@ -104,7 +104,7 @@ runner (`statement.KindDataChange`). A statement the parse boundary does not nam
 
 ### `unsupported-partitioned-parent`, keyed on `PartitionRefusalCause`
 
-The four causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
+The five causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
 keeps the not-implemented case and the version-gated case apart in one sentence; this table
 agrees with it rather than collapsing them. An importer reads the cause from the `Cause` field of
 `*UnsupportedPartitionedParentError` (`errors.As`), and `PartitionRefusalCause.Class()` answers
@@ -116,6 +116,7 @@ conversion.
 | `parent-concurrent-index-build` | The `CREATE INDEX ON ONLY` → per-partition `CONCURRENTLY` → `ATTACH PARTITION` flow is not yet implemented | `capability-boundary` | A planned engine capability; the matrix marks it 🟡. |
 | `parent-blocking-index-build` | pg-sprite will not substitute a blocking parent build for the missing partition-aware flow | `capability-boundary` | Same missing flow; the refusal of the blocking substitute is the policy half of the same gap. The eligibility registry marks this cause acceptable, but `migrate --accept-blocking` does not reach it yet: the unforced imperative path refuses the parent build with the concurrent cause, and the flag rejects `--force`. |
 | `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
+| `parent-concurrent-index-drop` | PostgreSQL cannot drop an index of a partitioned table concurrently in any supported version, and a partition's own index cannot be dropped alone | `by-design` | No concurrent drop exists to wait for. The drop PostgreSQL accepts is a plain `DROP INDEX`, which takes `ACCESS EXCLUSIVE` on the parent, every partition, and every partition's index; the eligibility registry marks this cause acceptable, and `migrate --alter` runs that plain drop under `--accept-blocking` and `--allow-destructive` naming the table. |
 | `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
 ### `copy-and-swap-refused`, keyed on `CopySwapRefusalCause`
@@ -135,17 +136,19 @@ environment refusal also carries the typed `CopySwapSetting` the operator must c
 `max_replication_slots` or `max_wal_senders`; none for disk), so an adapter never parses
 the prose detail to learn which knob to turn.
 
-An adapter that calls `CheckCopySwap`, which folds the privilege, shape, and environment checks
-into one call, sees refusals from all three in that order, and must read each in its own
-vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environment refusals:
+An adapter that calls `schemachange.CheckCopySwap` or `preflight.CheckCopySwap`, which both
+fold the privilege, shape, and environment checks into one call, sees refusals from all three
+in that order, and must read each in its own vocabulary — `CopySwapRefusalCauseOf` answers
+only for the shape and environment refusals:
 
-| Outcome of `CheckCopySwap` | How to read it | What it means |
+| Outcome of `schemachange.CheckCopySwap` or `preflight.CheckCopySwap` | How to read it | What it means |
 | --- | --- | --- |
 | `*PrivilegeError` | `errors.As`; `Grant` is the exact statement to run | The engine role lacks the copy-and-swap tier against this table, or (for a run that decodes WAL) replication access. Raised before any shape or cluster read. |
 | `*UnsupportedCopySwapShapeError` | `CopySwapRefusalCauseOf` → a shape cause from the table below | The table's shape is outside what the route supports. |
 | `*CopySwapEnvironmentError` | `CopySwapRefusalCauseOf` → a cluster or volume cause from the table below, plus `Setting`, and for a measured disk refusal `FreeDiskBytes`, `RequiredShadowBytes` (the space required for the shadow, twice the table), and `SlotLagCeilingBytes` (the effective ceiling for a run that decodes WAL, even when the shadow alone does not fit; zero only for a quiesced run), and for a resumed run `HeldShadowBytes` and `HeldWALBytes` (the shadow already built and the WAL the stopped run's slot already retains, as the server measured them, each capped at the requirement it is taken from and zero for a fresh run; the space refused for is `RequiredShadowBytes − HeldShadowBytes + SlotLagCeilingBytes − HeldWALBytes`) | The cluster or the volume cannot carry the run. |
 | `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
-| any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
+| `schemachange.ErrInvalidOptions` | `errors.Is` | `schemachange.CheckCopySwap` only: the start was neither `CopySwapResume` nor `CopySwapRestart`, or a resume was given no checkpoint store. A defect in the caller; nothing was read. |
+| any other error | wrapped query error | A catalog read failed, or, for `schemachange.CheckCopySwap` on a resume, the read of the table's checkpoint row did; retry or surface it as an engine failure. |
 
 `CopySwapRefusalCause.Class()` answers the `class` column below as a `refusal.Class`, which
 converts to `verdict.Class` with a plain conversion. The imperative front door carries every
