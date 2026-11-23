@@ -58,7 +58,9 @@ import (
 // vocabulary. Version 22 added the statement-level
 // drops field and its part in the fingerprint, and the report-level
 // pinnable_fingerprint field.
-const FormatVersion = 22
+// Version 23 added the partitioned-index-build execution contract and its
+// part in the fingerprint.
+const FormatVersion = 23
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -239,6 +241,53 @@ type Report struct {
 	// means the table is not clean even though there is nothing to run.
 	// Explanatory, so excluded from the fingerprint.
 	Advisories []schemadiff.Advisory `json:"advisories,omitempty"`
+}
+
+// RoutePartitionedParent applies the partitioned-parent policy to a report
+// whose target is a partitioned table, on a server of major version
+// serverMajor. A statement whose steps are a CREATE INDEX is routed to the
+// partition-aware index build instead of refused: its one step becomes the
+// statement itself with the execution partitioned-index-build, because the
+// substitute the planner made for a plain table (a concurrent build) cannot
+// run on a partitioned parent and the submitted form blocks writes to the
+// whole tree. The partitions are not in the plan; the build lists them when
+// it runs. Every other statement is checked against
+// preflight.RefusesPartitionedParent and refused by its cause, so the
+// unsupported shapes (index adoption, a NOT VALID foreign key before version
+// 18, a concurrent drop of the parent's index) stay refused. A report on a table that is not partitioned must not
+// pass through here.
+func RoutePartitionedParent(report *Report, serverMajor int) error {
+	causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
+	for i := range report.Statements {
+		st := &report.Statements[i]
+		routes, err := preflight.RoutesToPartitionedIndexBuild(st.ExecSQL)
+		if err != nil {
+			return err
+		}
+		if routes {
+			routeToPartitionedIndexBuild(st)
+			continue
+		}
+		if causes[i], err = preflight.RefusesPartitionedParent(serverMajor, st.ExecSQL); err != nil {
+			return err
+		}
+	}
+	return RefuseUnsupportedPartitionedParent(report, causes)
+}
+
+// routeToPartitionedIndexBuild makes the statement's execution the
+// partition-aware index build: the one step is the statement, and a decision
+// that carried the planner's substitute carries the build as its safer
+// sequence instead.
+func routeToPartitionedIndexBuild(st *Statement) {
+	st.ExecSQL = []string{st.SQL}
+	st.Execution = planner.ExecutionPartitionedIndexBuild
+	for i := range st.Decisions {
+		if len(st.Decisions[i].SaferSQL) > 0 {
+			st.Decisions[i].SaferSQL = []string{st.SQL}
+			st.Decisions[i].SaferSQLExecution = planner.ExecutionPartitionedIndexBuild
+		}
+	}
 }
 
 // RefuseUnsupportedPartitionedParent marks statements as refused when
@@ -476,7 +525,11 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 // after a file separator. Explanatory fields
 // (decisions, kind, destructive, reason, cause, guidance) are excluded, so
 // a reworded reason does not change identity but a rerouted or resequenced
-// plan does. The exact
+// plan does. A statement that runs as the partitioned index build also
+// hashes its execution: its exec_sql is the statement as written, and the
+// same text run as a literal CREATE INDEX CONCURRENTLY is a different plan.
+// Every other statement leaves its execution out, so its identity is the one
+// it always had. The exact
 // serialization is part of the contract (docs/plan-report.md) and changes
 // only with a format_version bump. This is a plan identity, not a schema
 // fingerprint: it never participates in schema-state comparison.
@@ -493,6 +546,9 @@ func Fingerprint(statements []Statement, extensionSchemas ...string) string {
 		writeField(h, string(st.Disposition))
 		for _, sql := range st.ExecSQL {
 			writeField(h, sql)
+		}
+		if st.Execution == planner.ExecutionPartitionedIndexBuild {
+			writeField(h, string(st.Execution))
 		}
 		if st.Drops != nil {
 			h.Write([]byte{0x1c}) // file separator: the dropped object follows

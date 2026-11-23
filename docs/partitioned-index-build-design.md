@@ -1,14 +1,14 @@
 # Partition-aware index builds on a partitioned parent
 
-_Status: in progress. The `pkg/statement` edits and `executor.BuildPartitionedIndex` are implemented; the planner, preflight, diff, and CLI wiring below is not. Tracks [block/pg-sprite#34](https://github.com/block/pg-sprite/issues/34)._
+_Status: implemented. The `pkg/statement` edits, `executor.BuildPartitionedIndex`, and the planner, preflight, migrate, diff, and plan report wiring below ship together. Tracks [block/pg-sprite#34](https://github.com/block/pg-sprite/issues/34)._
 
 ## Problem
 
 PostgreSQL cannot run `CREATE INDEX CONCURRENTLY` on a partitioned table, and a
 plain `CREATE INDEX` on one builds every partition's index while holding a lock
-that blocks writes to the whole tree. pg-sprite refuses both
+that blocks writes to the whole tree. Before this flow, pg-sprite refused both
 (`parent-concurrent-index-build`, `parent-blocking-index-build`, RF-6), so a
-schema change that adds an index to a partitioned table cannot run at all.
+schema change that adds an index to a partitioned table could not run at all.
 
 PostgreSQL documents an online alternative (the "Partition Maintenance" section
 of the partitioning chapter):

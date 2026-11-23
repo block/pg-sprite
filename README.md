@@ -110,10 +110,11 @@ refusal — never a silently wrong or incomplete result:
   difference is a typed `diff` refusal; change the declaration with owner
   tooling, then state it in the file. A serial cannot state one, so export
   refuses a serial whose sequence was declared otherwise.
-- **Partitioned tables** support in-place statement changes, but cannot be
-  expressed in or exported to desired files, and `migrate` refuses
-  `ATTACH PARTITION` and `DETACH PARTITION` unless `--force` names the table
-  ([limitations](docs/limitations.md)).
+- **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
+  on a partitioned table runs partition by partition, resuming when the same
+  statement is run again. They cannot be expressed in or exported to desired
+  files, and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
+  `--force` names the table ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
   An index of a partitioned table has no concurrent drop at all: drop it with
@@ -194,8 +195,8 @@ refusal — never a silently wrong or incomplete result:
   deliberately under the engine's bounded lock and statement budgets, with
   the verdict marked `executed-without-online-safety` (exit 3). A `DROP INDEX`
   also needs `--allow-destructive` naming the same table. Every other
-  refusal — including a blocking index build on a partitioned parent — still
-  exits 2. Design:
+  refusal — including a forced blocking index build on a partitioned parent —
+  still exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,

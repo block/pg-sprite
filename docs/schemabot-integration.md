@@ -721,6 +721,34 @@ so "what persists" below is also what the rerun builds on. Route each outcome by
 | `execution-failed` | unknown for the last step | no, inspect first | A failure outside the typed set: the statement text holds more than one statement (`statement.ErrNotOneStatement`), a step was cancelled as one side of a deadlock (SQLSTATE 40P01, for example against a concurrent `DETACH PARTITION`), or the server returned another error. Surface to an operator; a deadlock commits nothing of its step, so a rerun resumes |
 | `*dbconn.TableLockHeldError` (no code) | nothing | yes, after a wait | Another session holds the table's lock; the error names the backend. Wait and retry |
 
+### Wiring the build through `migrate.Run` and `migrate.RunDesired`
+
+A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
+as this build; the plan statement carries `execution: partitioned-index-build`. The build takes
+the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
+sets `migrate.Options.Connection` to the `dbconn.Config` the pool was dialed with. It must
+reach the pool's database: the lock is an advisory lock, and an advisory lock excludes only
+sessions of the database it was taken in. The CLI sets it; a library caller that builds
+`Options` by hand does it itself. A statement that needs no dedicated session never reads it.
+
+Two wiring errors stop the run with no verdict and nothing executed. Both are mistakes no retry
+corrects, so fix the wiring rather than routing either as an outcome:
+
+| Error | How to recognize it | Cause and fix |
+| --- | --- | --- |
+| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset. Set it to the config the pool was dialed with |
+| `*migrate.PartitionedIndexConnectionMismatchError` | `errors.AsType[*migrate.PartitionedIndexConnectionMismatchError](err)` | `Options.Connection` reaches another database than the pool, whether another database of the cluster or one of the same name on another cluster. Point it at the pool's database |
+
+The mismatch error names `Options.Connection` and carries the database name and the cluster's
+system identifier on both sides: `PoolDatabase` and `PoolCluster` for the pool,
+`ConnectionDatabase` and `ConnectionCluster` for the connection. A connection that could not be
+opened or identified is an ordinary error, not either of these.
+
+`migrate.RunDesired` checks the wiring for the whole plan before its first statement, so a
+native statement planned ahead of the index, such as an `ADD COLUMN`, never commits first. The stop is a failed result that carries the plan and no verdicts, with the
+error returned alongside. `migrate.Run` checks it before the statement's first step. The build
+checks again when it runs.
+
 An adapter that enumerates `executor.Codes()` exhaustively must map every row above; the set
 is the contract, and [execution-model](execution-model.md#outcome-codes) is its canonical
 list. The design is in [partitioned-index-build-design](partitioned-index-build-design.md).

@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 	"strings"
 	"testing"
 
@@ -214,4 +215,94 @@ func TestMigrateAlterPartitionedIndexReportsProgress(t *testing.T) {
 	assert.NotContains(t, stdout.String(), operationLabel(progress.OperationConcurrentIndex), "progress never reaches stdout")
 	assert.True(t, strings.HasPrefix(stdout.String(), "executed natively"), "stdout carries the verdict: %q", stdout.String())
 	assertIndexBuiltEverywhere(t, pool, schema)
+}
+
+// A desired file that adds an index to a partitioned table builds it
+// partition by partition, and planning the same file again finds nothing to
+// do.
+func TestMigrateDesiredBuildsAPartitionedParentIndexAndConverges(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := partitionedIndexFixture(t, pool, 1000)
+	const desired = "CREATE TABLE p (id int, v text) PARTITION BY RANGE (id);\n" +
+		"CREATE INDEX p_v_idx ON p (v);"
+
+	cmd := desiredCommand(t, url, schema, desired)
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	v := decodeVerdict(t, out.String())
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Contains(t, v.Detail, "converged: all 1 planned statements committed and a fresh plan is empty")
+	assertIndexBuiltEverywhere(t, pool, schema)
+
+	out.Reset()
+	require.NoError(t, desiredCommand(t, url, schema, desired).run(t.Context(), &out))
+	again := decodeVerdict(t, out.String())
+	assert.Equal(t, verdict.OutcomeExecuted, again.Outcome)
+	assert.Contains(t, again.Detail, "already converged: the live table matches the desired schema; nothing to run")
+}
+
+// A desired file whose index is already on the parent but invalid, the
+// leftover of an interrupted build, is resumed instead of reported as done
+// or as drift.
+func TestMigrateDesiredResumesAnUnfinishedPartitionedIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := partitionedIndexFixture(t, pool, 1000)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		`CREATE INDEX p_v_idx ON ONLY %[1]s.p (v);
+		 CREATE INDEX p1_v_idx ON %[1]s.p1 (v);
+		 ALTER INDEX %[1]s.p_v_idx ATTACH PARTITION %[1]s.p1_v_idx`, schema))
+	require.NoError(t, err)
+
+	cmd := desiredCommand(t, url, schema, "CREATE TABLE p (id int, v text) PARTITION BY RANGE (id);\n"+
+		"CREATE INDEX p_v_idx ON p (v);")
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	v := decodeVerdict(t, out.String())
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Contains(t, v.Detail, "converged: all 1 planned statements committed and a fresh plan is empty")
+	assertIndexBuiltEverywhere(t, pool, schema)
+}
+
+// A CREATE INDEX on a partitioned parent goes through the partitioned index
+// build's admission, and the dry run reports the same refusal the apply
+// does: an unnamed index, and IF NOT EXISTS, which is refused by design. An
+// unqualified table that the search_path resolves to the parent reaches the
+// same admission. Neither run builds an index.
+func TestMigrateDryRunRefusesPartitionedIndexShapesLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := partitionedIndexFixture(t, pool, 0)
+	u, err := neturl.Parse(url)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("options", "-csearch_path="+schema)
+	u.RawQuery = q.Encode()
+
+	for _, tc := range []struct {
+		name, url, alter string
+		class            verdict.Class
+	}{
+		{"an unnamed index", url, fmt.Sprintf("CREATE INDEX ON %s.p (v)", schema), verdict.ClassCapabilityBoundary},
+		{"IF NOT EXISTS", url, fmt.Sprintf("CREATE INDEX IF NOT EXISTS p_v_idx ON %s.p (v)", schema), verdict.ClassByDesign},
+		{"a TABLESPACE clause", url, fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v) TABLESPACE pg_default", schema), verdict.ClassCapabilityBoundary},
+		{"an unnamed index on a table the search_path resolves", u.String(), "CREATE INDEX ON p (v)", verdict.ClassCapabilityBoundary},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dryRun, applied := admissionRefusalVerdicts(t, tc.url, tc.alter)
+			assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, dryRun.Reason)
+			assert.Equal(t, tc.class, dryRun.Class)
+			assert.Equal(t, schema+".p", dryRun.Table)
+			assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
+			assert.Empty(t, indexStates(t, pool, schema), "no index was built")
+		})
+	}
 }
