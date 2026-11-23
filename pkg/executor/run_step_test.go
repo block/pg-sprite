@@ -6,6 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
@@ -31,6 +32,14 @@ func TestRunSequenceAsStepRefusesAStepWithNoTracker(t *testing.T) {
 	_, err := executor.RunSequenceAsStep(t.Context(), nil, preflight.PreflightedTable{},
 		[]string{"ALTER TABLE s.t ADD COLUMN v int"}, executor.SequenceBudget{}, executor.DefaultRetryPolicy(),
 		nil, nil, executor.RunStep{Step: 2})
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+}
+
+func TestBuildPartitionedIndexAsStepRefusesATrackerWithNoStep(t *testing.T) {
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+	_, err = executor.BuildPartitionedIndexAsStep(t.Context(), dbconn.Config{}, nil, preflight.PreflightedTable{},
+		"CREATE INDEX i ON s.t (v)", executor.ConcurrentBudget{}, executor.RunStep{Tracker: tracker})
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
 
