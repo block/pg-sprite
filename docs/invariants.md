@@ -1733,6 +1733,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestReadIndexUsageSumsAPartitionedIndexsLeafIndexes`,
   `TestCheckLeafStatisticsListedRefusesAnUnlistedLeaf`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
+  `TestRunDesiredAppliesAReviewedDrop`, `TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop`,
+  `TestRunDesiredReviewedIndexDropLeavesWritesUnblocked`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)
   ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),
@@ -1822,7 +1824,7 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestEveryAcknowledgementKindUnwrapsToItsOwnMismatchSentinel`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
   registry's shape, the desired-state rejections, and the one admitted acknowledgement;
-  `TestAdmitPlanDestructiveAcknowledgement`
+  `TestAdmitPlanDestructiveAcknowledgement` and `TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop`
   for admission needing the pin, the table, and the acknowledgement together;
   `TestEveryOpKindIsClassifiedForDestructiveness` and
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
