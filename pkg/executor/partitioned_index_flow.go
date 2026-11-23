@@ -121,8 +121,9 @@ func (f *partitionedIndexFlow) resolveTarget(ctx context.Context) error {
 const relkindSQL = `SELECT c.relkind::pg_catalog.text FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1`
 
 // readTree lists the partition tree and refuses it when it holds a foreign
-// table: a foreign table cannot carry an index, and a parent's index never
-// becomes valid while one of its partitions has none. It is read at the start
+// table or a partition whose detach has not finished: neither can have an
+// index attached, and a parent's index never becomes valid while one of its
+// partitions has none. It is read at the start
 // and on every later pass, so a foreign table attached mid-run refuses the run
 // too.
 func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, error) {
@@ -138,6 +139,10 @@ func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, e
 	if foreign := foreignPartitions(tree); len(foreign) > 0 {
 		return nil, fmt.Errorf("%w: %s under %s",
 			ErrForeignTablePartition, strings.Join(foreign, ", "), qualifiedName(f.target.schema, f.target.table))
+	}
+	if pending := detachPendingPartitions(tree); len(pending) > 0 {
+		return nil, fmt.Errorf("%w: %s under %s; finish each detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then rerun",
+			ErrPartitionDetachPending, strings.Join(pending, ", "), qualifiedName(f.target.schema, f.target.table))
 	}
 	if f.req.unique {
 		if err := f.refuseUncoveredPartitionKeys(ctx, tree); err != nil {

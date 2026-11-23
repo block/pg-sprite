@@ -63,6 +63,10 @@ pg-sprite run on the same parent is refused:
      (`buildIndexConcurrently`) under the derived name, and then attaches it.
    - A **foreign table** partition cannot carry an index, so the flow refuses the
      tree before step 1 (`ErrForeignTablePartition`).
+   - A partition whose `DETACH PARTITION ... CONCURRENTLY` did not finish is
+     left out by the server when it attaches an index, so the flow refuses the
+     tree before step 1 (`ErrPartitionDetachPending`), and the attach step's
+     proof treats such a partition as no longer in the tree.
    - A **unique** index must contain the partition key of every partitioned
      table in the tree among its plain key columns. PostgreSQL checks each
      partitioned table only when that table gets its index, so the flow checks
@@ -174,10 +178,11 @@ ST-7 when a name moved:
   and the partition's index by OID, runs the attach, and reads `pg_inherits`
   again: the partition's index must be attached to the parent's index by OID, or
   the transaction rolls back. A partition detached after its index was built is
-  refused with ST-7, and the error names the index the build left on the detached
-  table (`<index>_p<partition OID>`). That index stays: the flow drops nothing it
-  did not just prove abandoned, and a rerun does not list a table that left the
-  tree.
+  refused with ST-7. The error gives the last-known names and OIDs of the index
+  and the partition and asks an operator to inspect the catalog, because a name
+  captured earlier may no longer name the same relation. The index stays: the
+  flow drops nothing it did not just prove abandoned, and a rerun does not list a
+  table that left the tree.
 
 ### Locks and budgets
 
@@ -191,9 +196,27 @@ ST-7 when a name moved:
   attach waits behind DML statements running on that partition (not behind a
   writer's open transaction), and while it holds or waits for the index, every
   new statement on that partition that opens it queues behind. The step's
-  `lock_timeout` bounds that: a wait that runs out is `budget-lock-exceeded`, the
-  finished partitions stay attached, and a retry resumes. Other partitions are
-  never affected, and the transaction is brief. The leaf builds, being
+  `lock_timeout` bounds the attach's wait to acquire the lock: a wait that runs
+  out is `budget-lock-exceeded`, the finished partitions stay attached, and a
+  retry resumes. Once acquired, the lock is held through the read-back and the
+  commit, each statement bounded by `statement_timeout`, and statements queued
+  behind it wait under their own clients' timeouts. Other partitions are never
+  affected, and the transaction is brief.
+- Before the attach, the step locks the partition `SHARE UPDATE EXCLUSIVE`, so
+  that the proof that it is still in the tree holds until commit. That lock does
+  not conflict with DML, but it waits behind anything that holds
+  `SHARE UPDATE EXCLUSIVE` or a stronger lock on the partition: `VACUUM`,
+  `ANALYZE`, `CREATE INDEX [CONCURRENTLY]`, and `REINDEX CONCURRENTLY`. An autovacuum normally gives way to the lock request,
+  but an anti-wraparound autovacuum does not, so on a large partition it can make
+  every attach `budget-lock-exceeded` until it finishes; the finished partitions
+  stay attached, and a retry resumes.
+- The step locks the partition before the attach takes `ACCESS SHARE` on the
+  parent, which is the opposite order from a plain `DETACH PARTITION` (the
+  parent `ACCESS EXCLUSIVE` first, then the partition). When the two overlap, the
+  server either lets the step's `lock_timeout` run out (`budget-lock-exceeded`)
+  or detects a deadlock and cancels one side with SQLSTATE 40P01. When the step
+  is the side cancelled, the outcome is `execution-failed`: nothing of that step
+  committed, and a rerun resumes from the partitions already attached. The leaf builds, being
   concurrent, do not block writers.
 - Statements derived from the parent's definition are fully schema-qualified, so
   they read the same under any `search_path`. The statements that carry the
@@ -240,7 +263,7 @@ predicate.
   dedicated session the pool cannot supply. It is admitted only for a
   partitioned target (ST-7). Its refusals are typed: `ErrNotPartitionedTable`,
   `ErrPartitionedIndexNameTaken`, `ErrForeignTablePartition`,
-  `ErrUniqueIndexPartitionKey`, `ErrTableLockUnconfirmed`,
+  `ErrUniqueIndexPartitionKey`, `ErrTableLockUnconfirmed`, `ErrPartitionDetachPending`,
   `ErrPartitionedIndexTablespace`, and `ErrPartitionedIndexUnsettled`, beside the
   concurrent build's own. The report lists each partition the run gave an index
   (`built`, `reused`, `adopted`, or `partitioned`) and whether it recovered
