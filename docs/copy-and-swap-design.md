@@ -367,6 +367,11 @@ no checkpoint row in a non-terminal phase still names it. Slot inspection treats
 A host reaps with the connection config its runs use, on the database they run in. The pass is
 safe to run at any time, including while a schema change is in flight: it keeps every slot a
 live row names or a process holds, and waits on the slot's lock for a run that is claiming one.
+It stops at the first drop that fails and returns the slots sorted so far beside the error. The
+drop takes the slot before the publication of the same name, so a slot whose publication is then
+refused as not the route's, or fails to drop, is gone and in `Dropped`, and the error
+(`decode.ErrSlotDroppedPublicationLeft`, joined with the publication's own error) names the
+publication left for the operator.
 
 ```go
 // reapOrphans drops the engine's orphan slots in the database cfg names.

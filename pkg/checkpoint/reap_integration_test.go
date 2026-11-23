@@ -215,6 +215,45 @@ func TestReapOrphanSlotsReportsAPrefixWearingForeignSlot(t *testing.T) {
 	assert.True(t, slotExists(t, d.pool, foreign))
 }
 
+// An orphan of the engine's name shape whose same-named publication
+// publishes every table loses its slot and keeps its publication: the drop
+// takes the slot first, then refuses the publication as not the route's
+// single-table one. The pass stops with that refusal, and its report lists
+// the slot as dropped, since the server no longer has it (ST-3).
+func TestReapOrphanSlotsReportsASlotDroppedBeforeItsPublicationWasRefused(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	const name = "pgsprite_ffff0000"
+	_, err := d.pool.Exec(t.Context(), `CREATE PUBLICATION pgsprite_ffff0000 FOR ALL TABLES`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := d.pool.Exec(context.WithoutCancel(t.Context()), `DROP PUBLICATION IF EXISTS pgsprite_ffff0000`)
+		assert.NoError(t, err)
+	})
+	_, err = d.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, name)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := d.pool.Exec(context.WithoutCancel(t.Context()), `
+			SELECT pg_drop_replication_slot(slot_name)
+			FROM pg_catalog.pg_replication_slots
+			WHERE slot_name = $1`, name)
+		assert.NoError(t, err)
+	})
+
+	reaped, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
+
+	require.ErrorIs(t, err, decode.ErrSlotDroppedPublicationLeft)
+	var foreign *decode.ForeignStateError
+	require.ErrorAs(t, err, &foreign, "the publication's refusal is in the chain")
+	assert.Equal(t, decode.ForeignObjectPublication, foreign.Object)
+	assert.Equal(t, checkpoint.Reaped{Dropped: []string{name}}, reaped)
+	assert.False(t, slotExists(t, d.pool, name), "the slot was dropped")
+	var publications int
+	require.NoError(t, d.pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_catalog.pg_publication WHERE pubname = $1`, name).Scan(&publications))
+	assert.Equal(t, 1, publications, "the FOR ALL TABLES publication is left")
+}
+
 // Without the checkpoint table no row can speak for any slot, so the pass
 // is refused rather than read every slot as an orphan.
 func TestReapOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {

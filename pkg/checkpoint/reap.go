@@ -16,7 +16,9 @@ import (
 // of the store's database, every slot in exactly one list.
 type Reaped struct {
 	// Dropped slots had no checkpoint row, or a terminal one, and no holder:
-	// orphans, dropped with their publications.
+	// orphans, dropped with their publications. A pass that stops because a
+	// slot's publication was left after the slot's drop lists that slot
+	// last, and its error names the publication.
 	Dropped []string
 	// Live slots are named by a checkpoint row in a non-terminal phase: a
 	// schema change in flight or resumable owns each.
@@ -90,8 +92,11 @@ type candidateSlot struct {
 // slot's publication with it. Slots a live row names or a process holds,
 // and names that wear the prefix without the shape, are reported and left
 // as found. The drops stop at the first failure, reporting what was dropped
-// before it. Two reapers over one database take turns at each slot; the
-// one that waited finds the slot gone and reports the drop as its own too.
+// before it; a slot dropped whose publication the drop then refused or
+// failed to drop (decode.ErrSlotDroppedPublicationLeft) is in Dropped too,
+// since it is gone, and the error names the publication left. Two reapers
+// over one database take turns at each slot; the one that waited finds the
+// slot gone and reports the drop as its own too.
 //
 // A database where Ensure has never run has no rows to speak for its
 // slots, so the pass is refused with ErrTableMissing rather than read every
@@ -187,6 +192,12 @@ func (s *Store) dropIfStillOrphan(ctx context.Context, cfg dbconn.Config, name s
 		if errors.Is(err, decode.ErrSlotActive) {
 			reaped.Active = append(reaped.Active, name)
 			return nil
+		}
+		if errors.Is(err, decode.ErrSlotDroppedPublicationLeft) {
+			// The slot is gone and the report says so; the publication the
+			// drop left is the operator's to look at, so the pass stops.
+			reaped.Dropped = append(reaped.Dropped, name)
+			return fmt.Errorf("reap orphan slot %s: %w", name, err)
 		}
 		if err != nil {
 			return fmt.Errorf("reap orphan slot %s: %w", name, err)

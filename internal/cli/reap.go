@@ -24,9 +24,13 @@ type reapReport struct {
 	// engine's to reap and every list is empty.
 	CheckpointTableExists bool `json:"checkpoint_table_exists"`
 	// Stopped is true when a drop failed: the lists hold only the slots
-	// sorted before the failure, and the command exits 1.
+	// sorted before the failure, and the command exits 1. A slot whose drop
+	// went through before its publication was refused or failed to drop is
+	// gone, so it is the last entry of Dropped, and the error names the
+	// publication left.
 	Stopped bool `json:"stopped"`
-	// Dropped are the orphan slots the run dropped, publications included.
+	// Dropped are the orphan slots the run dropped, publications included
+	// except as Stopped says.
 	Dropped []string `json:"dropped"`
 	// WouldDrop are the orphan slots a real run would drop now.
 	WouldDrop []string `json:"would_drop"`
@@ -152,7 +156,7 @@ func renderReap(report reapReport) string {
 	writeReapSection(&b, "active (kept: a process holds it)", report.Active)
 	writeReapSection(&b, "foreign (kept: wears the pgsprite_ prefix without the engine's name shape)", report.Foreign)
 	if report.Stopped {
-		b.WriteString("stopped at a failed drop: slots after it were not reached\n")
+		b.WriteString("stopped at a failed drop: the error names what was left in place; slots after it were not reached\n")
 	}
 	if report.DryRun {
 		b.WriteString("dry run: nothing was dropped\n")

@@ -214,11 +214,13 @@ func TestReapJSONListsAreArraysWhenEmpty(t *testing.T) {
 	assert.JSONEq(t, `false`, string(raw["stopped"]))
 }
 
-// A drop that fails partway still reports what was dropped before it, marks
-// the report stopped, and exits 1. The second orphan's publication publishes
-// every table, which is not the single-table publication the engine makes,
-// so its drop fails after the first orphan has gone. Both names are made by
-// hand in the engine's shape so the pass reaches them in this order.
+// A drop that fails partway still reports what was dropped, marks the
+// report stopped, and exits 1. The second orphan's publication publishes
+// every table, which is not the single-table publication the engine makes:
+// the drop takes the second slot, then refuses its publication, so both
+// slots are reported dropped and the second publication stays. Both names
+// are made by hand in the engine's shape so the pass reaches them in this
+// order.
 func TestReapReportsWhatWasDroppedBeforeAFailedDrop(t *testing.T) {
 	url := testutil.NewDatabase(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -261,7 +263,7 @@ func TestReapReportsWhatWasDroppedBeforeAFailedDrop(t *testing.T) {
 	assert.Equal(t, reapReport{
 		CheckpointTableExists: true,
 		Stopped:               true,
-		Dropped:               []string{first},
+		Dropped:               []string{first, second},
 		WouldDrop:             []string{},
 		Live:                  []string{},
 		Active:                []string{},
@@ -269,6 +271,7 @@ func TestReapReportsWhatWasDroppedBeforeAFailedDrop(t *testing.T) {
 	}, report)
 	assert.False(t, slotPresent(t, pool, first))
 	assert.False(t, publicationPresent(t, pool, first))
+	assert.False(t, slotPresent(t, pool, second), "the second slot is dropped before its publication is refused")
 	assert.True(t, publicationPresent(t, pool, second), "a publication not of the engine's shape is left")
 
 	// The failed drop took the second slot and left its publication, so

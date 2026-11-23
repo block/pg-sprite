@@ -534,7 +534,11 @@ reports with nothing dropped and exit 0. `--json` prints the lists as
 `dropped`, `would_drop`, `live`, `active`, and `foreign` (always arrays),
 with `dry_run`, `checkpoint_table_exists`, and `stopped`, which is true when
 a drop failed: the lists then hold what was sorted before the failure and the
-command exits 1.
+command exits 1. The slot is dropped before its publication, so a slot whose
+same-named publication `reap` will not drop (one that is not the
+single-table publication pg-sprite makes, such as a `FOR ALL TABLES` one) is
+gone and listed last under `dropped`, and the error names the publication
+left in place for you to look at.
 
 A program that embeds pg-sprite as a Go library can poll a run's phase, step,
 and row, checksum, and catch-up counters directly; that snapshot is the

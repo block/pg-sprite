@@ -16,6 +16,15 @@ import (
 // so the slot and its publication are left as found.
 var ErrSlotActive = errors.New("replication slot is held by another process")
 
+// ErrSlotDroppedPublicationLeft reports a drop that got as far as the slot
+// and no further: no slot of the name remains — the drop removed it, or it
+// was already absent — but the publication of the name was not dropped, so
+// a caller that reports what it removed counts the slot as gone. It is
+// joined with the publication drop's own error, a *ForeignStateError for a
+// publication that is not the route's, so a caller routing on that error
+// still sees it.
+var ErrSlotDroppedPublicationLeft = errors.New("replication slot dropped, publication of its name left in place")
+
 // DropSlot drops the engine's replication slot and publication of the given
 // name from pool's database. The slot is dropped with DROP_REPLICATION_SLOT
 // … WAIT on a fresh replication connection built from cfg, proven to be on
@@ -33,7 +42,11 @@ var ErrSlotActive = errors.New("replication slot is held by another process")
 // another database or is physical, and a publication of the name that is not
 // one CreateSlot would have created, are refused with a *ForeignStateError
 // and left as found — a foreign slot leaves the publication of the name in
-// place too, since the whole name is then in dispute. A name outside the
+// place too, since the whole name is then in dispute. The slot is dropped
+// before the publication is judged, so a publication refused, or a
+// publication drop that fails, after the slot is gone comes back as
+// ErrSlotDroppedPublicationLeft joined with the publication's error: the
+// slot is dropped and the publication stays. A name outside the
 // engine's shape is an invariant violation. The reads that judge the slot,
 // the server, and the publication do not consult pool's search_path, so a
 // caller need not pin it. The slot is judged by the read InspectSlot makes,
@@ -50,19 +63,26 @@ func DropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name s
 // with ErrSlotActive and left in place, publication and all. Whether the
 // slot is held is judged by the server at the drop itself, not by a catalog
 // read before it, so a slot that becomes held between a caller's read and
-// the drop is still left alone. Everything else is as for DropSlot.
+// the drop is still left alone. Everything else is as for DropSlot,
+// ErrSlotDroppedPublicationLeft for a publication left after the slot's
+// drop included.
 func DropIdleSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string) error {
 	return dropSlotAndPublication(ctx, cfg, pool, name, false)
 }
 
 // dropSlotAndPublication is the drop behind DropSlot and DropIdleSlot: the
 // slot, then the publication of the name. A slot drop that fails or is
-// refused leaves the publication in place.
+// refused leaves the publication in place; a publication drop that fails or
+// is refused once the slot is gone is ErrSlotDroppedPublicationLeft, so the
+// caller learns the slot went.
 func dropSlotAndPublication(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string, wait bool) error {
 	if err := dropSlot(ctx, cfg, pool, name, wait); err != nil {
 		return err
 	}
-	return dropOwnPublication(ctx, pool, name)
+	if err := dropOwnPublication(ctx, pool, name); err != nil {
+		return fmt.Errorf("slot %s: %w: %w", name, ErrSlotDroppedPublicationLeft, err)
+	}
+	return nil
 }
 
 // dropSlot drops the engine's slot of the name and nothing else; wait says
