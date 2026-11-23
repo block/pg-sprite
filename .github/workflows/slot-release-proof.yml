@@ -3,14 +3,22 @@
 # PostgreSQL's own slot releases, about a minute a major, and it measures the
 # server's behaviour rather than the diff in front of it: the WAL the slot
 # retains between releases is what the lag-ceiling sizing rule in
-# docs/copy-and-swap.md rests on. Run weekly on main, it fails here, on the
-# major whose release cadence changed, instead of rotting unnoticed.
+# docs/copy-and-swap.md rests on. Run weekly on main, a changed release
+# cadence fails here, on its own major, instead of rotting unnoticed; a red leg
+# can also be runner contention, which the logged positions tell apart.
 name: Slot Release Proof
 
 on:
   schedule:
     - cron: "41 7 * * 1"
   workflow_dispatch:
+  # A pull request that changes this workflow or the proof itself runs it on
+  # every major before it merges, so a broken proof is not first seen on a
+  # Monday. It still gates nothing: the workflow is not part of all-green.
+  pull_request:
+    paths:
+      - .github/workflows/slot-release-proof.yml
+      - pkg/applier/catchup_slot_release_integration_test.go
 
 permissions:
   contents: read
@@ -27,6 +35,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The supported majors (docs/postgresql-version-support.md), the same list
+        # make test-supported-postgres runs; a unit test in internal/testutil
+        # fails when the two differ.
         pg: ["14", "15", "16", "17", "18"]
     env:
       PG_VERSION: ${{ matrix.pg }}
@@ -42,3 +53,20 @@ jobs:
       # reading, which tells the server's timing apart from a slow stream.
       - name: Run the slot release proof
         run: make slot-release-proof
+
+  # GitHub disables a public repository's scheduled workflows after 60 days
+  # without repository activity. Re-enabling this workflow through the API on
+  # each scheduled run restarts that clock without a commit, so a quiet
+  # stretch on main does not silently stop the weekly proof.
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Keep the weekly schedule enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh api --method PUT "repos/$REPO/actions/workflows/slot-release-proof.yml/enable"

@@ -1,5 +1,7 @@
 # pg-sprite
 
+[![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
+
 > [!WARNING]
 > **Early release — not production-ready.** This project is under active
 > development. Tagged releases exist, but pre-1.0 there are no stability
