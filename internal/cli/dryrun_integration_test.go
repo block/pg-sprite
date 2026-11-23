@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	neturl "net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -322,9 +324,20 @@ func TestDryRunAndDiffAgreeOnDestructive(t *testing.T) {
 	assert.Equal(t, alterSt.Disposition, diffSt.Disposition)
 	assert.Equal(t, alterSt.SQL, diffSt.SQL,
 		"both doors must render the same change as the same canonical string")
-	assert.Equal(t, alterReport.Fingerprint, diffReport.Fingerprint,
-		"the same plan must carry the same identity through either door")
 	assert.NotEmpty(t, alterReport.Fingerprint)
+
+	// The diff door also reports the live column the drop removes, which its
+	// fingerprint covers and a submitted statement has no way to carry.
+	// Without that definition the two doors name the same plan.
+	require.NotNil(t, diffSt.Drops, "the derived DROP COLUMN must carry the column it removes")
+	assert.Equal(t, schemadiff.DroppedColumn, diffSt.Drops.Kind)
+	assert.Equal(t, "doomed", diffSt.Drops.Name)
+	assert.NotEqual(t, alterReport.Fingerprint, diffReport.Fingerprint,
+		"a pin on the derived plan must bind the definition of the column it drops")
+	withoutDefinition := slices.Clone(diffReport.Statements)
+	withoutDefinition[0].Drops = nil
+	assert.Equal(t, alterReport.Fingerprint, plan.Fingerprint(withoutDefinition),
+		"the same plan must carry the same identity through either door")
 }
 
 // An unqualified statement resolves to the schema the engine actually
