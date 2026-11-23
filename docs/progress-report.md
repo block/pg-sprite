@@ -73,7 +73,7 @@ licenses a consumer to intervene in the change itself.
 | `format_version` | int | always | Contract version; reject unknown versions. |
 | `phase` | string | always | Overall execution phase (see Phases). |
 | `step` | int | after the first step starts | 1-based position in a multi-step sequence. Absent before execution reaches step 1. |
-| `total_steps` | int | after `Start` | Number of steps in the execution; `1` for single-statement entry points. |
+| `total_steps` | int | after `Start` | Number of steps in the execution; `1` for single-statement entry points. It only grows during a run, for an execution that finds more steps while it runs (`Tracker.AddSteps`). For a partitioned index build it is an upper bound: a partition that already has its index attached takes no step, so a resumed run finishes with `step` below it. |
 | `elapsed_ns` | int | always | Nanoseconds since execution started. For a terminal phase, **frozen** at the instant the outcome was recorded — a late poll reports the execution's duration, not the observation's age. |
 | `step_elapsed_ns` | int | always | Nanoseconds since the current step started; frozen the same way at a terminal phase. |
 | `detail` | object | always | The operation currently executing (below). |

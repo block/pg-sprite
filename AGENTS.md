@@ -109,6 +109,10 @@ is a smoke tour of the built binary, not a second test suite.
   never by AST transformation; the executable-SQL AST edit permitted here is retargeting a single statement's
   one relation name (`pkg/statement` `Qualify`), which changes no semantics (see
   [docs/copy-and-swap-design.md](docs/copy-and-swap-design.md#d1--no-durable-scratch-database)).
+  A second executable-SQL edit is permitted for a partitioned table's index build: `OnlyIndex` and
+  `PartitionIndex` change one `CREATE INDEX`'s name, target relation, and `ONLY` and `CONCURRENTLY`
+  flags, and nothing in its key, expressions, or predicate (see
+  [docs/partitioned-index-build-design.md](docs/partitioned-index-build-design.md)).
   A separate comparison-only exception permits `RowSecurityChange.CanonicalSQLForNamespace` to erase
   only the validated operation target's schema on a fresh parsed tree. The comparison key
   must already include the canonical namespace and table.

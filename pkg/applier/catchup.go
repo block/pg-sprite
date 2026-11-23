@@ -20,6 +20,13 @@ const (
 	// drains and flushes what it holds when the stream is not busy enough
 	// to fill it first.
 	DefaultCatchupInterval = 250 * time.Millisecond
+	// MaxCatchupInterval is the longest Interval a catch-up accepts: the
+	// server's release interval. The Interval is credited to the retained
+	// WAL's grace, so this bound keeps the grace within twice the release
+	// interval; a cycle longer than the release interval would also make
+	// the stream's confirmations, not the server's releases, the pace at
+	// which the slot gives WAL back.
+	MaxCatchupInterval = decode.RestartReleaseInterval
 	// DefaultCatchupMaxChanges is how many changes a cycle adds before it
 	// drains and flushes, whatever the interval says.
 	DefaultCatchupMaxChanges = 10_000
@@ -60,7 +67,9 @@ type CatchupOptions struct {
 	// confirmations, so the slot's retained WAL is released at this pace,
 	// and it is part of the grace the retained WAL may stand over
 	// SlotLagCeiling: a longer Interval lets the slot grow further past
-	// the ceiling before the run ends.
+	// the ceiling before the run ends. Zero takes DefaultCatchupInterval;
+	// a value below one millisecond or above MaxCatchupInterval is
+	// refused, so the grace stays bounded.
 	Interval time.Duration
 	// MaxChanges is the most changes a cycle adds before it drains and
 	// flushes: the bound on a flush transaction's size on a busy stream.
@@ -83,10 +92,11 @@ type CatchupOptions struct {
 	// lag is the stream's own; the WAL the slot retains on the volume,
 	// which the server releases some time after the stream confirms it,
 	// ends the run only once it has stayed over the ceiling for the
-	// server's release interval plus one cycle. A busy source's slot retains
-	// one to two release intervals of the cluster's WAL while the stream
-	// keeps up, so a ceiling below a release interval and a cycle of it,
-	// with margin, ends a healthy run. Zero takes
+	// server's release interval plus one cycle, or at once on a cycle that
+	// reads it past decode.RetainedWALHardMultiple times the ceiling. A busy
+	// source's slot retains one to two release intervals of the cluster's
+	// WAL while the stream keeps up, so a ceiling below a release interval
+	// and a cycle of it, with margin, ends a healthy run. Zero takes
 	// decode.DefaultSlotLagCeiling; a value below one byte is refused, so
 	// the ceiling is always in force.
 	SlotLagCeiling int64
@@ -156,6 +166,10 @@ func (o CatchupOptions) withDefaults() CatchupOptions {
 func (o CatchupOptions) validate() error {
 	if o.Interval < time.Millisecond {
 		return fmt.Errorf("%w: interval %s is below one millisecond; use zero for the default", ErrInvalidCatchupOptions, o.Interval)
+	}
+	if o.Interval > MaxCatchupInterval {
+		return fmt.Errorf("%w: interval %s is above the %s maximum, which bounds the slot lag grace; use a value up to %s, or zero for the %s default",
+			ErrInvalidCatchupOptions, o.Interval, MaxCatchupInterval, MaxCatchupInterval, DefaultCatchupInterval)
 	}
 	if o.MaxChanges < 1 {
 		return fmt.Errorf("%w: max changes %d is below one", ErrInvalidCatchupOptions, o.MaxChanges)
@@ -603,7 +617,9 @@ func (c *Catchup) checkSlot(ctx context.Context, pool *pgxpool.Pool) error {
 			&decode.SlotLostError{Slot: c.stream.Slot()})
 	}
 	// INV: ST-3 — the ceiling is judged every cycle, fail closed.
-	if err := c.slotLag.Judge(status, c.opts.Clock.Now()); err != nil {
+	now := c.opts.Clock.Now()
+	if err := c.slotLag.Judge(status, now); err != nil {
+		err = recordDeadlocks(err, c.deadlocks, c.retryAt, now)
 		return fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
 	return nil
@@ -689,12 +705,21 @@ func confirmBound(delivered decode.LSN, oldestPending decode.LSN, hasPending boo
 	return delivered
 }
 
+// walEndSQL reads the server's write position. It runs on the caller's
+// pool, whatever its search_path, so the cast is spelled through
+// pg_catalog as well as the function: a lookalike text type on the path
+// would otherwise reshape the position the lag is measured against
+// (CO-9).
+//
+// INV: CO-9
+const walEndSQL = `SELECT pg_catalog.pg_current_wal_lsn()::pg_catalog.text`
+
 // measureWALEnd reads the server's write position on pool: the far end of
 // the lag. It runs after the cycle's confirmation, so the position it
 // returns is never below the one confirmed.
 func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) (decode.LSN, error) {
 	var text string
-	if err := pool.QueryRow(ctx, `SELECT pg_catalog.pg_current_wal_lsn()::text`).Scan(&text); err != nil {
+	if err := pool.QueryRow(ctx, walEndSQL).Scan(&text); err != nil {
 		return 0, fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
 	walEnd, err := decode.ParseLSN(text)
