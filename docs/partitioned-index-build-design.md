@@ -63,6 +63,11 @@ pg-sprite run on the same parent is refused:
      (`buildIndexConcurrently`) under the derived name, and then attaches it.
    - A **foreign table** partition cannot carry an index, so the flow refuses the
      tree before step 1 (`ErrForeignTablePartition`).
+   - A **unique** index must contain the partition key of every partitioned
+     table in the tree among its plain key columns. PostgreSQL checks each
+     partitioned table only when that table gets its index, so the flow checks
+     every level before step 1 and refuses a mismatch
+     (`ErrUniqueIndexPartitionKey`).
 3. **New partitions.** A partition created during the flow
    (`CREATE TABLE ... PARTITION OF`) gets a clone of every index on its parent,
    already attached. A table attached with `ATTACH PARTITION` ends up with an
@@ -231,6 +236,7 @@ predicate.
   dedicated session the pool cannot supply. It is admitted only for a
   partitioned target (ST-7). Its refusals are typed: `ErrNotPartitionedTable`,
   `ErrPartitionedIndexNameTaken`, `ErrForeignTablePartition`,
+  `ErrUniqueIndexPartitionKey`,
   `ErrPartitionedIndexTablespace`, and `ErrPartitionedIndexUnsettled`, beside the
   concurrent build's own. The report lists each partition the run gave an index
   (`built`, `reused`, `adopted`, or `partitioned`) and whether it recovered

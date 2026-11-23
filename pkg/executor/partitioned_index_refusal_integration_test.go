@@ -66,6 +66,50 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 			f.requireNothingBuilt(t, "orders", partitions...)
 		})
 
+		// PostgreSQL checks a unique index against each partitioned table's
+		// partition key only when that table gets its index, so a key that
+		// misses a level below the parent would fail part-way through the
+		// tree. The build checks every level first and creates nothing.
+		t.Run("a unique index that misses a partition key below the parent", func(t *testing.T) {
+			for name, c := range map[string]struct {
+				subKey string
+				// covering is a unique key that contains every level's
+				// partition key; empty when no key can.
+				covering string
+			}{
+				"a column":      {subKey: "LIST (region)", covering: "(id, ts, region)"},
+				"an expression": {subKey: "LIST (lower(region))"},
+			} {
+				t.Run(name, func(t *testing.T) {
+					f := newFixture(t)
+					f.exec(t, `CREATE TABLE %s.events (
+	id bigint NOT NULL,
+	region text NOT NULL,
+	ts date NOT NULL
+) PARTITION BY RANGE (ts)`, f.schema)
+					f.exec(t, `CREATE TABLE %[1]s.events_2023 PARTITION OF %[1]s.events
+	FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')`, f.schema)
+					f.exec(t, `CREATE TABLE %[1]s.events_2024 PARTITION OF %[1]s.events
+	FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+	PARTITION BY `+c.subKey, f.schema)
+					f.exec(t, `CREATE TABLE %[1]s.events_2024_eu PARTITION OF %[1]s.events_2024
+	FOR VALUES IN ('eu')`, f.schema)
+					partitions := []string{"events_2023", "events_2024", "events_2024_eu"}
+
+					_, err := f.buildErr(t, "events", fmt.Sprintf("CREATE UNIQUE INDEX idx_events_id ON %s.events (id, ts)", f.schema))
+
+					require.ErrorIs(t, err, executor.ErrUniqueIndexPartitionKey)
+					f.requireNothingBuilt(t, "events", partitions...)
+					if c.covering == "" {
+						return
+					}
+					f.build(t, "events", fmt.Sprintf("CREATE UNIQUE INDEX idx_events_id ON %s.events %s", f.schema, c.covering))
+					f.requireCovered(t, "events", "idx_events_id", "events_2023", "events_2024")
+					f.requireCovered(t, "events_2024", f.derived(t, "idx_events_id", "events_2024"), "events_2024_eu")
+				})
+			}
+		})
+
 		// Each of these holds a name the build needs. None is renamed,
 		// dropped, or attached; the build says so and stops.
 		t.Run("a name held by something that is not the requested index", func(t *testing.T) {
