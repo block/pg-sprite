@@ -95,10 +95,11 @@ type CopySwapEnvironment struct {
 
 // CopySwapHeld is the space a stopped copy-and-swap run already occupies on
 // the volume when the run being checked resumes it: the shadow it built so
-// far and the WAL its replication slot retains. Both figures must be read
-// from the server, never from a checkpoint row, and a figure that could
-// not be read is zero, so the check discounts no more than the volume
-// truly holds. A negative figure is refused.
+// far and the WAL its replication slot retains, or that its swap has
+// already committed. Every field must be read from the server, never from
+// a checkpoint row, and a figure that could not be read is zero, so the
+// check discounts no more than the volume truly holds. A negative figure
+// is refused.
 type CopySwapHeld struct {
 	// ShadowBytes is the shadow table's total size (heap, indexes, TOAST)
 	// as the server reports it.
@@ -107,6 +108,13 @@ type CopySwapHeld struct {
 	// restart position to the server's write position. It is counted only
 	// for a run that decodes WAL; a quiesced run holds no slot.
 	RetainedWALBytes int64
+	// SwapCommitted reports that the catalog shows the stopped run's swap
+	// committed: the shadow already bears the table's name, so the run
+	// being checked only finishes it — drops the slot and the retained
+	// source, and records the change done. That run builds no shadow and
+	// decodes no WAL, so the disk check asks it for neither the copy's
+	// headroom nor the slot lag ceiling; what it does frees space.
+	SwapCommitted bool
 }
 
 // DefaultSlotLagCeiling is the slot lag ceiling, in bytes, a catch-up

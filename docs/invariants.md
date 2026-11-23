@@ -1372,7 +1372,12 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 caller-measured disk headroom against the shadow copy's requirement plus, for a run that
 decodes WAL, the slot lag ceiling, each less what `pkg/schemachange` `MeasureResumeHeld`
 reads from the server that a resumed run already holds of it, and nothing for a run that
-starts over), chained by type —
+starts over; a resume of a `cutover` row whose swap the catalog shows committed — read as
+`InspectSwapped` reads it — is asked for neither, since it builds no shadow and decodes no
+WAL, and `MeasureResumeHeld` reports it as `SwapCommitted`, while a `cutover` row whose swap
+did not commit is measured as any resume, pinned by
+`TestCheckCopySwapAdmitsFinishingACommittedSwapOnATightVolume` and
+`TestCheckCopySwapStillAsksACutoverRowWhoseSwapDidNotCommitForTheCopy`), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last; `pkg/schemachange` `CheckCopySwap` runs the chain with the
 resume measure as one call, which `pkg/migrate` calls; and before them `pkg/schemachange` `CheckPool`, which

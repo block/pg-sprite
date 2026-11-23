@@ -123,7 +123,14 @@ implementation time):
   `preflight.DefaultSlotLagCeiling` (the catch-up's default), and a negative value is
   refused. Between the shape and the environment check it fills `CopySwapEnvironment.Held`
   from `schemachange.MeasureResumeHeld` (the shadow's and the slot's sizes, read from the
-  server, zero for a fresh run), so a resume is asked only for what is left to grow.
+  server, zero for a fresh run), so a resume is asked only for what is left to grow. A
+  `cutover` row whose swap the catalog shows committed — the read `InspectSwapped` makes —
+  is reported as `Held.SwapCommitted`, and the disk check then asks for neither the copy's
+  headroom nor the slot lag ceiling: the run that finishes it builds nothing and decodes no
+  WAL, it only drops the slot and the retained source and saves `done`, which frees space,
+  so a volume tight because the retained source is still on it admits the cleanup. A
+  `cutover` row whose swap did not commit, or whose outcome that read cannot call yet, is
+  measured as any other resume, since its run verifies and swaps again over the shadow.
   `preflight.CheckCopySwap` runs the same three checks without that measure, so it asks a
   resume for the whole requirement again. Pass `schemachange.CopySwapRestart` for a run
   with `RunOptions.Restart` set and `schemachange.CopySwapResume` for every other run; the

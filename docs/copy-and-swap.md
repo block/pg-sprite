@@ -145,7 +145,10 @@ resume it with `--slot-lag-ceiling 2GiB`. The resume needs 20 − 6 = 14 GiB for
 2 − 1.5 = 0.5 GiB for the slot, 14.5 GiB in all. Pass the free space the volume has now, as for
 any run. Neither discount goes past its own requirement, and anything pg-sprite cannot read
 (no shadow, a slot that is gone or lost, a server that cannot measure the WAL) counts as
-nothing held, so the check falls back to a fresh run's figure. A run with
+nothing held, so the check falls back to a fresh run's figure. A run that stopped after its
+swap committed, before it finished, is asked for no space at all when its statement runs
+through copy-and-swap again: that run only drops the slot and the retained old table and
+records the change done, which frees space. A run with
 `--restart SCHEMA.TABLE` is checked as a fresh run: it discards what the stopped run held
 before it builds anew.
 
