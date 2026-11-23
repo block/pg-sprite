@@ -97,7 +97,7 @@ func TestDeleteSQLMatchesTheRowIdentity(t *testing.T) {
 	_, where, found := strings.Cut(deleteSQL, " WHERE ")
 	require.True(t, found, "the delete is conditional")
 	for _, column := range []string{"schema_name", "table_name", "format_version", "source_fingerprint", "target_fingerprint"} {
-		assert.Contains(t, where, column+" = $")
+		assert.Contains(t, where, column+" OPERATOR(pg_catalog.=) $")
 	}
 }
 
@@ -118,9 +118,9 @@ func TestSaveSQLGuardsTheRowIdentity(t *testing.T) {
 	_, guard, found := strings.Cut(saveSQL, "\nWHERE ")
 	require.True(t, found, "the upsert has a conflict guard")
 	for _, column := range []string{"format_version", "source_fingerprint", "target_fingerprint"} {
-		assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".`+column+" = EXCLUDED."+column)
+		assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".`+column+" OPERATOR(pg_catalog.=) EXCLUDED."+column)
 	}
-	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".phase = ANY($15)`, "the stored row's phase must be one this engine knows")
+	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".phase OPERATOR(pg_catalog.=) ANY($15)`, "the stored row's phase must be one this engine knows")
 	update, _, _ := strings.Cut(saveSQL, "\nWHERE ")
 	_, update, _ = strings.Cut(update, "DO UPDATE SET")
 	for _, column := range []string{"format_version", "source_fingerprint", "target_fingerprint"} {
@@ -139,5 +139,5 @@ func TestSaveSQLKeepsTheShadowProofOnceWritten(t *testing.T) {
 	assert.NotContains(t, update, "shadow_proof = EXCLUDED.shadow_proof", "a missing proof never overwrites the row's")
 	assert.Contains(t, guard, "EXCLUDED.shadow_proof IS NULL")
 	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".shadow_proof IS NULL`)
-	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".shadow_proof = EXCLUDED.shadow_proof`)
+	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".shadow_proof OPERATOR(pg_catalog.=) EXCLUDED.shadow_proof`)
 }

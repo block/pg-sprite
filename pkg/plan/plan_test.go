@@ -218,6 +218,7 @@ func TestRefusedStatementsReportAcceptedBlockingEligibility(t *testing.T) {
 	}{
 		{"blocking parent index", preflight.PartitionCauseBlockingIndexBuild, true},
 		{"concurrent parent index", preflight.PartitionCauseConcurrentIndexBuild, false},
+		{"concurrent parent index drop", preflight.PartitionCauseConcurrentIndexDrop, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := plan.NewReport(plan.SourceAlter)
@@ -478,7 +479,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 20 against this test.
+// omissions. A consumer pins format_version 21 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -534,7 +535,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 20,
+		"format_version": 21,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -592,7 +593,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 20,
+		"format_version": 21,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -617,7 +618,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 20,
+		"format_version": 21,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -728,7 +729,7 @@ func TestFingerprintCoversExtensionSchemas(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 20.
+// pinned to format_version 21.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

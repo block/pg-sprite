@@ -25,6 +25,9 @@ const (
 	// foreign key, which the server version cannot do on a partitioned
 	// table.
 	PartitionCauseNotValidForeignKey PartitionRefusalCause = "parent-not-valid-foreign-key"
+	// PartitionCauseConcurrentIndexDrop means a step drops an index of the
+	// parent concurrently, which PostgreSQL rejects for a partitioned index.
+	PartitionCauseConcurrentIndexDrop PartitionRefusalCause = "parent-concurrent-index-drop"
 )
 
 // PartitionRefusalCauses returns the closed set of partitioned-parent
@@ -36,6 +39,7 @@ func PartitionRefusalCauses() []PartitionRefusalCause {
 		PartitionCauseBlockingIndexBuild,
 		PartitionCauseIndexAdoption,
 		PartitionCauseNotValidForeignKey,
+		PartitionCauseConcurrentIndexDrop,
 	}
 }
 
@@ -45,7 +49,8 @@ func PartitionRefusalCauses() []PartitionRefusalCause {
 // flow is a planned engine capability, and refusing the blocking substitute
 // is the policy half of the same gap. Index adoption is by design: no
 // supported server adopts an index as a constraint on a partitioned parent,
-// so waiting for an engine release waits for nothing. The NOT VALID foreign
+// so waiting for an engine release waits for nothing; the same holds for a
+// concurrent drop of a partitioned index. The NOT VALID foreign
 // key is environmental: the same statement runs on a newer server, so the
 // action that unblocks it is a server upgrade. The class is a triage
 // decision; the cause's row in the document decides what the consumer does
@@ -54,7 +59,7 @@ func (c PartitionRefusalCause) Class() refusal.Class {
 	switch c {
 	case PartitionCauseConcurrentIndexBuild, PartitionCauseBlockingIndexBuild:
 		return refusal.ClassCapabilityBoundary
-	case PartitionCauseIndexAdoption:
+	case PartitionCauseIndexAdoption, PartitionCauseConcurrentIndexDrop:
 		return refusal.ClassByDesign
 	case PartitionCauseNotValidForeignKey:
 		return refusal.ClassEnvironmental
@@ -87,6 +92,11 @@ func (e *UnsupportedPartitionedParentError) Error() string {
 	case PartitionCauseConcurrentIndexBuild:
 		return "PostgreSQL cannot build parent-level indexes concurrently; pg-sprite does not yet support " +
 			"the partition-aware CREATE INDEX ON ONLY, per-partition CREATE INDEX CONCURRENTLY, and ATTACH PARTITION flow"
+	case PartitionCauseConcurrentIndexDrop:
+		return "PostgreSQL cannot drop an index of a partitioned table concurrently in any supported version, and a partition's " +
+			"own index cannot be dropped alone; the drop is a plain DROP INDEX, which takes ACCESS EXCLUSIVE on the parent, " +
+			"every partition, and every partition's index — run it through the imperative front door with the blocking lock " +
+			"and the destructive drop both acknowledged for the table"
 	default:
 		return "pg-sprite refuses an unsupported operation on a partitioned table"
 	}
@@ -121,8 +131,8 @@ func RefusesPartitionedParent(serverMajor int, execSQL []string) (PartitionRefus
 		}
 		// INV: RF-6 — no partitioned-parent sequence starts when pg-sprite
 		// cannot complete it without an ACCESS EXCLUSIVE index build, an
-		// unsupported index adoption, or a server-version-unsupported NOT
-		// VALID foreign key.
+		// unsupported index adoption, a server-version-unsupported NOT
+		// VALID foreign key, or a concurrent drop of a partitioned index.
 		ops, err := statement.ParseOps(sql)
 		if err != nil {
 			return "", fmt.Errorf("check partitioned-parent operations: %w", err)
@@ -135,6 +145,11 @@ func RefusesPartitionedParent(serverMajor int, execSQL []string) (PartitionRefus
 				op.Constraint == statement.ConstraintForeignKey && op.NotValid {
 				return PartitionCauseNotValidForeignKey, nil
 			}
+		}
+		// Every index of a partitioned parent is a partitioned index, which
+		// PostgreSQL refuses to drop concurrently.
+		if st.Kind() == statement.KindDropIndex && st.Concurrent() {
+			return PartitionCauseConcurrentIndexDrop, nil
 		}
 		if st.BuildsIndex() {
 			if st.Concurrent() {

@@ -146,7 +146,7 @@ func TestSupabaseUniqueIndexFailure(t *testing.T) {
 	v, err := migrate.Run(t.Context(), pool, st, migrate.DefaultOptions())
 	require.ErrorIs(t, err, executor.ErrBuildLeftInvalidIndex)
 	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
-	assert.Equal(t, string(executor.CodeInvalidIndexOwnLeftover), v.Code)
+	assert.Equal(t, string(executor.CodeDataFault), v.Code, "the duplicate rows are the fault; the leftover rides on the error")
 	var valid bool
 	var count int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT indisvalid
