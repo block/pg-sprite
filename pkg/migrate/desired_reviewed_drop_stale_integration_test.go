@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -31,12 +33,44 @@ func TestExecutePlanRefusesADropWhoseObjectChangedAfterTheRead(t *testing.T) {
 		intact  string
 	}{
 		{
-			name:    "column dropped and added again",
-			desired: `CREATE TABLE t (id int PRIMARY KEY, keep text, CONSTRAINT t_keep_check CHECK (keep <> ''));CREATE INDEX t_keep_idx ON t (keep);`,
-			replace: `ALTER TABLE %[1]s.t DROP COLUMN legacy; ALTER TABLE %[1]s.t ADD COLUMN legacy text`,
-			drift:   executor.ErrDroppedObjectDrift,
-			code:    executor.CodeDroppedObjectDrift,
-			intact:  `SELECT count(*) FROM information_schema.columns WHERE table_schema = '%[1]s' AND table_name = 't' AND column_name = 'legacy'`,
+			name: "column dropped and added again",
+			desired: `CREATE TABLE t (
+				id int PRIMARY KEY,
+				keep text,
+				CONSTRAINT t_keep_check CHECK (keep <> '')
+			);
+			CREATE INDEX t_keep_idx ON t (keep);`,
+			replace: `
+				ALTER TABLE %[1]s.t DROP COLUMN legacy;
+				ALTER TABLE %[1]s.t ADD COLUMN legacy text`,
+			drift: executor.ErrDroppedObjectDrift,
+			code:  executor.CodeDroppedObjectDrift,
+			intact: `
+				SELECT count(*)
+				FROM information_schema.columns
+				WHERE table_schema = '%[1]s'
+					AND table_name = 't'
+					AND column_name = 'legacy'`,
+		},
+		{
+			name: "index dropped and created again on another column",
+			desired: `CREATE TABLE t (
+				id int PRIMARY KEY,
+				keep text,
+				legacy text,
+				CONSTRAINT t_keep_check CHECK (keep <> '')
+			);`,
+			replace: `
+				DROP INDEX %[1]s.t_keep_idx;
+				CREATE INDEX t_keep_idx ON %[1]s.t (legacy)`,
+			drift: executor.ErrDroppedIndexDrift,
+			code:  executor.CodeDroppedIndexDrift,
+			intact: `
+				SELECT count(*)
+				FROM pg_indexes
+				WHERE schemaname = '%[1]s'
+					AND indexname = 't_keep_idx'
+					AND indexdef LIKE '%%(legacy)%%'`,
 		},
 	}
 	for _, tc := range cases {
@@ -46,8 +80,12 @@ func TestExecutePlanRefusesADropWhoseObjectChangedAfterTheRead(t *testing.T) {
 			t.Cleanup(pool.Close)
 			schema := testutil.NewSchema(t, pool)
 			_, err = pool.Exec(t.Context(), fmt.Sprintf(`
-				CREATE TABLE %[1]s.t (id int PRIMARY KEY, keep text, legacy text,
-					CONSTRAINT t_keep_check CHECK (keep <> ''));
+				CREATE TABLE %[1]s.t (
+					id int PRIMARY KEY,
+					keep text,
+					legacy text,
+					CONSTRAINT t_keep_check CHECK (keep <> '')
+				);
 				CREATE INDEX t_keep_idx ON %[1]s.t (keep)`, schema))
 			require.NoError(t, err)
 
@@ -69,7 +107,10 @@ func TestExecutePlanRefusesADropWhoseObjectChangedAfterTheRead(t *testing.T) {
 			require.NoError(t, err)
 
 			opts := DefaultOptions()
-			res, err := executePlan(t.Context(), pool, report, opts, schema+".t", nil)
+			replan := func(ctx context.Context) (plan.Report, error) {
+				return diffplan.Plan(ctx, pool, diffplan.Request{Schema: schema, Desired: ds})
+			}
+			res, err := executePlan(t.Context(), pool, report, opts, schema+".t", replan)
 			require.ErrorIs(t, err, tc.drift)
 			assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
 			require.NotEmpty(t, res.Verdicts)

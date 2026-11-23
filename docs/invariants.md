@@ -1734,7 +1734,7 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestCheckLeafStatisticsListedRefusesAnUnlistedLeaf`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `TestRunDesiredAppliesAReviewedDrop`, `TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop`,
-  `TestRunDesiredReviewedIndexDropNeverBlocksTheTable`,
+  `TestRunDesiredReviewedIndexDropLeavesWritesUnblocked`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)
   ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),

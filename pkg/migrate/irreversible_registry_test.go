@@ -359,27 +359,46 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 	})
 
 	// The one acknowledgement desired-state execution takes lives on the
-	// request, never on the policy. Every string on the request is either
-	// the plan's identity, the pin, or that acknowledgement, so a new string
-	// that could carry another acknowledgement fails here until it is
-	// classified.
-	t.Run("the request carries exactly one acknowledgement", func(t *testing.T) {
+	// request, never on the policy. Every string on each desired-state
+	// request is either the plan's identity, the pin, or that
+	// acknowledgement, so a new string that could carry another
+	// acknowledgement fails here until it is classified.
+	t.Run("each request carries at most the one acknowledgement", func(t *testing.T) {
 		declared := map[string]bool{
-			// The target schema the desired table lives in.
-			"DesiredRequest.Schema": true,
+			// The target schema the desired object lives in.
+			"DesiredRequest.Schema":     true,
+			"RowSecurityRequest.Schema": true,
+			"EnumTypeRequest.Schema":    true,
 			// The pin that binds the destructive acknowledgement to the
 			// reviewed plan.
-			"DesiredRequest.ExpectedFingerprint": true,
-			// The destructive acknowledgement, valid only with the pin.
-			"DesiredRequest.AllowDestructive": true,
+			"DesiredRequest.ExpectedFingerprint":     true,
+			"RowSecurityRequest.ExpectedFingerprint": true,
+			"EnumTypeRequest.ExpectedFingerprint":    true,
+			// The destructive acknowledgement, valid only with the pin. An
+			// enum type plan drops nothing, so its request carries none.
+			"DesiredRequest.AllowDestructive":     true,
+			"RowSecurityRequest.AllowDestructive": true,
 		}
 		var names []string
-		for _, sw := range policySwitches(reflect.TypeFor[DesiredRequest](), "DesiredRequest", nil) {
-			names = append(names, sw.name)
-			assert.False(t, sw.isBool, "%s: a bool cannot name its table, so it cannot be an acknowledgement", sw.name)
-			assert.True(t, declared[sw.name], "%s is a string on the desired-state request that is not classified", sw.name)
+		for _, req := range []struct {
+			typ  reflect.Type
+			name string
+		}{
+			{reflect.TypeFor[DesiredRequest](), "DesiredRequest"},
+			{reflect.TypeFor[RowSecurityRequest](), "RowSecurityRequest"},
+			{reflect.TypeFor[EnumTypeRequest](), "EnumTypeRequest"},
+		} {
+			for _, sw := range policySwitches(req.typ, req.name, nil) {
+				names = append(names, sw.name)
+				assert.False(t, sw.isBool, "%s: a bool cannot name its table, so it cannot be an acknowledgement", sw.name)
+				assert.True(t, declared[sw.name], "%s is a string on a desired-state request that is not classified", sw.name)
+			}
 		}
-		assert.ElementsMatch(t, []string{"DesiredRequest.Schema", "DesiredRequest.ExpectedFingerprint", "DesiredRequest.AllowDestructive"}, names)
+		assert.ElementsMatch(t, []string{
+			"DesiredRequest.Schema", "DesiredRequest.ExpectedFingerprint", "DesiredRequest.AllowDestructive",
+			"RowSecurityRequest.Schema", "RowSecurityRequest.ExpectedFingerprint", "RowSecurityRequest.AllowDestructive",
+			"EnumTypeRequest.Schema", "EnumTypeRequest.ExpectedFingerprint",
+		}, names)
 		for _, op := range ops {
 			if op.desired == desiredAdmitsPinnedPlan {
 				assert.Equal(t, ackAllowDestructive, op.ack, "entry %q: the request's acknowledgement is the destructive one", op.key)

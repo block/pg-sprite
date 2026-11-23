@@ -25,7 +25,8 @@ func destructiveReport() plan.Report {
 		Disposition: router.DispositionExecute,
 		Statements: []plan.Statement{
 			{SQL: `ALTER TABLE app.orders ADD COLUMN note text`, Disposition: router.DispositionExecute},
-			{SQL: `ALTER TABLE app.orders DROP COLUMN legacy_id`, Destructive: true, Disposition: router.DispositionExecute},
+			{SQL: `ALTER TABLE app.orders DROP COLUMN legacy_id`, Destructive: true, Disposition: router.DispositionExecute,
+				Drops: &schemadiff.DroppedObject{Kind: schemadiff.DroppedColumn, Name: "legacy_id", Definition: "legacy_id bigint"}},
 		},
 	}
 }
@@ -50,6 +51,41 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 		assert.Contains(t, res.Detail, "ExpectedFingerprint sha256:reviewed")
 		assert.Contains(t, res.Detail, "AllowDestructive app.orders")
 		assert.Contains(t, res.Detail, "the plan's other statement, even if non-destructive, was not run")
+		assert.NotContains(t, res.Detail, "imperative front door",
+			"a run that pinned the plan can set the acknowledgement, so it is pointed only at that")
+	})
+
+	t.Run("a run with no pin is also pointed at the path that needs none", func(t *testing.T) {
+		res, ok := admitPlan(DesiredRequest{}, report)
+		require.False(t, ok)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.Contains(t, res.Detail, "ExpectedFingerprint sha256:reviewed and AllowDestructive app.orders in the request")
+		assert.Contains(t, res.Detail, "or run it deliberately through the imperative front door")
+	})
+
+	t.Run("an acknowledged drop with no definition of what it drops is refused before anything runs", func(t *testing.T) {
+		undefined := destructiveReport()
+		undefined.Statements[1].Drops = nil
+		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, undefined)
+		require.False(t, ok)
+		assert.Equal(t, verdict.ClassInvariantViolation, res.Class)
+		assert.Equal(t, "planned statement 2 (ALTER TABLE app.orders DROP COLUMN legacy_id) is destructive but carries no definition of what it drops", res.Detail)
+	})
+
+	t.Run("an acknowledged partitioned parent's index drop keeps its guidance", func(t *testing.T) {
+		partitioned := destructiveReport()
+		partitioned.Statements[1] = plan.Statement{
+			SQL:         `DROP INDEX "app"."orders_qty_idx"`,
+			Kind:        schemadiff.ChangeDropIndex,
+			Destructive: true,
+			Disposition: router.DispositionRefuse,
+			Reason:      verdict.ReasonUnsupportedPartitionedParent,
+			Class:       verdict.ClassByDesign,
+		}
+		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, partitioned)
+		require.False(t, ok)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.Contains(t, res.Detail, "plain DROP INDEX through the imperative front door")
 	})
 
 	t.Run("a pinned drop beside a copy-and-swap statement is refused", func(t *testing.T) {
@@ -130,6 +166,7 @@ func TestExecutePlanRunsNoDestructiveStatementItCannotRecheck(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			report := destructiveReport()
 			report.Statements = report.Statements[1:]
+			report.Statements[0].Drops = nil
 			res, err := executePlan(t.Context(), nil, report, DefaultOptions(), tc.acknowledge, nil)
 			require.ErrorIs(t, err, executor.ErrInvariantViolation)
 			assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
