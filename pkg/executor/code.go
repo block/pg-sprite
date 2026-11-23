@@ -79,6 +79,16 @@ const (
 	// CodeInvalidIndexUnproven: an invalid index may remain but the
 	// catalog state could not be proven; an operator must inspect.
 	CodeInvalidIndexUnproven Code = "invalid-index-unproven"
+	// CodeNotCreateIndex: the statement handed to the partitioned index
+	// build is not a CREATE INDEX.
+	CodeNotCreateIndex Code = "not-create-index"
+	// CodeNotPartitionedTable: the target of a partitioned index build is
+	// not a partitioned table.
+	CodeNotPartitionedTable Code = "not-partitioned-table"
+	// CodePartitionedIndexNameTaken: a name the partitioned index build
+	// needs is held by a relation that is not the requested index; the
+	// occupant is left for an operator.
+	CodePartitionedIndexNameTaken Code = "partitioned-index-name-taken"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -252,6 +262,9 @@ func Codes() []Code {
 		CodeInvalidIndexNotDroppable,
 		CodeInvalidIndexBuilderUnobservable,
 		CodeInvalidIndexUnproven,
+		CodeNotCreateIndex,
+		CodeNotPartitionedTable,
+		CodePartitionedIndexNameTaken,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -304,6 +317,9 @@ func (c Code) Permanent() bool {
 		CodeInvalidIndexNotDroppable,
 		CodeInvalidBlockingBudget,
 		CodeUnsupportedAcceptedBlocking,
+		CodeNotCreateIndex,
+		CodeNotPartitionedTable,
+		CodePartitionedIndexNameTaken,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -343,9 +359,19 @@ func (c Code) Permanent() bool {
 // that underlying code — the step position and committed prefix ride on
 // the struct itself, not the vocabulary. An error outside the typed set
 // maps to CodeExecutionFailed.
+//
+// An error that carries ErrInvariantViolation maps to
+// CodeInvariantViolation whichever typed failure wraps it, so the
+// fail-closed code outranks every other one. Each typed error's own Code
+// method applies the same rule, so the two never disagree.
 func OutcomeCode(err error) Code {
 	if err == nil {
 		return ""
+	}
+	// An invariant breach is the fail-closed outcome whichever typed failure
+	// carries it, so it outranks every typed code below.
+	if errors.Is(err, ErrInvariantViolation) {
+		return CodeInvariantViolation
 	}
 	if stepErr, ok := errors.AsType[*SequenceStepError](err); ok {
 		return OutcomeCode(stepErr.Err)
@@ -396,6 +422,12 @@ func sentinelCode(err error) Code {
 		return CodeCancelledByCaller
 	case errors.Is(err, ErrCancelledExternally):
 		return CodeCancelledExternally
+	case errors.Is(err, ErrNotCreateIndex):
+		return CodeNotCreateIndex
+	case errors.Is(err, ErrNotPartitionedTable):
+		return CodeNotPartitionedTable
+	case errors.Is(err, ErrPartitionedIndexNameTaken):
+		return CodePartitionedIndexNameTaken
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):
@@ -457,8 +489,12 @@ func sentinelCode(err error) Code {
 	}
 }
 
-// Code returns the budget outcome's stable code.
+// Code returns the budget outcome's stable code. A budget error whose
+// cause carries an invariant breach reports the breach, as OutcomeCode does.
 func (e *BudgetError) Code() Code {
+	if errors.Is(e, ErrInvariantViolation) {
+		return CodeInvariantViolation
+	}
 	switch e.Cause {
 	case CauseLock:
 		return CodeBudgetLockExceeded
@@ -477,10 +513,13 @@ func (e *BudgetError) Code() Code {
 // backend's build in flight, abandoned on the target table, on another
 // table, not droppable, builder unobservable, or unproven. The data fault
 // outranks the cleanup state because it names what the operator corrects:
-// no handling of the leftover gets a rerun past the same rows. The cleanup
-// sentinel stays in the chain for errors.Is.
+// no handling of the leftover gets a rerun past the same rows. An invariant
+// breach in either the build or the cleanup outranks both, as it does in
+// OutcomeCode. The cleanup sentinel stays in the chain for errors.Is.
 func (e *InvalidIndexError) Code() Code {
 	switch {
+	case errors.Is(e, ErrInvariantViolation):
+		return CodeInvariantViolation
 	case e.buildDataFault():
 		return CodeDataFault
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
