@@ -30,6 +30,13 @@ var (
 	// partition's index in the default tablespace. The build refuses the
 	// statement before it creates anything.
 	ErrPartitionedIndexTablespace = errors.New("a partitioned index build does not support a TABLESPACE clause")
+	// ErrUniqueIndexMissingPartitionKey is returned, inside a
+	// *UniqueIndexPartitionKeyError that names what is missing, when a
+	// unique index's key does not include every partition key column of
+	// every partitioned table in the tree. PostgreSQL rejects such an index
+	// on each partitioned table it is created on, so the build refuses the
+	// statement before it creates anything.
+	ErrUniqueIndexMissingPartitionKey = errors.New("a unique index on a partitioned table must include every partition key column of every partitioned table in the tree")
 	// ErrPartitionedIndexUnsettled is returned when partitions kept appearing
 	// without an attached index for as long as the build's bounded number of
 	// passes. What the build finished stays attached.

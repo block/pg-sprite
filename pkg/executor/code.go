@@ -91,6 +91,11 @@ const (
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
 	CodePartitionedIndexTablespace Code = "partitioned-index-tablespace"
+	// CodeUniqueIndexMissingPartitionKey: a unique index on a partitioned
+	// table does not include every partition key column of every
+	// partitioned table in the tree, which PostgreSQL requires; nothing was
+	// created.
+	CodeUniqueIndexMissingPartitionKey Code = "unique-index-missing-partition-key"
 	// CodePartitionedIndexUnsettled: partitions kept appearing without an
 	// index until the build ran out of passes; a rerun resumes.
 	CodePartitionedIndexUnsettled Code = "partitioned-index-unsettled"
@@ -235,6 +240,7 @@ func Codes() []Code {
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
 		CodePartitionedIndexTablespace,
+		CodeUniqueIndexMissingPartitionKey,
 		CodePartitionedIndexUnsettled,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
@@ -287,6 +293,7 @@ func (c Code) Permanent() bool {
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
 		CodePartitionedIndexTablespace,
+		CodeUniqueIndexMissingPartitionKey,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -385,6 +392,8 @@ func sentinelCode(err error) Code {
 		return CodeForeignTablePartition
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
+	case errors.Is(err, ErrUniqueIndexMissingPartitionKey):
+		return CodeUniqueIndexMissingPartitionKey
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
 		return CodePartitionedIndexUnsettled
 	case errors.Is(err, ErrEmptySequence):

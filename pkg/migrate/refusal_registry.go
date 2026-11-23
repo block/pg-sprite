@@ -167,12 +167,14 @@ func admissionSentinels() []error {
 		executor.ErrUnsupportedSequenceStep,
 		executor.ErrUnnamedIndex,
 		executor.ErrIfNotExistsUnsupported,
+		executor.ErrUniqueIndexMissingPartitionKey,
 	}
 }
 
 // admissionRefusal classifies an imperative admission refusal: decided from
-// the statement's shape before anything executes, so it maps to a refusal
-// verdict, not an operational error. ok is false for an error outside
+// the statement's shape, and for a unique index on a partitioned table from
+// the tree's partition keys, before anything executes, so it maps to a
+// refusal verdict, not an operational error. ok is false for an error outside
 // admissionSentinels(), and for a *SequenceStepError wrapper — execution
 // started, which is never an admission refusal.
 func admissionRefusal(err error) (verdict.Refusal, bool) {
@@ -184,6 +186,11 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 	}
 	if errors.Is(err, executor.ErrIfNotExistsUnsupported) {
 		// The sentinel form of the if-not-exists create-shape cause.
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
+	if errors.Is(err, executor.ErrUniqueIndexMissingPartitionKey) {
+		// PostgreSQL itself rejects the index in every supported version, so
+		// no engine release runs it; the statement has to change.
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true

@@ -67,6 +67,13 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Once the parent's index exists, the server gives every partition
+	// created or attached later an index of its definition, and refuses a
+	// partition whose key it cannot cover, so the tree's keys need checking
+	// only here.
+	if err := f.checkUniqueIndex(ctx); err != nil {
+		return err
+	}
 	if err := f.ensureParentIndex(ctx); err != nil {
 		return err
 	}

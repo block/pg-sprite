@@ -53,7 +53,7 @@ where none does.** Three reasons carry a second, typed discriminator beneath the
 on the create path or, on the imperative path, the statement's `statement.Kind` or one of a
 closed set of admission sentinel errors — and in each case the values of that discriminator
 span more than one class. A single site can therefore emit several
-classes (`admissionRefusalVerdict` in `pkg/migrate/verdicts.go` mints refusals for three
+classes (`admissionRefusalVerdict` in `pkg/migrate/verdicts.go` mints refusals for four
 sentinels across two classes), so keying on the site would leave the class ambiguous and let a
 completeness test pass with the wrong answer. Where a reason has no such discriminator, the
 site is the key. The same rule applies when a broad reason gains a new cause or site: the
@@ -77,6 +77,7 @@ runner (`statement.KindDataChange`). A statement the parse boundary does not nam
 | `unsupported-statement` | An admitted `ALTER TABLE` operation for which the planner has no route (`routeRefusalVerdict`) | `capability-boundary` | — |
 | `unsupported-statement` | Imperative admission sentinel `ErrUnsupportedSequenceStep` or `ErrUnnamedIndex`; create admission sentinel `ErrUnsupportedCreateStep` | `capability-boundary` | — |
 | `unsupported-statement` | Imperative or create admission sentinel `ErrIfNotExistsUnsupported`; create admission sentinel `ErrDuplicateCreateName` (the sentinel forms of the `if-not-exists` and `duplicate-name` causes below) | `by-design` | — |
+| `unsupported-statement` | Imperative admission sentinel `ErrUniqueIndexMissingPartitionKey`: a unique index on a partitioned table whose key lacks a partition key column of a partitioned table in the tree, or a tree partitioned by an expression. PostgreSQL rejects the index in every supported version, so no engine release runs it and the statement has to change | `by-design` | — |
 | `unsupported-statement` | Create admission sentinel `ErrPartitionOfUnsupported` (the sentinel form of the `partition-of` cause below) | `capability-boundary` | — |
 | `unsupported-statement` | A statement a desired file may not hold (`*statement.DisallowedStatementError`, `desiredFileRefusal`), keyed on its kind: a kind the imperative gate also refuses (data change, provisioning, catalog work such as a type, `statement.KindOther`) takes the gate's class and owner above; a change the gate admits or routes (`ALTER TABLE`, `DROP INDEX`, `REINDEX`, `ALTER INDEX ... RENAME`, `ALTER TYPE ... ADD VALUE`) is refused here because a desired file declares state | gate's class, or `by-design` | gate's owner, when present |
 | `unsupported-statement` | A desired file's second `CREATE TABLE` (`*statement.SecondTableError`): one table per file | `by-design` | — |

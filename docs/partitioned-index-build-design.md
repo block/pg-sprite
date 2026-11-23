@@ -41,6 +41,24 @@ partition's index in the default tablespace, while a partition added later
 inherits the parent's. A partition's tablespace is chosen when the partition is
 created.
 
+A unique index must include every partition key column of every partitioned table
+it is created on, and PostgreSQL refuses a partition key that is an expression
+outright. The server checks this one partitioned table at a time: the parent at
+step 1, each sub-partitioned partition when step 2 reaches it, so a key that only
+a sub-partition's key defeats would fail after the parent's index committed.
+Under the lock, before step 1, the flow reads every partition key in the tree
+from `pg_catalog.pg_partitioned_table` and refuses such an index with nothing
+created (`*UniqueIndexPartitionKeyError`, wrapping
+`ErrUniqueIndexMissingPartitionKey`, naming each table and the columns the key
+lacks). Columns are matched by name, as the server matches a column the key
+writes plain, in parentheses, or under `COLLATE`; the server's further
+requirement that the two share a collation and equality operator is left to the
+server, which checks it on the parent at step 1. Once the parent's index exists,
+the server itself refuses a partition created or attached under it whose key the
+index does not cover, so the check does not repeat on later passes. A dry run
+reads the same keys (`executor.AdmitPartitionedUniqueIndex`) and reports the
+same refusal.
+
 ### Steps
 
 Under the advisory table lock (`dbconn.AcquireTableLock`, LK-1), so a second
@@ -235,7 +253,8 @@ predicate.
   dedicated session the pool cannot supply. It is admitted only for a
   partitioned target (ST-7). Its refusals are typed: `ErrNotPartitionedTable`,
   `ErrPartitionedIndexNameTaken`, `ErrForeignTablePartition`,
-  `ErrPartitionedIndexTablespace`, and `ErrPartitionedIndexUnsettled`, beside the
+  `ErrPartitionedIndexTablespace`, `ErrUniqueIndexMissingPartitionKey`, and
+  `ErrPartitionedIndexUnsettled`, beside the
   concurrent build's own. The report lists each partition the run gave an index
   (`built`, `reused`, `adopted`, or `partitioned`) and whether it recovered
   debris.
