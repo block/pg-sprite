@@ -1603,7 +1603,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   an index, drop an index concurrently (PostgreSQL has no concurrent drop for a partitioned
   index), or on PostgreSQL before 18 when it would add a foreign key `NOT VALID`. pg-sprite
   does not substitute a blocking parent build for the missing partition-aware online flow.
-  *Enforced:* preflight and sequence-executor admission. *Source:* PostgreSQL relation-kind and
+  *Enforced:* preflight and sequence-executor admission; the concurrent drop by preflight and
+  plan reporting, since sequence-executor admission refuses every `DROP INDEX` step on any
+  table before it reads the relation kind. *Source:* PostgreSQL relation-kind and
   version capabilities.
 - **RF-7** — Every refusal carries exactly one non-zero class from the closed refusal-class
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.

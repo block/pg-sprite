@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -163,6 +164,14 @@ func TestPlanRefusesConcurrentDropOfPartitionedParentIndex(t *testing.T) {
 	}
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
+
+	// The refusal is by design because the server has no concurrent drop
+	// here: the statement it withdrew fails with SQLSTATE 0A000
+	// (feature_not_supported) on the server under test.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP INDEX CONCURRENTLY %s.events_name_idx", schema))
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "0A000", pgErr.Code)
 }
 
 // The control: dropping an index of a plain table keeps the concurrent drop
