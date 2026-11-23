@@ -169,12 +169,14 @@ refusal — never a silently wrong or incomplete result:
   and the refusal lists the checks (`idx_scan` on every replica, foreign
   keys, uniqueness) that catch an index the application still uses, with
   the connected server's own scan count for the index in `index_usage`.
-- **Destructive desired-state plans are refused as a whole** — `migrate --desired`
-  creates missing tables and converges supported changes, but never infers permission
-  to discard live structure. A library caller can run a reviewed destructive plan
-  by pinning its fingerprint and naming the table (`DesiredRequest.ExpectedFingerprint`
-  with `DesiredRequest.AllowDestructive`); the plan then runs as one reviewed unit, and
-  a dropped index runs as `DROP INDEX CONCURRENTLY`. A new primary key or unique constraint over a live
+- **Destructive desired-state plans are refused as a whole unless you pin them** —
+  `migrate --desired` creates missing tables and converges supported changes, but never
+  infers permission to discard live structure. Review the plan with `diff --desired`,
+  then run it with `--expect-fingerprint` (the `sha256:...` value `diff` prints) and
+  `--allow-destructive SCHEMA.TABLE`: the run executes only that plan, and each
+  destructive statement is audited and marked `allowed_destructive: true`. A dropped
+  index runs as `DROP INDEX CONCURRENTLY`. Row security policies are separate: a
+  policy drop in a desired file is already atomic and needs no acknowledgement. A new primary key or unique constraint over a live
   unique index of its name is not destructive: it takes the index over with
   `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
   index changed after planning. Nor is a live check constraint left `NOT VALID`

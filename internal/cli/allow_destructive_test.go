@@ -47,11 +47,41 @@ func TestAllowDestructiveFlagGrammar(t *testing.T) {
 		require.NoError(t, parse("--accept-blocking", "public.orders", "--statement-timeout", "10m"))
 	})
 
-	t.Run("rejects --desired", func(t *testing.T) {
+	t.Run("with --desired requires the pinned plan", func(t *testing.T) {
 		c := &MigrateCmd{Desired: "orders.sql", AllowDestructive: "public.orders"}
 		err := c.validateInput()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--allow-destructive cannot be combined with --desired")
+		assert.Contains(t, err.Error(), "--allow-destructive with --desired requires --expect-fingerprint")
+	})
+
+	t.Run("with --desired and the pinned plan is accepted", func(t *testing.T) {
+		c := &MigrateCmd{Desired: "orders.sql", AllowDestructive: "public.orders", ExpectFingerprint: "sha256:reviewed"}
+		require.NoError(t, c.validateInput())
+	})
+
+	t.Run("the pinned plan stands alone with --desired", func(t *testing.T) {
+		c := &MigrateCmd{Desired: "orders.sql", ExpectFingerprint: "sha256:reviewed"}
+		require.NoError(t, c.validateInput())
+	})
+
+	t.Run("the pin needs --desired", func(t *testing.T) {
+		c := &MigrateCmd{Alter: "ALTER TABLE public.orders DROP COLUMN note", ExpectFingerprint: "sha256:reviewed"}
+		err := c.validateInput()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--expect-fingerprint requires --desired")
+	})
+
+	t.Run("the other acknowledgements stay rejected beside the pin", func(t *testing.T) {
+		for flag, c := range map[string]*MigrateCmd{
+			"--force":           {Desired: "orders.sql", ExpectFingerprint: "sha256:r", Force: "public.orders"},
+			"--accept-blocking": {Desired: "orders.sql", ExpectFingerprint: "sha256:r", AcceptBlocking: "public.orders"},
+			"--restart":         {Desired: "orders.sql", ExpectFingerprint: "sha256:r", Restart: "public.orders"},
+			"--block-writes":    {Desired: "orders.sql", ExpectFingerprint: "sha256:r", BlockWrites: "public.orders"},
+		} {
+			err := c.validateInput()
+			require.Error(t, err, flag)
+			assert.Contains(t, err.Error(), flag+" cannot be combined with --desired")
+		}
 	})
 
 	t.Run("wires the acknowledgement into the engine policy", func(t *testing.T) {

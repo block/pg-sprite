@@ -1788,9 +1788,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   also routes a statement to copy-and-swap is refused whole with `destructive-change`, since its
   drops would commit before copy-and-swap is checked. Without the acknowledgement the plan is refused whole with `destructive-change`; an
   acknowledgement without the fingerprint, or naming another table, is a usage error before
-  any statement runs, for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The other four, and
+  any statement runs, in a dry run and for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The other four, and
   the destructive acknowledgement in `Options`, are rejected: `RunDesired` returns each one's
-  own sentinel before any database work, and `migrate --desired` rejects each flag. A new
+  own sentinel before any database work, and `migrate --desired` rejects each flag, taking
+  `--allow-destructive` only with `--expect-fingerprint`. A new
   string or bool field reachable from `Options`, nested structs and pointers included, not
   declared as no acknowledgement, a
   new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI
@@ -1812,10 +1813,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
-  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`, `admitPlan` and
+  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`, `AdmitPlan` and
   `checkDesiredAllowDestructive` for the one admitted acknowledgement,
-  `CheckDesiredAllowDestructiveTable`, which `RunDesired` and `RunDesiredWithRowSecurity` (before
-  its converged-table return) apply to the resolved table,
+  `CheckDesiredAllowDestructiveTable`, which `RunDesired`, `RunDesiredWithRowSecurity` (before
+  its converged-table return), and the CLI's dry run all apply to the resolved table,
   `ErrAllowDestructiveNeedsFingerprint`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
   `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
@@ -1833,7 +1834,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   restart's unrecorded leftover left standing;
   `TestEveryAcknowledgementFlagMapsToARegistryEntry` for every `migrate` flag being an
   acknowledgement or declared not one, each acknowledgement flag reaching exactly its own
-  field and sentinel, and every registry acknowledgement having a flag; and
+  field and sentinel, `--allow-destructive` with `--desired` needing `--expect-fingerprint`,
+  and every registry acknowledgement having a flag; and
   `TestAcknowledgementsNamesTheRegistry` and
   `TestOptionsAcknowledgementsNamesWhatThePolicyCarries` for the exported view.
   *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).

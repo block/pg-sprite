@@ -156,6 +156,10 @@ security. `diff` and `migrate --dry-run` show the ordinary plan, and `--json`
 returns the ordinary [plan report](plan-report.md), fingerprint included. A
 table change that plan refuses, such as a new `serial` column, is refused with
 the same error a file without row security gets.
+A table change that drops a column, a constraint, an index, or a `NOT NULL` is
+refused until the run pins the reviewed plan with `--expect-fingerprint` and
+names the table with `--allow-destructive`, exactly as for a file without row
+security ([cli.md](cli.md#apply-a-reviewed-drop)).
 
 `migrate --desired` runs that plan through the desired-state sequence. Its
 JSON is `migrate.DesiredResult` with `plan`, `verdicts`, `outcome`, and
@@ -176,6 +180,12 @@ file already matching, such as a rerun after the table change, goes to the
 row security executor and prints a single verdict: `outcome` is `executed-natively`
 and `executed_sql` is absent. A script that reruns the same command reads
 the top-level `outcome` from either.
+
+A policy the file no longer lists is dropped by the atomic row security
+change without an acknowledgement: the policy and its replacement commit
+together, so no moment leaves the table unprotected. That run has no plan to
+pin and acknowledges nothing, so `--expect-fingerprint` and
+`--allow-destructive` are rejected on it.
 
 A file whose row security differs from the live table is refused when its
 table definition differs too. Converge the two separately: change the row

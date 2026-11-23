@@ -129,12 +129,12 @@ func TestAdmitPlan(t *testing.T) {
 	}
 
 	t.Run("admits an executable plan", func(t *testing.T) {
-		_, ok := admitPlan(DesiredRequest{}, executable())
+		_, ok := AdmitPlan(DesiredRequest{}, executable())
 		assert.True(t, ok)
 	})
 
 	t.Run("admits a matching pinned fingerprint", func(t *testing.T) {
-		_, ok := admitPlan(DesiredRequest{ExpectedFingerprint: "fp-live"}, executable())
+		_, ok := AdmitPlan(DesiredRequest{ExpectedFingerprint: "fp-live"}, executable())
 		assert.True(t, ok)
 	})
 
@@ -145,7 +145,7 @@ func TestAdmitPlan(t *testing.T) {
 		exists := false
 		report.TableExists = &exists
 		report.Statements[0].Destructive = true
-		res, ok := admitPlan(DesiredRequest{ExpectedFingerprint: "fp-reviewed"}, report)
+		res, ok := AdmitPlan(DesiredRequest{ExpectedFingerprint: "fp-reviewed"}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonPlanFingerprintMismatch, res.Reason)
@@ -161,7 +161,7 @@ func TestAdmitPlan(t *testing.T) {
 		report := executable()
 		exists := false
 		report.TableExists = &exists
-		_, ok := admitPlan(DesiredRequest{}, report)
+		_, ok := AdmitPlan(DesiredRequest{}, report)
 		assert.True(t, ok)
 	})
 
@@ -172,7 +172,7 @@ func TestAdmitPlan(t *testing.T) {
 			Destructive: true,
 			Disposition: router.DispositionExecute,
 		})
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "statement 2")
@@ -196,7 +196,7 @@ func TestAdmitPlan(t *testing.T) {
 				SQL:         "CREATE INDEX t_v_idx ON app.t (v)",
 				Disposition: router.DispositionExecute,
 			})
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "the plan's 2 other statements, non-destructive ones included, were not run",
@@ -210,7 +210,7 @@ func TestAdmitPlan(t *testing.T) {
 			Destructive: true,
 			Disposition: router.DispositionExecute,
 		}}
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.NotContains(t, res.Detail, "all-or-nothing",
@@ -228,7 +228,7 @@ func TestAdmitPlan(t *testing.T) {
 			Destructive: true,
 			Disposition: router.DispositionExecute,
 		})
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "ExpectedFingerprint fp-live and AllowDestructive app.t")
@@ -249,7 +249,7 @@ func TestAdmitPlan(t *testing.T) {
 			Reason:      verdict.ReasonUnsupportedPartitionedParent,
 			Class:       verdict.ClassByDesign,
 		})
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.NotContains(t, res.Detail, "DROP INDEX CONCURRENTLY")
@@ -282,7 +282,7 @@ func TestAdmitPlan(t *testing.T) {
 				Reason:      tc.stReason,
 				Class:       tc.stClass,
 			})
-			res, ok := admitPlan(DesiredRequest{}, report)
+			res, ok := AdmitPlan(DesiredRequest{}, report)
 			require.False(t, ok, "disposition %s", tc.disposition)
 			assert.Equal(t, tc.want, res.Reason, "disposition %s", tc.disposition)
 			assert.Equal(t, tc.wantClass, res.Class, "disposition %s / %s", tc.disposition, tc.stReason)
