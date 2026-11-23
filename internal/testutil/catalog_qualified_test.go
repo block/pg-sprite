@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // reports records what AssertCatalogQualified reports instead of failing.
@@ -41,7 +42,7 @@ func TestCatalogQualifiedReportsABareRelationInAParenthesisedJoin(t *testing.T) 
 	SELECT 1
 	FROM (pg_replication_slots s CROSS JOIN pg_catalog.pg_class c)
 	WHERE s.slot_name OPERATOR(pg_catalog.=) $1`)
-	assert.Len(t, bare.got, 1)
+	require.Len(t, bare.got, 1)
 	assert.Contains(t, bare.got[0], `relation "pg_replication_slots" is not qualified`)
 
 	qualified := &reports{}
@@ -123,7 +124,7 @@ func TestCatalogQualifiedReportsInOverAList(t *testing.T) {
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
 	WHERE s.slot_type IN ('logical', 'physical')`,
-		`operator "=" (AEXPR_IN) is not spelled OPERATOR(pg_catalog.…)`)
+		`IN (list) compares through operator "=", which the search_path resolves`)
 	assertPasses(t, `
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
@@ -137,7 +138,7 @@ func TestCatalogQualifiedReportsInOverASubquery(t *testing.T) {
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
 	WHERE s.database IN (SELECT d.datname FROM pg_catalog.pg_database d)`,
-		`subquery comparison "" (ANY_SUBLINK) is not spelled OPERATOR(pg_catalog.…)`)
+		`IN (subquery) compares through an unqualified =; write x OPERATOR(pg_catalog.=) ANY (subquery)`)
 	assertPasses(t, `
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
@@ -150,7 +151,7 @@ func TestCatalogQualifiedReportsLike(t *testing.T) {
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
 	WHERE s.slot_name LIKE 'sprite_%'`,
-		`operator "~~" (AEXPR_LIKE) is not spelled OPERATOR(pg_catalog.…)`)
+		`LIKE compares through operator "~~", which the search_path resolves`)
 	assertPasses(t, `
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
@@ -164,7 +165,7 @@ func TestCatalogQualifiedReportsBetween(t *testing.T) {
 	SELECT c.relname
 	FROM pg_catalog.pg_class c
 	WHERE c.relpages BETWEEN 1 AND 10`,
-		`operator "BETWEEN" (AEXPR_BETWEEN) is not spelled OPERATOR(pg_catalog.…)`)
+		`BETWEEN compares through operator "BETWEEN", which the search_path resolves`)
 	assertPasses(t, `
 	SELECT c.relname
 	FROM pg_catalog.pg_class c
@@ -180,7 +181,7 @@ func TestCatalogQualifiedReportsIsDistinctFrom(t *testing.T) {
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
 	WHERE s.slot_name IS DISTINCT FROM $1`,
-		`operator "=" (AEXPR_DISTINCT) is not spelled OPERATOR(pg_catalog.…)`)
+		`IS DISTINCT FROM compares through operator "=", which the search_path resolves`)
 	assertPasses(t, `
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
@@ -207,7 +208,7 @@ func TestCatalogQualifiedReportsABareOperator(t *testing.T) {
 	SELECT s.slot_name
 	FROM pg_catalog.pg_replication_slots s
 	WHERE pg_catalog.to_jsonb(s) ->> 'slot_type' OPERATOR(pg_catalog.=) 'logical'`,
-		`operator "->>" (AEXPR_OP) is not spelled OPERATOR(pg_catalog.…)`)
+		`operator "->>" is not spelled OPERATOR(pg_catalog.…)`)
 }
 
 // What the grammar resolves in pg_catalog itself, or that resolves
@@ -227,4 +228,115 @@ func TestCatalogQualifiedPassesWhatTheGrammarResolvesItself(t *testing.T) {
 	WHERE NOT s.active
 	  AND (s.temporary IS NULL OR s.slot_name OPERATOR(pg_catalog.=) ANY (SELECT o.slot_name FROM own_rows o))`,
 		`"sprite"."checkpoints"`)
+}
+
+// A simple CASE compares its argument with each WHEN through the =
+// the search_path finds.
+func TestCatalogQualifiedReportsASimpleCase(t *testing.T) {
+	assertReportedOnce(t, `
+	SELECT CASE s.slot_type WHEN 'logical' THEN 1 ELSE 0 END
+	FROM pg_catalog.pg_replication_slots s`,
+		`CASE x WHEN compares x with each WHEN through an unqualified =`)
+	assertPasses(t, `
+	SELECT CASE WHEN s.slot_type OPERATOR(pg_catalog.=) 'logical' THEN 1 ELSE 0 END
+	FROM pg_catalog.pg_replication_slots s`)
+}
+
+// JOIN … USING and NATURAL JOIN compare the shared columns through the =
+// the search_path finds.
+func TestCatalogQualifiedReportsJoinUsingAndNaturalJoin(t *testing.T) {
+	const want = `JOIN … USING and NATURAL JOIN compare the shared columns through an unqualified =`
+	assertReportedOnce(t, `
+	SELECT 1
+	FROM pg_catalog.pg_replication_slots s
+	JOIN pg_catalog.pg_stat_replication r USING (pid)`, want)
+	assertReportedOnce(t, `
+	SELECT 1
+	FROM pg_catalog.pg_replication_slots s
+	NATURAL JOIN pg_catalog.pg_stat_replication r`, want)
+}
+
+// A collation is looked up through the search_path unless qualified.
+func TestCatalogQualifiedReportsAnUnqualifiedCollation(t *testing.T) {
+	assertReportedOnce(t, `
+	SELECT s.slot_name COLLATE "C"
+	FROM pg_catalog.pg_replication_slots s`,
+		`collation "C" is not qualified with pg_catalog`)
+	assertPasses(t, `
+	SELECT s.slot_name COLLATE pg_catalog."C"
+	FROM pg_catalog.pg_replication_slots s`)
+}
+
+// ORDER BY … USING names a sort operator the search_path resolves unless
+// it is spelled OPERATOR(pg_catalog.…).
+func TestCatalogQualifiedReportsOrderByUsing(t *testing.T) {
+	assertReportedOnce(t, `
+	SELECT s.slot_name
+	FROM pg_catalog.pg_replication_slots s
+	ORDER BY s.slot_name USING <`,
+		`ORDER BY … USING "<" is not spelled OPERATOR(pg_catalog.…)`)
+	assertPasses(t, `
+	SELECT s.slot_name
+	FROM pg_catalog.pg_replication_slots s
+	ORDER BY s.slot_name USING OPERATOR(pg_catalog.<)`)
+}
+
+// An ALL over a subquery compares through the operator it names.
+func TestCatalogQualifiedReportsAllOverASubquery(t *testing.T) {
+	assertReportedOnce(t, `
+	SELECT 1
+	FROM pg_catalog.pg_replication_slots s
+	WHERE s.xmin <> ALL (SELECT a.backend_xmin FROM pg_catalog.pg_stat_activity a)`,
+		`op ALL (subquery) compares through operator "<>"`)
+}
+
+// pg_catalog is the only schema a lookalike cannot be planted ahead of;
+// a name in any other schema is reported.
+func TestCatalogQualifiedReportsAnotherSchema(t *testing.T) {
+	assertReportedOnce(t, `SELECT 1 FROM app.pg_class c`,
+		`relation "app.pg_class" is not qualified`)
+	assertReportedOnce(t, `SELECT app.to_jsonb(1)`,
+		`function "app.to_jsonb" is not qualified`)
+	assertReportedOnce(t, `SELECT $1::app.text`,
+		`type "app.text" is not qualified`)
+}
+
+// A query that does not parse is reported, not passed.
+func TestCatalogQualifiedReportsAQueryThatDoesNotParse(t *testing.T) {
+	r := &reports{}
+	AssertCatalogQualified(r, `SELEC 1`)
+	assert.NotEmpty(t, r.got)
+}
+
+// The caller's own relation passes spelled plain as well as quoted.
+func TestCatalogQualifiedPassesTheOwnRelationSpelledPlain(t *testing.T) {
+	assertPasses(t, `SELECT c.slot_name FROM sprite.checkpoints c`, `sprite.checkpoints`)
+}
+
+// FOR UPDATE OF names the alias of a relation read in FROM, not a
+// relation the search_path resolves.
+func TestCatalogQualifiedPassesALockedAlias(t *testing.T) {
+	assertPasses(t, `
+	SELECT c.slot_name
+	FROM "sprite"."checkpoints" c
+	FOR UPDATE OF c`,
+		`"sprite"."checkpoints"`)
+}
+
+// A common table expression's name is in scope after it and, under
+// RECURSIVE, in its own body; outside that scope the bare name is a
+// relation the search_path resolves.
+func TestCatalogQualifiedExcusesACommonTableExpressionOnlyInScope(t *testing.T) {
+	assertReportedOnce(t, `
+	WITH pg_class AS (SELECT c.oid FROM pg_class c)
+	SELECT p.oid FROM pg_class p`,
+		`relation "pg_class" is not qualified`)
+	assertPasses(t, `
+	WITH RECURSIVE chain(n) AS (
+	     SELECT 1
+	     UNION ALL
+	     SELECT chain.n OPERATOR(pg_catalog.+) 1 FROM chain WHERE chain.n OPERATOR(pg_catalog.<) 3
+	     ),
+	     later AS (SELECT chain.n FROM chain)
+	SELECT later.n FROM later`)
 }
