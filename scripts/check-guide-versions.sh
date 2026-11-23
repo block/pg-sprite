@@ -9,7 +9,8 @@
 # guide names the tag, so a refresh that moves a tag and its digest together
 # cannot leave the guide naming a version that never ran. A tag's leading `v`
 # is dropped (`v2.197.0` is written `2.197.0`), and the version must stand as
-# its own word: `2.10` does not match `2.10.1`, but may end a sentence.
+# its own word: `2.10` does not match `2.10.1` or `2.10-rc1`, but may end a
+# sentence. Only the first paragraph under the heading is read.
 #
 # Reads only the two files: no registry, no Docker. Every `image:` line must
 # be a pin in that form, on its own, as check-image-pins.sh also requires.
@@ -24,9 +25,10 @@
 
 set -euo pipefail
 
-root="$(git rev-parse --show-toplevel)"
-compose_file="${1:-$root/compose/supabase.yml}"
-guide="${2:-$root/docs/supabase.md}"
+# The defaults ask git for the checkout only when a path is not given, so the
+# check runs outside a checkout when both are.
+compose_file="${1:-$(git rev-parse --show-toplevel)/compose/supabase.yml}"
+guide="${2:-$(git rev-parse --show-toplevel)/docs/supabase.md}"
 for file in "$compose_file" "$guide"; do
 	if [ ! -f "$file" ]; then
 		echo "file not found: $file" >&2
@@ -38,18 +40,37 @@ heading='## What works today'
 image_pattern='^[[:space:]]*image:'
 pin_pattern='^[[:space:]]*image:[[:space:]]*["'\'']?([^"'\''@[:space:]]+)@(sha256:[0-9a-f]{64})["'\'']?[[:space:]]*$'
 
+# is_heading reports whether a guide line is the heading, ignoring trailing
+# spaces and a CRLF line ending.
+is_heading() {
+	local line="$1"
+	[ "${line%"${line##*[![:space:]]}"}" = "$heading" ]
+}
+
+# has_heading reports whether the guide has the heading at all.
+has_heading() {
+	local line
+	while IFS= read -r line || [ -n "$line" ]; do
+		if is_heading "$line"; then
+			return 0
+		fi
+	done <"$guide"
+	return 1
+}
+
 # tested_paragraph prints the first paragraph after the heading, on one line,
-# so a version is found wherever the prose wraps.
+# so a version is found wherever the prose wraps. A line of only spaces ends
+# the paragraph, as it does in Markdown.
 tested_paragraph() {
 	local in_section=false started=false paragraph=""
-	while IFS= read -r line; do
+	while IFS= read -r line || [ -n "$line" ]; do
 		if [ "$in_section" = false ]; then
-			if [ "$line" = "$heading" ]; then
+			if is_heading "$line"; then
 				in_section=true
 			fi
 			continue
 		fi
-		if [ -z "$line" ]; then
+		if [ -z "${line//[[:space:]]/}" ]; then
 			if [ "$started" = true ]; then
 				break
 			fi
@@ -62,16 +83,21 @@ tested_paragraph() {
 }
 
 # names_version reports whether the paragraph holds the version as a word of
-# its own: not preceded by a digit or dot, and not followed by a digit or by a
-# dot and a digit.
+# its own: not preceded by a digit or dot, and not followed by a digit, a
+# dot and a digit, or a pre-release or build suffix (`2.197.0-rc1` and
+# `2.197.0+build5` are other releases).
 names_version() {
 	local escaped="${1//./[.]}"
-	local word="(^|[^0-9.])${escaped}([^0-9.]|[.]([^0-9]|$)|$)"
+	local word="(^|[^0-9.])${escaped}([^0-9.+-]|[.]([^0-9]|$)|$)"
 	[[ "$2" =~ $word ]]
 }
 
+if ! has_heading; then
+	echo "heading \"$heading\" not found in $guide; the tested versions go in the first paragraph under it" >&2
+	exit 2
+fi
 paragraph=$(tested_paragraph)
-if [ -z "${paragraph// /}" ]; then
+if [ -z "${paragraph//[[:space:]]/}" ]; then
 	echo "no paragraph under \"$heading\" in $guide to hold the tested versions" >&2
 	exit 2
 fi
@@ -80,7 +106,7 @@ pins=0
 line_number=0
 missing=()
 unchecked=()
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "$line" ]; do
 	line_number=$((line_number + 1))
 	if [[ ! "$line" =~ $image_pattern ]]; then
 		continue
@@ -118,7 +144,7 @@ for entry in "${missing[@]+"${missing[@]}"}"; do
 done
 
 if [ "${#missing[@]}" -gt 0 ]; then
-	echo "${#missing[@]} pins in $compose_file are not named under \"$heading\" in $guide; update the tested versions to the pinned ones" >&2
+	echo "${#missing[@]} pins in $compose_file are not named under \"$heading\" in $guide; update the tested versions to the pinned ones; they are read from the first paragraph under the heading only" >&2
 	exit 1
 fi
 if [ "${#unchecked[@]}" -gt 0 ]; then

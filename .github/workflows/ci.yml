@@ -91,6 +91,10 @@ jobs:
       # The gate is one `go run` and a diff; it goes first so a broken
       # generator is reported even when an unrelated unit test fails.
       - run: make check-capabilities
+      # The Supabase guide's tested versions must name each compose pin. A
+      # PR that edits only the guide skips the Supabase job, so the offline
+      # half of check-image-pins runs here too; the registry half stays there.
+      - run: make check-guide-versions
       - run: make test-unit
 
   lint:

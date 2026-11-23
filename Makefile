@@ -19,7 +19,7 @@ PINS_FILE ?= compose/supabase.yml
 # Guide whose tested versions must name each of those pins' versions.
 GUIDE_FILE ?= docs/supabase.md
 
-.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-guide-versions check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -148,12 +148,16 @@ check-capabilities:
 check-vulnerabilities:
 	@scripts/check-vulnerabilities.sh
 
-# Fail if the guide's tested versions do not name each pinned version (offline),
-# then if an image pin's tag no longer resolves to its pinned digest. Docker
-# pulls by digest and ignores the tag, so only a registry lookup catches a
-# wrong tag. PINS_FILE selects the compose file, GUIDE_FILE the guide.
-check-image-pins:
+# Fail if the guide's tested versions do not name each pinned version. Offline:
+# no registry, no Docker. PINS_FILE selects the compose file, GUIDE_FILE the
+# guide.
+check-guide-versions:
 	@scripts/check-guide-versions.sh "$(PINS_FILE)" "$(GUIDE_FILE)"
+
+# Run check-guide-versions, then fail if an image pin's tag no longer resolves
+# to its pinned digest. Docker pulls by digest and ignores the tag, so only a
+# registry lookup catches a wrong tag.
+check-image-pins: check-guide-versions
 	@scripts/check-image-pins.sh "$(PINS_FILE)"
 
 # Drive both checks through each outcome, check-image-pins against a stand-in

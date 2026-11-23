@@ -22,7 +22,9 @@ failures=0
 expect() {
 	local name="$1" want="$2" want_output="$3"
 	printf '%s' "$4" >"$work/compose.yml"
-	printf '%s' "$5" >"$work/guide.md"
+	# The guide is written with the newline $(guide_with ...) strips, so its last
+	# line is read like any other.
+	printf '%s\n' "$5" >"$work/guide.md"
 	local got=0
 	"$script" "$work/compose.yml" "$work/guide.md" >"$work/out" 2>&1 || got=$?
 	if [ "$got" -ne "$want" ]; then
@@ -43,6 +45,7 @@ compose="services:
   auth:
     image: \"acme/gotrue:v2.197.0@$D1\"
 "
+compose_bumped="${compose/v2.197.0/v2.198.0}"
 guide_with() {
 	printf '# Guide\n\n## What works today\n\nA local `acme/postgres:17.6.1.136` database\nwas exercised. Auth %s was tested.\n\n## Later\n\nAuth 2.198.0 is planned.\n' "$1"
 }
@@ -69,11 +72,63 @@ expect "a version inside another version does not stand in for it" 1 \
 	"MISSING      acme/gotrue:v2.197.0: the guide's tested versions do not name 2.197.0" \
 	"$compose" "$(guide_with 12.197.0)"
 
-expect "a guide without the tested-versions heading cannot be checked" 2 "" \
+expect "a pre-release of the pinned version does not stand in for it" 1 \
+	"MISSING      acme/gotrue:v2.197.0: the guide's tested versions do not name 2.197.0" \
+	"$compose" "$(guide_with 2.197.0-rc1)"
+
+expect "a build of the pinned version does not stand in for it" 1 \
+	"MISSING      acme/gotrue:v2.197.0: the guide's tested versions do not name 2.197.0" \
+	"$compose" "$(guide_with 2.197.0+build5)"
+
+expect "a last image line with no trailing newline is still checked" 1 \
+	"MISSING      acme/gotrue:v2.198.0: the guide's tested versions do not name 2.198.0" \
+	"${compose_bumped%$'\n'}" "$(guide_with 2.197.0)"
+
+# A line of only spaces is a blank line in Markdown, so the version after it
+# is in a second paragraph.
+expect "a line of spaces ends the tested-versions paragraph" 1 \
+	"MISSING      acme/gotrue:v2.197.0: the guide's tested versions do not name 2.197.0" \
+	"$compose" "# Guide
+
+## What works today
+
+A local \`acme/postgres:17.6.1.136\` database was exercised.
+   
+Auth 2.197.0 was tested."
+
+expect "a heading with trailing spaces and a CRLF ending is still the heading" 0 "" \
+	"$compose" "# Guide
+
+## What works today  "$'\r'"
+
+A local \`acme/postgres:17.6.1.136\` database. Auth 2.197.0 was tested."
+
+expect "a guide without the tested-versions heading says the heading is missing" 2 \
+	"heading \"## What works today\" not found in $work/guide.md; the tested versions go in the first paragraph under it" \
 	"$compose" "# Guide
 
 Auth 2.197.0.
 "
+
+expect "a heading with nothing under it says the paragraph is missing" 2 \
+	"no paragraph under \"## What works today\" in $work/guide.md to hold the tested versions" \
+	"$compose" "# Guide
+
+## What works today
+"
+
+# Both paths are given, so the check needs no git checkout to find them.
+printf '%s' "$compose" >"$work/compose.yml"
+guide_with 2.197.0 >"$work/guide.md"
+got=0
+(cd "$work" && GIT_CEILING_DIRECTORIES="$work" "$script" "$work/compose.yml" "$work/guide.md") >"$work/out" 2>&1 || got=$?
+if [ "$got" -ne 0 ]; then
+	echo "FAIL the check runs outside a git checkout when both paths are given: exit $got, want 0" >&2
+	sed 's/^/    /' "$work/out" >&2
+	failures=$((failures + 1))
+else
+	echo "ok   the check runs outside a git checkout when both paths are given"
+fi
 
 expect "an image line the check cannot read is reported, not skipped" 2 "" \
 	"$compose  c:
