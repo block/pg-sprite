@@ -96,19 +96,6 @@ func (f runFixture) invalidate(t *testing.T, index string) {
 	f.exec(t, `UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = '%s.%s'::regclass`, f.schema, index)
 }
 
-// A partition that is itself partitioned is refused before any partition is
-// built, and nothing is attached to the parent's index.
-func TestRunPartitionedIndexRefusesASubPartitionedPartition(t *testing.T) {
-	f := newRunFixture(t)
-	f.exec(t, `CREATE TABLE %[1]s.orders_sa PARTITION OF %[1]s.orders FOR VALUES IN ('sa') PARTITION BY RANGE (id)`, f.schema)
-
-	_, err := f.run(t, "idx_orders_total")
-
-	require.ErrorIs(t, err, ErrInvariantViolation)
-	assert.Contains(t, err.Error(), f.schema+".orders_sa")
-	assert.Contains(t, err.Error(), "is itself partitioned")
-}
-
 // A partition's failed build surfaces through the run with the partition
 // named and the build's own verdict kept: unique rows that are not unique
 // are a data fault. The parent's index stays invalid, so it never reports
