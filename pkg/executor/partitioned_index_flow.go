@@ -196,9 +196,10 @@ func (f *partitionedIndexFlow) createParentIndex(ctx context.Context) error {
 }
 
 // verify re-reads the parent's index and reports success only when it is valid:
-// PostgreSQL marks it so once every partition has an index attached, and an
-// index left invalid after the build attached them all is a state this executor
-// does not understand.
+// PostgreSQL marks it so once every partition has an index attached. An index
+// left invalid after the build attached one to every partition it listed means
+// a partition the list did not hold has none, or the catalog is in a state this
+// executor does not understand; either way the build does not report success.
 func (f *partitionedIndexFlow) verify(ctx context.Context) error {
 	return f.tx.read(ctx, "verify the parent index", func(ctx context.Context, q querier) error {
 		parent, found, err := relationByOID(ctx, q, f.parent.oid)
@@ -210,7 +211,8 @@ func (f *partitionedIndexFlow) verify(ctx context.Context) error {
 			return fmt.Errorf("%w: parent index %s no longer has the identity the build resolved", ErrInvariantViolation, name)
 		}
 		if !parent.valid {
-			return fmt.Errorf("%w: parent index %s is invalid although every partition has an attached index",
+			return fmt.Errorf("%w: parent index %s is invalid after the build attached an index to every partition it listed, "+
+				"so a partition created after the list was read has none, or the catalog is in a state the build does not understand",
 				ErrInvariantViolation, name)
 		}
 		if err := q.QueryRow(ctx, `SELECT pg_catalog.current_setting('server_version')`).Scan(&f.rep.ServerVersion); err != nil {
