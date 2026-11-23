@@ -197,6 +197,22 @@ func TestDesiredRowSecurityRequiresTableDefinition(t *testing.T) {
  CREATE POLICY readers ON documents FOR SELECT USING (true);`)
 	require.ErrorIs(t, err, ErrRowSecurityDeclaration)
 	require.ErrorIs(t, err, ErrRowSecurityTableDefinitionRequired)
+	// The file has its ENABLE, so the message names only the missing table.
+	assert.EqualError(t, err, "desired row security requires a CREATE TABLE definition")
+}
+
+// The missing-table refusal matches the declaration error and its own
+// sentinel and no other refusal, so a caller branching on a specific cause
+// does not misread a file with no table; the declaration error does not
+// match it in turn.
+func TestMissingTableRefusalMatchesOnlyTheDeclarationError(t *testing.T) {
+	_, err := ParseDesiredWithRowSecurity(`ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`)
+	require.ErrorIs(t, err, ErrRowSecurityDeclaration)
+	require.ErrorIs(t, err, ErrRowSecurityTableDefinitionRequired)
+	for _, other := range []error{ErrPolicyRelationDependency, ErrPolicyReadsOwnTable, ErrPolicyReadsCatalog, ErrPolicyLocksRows, ErrRowSecurityForeignKey, ErrParseDesired, ErrNoCreateTable} {
+		assert.NotErrorIs(t, err, other)
+	}
+	assert.NotErrorIs(t, ErrRowSecurityDeclaration, ErrRowSecurityTableDefinitionRequired)
 }
 
 // Extension schemas widen only the table definition of a row-security

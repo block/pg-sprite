@@ -28,9 +28,14 @@ func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 	tests := []struct {
 		name          string
 		cleanup       error
+		build         error
 		wantsDrop     bool
 		wantsRecovery bool
 	}{
+		// A build that failed on its rows names the drop of its proven own
+		// leftover but never the rebuild, which would meet the same rows.
+		{name: "own leftover of a duplicate-row build names the drop only", cleanup: ErrBuildLeftInvalidIndex, build: &pgconn.PgError{Code: "23505"}, wantsDrop: true},
+		{name: "unobservable builder after a data-fault build names neither", cleanup: ErrInvalidIndexBuilderUnobservable, build: &pgconn.PgError{Code: "22012"}},
 		{name: "proven own leftover names the drop", cleanup: ErrBuildLeftInvalidIndex, wantsDrop: true, wantsRecovery: true},
 		{name: "abandoned entry names the recovery only", cleanup: ErrAbandonedInvalidIndex, wantsRecovery: true},
 		{name: "in-flight build does not", cleanup: ErrInvalidIndexBuildInFlight},
@@ -43,7 +48,7 @@ func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := &InvalidIndexError{Schema: "s", Index: "i", Table: "t", BuilderPID: 7, Cleanup: tt.cleanup}
+			e := &InvalidIndexError{Schema: "s", Index: "i", Table: "t", BuilderPID: 7, Build: tt.build, Cleanup: tt.cleanup}
 			msg := e.Error()
 			if tt.wantsDrop {
 				assert.Contains(t, msg, `DROP INDEX CONCURRENTLY "s"."i"`)
