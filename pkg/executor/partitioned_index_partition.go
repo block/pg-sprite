@@ -118,8 +118,12 @@ func (f *partitionedIndexFlow) findLeafIndex(ctx context.Context, node partition
 	)
 	err = f.tx.read(ctx, "inspect the index of partition "+node.qualified(), func(ctx context.Context, q querier) error {
 		var err error
-		if occupant, occupied, err = relationByName(ctx, q, node.schema, name); err != nil || occupied {
+		if occupant, occupied, err = relationByName(ctx, q, node.schema, name); err != nil {
 			return err
+		}
+		if occupied {
+			// The derived name decides; the occupant is judged below.
+			return nil
 		}
 		if reusable, err = reusableIndexes(ctx, q, node.oid); err != nil {
 			return err
@@ -283,6 +287,10 @@ func (f *partitionedIndexFlow) ensureSubPartitionIndex(ctx context.Context, node
 			// The partition is locked and proved by identity before the
 			// statement names it, and the index is checked to be on it
 			// before the step commits (INV: ST-7).
+			// createOnlyIndex locks and proves the partition again. This
+			// first lock is what keeps proveNodeIn's read of the tree under
+			// the lock; taking a lock the transaction already holds again
+			// costs one catalog check.
 			if err := lockAndProveTable(ctx, tx, onlyIndexTable{oid: node.oid, schema: node.schema, name: node.name}); err != nil {
 				return err
 			}
