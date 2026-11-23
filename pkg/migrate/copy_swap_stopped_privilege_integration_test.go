@@ -34,16 +34,24 @@ func TestRunRoutesAStatementOfARoleThatCannotReadTheCheckpointStore(t *testing.T
 	const password = "store-blind-password"
 	tableOwner := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
 	schema := testutil.NewSchema(t, admin)
+	// The admin connection is not a superuser on every fixture (Supabase's
+	// postgres role is not), so OWNER TO needs the admin to be a member of
+	// the new owner and the new owner to hold CREATE on the schema. The
+	// grantee is spelled by name: the Supabase image crashes on
+	// GRANT ... TO CURRENT_USER.
+	var adminRole string
+	require.NoError(t, admin.QueryRow(t.Context(), "SELECT current_user").Scan(&adminRole))
 	_, err = admin.Exec(t.Context(), fmt.Sprintf(`
+		GRANT %[2]s TO %[3]s;
+		GRANT USAGE, CREATE ON SCHEMA %[1]s TO %[2]s;
 		CREATE TABLE %[1]s.owned (
 		    id int PRIMARY KEY
 		);
 		ALTER TABLE %[1]s.owned OWNER TO %[2]s;
 		CREATE TABLE %[1]s.not_owned (
 		    id int PRIMARY KEY
-		);
-		GRANT USAGE ON SCHEMA %[1]s TO %[2]s`,
-		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{tableOwner}.Sanitize()))
+		)`,
+		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{tableOwner}.Sanitize(), pgx.Identifier{adminRole}.Sanitize()))
 	require.NoError(t, err)
 	u, err := url.Parse(serverURL)
 	require.NoError(t, err)
