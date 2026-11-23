@@ -16,6 +16,10 @@ const (
 	sqlstateClassIntegrityConstraint = "23"
 )
 
+// catalogSchema is the schema of the server's own catalogs, which a
+// violation names when the write it refused was to a catalog row.
+const catalogSchema = "pg_catalog"
+
 // isDataFault reports whether err is the server rejecting the table's rows,
 // a fault every rerun of the same statement meets again until the data is
 // corrected. It is the same rule as pkg/schemachange's IsDataFault, copied

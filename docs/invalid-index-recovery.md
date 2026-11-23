@@ -179,6 +179,11 @@ the name and a rerun is refused until it is gone:
    and build in one call.
 3. Run the change again.
 
+Run it again only after both steps. Until the rows are corrected and the leftover dropped, a
+rerun is refused before the build as `invalid-index-abandoned`, which is recoverable, and
+`RebuildAbandonedIndex` on it scans the table, fails on the same rows, and returns
+`data-fault` again.
+
 An entry the run could not prove its own is reported with the same code; follow its
 state's section below before removing anything.
 

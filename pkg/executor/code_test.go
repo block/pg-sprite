@@ -63,6 +63,17 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeInvalidIndexOwnLeftover,
 		},
 		{
+			// Two concurrent builds that pick one index name in one schema
+			// collide in pg_class's unique name index: a 23505 that names a
+			// catalog relation, not the table's rows.
+			name: "a build that lost a catalog name collision to another table's index",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "other",
+				Build: &pgconn.PgError{Code: "23505", SchemaName: "pg_catalog", TableName: "pg_class",
+					ConstraintName: "pg_class_relname_nsp_index"},
+				Cleanup: executor.ErrInvalidIndexOnOtherTable},
+			want: executor.CodeInvalidIndexOtherTable,
+		},
+		{
 			name: "invalid index build in flight",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", BuilderPID: 42, Cleanup: executor.ErrInvalidIndexBuildInFlight},
 			want: executor.CodeInvalidIndexBuildInFlight,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // InvalidIndexError reports that an invalid index exists (or may remain)
@@ -102,9 +103,19 @@ func (e *InvalidIndexError) Error() string {
 // buildDataFault reports whether the build failed because the server
 // rejected the table's rows (SQLSTATE class 22 or 23): duplicate values
 // under a unique index, or an index expression that raises on a row. Every
-// rerun of the same build meets the same rows until they are corrected.
+// rerun of the same build meets the same rows until they are corrected. A
+// violation the server reports on a pg_catalog relation is not the rows':
+// two builds that pick one index name in one schema collide in pg_class's
+// unique name index, and the loser's leftover is judged by Cleanup instead.
 func (e *InvalidIndexError) buildDataFault() bool {
-	return isDataFault(e.Build)
+	return isDataFault(e.Build) && !violatesCatalog(e.Build)
+}
+
+// violatesCatalog reports whether err is the server rejecting a write to
+// one of its own catalogs rather than to the target table.
+func violatesCatalog(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.SchemaName == catalogSchema
 }
 
 // dataFaultError renders a build that failed on its rows. The server error
