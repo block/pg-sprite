@@ -109,11 +109,14 @@ type Store struct {
 }
 
 // NewStore prepares a store over pool. It refuses options that cannot bound
-// a read. Any pool is accepted, and the catalog reads Ensure makes resolve
-// to pg_catalog whatever the pool's search_path. The session timeouts, the
-// session-affinity proof, and the removal of a pg_catalog entry listed after
-// a user schema are what dbconn.NewPool adds; a pool built another way
-// supplies its own timeouts.
+// a read. Any pool is accepted: the catalog reads Ensure makes, and the
+// row statements of Load, Inspect, Save, and Delete, resolve their casts
+// and comparisons to pg_catalog whatever the pool's search_path. Save and
+// Delete first confirm the table lock through dbconn, whose comparisons
+// resolve through the path, so a lookalike = on it makes them refuse
+// rather than write. The session timeouts, the session-affinity proof, and
+// the removal of a pg_catalog entry listed after a user schema are what
+// dbconn.NewPool adds; a pool built another way supplies its own timeouts.
 func NewStore(pool *pgxpool.Pool, opts Options) (*Store, error) {
 	if pool == nil {
 		return nil, fmt.Errorf("%w: pool is nil", ErrInvalidOptions)
@@ -140,12 +143,15 @@ func NewStore(pool *pgxpool.Pool, opts Options) (*Store, error) {
 // is never cleared or replaced by a later Save (ST-2). jsonb compares by
 // value, so a proof re-rendered with other spacing or key order is the
 // same proof to the guard. The statement is write-once the same way,
-// compared as text.
+// compared as text. The cast and every comparison are spelled through
+// pg_catalog, since the store runs on whatever pool the caller passes
+// (CO-9).
+// INV: CO-9
 const saveSQL = "INSERT INTO " + tableIdent + ` (
 	schema_name, table_name, format_version, shadow_table, slot_name, publication_name,
 	watermark, last_applied_lsn, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof,
 	statement
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::pg_lsn, $9, $10, $11, $12, $13, $14)
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::pg_catalog.pg_lsn, $9, $10, $11, $12, $13, $14)
 ON CONFLICT (schema_name, table_name) DO UPDATE SET
 	shadow_table = EXCLUDED.shadow_table,
 	slot_name = EXCLUDED.slot_name,
@@ -156,16 +162,21 @@ ON CONFLICT (schema_name, table_name) DO UPDATE SET
 	updated_at = EXCLUDED.updated_at,
 	shadow_proof = COALESCE(EXCLUDED.shadow_proof, ` + tableIdent + `.shadow_proof),
 	statement = COALESCE(EXCLUDED.statement, ` + tableIdent + `.statement)
-WHERE ` + tableIdent + `.format_version = EXCLUDED.format_version
-	AND ` + tableIdent + `.source_fingerprint = EXCLUDED.source_fingerprint
-	AND ` + tableIdent + `.target_fingerprint = EXCLUDED.target_fingerprint
-	AND ` + tableIdent + `.phase = ANY($15)
+` + saveGuardSQL
+
+// saveGuardSQL is the condition saveSQL updates an existing row under. The
+// SET list above it assigns rather than compares, and COALESCE is grammar,
+// so the guard holds every comparison the path could otherwise resolve.
+const saveGuardSQL = `WHERE ` + tableIdent + `.format_version OPERATOR(pg_catalog.=) EXCLUDED.format_version
+	AND ` + tableIdent + `.source_fingerprint OPERATOR(pg_catalog.=) EXCLUDED.source_fingerprint
+	AND ` + tableIdent + `.target_fingerprint OPERATOR(pg_catalog.=) EXCLUDED.target_fingerprint
+	AND ` + tableIdent + `.phase OPERATOR(pg_catalog.=) ANY($15)
 	AND (EXCLUDED.shadow_proof IS NULL
 		OR ` + tableIdent + `.shadow_proof IS NULL
-		OR ` + tableIdent + `.shadow_proof = EXCLUDED.shadow_proof)
+		OR ` + tableIdent + `.shadow_proof OPERATOR(pg_catalog.=) EXCLUDED.shadow_proof)
 	AND (EXCLUDED.statement IS NULL
 		OR ` + tableIdent + `.statement IS NULL
-		OR ` + tableIdent + `.statement = EXCLUDED.statement)`
+		OR ` + tableIdent + `.statement OPERATOR(pg_catalog.=) EXCLUDED.statement)`
 
 // Save writes cp as the target's one row, atomically: a reader sees the
 // previous record or this one, never a mix (ST-1). It refuses, with
@@ -251,9 +262,11 @@ func watermarkColumn(w copier.Watermark) pgtype.Int8 {
 // deleteSQL removes the target's row, but only the row the caller was
 // shown: one carrying the format version and fingerprints it names. A row
 // that has since been replaced by another statement's is left in place and
-// the statement reports zero rows.
-const deleteSQL = "DELETE FROM " + tableIdent + ` WHERE schema_name = $1 AND table_name = $2
-	AND format_version = $3 AND source_fingerprint = $4 AND target_fingerprint = $5`
+// the statement reports zero rows. Its comparisons are spelled through
+// pg_catalog for the same reason as Save's (CO-9).
+// INV: CO-9
+const deleteSQL = "DELETE FROM " + tableIdent + ` WHERE schema_name OPERATOR(pg_catalog.=) $1 AND table_name OPERATOR(pg_catalog.=) $2
+	AND format_version OPERATOR(pg_catalog.=) $3 AND source_fingerprint OPERATOR(pg_catalog.=) $4 AND target_fingerprint OPERATOR(pg_catalog.=) $5`
 
 // Delete removes the target's row so a fresh run can Save its own. It is
 // the one deliberate step between an IncompatibleError and a fresh start,

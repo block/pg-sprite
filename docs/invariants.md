@@ -577,7 +577,14 @@ shadowing `<schema>, pg_catalog` path would otherwise name an owner that is not 
 refuse the engine's own table as foreign, and an empty `pg_namespace` or `pg_attribute` would
 report the schema absent or every column missing — decoy relations, functions, and operators on
 that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the text is held
-by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot reaper's slot
+by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the row statements `Load`,
+`Save`'s upsert and guard, and `Delete` run on the same pool and spell their casts and
+comparisons through `pg_catalog` too, so a lookalike `text` cannot cut the saved position short
+and a lookalike `=` cannot hide the row (`TestLoadReadsTheSavedPositionUnderALookalikeTextType`,
+`TestLoadFindsTheRowUnderLookalikeTextComparisons`, the text held by
+`TestRowStatementsQualifyEveryCastAndOperator`) — the table lock confirmation `Save` and
+`Delete` run first is `pkg/dbconn`'s, its comparisons still bare, so on such a pool they refuse
+with LK-1 rather than write; the orphan-slot reaper's slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
@@ -598,12 +605,24 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 `TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
 `TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
 `TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
-prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
-the text is held by
+prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone);
+the WAL marker (`MarkWAL`), written in a transaction on the caller's pool, and the stream's read
+of `wal_sender_timeout`, on the replication session, whose `search_path` comes from the caller's
+connection settings and the role's and database's and is never repaired, spell their cast and
+comparison through `pg_catalog` too: on a shadowing `<schema>, pg_catalog` path a lookalike
+`text` type would cut the marker's position to `0/1`, short of every change the caller's
+snapshot saw, and a lookalike `text = text` that answers false would match no setting and refuse
+the stream, `TestMarkWALReturnsTheServersPositionUnderALookalikeTextType` and
+`TestHeartbeatReadsTheSenderTimeoutUnderALookalikeEquals`; and the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
 `TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
 `TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
-character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
+character outside `OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
+write-position reads, on the caller's pool every cycle, cast through `pg_catalog.text`: a
+lookalike `text` type on a shadowing path would cut the snapshot into one the drain refuses and
+the write position to `0/1`, below anything the stream has confirmed,
+`TestCatchupMeasuresTheServersPositionUnderALookalikeTextType`, the text held by
+`TestCatchupPoolReadsQualifyEveryFunctionAndCast`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
