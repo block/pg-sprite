@@ -87,6 +87,10 @@ expect "an image with a tag and no digest is reported, not skipped" 2 "$two_pins
 "
 
 reset
+echo "$D3" >"$FAKE_DIR/acme_b_2.0"
+expect "a last image line with no trailing newline is still checked" 1 "${two_pins%$'\n'}"
+
+reset
 expect "a file with no image lines cannot be checked" 2 "services: {}
 "
 
