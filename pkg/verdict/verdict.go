@@ -488,6 +488,12 @@ const (
 	// executed. The route is in preview, so it runs only when the policy
 	// opens it.
 	CauseCopyAndSwapNotEnabled Cause = "copy-and-swap-not-enabled"
+	// CauseCopyAndSwapRunStopped: the table has a copy-and-swap run that
+	// stopped short of done, and the statement is not the one it records;
+	// nothing was executed. The stopped run is finished by running its own
+	// statement again, or discarded by a copy-and-swap run started over
+	// under the restart acknowledgement.
+	CauseCopyAndSwapRunStopped Cause = "copy-and-swap-run-stopped"
 )
 
 // Verdict is the structured outcome of one migrate invocation.

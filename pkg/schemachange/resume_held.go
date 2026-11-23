@@ -38,7 +38,7 @@ func MeasureResumeHeld(ctx context.Context, pool *pgxpool.Pool, store *checkpoin
 	if shape.Table() == "" {
 		return preflight.CopySwapHeld{}, fmt.Errorf("%w: zero copy-and-swap shape", preflight.ErrCopySwapProofMismatch)
 	}
-	cp, resumable, err := resumableRow(ctx, store, shape.Schema(), shape.Table())
+	cp, resumable, err := ResumableRow(ctx, store, shape.Schema(), shape.Table())
 	if err != nil {
 		return preflight.CopySwapHeld{}, err
 	}
@@ -58,13 +58,15 @@ func MeasureResumeHeld(ctx context.Context, pool *pgxpool.Pool, store *checkpoin
 	return held, nil
 }
 
-// resumableRow reads the table's checkpoint row and reports whether it
+// ResumableRow reads the table's checkpoint row and reports whether it
 // records a run the next run resumes: a row in a phase this engine knows
 // that is not terminal. The row-level outcomes Inspect reports — no row,
 // no table, a table an older engine shaped, a row in another format or an
 // unknown phase — are not resumes here; the run decides those itself under
-// its lock. Any other error is returned.
-func resumableRow(ctx context.Context, store *checkpoint.Store, schema, table string) (checkpoint.Checkpoint, bool, error) {
+// its lock. Any other error is returned. The read takes no lock, so it is
+// a forecast for a caller deciding where to send a statement: a Runner
+// reads the row again under the table's lock and decides from that.
+func ResumableRow(ctx context.Context, store *checkpoint.Store, schema, table string) (checkpoint.Checkpoint, bool, error) {
 	cp, err := store.Inspect(ctx, schema, table)
 	switch {
 	case err == nil:

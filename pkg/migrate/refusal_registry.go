@@ -111,6 +111,7 @@ func siteRefusals() []siteRefusal {
 		{"declarative-foreign-key", plan.ForeignKeyChangeRefusal()},
 		{"plan-incoherent", planIncoherentRefusal()},
 		{"copy-and-swap-not-enabled", copySwapNotEnabledRefusal()},
+		{"copy-and-swap-run-stopped", copySwapRunStoppedRefusal()},
 		{"row-security-unsupported", rowSecurityUnsupportedRefusal()},
 		{"row-security-missing-table", plan.RowSecurityMissingTableRefusal()},
 	}

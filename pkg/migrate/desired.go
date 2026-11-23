@@ -167,7 +167,11 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // does not match the pinned fingerprint is refused before anything runs,
 // and so is a plan that routes a statement through copy-and-swap when that
 // route's preflight refuses the table or the server as they stand now.
-// Execution-time semantics are committed-prefix: once statements start
+// An empty plan is executed with nothing to run, unless the table has a
+// copy-and-swap run stopped short of done: its shape may match only
+// because that run swapped it in, so it is refused with cause
+// copy-and-swap-run-stopped and the stopped statement is finished through
+// [Run]. Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
 // refuses or fails, and the result's verdicts disclose exactly how far
 // convergence got.
@@ -249,8 +253,20 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// carries no plan identity for a pinned fingerprint to verify (every
 	// empty plan hashes alike), and nothing runs either way — which is all
 	// a pin protects. Checking the pin first would refuse a legitimate
-	// re-run of an approved plan that already converged.
+	// re-run of an approved plan that already converged. A table that
+	// matches only because a stopped copy-and-swap run swapped its shape in
+	// is not converged: the run's row and what it still holds stand with
+	// nothing planned to finish them. A non-empty plan meets a stopped run
+	// in Run, statement by statement.
 	if len(report.Statements) == 0 {
+		stopped, err := findStoppedRun(ctx, pool, report.Schema, report.Table)
+		if err != nil {
+			return DesiredResult{}, err
+		}
+		if stopped.found {
+			return DesiredResult{Plan: report}.refused(copySwapRunStoppedRefusal(),
+				desiredRunStoppedDetail(report.Schema, report.Table, stopped)), nil
+		}
 		return DesiredResult{
 			Plan:    report,
 			Outcome: verdict.OutcomeExecuted,
