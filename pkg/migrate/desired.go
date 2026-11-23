@@ -605,7 +605,11 @@ func planStatementSQL(report plan.Report, i int) string {
 //
 // A plan holding destructive statements is admitted only when the request
 // names the desired table in AllowDestructive; the pin check above has
-// already bound that acknowledgement to the reviewed plan.
+// already bound that acknowledgement to the reviewed plan. A partitioned
+// parent's index drop and a destructive statement that carries no
+// definition of what it drops are refused even when the run is
+// acknowledged: the first so the operator gets its specific guidance, the
+// second so the refusal comes before any statement runs.
 func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 	refused := DesiredResult{Plan: report}
 	if stale, ok := CheckPlanPin(req.ExpectedFingerprint, report); !ok {
@@ -613,7 +617,7 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 	}
 	acknowledged := destructiveAcknowledged(req, report)
 	for i, ps := range report.Statements {
-		if !ps.Destructive || acknowledged {
+		if !ps.Destructive {
 			continue
 		}
 		if isPartitionedIndexDrop(ps) {
@@ -626,13 +630,18 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 			detail += skippedRestDetail(len(report.Statements) - 1)
 			return refused.refused(destructiveChangeRefusal(), detail), false
 		}
-		detail := fmt.Sprintf(
-			"planned statement %d discards live structure (%s); desired-state execution runs a destructive "+
-				"statement only when the run pins the reviewed plan's fingerprint and names the table in the "+
-				"destructive acknowledgement — review the plan, then rerun with ExpectedFingerprint %s and AllowDestructive %s.%s in the request",
-			i+1, ps.SQL, report.Fingerprint, report.Schema, report.Table)
-		detail += skippedRestDetail(len(report.Statements) - 1)
-		return refused.refused(destructiveChangeRefusal(), detail), false
+		if !acknowledged {
+			detail := unacknowledgedDropDetail(req, report, i, ps) + skippedRestDetail(len(report.Statements)-1)
+			return refused.refused(destructiveChangeRefusal(), detail), false
+		}
+		if ps.Drops == nil {
+			// The reviewed plan binds a drop to the definition of the
+			// object it removes; a destructive statement that carries
+			// none cannot be re-checked before it runs, so the plan is
+			// refused before any of its statements runs.
+			return refused.refused(planIncoherentRefusal(), fmt.Sprintf(
+				"planned statement %d (%s) is destructive but carries no definition of what it drops", i+1, ps.SQL)), false
+		}
 	}
 	if refusal, ok := refuseDestructiveWithCopySwap(report); !ok {
 		return refusal, false
@@ -642,6 +651,26 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		return refused.refused(r, detail), false
 	}
 	return DesiredResult{}, true
+}
+
+// unacknowledgedDropDetail names the way through for a destructive statement
+// the run did not acknowledge. A run that pinned no fingerprint may come from
+// a caller that cannot set one, so it is also given the deliberate path that
+// needs no pin: the concurrent idiom for an index, since the imperative front
+// door refuses a plain DROP INDEX, and the imperative front door otherwise.
+func unacknowledgedDropDetail(req DesiredRequest, report plan.Report, i int, ps plan.Statement) string {
+	detail := fmt.Sprintf(
+		"planned statement %d discards live structure (%s); desired-state execution runs a destructive "+
+			"statement only when the run pins the reviewed plan's fingerprint and names the table in the "+
+			"destructive acknowledgement — review the plan, then rerun with ExpectedFingerprint %s and AllowDestructive %s in the request",
+		i+1, ps.SQL, report.Fingerprint, desiredTable(report))
+	if req.ExpectedFingerprint != "" {
+		return detail
+	}
+	if ps.Kind == schemadiff.ChangeDropIndex {
+		return detail + ", or drop it deliberately with DROP INDEX CONCURRENTLY, then rerun"
+	}
+	return detail + ", or run it deliberately through the imperative front door"
 }
 
 // isPartitionedIndexDrop reports whether ps drops an index of a partitioned
