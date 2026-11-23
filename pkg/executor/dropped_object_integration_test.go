@@ -167,6 +167,8 @@ func TestRunSequenceDroppingRefusesAStatementThatDoesNotDropTheObject(t *testing
 		"another kind":      fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN extra int", schema),
 		"two drops at once": fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note, DROP COLUMN other", schema),
 		"cascade":           fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note CASCADE", schema),
+		"another column's cascade alongside the drop": fmt.Sprintf(
+			"ALTER TABLE %s.t DROP COLUMN other CASCADE, ADD COLUMN y int", schema),
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := runDropping(t, pool, schema, d, sql)

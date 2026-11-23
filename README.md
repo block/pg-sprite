@@ -171,7 +171,10 @@ refusal — never a silently wrong or incomplete result:
   the connected server's own scan count for the index in `index_usage`.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
-  to discard live structure. A new primary key or unique constraint over a live
+  to discard live structure. A library caller can run a reviewed destructive plan
+  by pinning its fingerprint and naming the table (`DesiredRequest.ExpectedFingerprint`
+  with `DesiredRequest.AllowDestructive`); the plan then runs as one reviewed unit, and
+  a dropped index runs as `DROP INDEX CONCURRENTLY`. A new primary key or unique constraint over a live
   unique index of its name is not destructive: it takes the index over with
   `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
   index changed after planning. Nor is a live check constraint left `NOT VALID`
