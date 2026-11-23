@@ -190,3 +190,25 @@ func TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun(t *test
 	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
 	assert.True(t, hasColumn(t, pool, schema, "title"), "the planned statement stays committed")
 }
+
+// The destructive acknowledgement must name the table the file converges
+// whether or not anything is left to run: a converged file, and a file with
+// changes to run, both reject an acknowledgement for another table before
+// anything executes.
+func TestRunDesiredWithRowSecurityChecksTheAcknowledgedTableOnAConvergedFile(t *testing.T) {
+	pool, schema := rowSecurityTable(t)
+	converged := parseRowSecurity(t, fmt.Sprintf(documentsWithRowSecurity, "", ""))
+	changing := parseRowSecurity(t, fmt.Sprintf(documentsWithRowSecurity, ",\n  title text", ""))
+
+	for name, desired := range map[string]statement.DesiredWithRowSecurity{"converged": converged, "with changes": changing} {
+		t.Run(name, func(t *testing.T) {
+			res, err := migrate.RunDesiredWithRowSecurity(t.Context(), pool, migrate.RowSecurityRequest{
+				Schema: schema, Desired: desired,
+				ExpectedFingerprint: "reviewed-plan", AllowDestructive: schema + ".other",
+			}, runOptions())
+			require.ErrorIs(t, err, migrate.ErrAllowDestructiveMismatch)
+			assert.Empty(t, res.Verdicts)
+			assert.False(t, hasColumn(t, pool, schema, "title"), "nothing may have run")
+		})
+	}
+}
