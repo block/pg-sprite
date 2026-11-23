@@ -61,10 +61,10 @@ func ExecuteNativeAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.P
 // RunSequenceAdopting and RunSequenceValidating check them; the step that
 // drops dropped first checks, under the table's lock, that the column,
 // constraint, or NOT NULL still has the definition the plan carried, and
-// refuses with ErrDroppedObjectDrift, dropping nothing, when it does not. Each admitted step is reported as at.Step in turn, so a
-// concurrent index build publishes the server's build counters under it. A
-// zero at runs exactly as the untracked entry point for the same
-// arguments.
+// refuses with ErrDroppedObjectDrift, dropping nothing, when it does not.
+// Each admitted step is reported as at.Step in turn, so a concurrent index
+// build publishes the server's build counters under it. A zero at runs
+// exactly as the untracked entry point for the same arguments.
 func RunSequenceAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject, at RunStep) (SequenceReport, error) {
 	if err := at.validate(); err != nil {
 		return SequenceReport{}, err
