@@ -128,6 +128,22 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 					},
 				},
 				{
+					name: "a partitioned index of another definition holds the parent index's name",
+					setup: func(t *testing.T, f partitionedFixture, _ string) {
+						f.exec(t, `CREATE INDEX idx_orders_total ON ONLY %s.orders (note)`, f.schema)
+					},
+					heldTable: "orders",
+					held:      func(string) string { return "idx_orders_total" },
+				},
+				{
+					name: "a partitioned index with another predicate holds the parent index's name",
+					setup: func(t *testing.T, f partitionedFixture, _ string) {
+						f.exec(t, `CREATE INDEX idx_orders_total ON ONLY %s.orders (total) WHERE total > 0`, f.schema)
+					},
+					heldTable: "orders",
+					held:      func(string) string { return "idx_orders_total" },
+				},
+				{
 					name: "an index on another table holds the parent index's name",
 					setup: func(t *testing.T, f partitionedFixture, _ string) {
 						f.exec(t, `CREATE TABLE %s.other (total int)`, f.schema)
@@ -137,7 +153,7 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 					held:      func(string) string { return "idx_orders_total" },
 				},
 				{
-					name: "an index holds a partition's derived name",
+					name: "an index of another definition holds a partition's derived name",
 					setup: func(t *testing.T, f partitionedFixture, derivedEU string) {
 						f.exec(t, `CREATE INDEX %s ON %s.orders_eu (note)`, derivedEU, f.schema)
 					},
@@ -145,10 +161,28 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 					held:      func(derivedEU string) string { return derivedEU },
 				},
 				{
+					name: "an index on another partition holds a partition's derived name",
+					setup: func(t *testing.T, f partitionedFixture, derivedEU string) {
+						f.exec(t, `CREATE INDEX %s ON %s.orders_us (total)`, derivedEU, f.schema)
+					},
+					heldTable: "orders_us",
+					held:      func(derivedEU string) string { return derivedEU },
+				},
+				{
 					name: "a sequence holds a partition's derived name",
 					setup: func(t *testing.T, f partitionedFixture, derivedEU string) {
 						f.exec(t, `CREATE SEQUENCE %s.%s`, f.schema, derivedEU)
 					},
+				},
+				{
+					name: "an index attached to another partitioned index holds a partition's derived name",
+					setup: func(t *testing.T, f partitionedFixture, derivedEU string) {
+						f.exec(t, `CREATE INDEX idx_other ON ONLY %s.orders (total)`, f.schema)
+						f.exec(t, `CREATE INDEX %s ON %s.orders_eu (total)`, derivedEU, f.schema)
+						f.exec(t, `ALTER INDEX %s.idx_other ATTACH PARTITION %s.%s`, f.schema, f.schema, derivedEU)
+					},
+					heldTable: "orders_eu",
+					held:      func(derivedEU string) string { return derivedEU },
 				},
 			}
 			for _, c := range cases {

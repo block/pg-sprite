@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -138,6 +139,9 @@ type relationFacts struct {
 	quotedName   string
 	quotedSchema string
 	quotedTable  string
+	// backsConstraint is whether a constraint names the relation as its
+	// index (pg_constraint.conindid).
+	backsConstraint bool
 }
 
 func (f relationFacts) isPartitionedIndex() bool { return f.relkind == "I" }
@@ -151,7 +155,8 @@ const relationFactColumns = `c.oid, n.nspname, c.relname, c.relkind::pg_catalog.
 		        CASE WHEN c.relkind OPERATOR(pg_catalog.=) 'i' OR c.relkind OPERATOR(pg_catalog.=) 'I'
 		             THEN pg_catalog.pg_get_indexdef(c.oid) END,
 		        pg_catalog.quote_ident(c.relname), pg_catalog.quote_ident(n.nspname),
-		        pg_catalog.quote_ident(t.relname), t.relkind::pg_catalog.text, t.relname`
+		        pg_catalog.quote_ident(t.relname), t.relkind::pg_catalog.text, t.relname,
+		        EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conindid OPERATOR(pg_catalog.=) c.oid)`
 
 const relationFactJoins = `FROM pg_catalog.pg_class c
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
@@ -168,7 +173,7 @@ func scanRelationFacts(row pgx.Row) (relationFacts, error) {
 	)
 	err := row.Scan(&f.oid, &f.schema, &f.name, &f.relkind, &f.isPartition,
 		&tableOID, &valid, &unique, &def,
-		&f.quotedName, &f.quotedSchema, &quotedTable, &tableRelkind, &tableName)
+		&f.quotedName, &f.quotedSchema, &quotedTable, &tableRelkind, &tableName, &f.backsConstraint)
 	if err != nil {
 		return relationFacts{}, err
 	}
@@ -219,6 +224,43 @@ func relationByOID(ctx context.Context, q querier, oid uint32) (relationFacts, b
 	return f, true, nil
 }
 
+// reusableIndexesSQL selects, with the same columns as relationByNameSQL, the
+// indexes on the table $1 that could stand in for the one the build would
+// create: valid, ready, attached to no partitioned index, and backing no
+// constraint. A constraint's index has duties beyond its key, and attaching it
+// under a parent index that is not a constraint's would change what it is.
+const reusableIndexesSQL = `SELECT ` + relationFactColumns + `
+		   ` + relationFactJoins + `
+		  WHERE i.indrelid OPERATOR(pg_catalog.=) $1
+		    AND c.relkind OPERATOR(pg_catalog.=) 'i'
+		    AND NOT c.relispartition
+		    AND i.indisvalid AND i.indisready
+		    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+		                     WHERE k.conindid OPERATOR(pg_catalog.=) c.oid)
+		  ORDER BY c.oid`
+
+// reusableIndexes lists the indexes on a leaf partition that could stand in for
+// the index the build would create. The caller compares each one's definition.
+func reusableIndexes(ctx context.Context, q querier, tableOID uint32) ([]relationFacts, error) {
+	rows, err := q.Query(ctx, reusableIndexesSQL, tableOID)
+	if err != nil {
+		return nil, fmt.Errorf("list indexes of table %d: %w", tableOID, err)
+	}
+	defer rows.Close()
+	var found []relationFacts
+	for rows.Next() {
+		f, err := scanRelationFacts(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan indexes of table %d: %w", tableOID, err)
+		}
+		found = append(found, f)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list indexes of table %d: %w", tableOID, err)
+	}
+	return found, nil
+}
+
 const attachedIndexOfSQL = `SELECT i.indexrelid
 		   FROM pg_catalog.pg_index i
 		   JOIN pg_catalog.pg_inherits h ON h.inhrelid OPERATOR(pg_catalog.=) i.indexrelid
@@ -237,6 +279,31 @@ func attachedIndexOf(ctx context.Context, q querier, partitionOID, parentIndexOI
 		return 0, false, fmt.Errorf("read the index of partition %d attached to index %d: %w", partitionOID, parentIndexOID, err)
 	}
 	return oid, true, nil
+}
+
+// definitionKey is the part of an index's printed definition that two indexes
+// must share for the server to accept one as a partition of the other:
+// uniqueness and everything from the access method on. The name and the table
+// are cut off by their exact printed form, not by searching for a keyword,
+// which a quoted name could contain. A definition that does not begin with the
+// form the server is known to print fails closed, so a server that changes the
+// format stops the build instead of matching wrongly.
+func (f relationFacts) definitionKey() (string, error) {
+	prefix := "CREATE "
+	if f.unique {
+		prefix += "UNIQUE "
+	}
+	prefix += "INDEX " + f.quotedName + " ON "
+	if f.tableRelkind == "p" {
+		prefix += "ONLY "
+	}
+	prefix += f.quotedSchema + "." + f.quotedTable
+	tail, ok := strings.CutPrefix(f.def, prefix)
+	if !ok {
+		return "", fmt.Errorf("%w: the definition of index %s.%s is not in the form the build reads: %q",
+			ErrInvariantViolation, f.schema, f.name, f.def)
+	}
+	return fmt.Sprintf("unique=%t%s", f.unique, tail), nil
 }
 
 // describeRelation names what a relation is, for a refusal that says it is not

@@ -26,12 +26,14 @@ type partitionedIndexFlow struct {
 	req     partitionedIndexRequest
 	target  indexTarget
 
-	// parent is the parent's index as the catalog reads it right after it is
-	// created.
+	// parent is the parent's index as the catalog reads it once it exists.
 	parent relationFacts
 	// rootDef is the parent's index definition read under catalogReadPath: the
 	// text every partition's statement is derived from.
 	rootDef string
+	// rootKey is the parent's definitionKey, which a partition's index must
+	// equal to be attached under it.
+	rootKey string
 
 	// changes counts the catalog changes the run has made; a pass that leaves
 	// it where it found it has nothing left to do.
@@ -63,7 +65,7 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := f.createParentIndex(ctx); err != nil {
+	if err := f.ensureParentIndex(ctx); err != nil {
 		return err
 	}
 	passes, err := settlePasses(ctx, maxPartitionedIndexPasses, func(ctx context.Context, pass int) (bool, error) {
@@ -215,33 +217,153 @@ func (f *partitionedIndexFlow) startStep(op progress.Operation, sql string, next
 	}
 }
 
-// onlyTable is the target as createOnlyIndex checks it.
-func (f *partitionedIndexFlow) onlyTable() onlyIndexTable {
-	return onlyIndexTable{oid: f.target.tableOID, schema: f.target.schema, name: f.target.table}
-}
-
-// createParentIndex creates the parent's index with ON ONLY.
-func (f *partitionedIndexFlow) createParentIndex(ctx context.Context) error {
-	onlySQL, err := statement.OnlyIndex(f.sql)
-	if err != nil {
-		return fmt.Errorf("make the parent index statement for %s: %w", qualifiedName(f.target.schema, f.req.index), err)
-	}
-	f.startStep(progress.OperationBrief, onlySQL, true)
-	// The statement's own expressions resolve under the target's schema, then
-	// public, the same path a concurrent build pins.
-	path := []string{f.target.schema, "public"}
-	err = f.tx.run(ctx, "create the parent index", path, true, func(ctx context.Context, tx pgx.Tx) error {
+// ensureParentIndex creates the parent's index with ON ONLY, or resumes the one
+// an earlier run left. A resumed index must be a partitioned index of the
+// requested definition: anything else under the name is not this change's to
+// adopt, and the build never picks another name.
+func (f *partitionedIndexFlow) ensureParentIndex(ctx context.Context) error {
+	var (
+		existing relationFacts
+		found    bool
+	)
+	err := f.tx.read(ctx, "look for the parent index", func(ctx context.Context, q querier) error {
 		var err error
-		f.parent, err = createOnlyIndex(ctx, tx, f.onlyTable(), f.target.schema, f.req.index, onlySQL)
+		existing, found, err = relationByName(ctx, q, f.target.schema, f.req.index)
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	f.rootDef = f.parent.def
-	f.rep.IndexOID = f.parent.oid
-	f.rep.ParentCreated = true
+	// checked is the parent's index as the build checked or created it.
+	var checked relationFacts
+	if !found {
+		if checked, err = f.createParentIndex(ctx); err != nil {
+			return err
+		}
+	} else {
+		if err := f.checkResumedParentIndex(ctx, existing); err != nil {
+			return err
+		}
+		checked = existing
+	}
+	key, err := checked.definitionKey()
+	if err != nil {
+		return err
+	}
+	f.parent, f.rootDef, f.rootKey = checked, checked.def, key
+	f.rep.IndexOID = checked.oid
 	return nil
+}
+
+// requireParentIndex proves a relation is a partitioned index on the target
+// table, the only thing the parent's index can be.
+func (f *partitionedIndexFlow) requireParentIndex(r relationFacts) error {
+	if !r.isPartitionedIndex() || r.tableOID != f.target.tableOID {
+		return fmt.Errorf("%w: %s is %s, not a partitioned index on %s",
+			ErrPartitionedIndexNameTaken, qualifiedName(r.schema, r.name), describeRelation(r),
+			qualifiedName(f.target.schema, f.target.table))
+	}
+	return nil
+}
+
+// onlyTable is the target as the identity createOnlyIndex proves.
+func (f *partitionedIndexFlow) onlyTable() onlyIndexTable {
+	return onlyIndexTable{oid: f.target.tableOID, schema: f.target.schema, name: f.target.table}
+}
+
+// requestPath is the search_path the request's own expressions resolve under: the
+// target's schema, then public, the same path a concurrent build pins.
+func (f *partitionedIndexFlow) requestPath() []string { return []string{f.target.schema, "public"} }
+
+// createParentIndex creates the parent's index with ON ONLY and returns it as
+// the catalog describes it right after, in the same transaction.
+func (f *partitionedIndexFlow) createParentIndex(ctx context.Context) (relationFacts, error) {
+	onlySQL, err := statement.OnlyIndex(f.sql)
+	if err != nil {
+		return relationFacts{}, fmt.Errorf("make the parent index statement for %s: %w", qualifiedName(f.target.schema, f.req.index), err)
+	}
+	f.startStep(progress.OperationBrief, onlySQL, true)
+	var created relationFacts
+	err = f.tx.run(ctx, "create the parent index", f.requestPath(), true, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		created, err = createOnlyIndex(ctx, tx, f.onlyTable(), f.target.schema, f.req.index, onlySQL)
+		return err
+	})
+	if err != nil {
+		return relationFacts{}, err
+	}
+	f.changes++
+	f.rep.ParentCreated = true
+	return created, nil
+}
+
+// checkResumedParentIndex decides whether the relation under the parent index's
+// name is the index the request describes. The server prints a definition in its
+// own normal form, which the request's text is not, so the request goes through
+// the server: a probe index is created from it in a transaction that always rolls
+// back, and the two printed definitions are compared.
+func (f *partitionedIndexFlow) checkResumedParentIndex(ctx context.Context, existing relationFacts) error {
+	if err := f.requireParentIndex(existing); err != nil {
+		return err
+	}
+	f.startStep(progress.OperationAdmitting, "", true)
+	var wantKey string
+	err := f.tx.run(ctx, "probe the requested index definition", f.requestPath(), false, func(ctx context.Context, tx pgx.Tx) error {
+		probeName, err := f.unusedProbeName(ctx, tx)
+		if err != nil {
+			return err
+		}
+		probeSQL, err := statement.PartitionIndex(f.sql, f.target.schema, f.target.table, probeName, statement.PartitionIndexOnly)
+		if err != nil {
+			return fmt.Errorf("make the probe statement for %s: %w", qualifiedName(f.target.schema, f.req.index), err)
+		}
+		// The probe builds an index like the real one, so it takes the same
+		// proved path and checks (INV: ST-7).
+		probe, err := createOnlyIndex(ctx, tx, f.onlyTable(), f.target.schema, probeName, probeSQL)
+		if err != nil {
+			return err
+		}
+		wantKey, err = probe.definitionKey()
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	haveKey, err := existing.definitionKey()
+	if err != nil {
+		return err
+	}
+	if haveKey != wantKey {
+		return fmt.Errorf("%w: the partitioned index %s on %s does not have the requested definition",
+			ErrPartitionedIndexNameTaken, qualifiedName(existing.schema, existing.name), qualifiedName(f.target.schema, f.target.table))
+	}
+	return nil
+}
+
+// maxProbeNameAttempts bounds the names tried for the probe index.
+const maxProbeNameAttempts = 16
+
+// unusedProbeName picks a name for the probe index that no relation in the schema
+// holds, read inside the probe's own transaction so the choice and the creation
+// share a snapshot. The probe never touches an existing object, so a relation
+// that carries the usual name only moves the probe to the next name.
+func (f *partitionedIndexFlow) unusedProbeName(ctx context.Context, q querier) (string, error) {
+	base := fmt.Sprintf("pgsprite_probe_%d", f.target.tableOID)
+	for attempt := range maxProbeNameAttempts {
+		name := base
+		if attempt > 0 {
+			name = fmt.Sprintf("%s_%d", base, attempt)
+		}
+		_, taken, err := relationByName(ctx, q, f.target.schema, name)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("%w: every probe index name from %s in %s is held by an existing relation",
+		ErrPartitionedIndexNameTaken, base, f.target.schema)
 }
 
 // verify re-reads the parent's index and reports success only when it is valid:

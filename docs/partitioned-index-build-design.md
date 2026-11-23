@@ -90,7 +90,8 @@ indexes on one table that share a long prefix therefore never share a partition
 index name. A name that fits is never changed, so earlier builds keep theirs.
 The name is deterministic, so a rerun finds the index an earlier run built. If
 the derived name is held by anything that is not a matching index on that
-partition, the flow refuses rather than choose another name.
+partition, or by an index that backs a constraint, the flow refuses rather than
+choose another name.
 
 The requested index name is the one the parser yields, already cut to 63 bytes
 the way the server cuts it, so the report names the index that exists.
