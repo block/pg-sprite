@@ -530,7 +530,7 @@ same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — or under a path pg-sprite builds that lists a user schema — introspection's
 target schema then `public`, the shadow build's source schema then `public` — qualify every
-relation, function, operator, and type with `pg_catalog`.
+relation, function, operator, type, and collation with `pg_catalog`.
 Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
 operator resolution ranks candidates across every schema on the path, so an exact-type overload
 planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
@@ -605,7 +605,7 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 `TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
 `TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
 `TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
-prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone);
+prove its `name` comparisons; its `text` and `jsonb` operators rest on the catalog-qualification check alone);
 the WAL marker (`MarkWAL`), written in a transaction on the caller's pool, and the stream's read
 of `wal_sender_timeout`, on the replication session, whose `search_path` comes from the caller's
 connection settings and the role's and database's and is never repaired, spell their cast and
@@ -616,8 +616,9 @@ the stream, `TestMarkWALReturnsTheServersPositionUnderALookalikeTextType` and
 `TestHeartbeatReadsTheSenderTimeoutUnderALookalikeEquals`; and the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
 `TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
-`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
-character outside `OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
+`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which walk each read's parse
+tree and reject every operator, the keyword comparisons included, not spelled
+`OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
 write-position reads, on the caller's pool every cycle, cast through `pg_catalog.text`: a
 lookalike `text` type on a shadowing path would cut the snapshot into one the drain refuses and
 the write position to `0/1`, below anything the stream has confirmed,
