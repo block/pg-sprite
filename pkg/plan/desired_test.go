@@ -81,3 +81,28 @@ func TestRefuseDestructiveOverridesAggregateRouteRefusal(t *testing.T) {
 	assert.Equal(t, verdict.ClassCapabilityBoundary, report.Statements[1].Class)
 	assert.Equal(t, plan.Fingerprint(report.Statements), report.Fingerprint)
 }
+
+// Refusing a copy of a report leaves the original's statements and their
+// safer advice as they were, and refusing it again keeps the fingerprint a
+// run must pin.
+func TestRefuseDestructiveLeavesTheCallersReportAndKeepsThePin(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Disposition = router.DispositionExecute
+	report.Statements = []plan.Statement{{
+		SQL: "DROP INDEX idx_documents", Destructive: true,
+		Backend: router.BackendNative, Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{SaferSQL: []string{"DROP INDEX CONCURRENTLY idx_documents"}, SaferSQLExecution: planner.ExecutionAutocommit}},
+	}}
+	report.Fingerprint = plan.Fingerprint(report.Statements)
+	reviewed := report.Fingerprint
+
+	preview := report
+	plan.RefuseDestructive(&preview)
+	assert.Equal(t, router.DispositionExecute, report.Statements[0].Disposition, "the caller's statement is not refused")
+	assert.Equal(t, router.BackendNative, report.Statements[0].Backend)
+	assert.Equal(t, []string{"DROP INDEX CONCURRENTLY idx_documents"}, report.Statements[0].Decisions[0].SaferSQL)
+	assert.Equal(t, reviewed, report.Fingerprint)
+
+	plan.RefuseDestructive(&preview)
+	assert.Equal(t, reviewed, preview.PinnableFingerprint, "a second refusal keeps the reviewed plan's fingerprint")
+}

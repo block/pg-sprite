@@ -756,9 +756,9 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   operator before asking for that consent. If that read fails, `Run` returns the error with a
   zero verdict and nothing executed rather than the refusal: route it as a retryable
   failure, like a connection fault, not as a refusal.
-  `RunDesired` rejects it ([below](#rundesired-takes-no-acknowledgement)) and keeps
-  refusing a destructive plan whole, so a declarative drop the operator approves runs as its
-  own imperative statement.
+  `RunDesired` rejects it ([below](#rundesired-takes-no-acknowledgement)); a declarative
+  drop the operator approves runs through `DesiredRequest.AllowDestructive`, which needs the
+  fingerprint of the plan the operator reviewed ([below](#reviewed-desired-drop)).
 - **A wrong-table acknowledgement is never retried as is.** Each acknowledgement `Run`
   takes must name a schema-qualified table — the resolved target, or for `AcceptBlocking` the
   table the statement locks — and one that names any other table is
@@ -786,7 +786,7 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `AllowDestructive`, in that order, before anything runs; `AcceptBlocking` is checked later,
   once the statement has been refused and the table it locks has been read, and
   `AllowDestructive` again against that table.
-- <a id="rundesired-takes-no-acknowledgement"></a>**`RunDesired` takes no acknowledgement.** Each of `Force`, `AcceptBlocking`,
+- <a id="rundesired-takes-no-acknowledgement"></a>**`RunDesired` takes no acknowledgement in `Options`.** Each of `Force`, `AcceptBlocking`,
   `AllowDestructive`, `CopySwap.Restart`, and `CopySwap.BlockWrites` accepts a loss for one
   statement the operator wrote, and a desired-state run executes statements the plan derived.
   Setting one returns its own sentinel before any database work, and setting several returns
@@ -811,6 +811,34 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   writes as `null`. The
   desired-state door's own refusals still apply to the view, so a destructive plan is still
   refused whole.
+- <a id="reviewed-desired-drop"></a>**A reviewed desired drop is a pinned plan and a named
+  table.** A desired plan that drops a column, a constraint, an index, or a `NOT NULL` is
+  refused whole with `destructive-change`, class `by-design`, and nothing runs, unless the
+  request carries both `DesiredRequest.ExpectedFingerprint`, the `plan.Report` fingerprint of
+  the plan the operator reviewed, and `DesiredRequest.AllowDestructive`, the desired file's
+  resolved schema-qualified table. A preview that has been through `plan.RefuseDestructive`,
+  as the CLI's dry-run JSON has, carries a `Fingerprint` that covers the refused plan and
+  cannot be pinned: pin its `PinnableFingerprint` (`pinnable_fingerprint`) instead. The acknowledgement is not the `Options` field, which
+  `RunDesired` still rejects. `AllowDestructive` without `ExpectedFingerprint` is
+  `migrate.ErrAllowDestructiveNeedsFingerprint` before any database work, and one naming
+  another table is `migrate.ErrAllowDestructiveMismatch` before any statement runs, even
+  when the plan drops nothing. A plan whose fingerprint differs from the pin is refused as
+  `plan-fingerprint-mismatch` with nothing executed. A pinned plan that drops something and
+  also routes a statement to copy-and-swap is refused whole with `destructive-change`, since
+  the drop would commit before copy-and-swap is checked against the changed table; make the
+  drop and the other change in two plans. Each destructive statement then runs
+  under the acknowledgement as it does through `Run` (RF-10), so its verdict carries
+  `allowed_destructive: true`, and a desired index drop runs as `DROP INDEX CONCURRENTLY`
+  and never holds the table's lock, refusing, dropping nothing, if the index no longer has
+  the definition the plan carried. A column, constraint, or `NOT NULL` drop is held to the
+  definition its plan carried the same way (`dropped-object-drift`), and a column drop is also
+  refused when the column has an index, constraint, or sequence the plan did not list as
+  dropped with it; the fingerprint covers each of those definitions and dependents. The plan runs in its order, which drops before adds, and statements that
+  already committed stay committed if a later one fails. Map SchemaBot's unsafe
+  acknowledgement to `AllowDestructive` only together with the fingerprint of the plan it
+  showed. `RunDesiredWithRowSecurity` takes the same two fields for a change to the table
+  definition; a policy a row security file no longer lists is dropped by the atomic row
+  security change without them.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
@@ -824,15 +852,23 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   (`plan.Statement`, carried over from `schemadiff.Change`) with `Adopts` set runs through
   `executor.ExecuteNativeAdoptingWithProgress` with that `IndexAdoption`, one with `Validates`
   set through `executor.ExecuteNativeValidatingWithProgress` with that `ConstraintValidation`,
-  and a statement whose `statement.Kind` is `KindRenameIndex` through
-  `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index.
-  Each re-reads the index or constraint under the
-  lock it runs with and refuses with `adopted-index-drift`, `validated-constraint-drift`, or
-  `renamed-index-drift` when it changed after planning. `ExecuteNativeWithProgress` carries no
-  planned definition and runs an adoption or validation unchecked, and refuses an index
+  a statement whose `statement.Kind` is `KindRenameIndex` through
+  `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index,
+  and a statement with `Drops` set and a column, constraint, or NOT NULL kind through
+  `executor.ExecuteNativeDroppingWithProgress` with that `DroppedObject`; a `Drops` of kind
+  `index` is a `DROP INDEX` that runs through `executor.ExecuteDropIndexConcurrently` with the
+  definition. Each re-reads the index, constraint, column, or NOT NULL under the
+  lock it runs with (the dropping session, for an index) and refuses with `adopted-index-drift`,
+  `validated-constraint-drift`, `renamed-index-drift`, `dropped-object-drift`, or
+  `dropped-index-drift` when it changed after planning. An index drop whose name was taken by a
+  different index between its check and the drop reports `dropped-index-replaced` (permanent):
+  unlike the drift refusals, an unreviewed index was dropped, and the error names it so the
+  operator can check and recreate it. `ExecuteNativeWithProgress` carries no
+  planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
   rename under ST-7, since the statement names no table. `Adopts` and `Validates` stay out of
   the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
-  or derives the plan again at apply time.
+  or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
+  fingerprint, so a stored plan carries it.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
   all direct-routed statements run first, then all engine-driven ones, regardless of their
   relative order in the plan — and a statement in one partition that depends on one in the
