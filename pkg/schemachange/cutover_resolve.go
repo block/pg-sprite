@@ -39,8 +39,9 @@ func rolledBack(err error) error {
 // success it was, its proof re-derived from what the swap left behind; the
 // source still bearing it means the attempt rolled back; a name borne by
 // neither relation, or a backend that outlives its own timeouts, is
-// refused.
-func resolveUnknownOutcome(ctx context.Context, pool *pgxpool.Pool, ready CutoverReady, backend swapBackend, attempt int, lost error, opts CutoverOptions) (SwappedTable, error) {
+// refused. A committed swap keeps carried, the compare the lost attempt
+// ran under its lock, which the catalog cannot re-derive.
+func resolveUnknownOutcome(ctx context.Context, pool *pgxpool.Pool, ready CutoverReady, backend swapBackend, attempt int, carried CarriedCompare, lost error, opts CutoverOptions) (SwappedTable, error) {
 	ctx = context.WithoutCancel(ctx)
 	schema, source := ready.built.Schema(), ready.built.SourceTable()
 	if backend.pid == 0 {
@@ -58,6 +59,7 @@ func resolveUnknownOutcome(ctx context.Context, pool *pgxpool.Pool, ready Cutove
 	case err == nil:
 		// INV: LK-4
 		swapped.attempts = attempt
+		swapped.carried = carried
 		return swapped, nil
 	case errors.Is(err, ErrNotSwapped):
 		return SwappedTable{}, rolledBack(fmt.Errorf("cutover of %s.%s rolled back when its attempt was cut short: %w", schema, source, lost))

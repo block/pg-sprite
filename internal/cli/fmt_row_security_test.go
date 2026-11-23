@@ -143,6 +143,11 @@ func TestFmtRefusesRowSecurityFileTheFrontDoorRefuses(t *testing.T) {
 CREATE POLICY p ON t USING (true);`,
 			want: statement.ErrRowSecurityDeclaration,
 		},
+		"ENABLE and policy without CREATE TABLE": {
+			sql: `ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON t USING (true);`,
+			want: statement.ErrRowSecurityTableDefinitionRequired,
+		},
 		"policy reads an unqualified table": {
 			sql: `CREATE TABLE t (id bigint PRIMARY KEY);
 ALTER TABLE t ENABLE ROW LEVEL SECURITY;
