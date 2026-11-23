@@ -20,6 +20,7 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -78,6 +79,33 @@ func TestCopySwapPreflightVerdict(t *testing.T) {
 		assert.Equal(t, verdict.Cause(preflight.CopySwapCauseUnlogged), v.Cause)
 		assert.Equal(t, "billing.orders", v.Table)
 		assert.Contains(t, v.Detail, "UNLOGGED")
+	})
+
+	t.Run("a keyless table carries the guidance to add an integer key", func(t *testing.T) {
+		shapeErr := &preflight.UnsupportedCopySwapShapeError{
+			Cause:        preflight.CopySwapCausePKUnsupported,
+			Detail:       "the primary key has 0 columns; exactly one is required",
+			NoPrimaryKey: true,
+		}
+		v, err := copySwapPreflightVerdict(st, fmt.Errorf("preflight: %w", shapeErr))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.Cause(preflight.CopySwapCausePKUnsupported), v.Cause)
+		assert.Equal(t, suggest.GuidanceAddIntegerPrimaryKey, v.Guidance)
+		assert.Contains(t, v.Detail, "docs/primary-keys.md#add-a-primary-key-online")
+	})
+
+	t.Run("a uuid-keyed table carries no guidance", func(t *testing.T) {
+		// A table has one primary key, and no online route replaces it,
+		// so there is no add-a-key step to point at.
+		shapeErr := &preflight.UnsupportedCopySwapShapeError{
+			Cause:  preflight.CopySwapCausePKUnsupported,
+			Detail: "primary-key column id has type uuid; smallint, integer, or bigint is required",
+		}
+		v, err := copySwapPreflightVerdict(st, shapeErr)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.Cause(preflight.CopySwapCausePKUnsupported), v.Cause)
+		assert.Empty(t, v.Guidance)
+		assert.Equal(t, shapeErr.Error(), v.Detail)
 	})
 
 	t.Run("a refused environment is environmental with its cause", func(t *testing.T) {
@@ -240,6 +268,17 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
 		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
+	})
+
+	// A slot past the hard limit is the same family: a resume under the
+	// same ceiling stops there again, so the remedy names the setting too.
+	t.Run("a slot past the hard limit names the ceiling to raise", func(t *testing.T) {
+		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetainedHardLimit,
+			Retained: 4 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 		assert.Contains(t, v.Detail, "resumes from the row")
 		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
 	})
@@ -411,6 +450,17 @@ func TestCopySwapDetail(t *testing.T) {
 	assert.Equal(t, "verified 10 rows in 1 chunks (1 settled against the stream); "+
 		"the retained source is kept under its _old name; "+
 		"the run reconciled a lost replication slot before catching up", kept)
+
+	// A swap that compared the keys its live pass left names how many and
+	// how long the compare ran under the lock, so a host reading the
+	// verdict sees what the swap paid without --debug.
+	carried := copySwapDetail(schemachange.Result{
+		Verification:    checksum.Report{Rows: 300, Chunks: 1},
+		CarriedCompare:  schemachange.CarriedCompare{Keys: 7, Elapsed: 12 * time.Millisecond},
+		OldTableDropped: true,
+	}, false)
+	assert.Equal(t, "verified 300 rows in 1 chunks; compared 7 still-changing keys under the swap lock in 12ms; "+
+		"the retained source is dropped", carried)
 
 	quiesced := copySwapDetail(schemachange.Result{
 		Verification:    checksum.Report{Rows: 4, Chunks: 1},

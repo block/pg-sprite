@@ -483,6 +483,9 @@ const (
 	// CauseParentNotValidForeignKey identifies a NOT VALID foreign key on a
 	// partitioned parent.
 	CauseParentNotValidForeignKey Cause = "parent-not-valid-foreign-key"
+	// CauseParentConcurrentIndexDrop identifies a concurrent drop of an
+	// index of a partitioned parent, which PostgreSQL does not support.
+	CauseParentConcurrentIndexDrop Cause = "parent-concurrent-index-drop"
 	// CauseCopyAndSwapNotEnabled: the statement routes to the copy-and-swap
 	// backend, which the caller has not opted into; nothing was read or
 	// executed. The route is in preview, so it runs only when the policy
@@ -593,10 +596,14 @@ type Verdict struct {
 	// the source — write fence or replication slot — is released, and the
 	// checkpoint row is deleted, so nothing remains and the corrected
 	// statement runs from the beginning without any acknowledgement. A
-	// data-fault verdict with it false is a run whose abandon did not
-	// finish: the row and the hold stand as far as the discard got, and
-	// the run is started over with the restart acknowledgement. It is the
-	// field automation branches on; Detail says the same for a reader.
+	// copy-and-swap data-fault verdict with it false is a run whose abandon
+	// did not finish: the row and the hold stand as far as the discard got,
+	// and the run is started over with the restart acknowledgement. A
+	// data-fault verdict that carries FailedStep is a native concurrent
+	// index build that failed on the rows, not a copy-and-swap run: there
+	// is no run to abandon or restart, and the build's invalid index is
+	// the leftover Detail names. It is the field automation branches on;
+	// Detail says the same for a reader.
 	// False for every other verdict, including a refusal: a run whose lock
 	// session is lost after its discard finished comes back as the
 	// shadow-lock-lost refusal, with nothing left behind but no field to say
@@ -609,8 +616,10 @@ type Verdict struct {
 	// Guidance is the typed manual path for a rewrite-required refusal,
 	// drawn from the suggest contract's Guidance vocabulary
 	// (docs/suggest-report.md), the same value the plan report's statement
-	// carries, or for a destructive-change refusal whose statement drops a
-	// column and adds it back under the same name. Detail states the steps
+	// carries, for a destructive-change refusal whose statement drops a
+	// column and adds it back under the same name, or for a
+	// copy-and-swap-pk-unsupported refusal of a table with no primary key
+	// (add-integer-primary-key). Detail states the steps
 	// for a human; Guidance is the key an automated caller branches on.
 	// Empty for every other verdict.
 	Guidance suggest.Guidance `json:"guidance,omitempty"`
