@@ -77,7 +77,7 @@ pins=0
 line_number=0
 mismatched=()
 unchecked=()
-while IFS= read -r line; do
+while IFS= read -r line || [ -n "$line" ]; do
 	line_number=$((line_number + 1))
 	if [[ ! "$line" =~ $image_pattern ]]; then
 		continue

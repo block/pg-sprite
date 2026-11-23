@@ -13,10 +13,12 @@ import (
 // relation, and last the server's WAL insert position as text. The position
 // is taken in the same statement as the read, as rowSQL takes it, so the
 // buffer can tell when the stream has delivered everything the read knew
-// about.
+// about. The position's cast names pg_catalog.text; the key comparison and
+// casts are left to the flush transaction's search_path, which is pinned
+// catalog-first before this runs.
 func shadowKeysSQL(relation, pk string) string {
 	return "SELECT ARRAY(SELECT " + pk + "::bigint FROM " + relation + " WHERE " + pk + " = ANY($1::bigint[])), " +
-		"pg_catalog.pg_current_wal_insert_lsn()::text"
+		"pg_catalog.pg_current_wal_insert_lsn()::pg_catalog.text"
 }
 
 // checksShadowRow reports whether the flush must find the shadow row under the

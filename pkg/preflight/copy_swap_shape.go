@@ -162,6 +162,25 @@ type UnsupportedCopySwapShapeError struct {
 	Cause CopySwapRefusalCause
 	// Detail is the catalog fact behind the cause.
 	Detail string
+	// NoPrimaryKey reports that the table was refused with
+	// CopySwapCausePKUnsupported because it has no primary key at all, the
+	// one key shape the operator can fix online by adding a key. False for
+	// a uuid, text, composite, or DEFERRABLE key, and for every other cause.
+	NoPrimaryKey bool
+}
+
+// copySwapShapeError returns the refusal for facts outside v1 scope, or nil
+// when the shape is supported.
+func copySwapShapeError(f copySwapShapeFacts) error {
+	cause, detail := refuseCopySwapShape(f)
+	if cause == "" {
+		return nil
+	}
+	return &UnsupportedCopySwapShapeError{
+		Cause:        cause,
+		Detail:       detail,
+		NoPrimaryKey: cause == CopySwapCausePKUnsupported && f.pkColumns == 0,
+	}
 }
 
 // Error implements the error interface.
@@ -231,8 +250,8 @@ func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table s
 	if err != nil {
 		return CopySwapShape{}, err
 	}
-	if cause, detail := refuseCopySwapShape(facts); cause != "" {
-		return CopySwapShape{}, &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
+	if err := copySwapShapeError(facts); err != nil {
+		return CopySwapShape{}, err
 	}
 	// INV: ST-6, RF-1, RF-2, RF-3
 	return CopySwapShape{
@@ -259,10 +278,7 @@ func RecheckCopySwapShape(ctx context.Context, tx pgx.Tx, target CopySwapTarget)
 	if facts.oid != target.oid {
 		return fmt.Errorf("%w: relation OID changed from %d to %d", ErrCopySwapProofMismatch, target.oid, facts.oid)
 	}
-	if cause, detail := refuseCopySwapShape(facts); cause != "" {
-		return &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
-	}
-	return nil
+	return copySwapShapeError(facts)
 }
 
 // refuseCopySwapShape decides the first cause that puts the facts outside
