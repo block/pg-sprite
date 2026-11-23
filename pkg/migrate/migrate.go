@@ -278,22 +278,23 @@ func (o Options) retry() executor.RetryPolicy {
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (v verdict.Verdict, err error) {
 	opts.startProgress(1)
 	defer func() { opts.finishProgress(v.Outcome, err) }()
-	return run(ctx, pool, st, opts, 1, nil, nil)
+	return run(ctx, pool, st, opts, 1, nil, nil, nil)
 }
 
-// run is Run for a statement that may be a diff-planned index adoption or
-// constraint validation: when adopts is set, st takes over that index, and
-// when validates is set, st validates that constraint. Either way
-// execution checks the planned definition again under the table's lock
+// run is Run for a statement that may be a diff-planned index adoption,
+// constraint validation, or drop: when adopts is set, st takes over that
+// index, when validates is set, st validates that constraint, and when
+// dropped is set, st drops that column, constraint, or NOT NULL. In every
+// case execution checks the planned definition again under the table's lock
 // before acting on it.
-func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
-	v, err := runStatement(ctx, pool, st, opts, step, adopts, validates)
+func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject) (verdict.Verdict, error) {
+	v, err := runStatement(ctx, pool, st, opts, step, adopts, validates, dropped)
 	return WithServerError(v, err), err
 }
 
 // runStatement is run before a failed verdict records the server error
 // that failed it.
-func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
+func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject) (verdict.Verdict, error) {
 	if err := opts.validate(); err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -355,6 +356,9 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	logger.Debug("statement routed",
 		"route", string(classified.Route), "disposition", string(rs.Disposition))
 
+	if err := checkDropRoute(rs, dropped); err != nil {
+		return verdict.Verdict{}, err
+	}
 	if opts.CopySwap.Restart != "" {
 		if err := checkRestartRoute(st, rs); err != nil {
 			return verdict.Verdict{}, err
@@ -382,7 +386,7 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		auditRestart(opts.audit(), st)
 	}
 
-	v, err := dispatch(ctx, pool, st, canonical, rs, opts, step, adopts, validates, logger)
+	v, err := dispatch(ctx, pool, st, canonical, rs, opts, step, adopts, validates, dropped, logger)
 	if allowedDestructive && v.Outcome != "" {
 		v.AllowedDestructive = true
 	}
@@ -392,7 +396,7 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 // dispatch runs a routed statement that is past the front door's
 // acknowledgement gates down the path its disposition names.
 func dispatch(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, canonical string,
-	rs router.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation,
+	rs router.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject,
 	logger *slog.Logger) (verdict.Verdict, error) {
 	switch rs.Disposition {
 	case router.DispositionExecute:
@@ -404,7 +408,7 @@ func dispatch(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, c
 			// submitted form runs natively as a blind bounded attempt
 			// instead of through the shadow table.
 			auditForce(opts.audit(), st, rs)
-			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, logger)
+			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, dropped, logger)
 		}
 		execSQL := rs.ExecSQL
 		substituted := len(execSQL) != 1 || execSQL[0] != rs.Statement
@@ -415,19 +419,19 @@ func dispatch(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, c
 			execSQL, substituted = []string{canonical}, false
 			auditForce(opts.audit(), st, rs)
 		}
-		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, step, adopts, validates, logger)
+		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, step, adopts, validates, dropped, logger)
 	case router.DispositionRewriteRequired:
 		if opts.Force == "" {
 			return rewriteRequiredVerdict(st, rs)
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, dropped, logger)
 	case router.DispositionUnavailable:
 		if opts.Force == "" {
 			return backendUnavailableVerdict(st, rs), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, step, adopts, validates, dropped, logger)
 	case router.DispositionRefuse:
 		// A planner refusal means no known safe path — there is nothing
 		// bounded to acknowledge, so the force acknowledgement does not
@@ -534,7 +538,7 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // with the exact provisioning statement instead.
 func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	execSQL []string, plan planner.Plan, substituted, forced bool,
-	opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, logger *slog.Logger) (verdict.Verdict, error) {
+	opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject, logger *slog.Logger) (verdict.Verdict, error) {
 	// An adoption or a validation is diff-planned SQL, which is never
 	// forced: the override exists for a submitted statement the router
 	// would substitute or decline.
@@ -546,11 +550,19 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		return verdict.Verdict{}, fmt.Errorf("%w: a forced attempt cannot carry the validation of constraint %s",
 			executor.ErrInvariantViolation, validates.Constraint)
 	}
+	if forced && dropped != nil {
+		return verdict.Verdict{}, fmt.Errorf("%w: a forced attempt cannot carry the drop of %s %s",
+			executor.ErrInvariantViolation, dropped.Kind, dropped.Name)
+	}
 	if adopts != nil && validates != nil {
 		// The diff plans an adoption and a validation as separate
 		// statements; one statement carrying both is outside its contract.
 		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the adoption of index %s and the validation of constraint %s",
 			executor.ErrInvariantViolation, adopts.Index, validates.Constraint)
+	}
+	if dropped != nil && (adopts != nil || validates != nil) {
+		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the drop of %s %s and an adoption or a validation",
+			executor.ErrInvariantViolation, dropped.Kind, dropped.Name)
 	}
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, substituted) {
@@ -616,7 +628,7 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	if forced {
 		err = executor.ExecuteNativeAsStep(ctx, pool, pt, st, opts.Budget.Brief, retry, opts.runStep(step))
 	} else {
-		rep, err = executor.RunSequenceAsStep(ctx, pool, pt, execSQL, opts.Budget, retry, adopts, validates, nil, opts.runStep(step))
+		rep, err = executor.RunSequenceAsStep(ctx, pool, pt, execSQL, opts.Budget, retry, adopts, validates, dropped, opts.runStep(step))
 	}
 	elapsed := time.Since(start)
 	if v, refused := execRefusal(st, err, substituted, forced, onlineIdiomPlan(plan)); refused {

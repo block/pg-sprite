@@ -27,6 +27,12 @@ type RowSecurityRequest struct {
 	// definition's plan, so it is the fingerprint
 	// diffplan.PlanWithRowSecurity reported.
 	ExpectedFingerprint string
+	// AllowDestructive names the desired table, schema-qualified, to let
+	// the table definition's destructive statements run, exactly as
+	// DesiredRequest.AllowDestructive does for a table file: valid only with
+	// ExpectedFingerprint, and applying to the table definition's plan alone.
+	// It never reaches the row security, which this path does not change.
+	AllowDestructive string
 }
 
 // RunDesiredWithRowSecurity converges an existing table onto a desired file
@@ -58,11 +64,17 @@ type RowSecurityRequest struct {
 // has been compared again.
 func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowSecurityRequest, opts Options) (result DesiredResult, err error) {
 	defer func() { opts.finishProgress(result.Outcome, err) }()
-	// INV: RF-12 — desired-state execution takes no acknowledgement.
+	// INV: RF-12 — desired-state execution takes no acknowledgement in
+	// Options.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
 	if err := opts.validate(); err != nil {
+		return DesiredResult{}, err
+	}
+	// INV: RF-12 — the one acknowledgement desired-state execution takes is
+	// bound to a pinned plan, decided before any database work.
+	if err := checkDesiredAllowDestructive(req.AllowDestructive, req.ExpectedFingerprint); err != nil {
 		return DesiredResult{}, err
 	}
 	report, err := diffplan.PlanWithRowSecurity(ctx, pool, req.Schema, req.Desired)
@@ -70,6 +82,12 @@ func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowS
 		return refused, nil
 	}
 	if err != nil {
+		return DesiredResult{}, err
+	}
+	// The acknowledgement must name the table the file converges even when
+	// nothing is left to run: a converged file is no reason to accept an
+	// acknowledgement for another table.
+	if err := CheckDesiredAllowDestructiveTable(req.AllowDestructive, report); err != nil {
 		return DesiredResult{}, err
 	}
 	if len(report.Statements) == 0 {
@@ -80,7 +98,8 @@ func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowS
 		}, nil
 	}
 	result, err = runDesired(ctx, pool, DesiredRequest{
-		Schema: req.Schema, Desired: req.Desired.TableDefinition(), ExpectedFingerprint: req.ExpectedFingerprint,
+		Schema: req.Schema, Desired: req.Desired.TableDefinition(),
+		ExpectedFingerprint: req.ExpectedFingerprint, AllowDestructive: req.AllowDestructive,
 	}, opts, refuseDroppedTable)
 	if err != nil || result.Outcome != verdict.OutcomeExecuted {
 		return result, err
