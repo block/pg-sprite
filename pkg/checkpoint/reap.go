@@ -12,12 +12,21 @@ import (
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
-// Reaped is what one pass of ReapOrphanSlots found among the engine slots
-// of the store's database, every slot in exactly one list.
+// Reaped is what one pass of ReapOrphanSlots, or one PreviewOrphanSlots,
+// found among the engine slots of the store's database, every slot it
+// reached in exactly one list or in Failed.
 type Reaped struct {
 	// Dropped slots had no checkpoint row, or a terminal one, and no holder:
-	// orphans, dropped with their publications.
+	// orphans, dropped with their publications. Only ReapOrphanSlots fills it.
 	Dropped []string
+	// WouldDrop slots are the orphans a pass would go on to drop now. Only
+	// PreviewOrphanSlots fills it; nothing in it was dropped.
+	WouldDrop []string
+	// Failed is the orphan the pass stopped at when its lock, its row's
+	// re-read, or its drop failed, and empty otherwise. The slot may be
+	// gone: the drop removes the slot before its publication, and a drop the
+	// server accepted can fail on the client's side.
+	Failed string
 	// Live slots are named by a checkpoint row in a non-terminal phase: a
 	// schema change in flight or resumable owns each.
 	Live []string
@@ -25,8 +34,9 @@ type Reaped struct {
 	// went to drop them; whoever holds one is the judge of it, so the
 	// reaper leaves it for a later pass.
 	Active []string
-	// Foreign slots wear the engine's prefix without its shape; they are
-	// somebody else's and are reported, never dropped.
+	// Foreign slots wear the engine's prefix without its name shape or
+	// without its output plugin; they are somebody else's and are reported,
+	// never dropped.
 	Foreign []string
 }
 
@@ -40,9 +50,10 @@ type Reaped struct {
 // whatever pool the caller passes, so every comparison is spelled
 // OPERATOR(pg_catalog.…) (LIKE is ~~): a lookalike = on name on the
 // session's search_path would otherwise list another database's slots as
-// this one's (CO-9).
+// this one's (CO-9). The output plugin is read so a slot of the engine's
+// name shape that another tool made with another plugin is foreign.
 const candidateSlotsSQL = `
-SELECT slot_name, active
+SELECT slot_name, active, plugin
 FROM pg_catalog.pg_replication_slots
 WHERE database OPERATOR(pg_catalog.=) pg_catalog.current_database()
   AND slot_type OPERATOR(pg_catalog.=) 'logical'
@@ -66,6 +77,7 @@ WHERE slot_name OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
 type candidateSlot struct {
 	name   string
 	active bool
+	plugin string
 }
 
 // ReapOrphanSlots drops the engine's orphan replication slots in the store's
@@ -88,10 +100,12 @@ type candidateSlot struct {
 // decode.DropIdleSlot on a replication connection built from cfg, which
 // refuses a held slot instead of waiting for its holder and takes an idle
 // slot's publication with it. Slots a live row names or a process holds,
-// and names that wear the prefix without the shape, are reported and left
-// as found. The drops stop at the first failure, reporting what was dropped
-// before it. Two reapers over one database take turns at each slot; the
-// one that waited finds the slot gone and reports the drop as its own too.
+// and slots that wear the prefix without the engine's name shape or output
+// plugin, are reported and left as found. The drops stop at the first
+// failure, reporting what was dropped before it and naming the slot it
+// stopped at in Failed. Two reapers over one database take turns at each
+// slot; the one that waited finds the slot gone and reports the drop as its
+// own too.
 //
 // A database where Ensure has never run has no rows to speak for its
 // slots, so the pass is refused with ErrTableMissing rather than read every
@@ -113,6 +127,7 @@ func (s *Store) ReapOrphanSlots(ctx context.Context, cfg dbconn.Config) (Reaped,
 			continue
 		}
 		if err := s.dropIfStillOrphan(ctx, cfg, c.name, &reaped); err != nil {
+			reaped.Failed = c.name
 			return reaped, err
 		}
 	}
@@ -120,7 +135,7 @@ func (s *Store) ReapOrphanSlots(ctx context.Context, cfg dbconn.Config) (Reaped,
 }
 
 // PreviewOrphanSlots reports what ReapOrphanSlots would make of the engine
-// slots of the store's database right now, dropping nothing: Dropped names
+// slots of the store's database right now, dropping nothing: WouldDrop names
 // the orphans a pass would go on to drop, and the other lists are the slots
 // it would keep. It reads the same slot listing and live rows and sorts
 // them with the same rule, but takes no slot lock and writes nothing, so it
@@ -140,7 +155,7 @@ func (s *Store) PreviewOrphanSlots(ctx context.Context) (Reaped, error) {
 	var preview Reaped
 	for _, c := range candidates {
 		if preview.fileUnlessOrphan(c, live) {
-			preview.Dropped = append(preview.Dropped, c.name)
+			preview.WouldDrop = append(preview.WouldDrop, c.name)
 		}
 	}
 	return preview, nil
@@ -154,6 +169,10 @@ func (s *Store) PreviewOrphanSlots(ctx context.Context) (Reaped, error) {
 func (r *Reaped) fileUnlessOrphan(c candidateSlot, live map[string]bool) bool {
 	switch {
 	case !decode.IsEngineSlotName(c.name):
+		r.Foreign = append(r.Foreign, c.name)
+	case c.plugin != decode.OutputPlugin:
+		// Every engine slot decodes with pgoutput, so a slot of the engine's
+		// name shape with another plugin was made by another tool.
 		r.Foreign = append(r.Foreign, c.name)
 	case live[c.name]:
 		// INV: ST-3 — a row in flight owns its slot; the reaper never
@@ -204,7 +223,7 @@ func (s *Store) candidateSlots(ctx context.Context) ([]candidateSlot, error) {
 	}
 	candidates, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (candidateSlot, error) {
 		var c candidateSlot
-		err := row.Scan(&c.name, &c.active)
+		err := row.Scan(&c.name, &c.active, &c.plugin)
 		return c, err
 	})
 	if err != nil {

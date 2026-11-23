@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	neturl "net/url"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -145,6 +147,7 @@ func TestReapDryRunListsTheOrphanAndDropsNothing(t *testing.T) {
 	report := runReap(t, &ReapCmd{DBFlags: DBFlags{URL: f.url}, DryRun: true})
 
 	assert.Equal(t, reapReport{
+		FormatVersion:         reapFormatVersion,
 		DryRun:                true,
 		CheckpointTableExists: true,
 		Dropped:               []string{},
@@ -168,6 +171,7 @@ func TestReapDropsTheOrphanAndKeepsLiveAndForeignSlots(t *testing.T) {
 	report := runReap(t, &ReapCmd{DBFlags: DBFlags{URL: f.url}})
 
 	assert.Equal(t, reapReport{
+		FormatVersion:         reapFormatVersion,
 		CheckpointTableExists: true,
 		Dropped:               []string{f.orphan},
 		WouldDrop:             []string{},
@@ -212,6 +216,8 @@ func TestReapJSONListsAreArraysWhenEmpty(t *testing.T) {
 	assert.JSONEq(t, `true`, string(raw["checkpoint_table_exists"]))
 	assert.JSONEq(t, `false`, string(raw["dry_run"]))
 	assert.JSONEq(t, `false`, string(raw["stopped"]))
+	assert.JSONEq(t, `""`, string(raw["failed"]))
+	assert.JSONEq(t, `1`, string(raw["format_version"]))
 }
 
 // A drop that fails partway still reports what was dropped before it, marks
@@ -259,8 +265,10 @@ func TestReapReportsWhatWasDroppedBeforeAFailedDrop(t *testing.T) {
 	var report reapReport
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
 	assert.Equal(t, reapReport{
+		FormatVersion:         reapFormatVersion,
 		CheckpointTableExists: true,
 		Stopped:               true,
+		Failed:                second,
 		Dropped:               []string{first},
 		WouldDrop:             []string{},
 		Live:                  []string{},
@@ -299,12 +307,13 @@ func TestReapReportsAnAbsentCheckpointTableAndExitsZero(t *testing.T) {
 	for _, dryRun := range []bool{true, false} {
 		report := runReap(t, &ReapCmd{DBFlags: DBFlags{URL: url}, DryRun: dryRun})
 		assert.Equal(t, reapReport{
-			DryRun:    dryRun,
-			Dropped:   []string{},
-			WouldDrop: []string{},
-			Live:      []string{},
-			Active:    []string{},
-			Foreign:   []string{},
+			FormatVersion: reapFormatVersion,
+			DryRun:        dryRun,
+			Dropped:       []string{},
+			WouldDrop:     []string{},
+			Live:          []string{},
+			Active:        []string{},
+			Foreign:       []string{},
 		}, report, "dry run %t", dryRun)
 
 		args := []string{"reap", "--url", url, "--json"}
@@ -314,4 +323,137 @@ func TestReapReportsAnAbsentCheckpointTableAndExitsZero(t *testing.T) {
 		assert.Equal(t, 0, Main(args, "test", io.Discard, io.Discard), "dry run %t", dryRun)
 	}
 	assert.True(t, slotPresent(t, pool, slot))
+}
+
+// dropSlotIfPresent registers the drop of a slot the test made by hand, so
+// the throwaway database can be dropped after it whether or not the pass
+// took the slot.
+func dropSlotIfPresent(t *testing.T, pool *pgxpool.Pool, name string) {
+	t.Helper()
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), `
+			SELECT pg_drop_replication_slot(slot_name)
+			FROM pg_catalog.pg_replication_slots
+			WHERE slot_name = $1`, name)
+		assert.NoError(t, err)
+	})
+}
+
+// When the one orphan's drop fails, the server has already taken the slot
+// (the drop removes the slot before its publication, and this publication
+// publishes every table, which is not the engine's shape), so the report
+// is still printed: stopped, with the orphan named as the slot the pass
+// stopped at, and exit 1.
+func TestReapReportsTheSlotItStoppedAtWhenTheOnlyDropFails(t *testing.T) {
+	url := testutil.NewDatabase(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	require.NoError(t, err)
+	require.NoError(t, store.Ensure(t.Context()))
+
+	const orphan = "pgsprite_0000aaaa"
+	_, err = pool.Exec(t.Context(), `CREATE PUBLICATION `+orphan+` FOR ALL TABLES`)
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, orphan)
+	require.NoError(t, err)
+	dropSlotIfPresent(t, pool, orphan)
+
+	cmd := &ReapCmd{DBFlags: DBFlags{URL: url}, JSON: true}
+	var out strings.Builder
+	require.Error(t, cmd.run(t.Context(), &out))
+	var report reapReport
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report), "stdout carries the stopped report")
+	assert.Equal(t, reapReport{
+		FormatVersion:         reapFormatVersion,
+		CheckpointTableExists: true,
+		Stopped:               true,
+		Failed:                orphan,
+		Dropped:               []string{},
+		WouldDrop:             []string{},
+		Live:                  []string{},
+		Active:                []string{},
+		Foreign:               []string{},
+	}, report)
+	assert.False(t, slotPresent(t, pool, orphan), "the server took the slot before the drop failed")
+}
+
+// A checkpoint table that goes away partway through a pass stops the pass
+// at the next orphan, whose row can no longer be read, and the report still
+// names the orphan already dropped: the "no checkpoint table" report is
+// only for a table that was absent when the pass began. An event trigger
+// drops the table when the first orphan's publication is dropped.
+func TestReapKeepsWhatItDroppedWhenTheCheckpointTableGoesMidPass(t *testing.T) {
+	url := testutil.NewDatabase(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	require.NoError(t, err)
+	require.NoError(t, store.Ensure(t.Context()))
+	checkpointTable := pgx.Identifier{checkpoint.SchemaName, checkpoint.TableName}.Sanitize()
+
+	const first, second = "pgsprite_0000aaaa", "pgsprite_ffff0000"
+	_, err = pool.Exec(t.Context(), `CREATE PUBLICATION `+first+` FOR TABLE `+checkpointTable)
+	require.NoError(t, err)
+	for _, name := range []string{first, second} {
+		_, err = pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, name)
+		require.NoError(t, err)
+		dropSlotIfPresent(t, pool, name)
+	}
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, testutil.NewSchema(t, pool), "drop_checkpoint_table", `
+		IF TG_TAG = 'DROP PUBLICATION' THEN
+			EXECUTE 'DROP TABLE IF EXISTS `+checkpointTable+` CASCADE';
+		END IF;`)
+
+	cmd := &ReapCmd{DBFlags: DBFlags{URL: url}, JSON: true}
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, checkpoint.ErrTableMissing)
+	var report reapReport
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	assert.Equal(t, reapReport{
+		FormatVersion:         reapFormatVersion,
+		CheckpointTableExists: true,
+		Stopped:               true,
+		Failed:                second,
+		Dropped:               []string{first},
+		WouldDrop:             []string{},
+		Live:                  []string{},
+		Active:                []string{},
+		Foreign:               []string{},
+	}, report)
+	assert.False(t, slotPresent(t, pool, first))
+	assert.True(t, slotPresent(t, pool, second), "no row can speak for the second slot any more, so it is kept")
+}
+
+// A dry run that would drop opens a replication connection, as each drop of
+// a real run does, so a role without the REPLICATION attribute learns from
+// the preview that a real run could not drop: the report is printed with
+// the orphan the pass would drop, and the command fails with the server's
+// insufficient-privilege refusal. Nothing is dropped.
+func TestReapDryRunFailsForARoleThatCannotOpenAReplicationConnection(t *testing.T) {
+	f := newReapFixture(t)
+	role := testutil.NewRole(t, f.pool, "LOGIN NOREPLICATION PASSWORD 'reap-test-only'")
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf(`GRANT USAGE ON SCHEMA %s TO %s`,
+		pgx.Identifier{checkpoint.SchemaName}.Sanitize(), pgx.Identifier{role}.Sanitize()))
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(`GRANT SELECT ON %s TO %s`,
+		pgx.Identifier{checkpoint.SchemaName, checkpoint.TableName}.Sanitize(), pgx.Identifier{role}.Sanitize()))
+	require.NoError(t, err)
+	u, err := neturl.Parse(f.url)
+	require.NoError(t, err)
+	u.User = neturl.UserPassword(role, "reap-test-only")
+
+	cmd := &ReapCmd{DBFlags: DBFlags{URL: u.String()}, DryRun: true, JSON: true}
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "42501", pgErr.Code, "the server refuses a walsender to a role without REPLICATION")
+	var report reapReport
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	assert.Equal(t, []string{f.orphan}, report.WouldDrop)
+	assert.True(t, slotPresent(t, f.pool, f.orphan), "a dry run drops nothing")
 }

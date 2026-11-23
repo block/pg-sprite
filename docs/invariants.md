@@ -1194,9 +1194,14 @@ one does not know keeps its slot (`TestReapOrphanSlotsKeepsASlotARowInAnUnknownP
 is dropped through `DropIdleSlot`, publication and all, which refuses a held slot instead of waiting for its holder — whether a
 slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
 snapshot; a slot a live row names, a slot a process holds, and a name wearing the prefix
-without the engine's shape are reported and left; a database whose checkpoint table does not
+without the engine's name shape or `pgoutput` plugin are reported and left
+(`TestReapOrphanSlotsReportsAnEngineShapedSlotOfAnotherPluginAsForeign`); the pass stops at
+the first failure and names the slot in `Failed`; a database whose checkpoint table does not
 exist is refused with `ErrTableMissing` rather than read as all orphans; two reapers over one
-database take turns at each slot, the one that waited finding the slot gone) + `pkg/applier`
+database take turns at each slot, the one that waited finding the slot gone;
+`Store.PreviewOrphanSlots` sorts the same reads by the same rule under no lock and drops
+nothing, and the `reap` command reports its `ErrTableMissing` refusal as an absent table with no
+slot examined, only when the first read refused) + `pkg/applier`
 `Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it,
 through one `decode.SlotLagWatch` for the run whose grace is `RestartReleaseInterval` plus
 the cycle's `Interval`, which cannot be set above `MaxCatchupInterval` (the release

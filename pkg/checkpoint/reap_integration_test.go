@@ -215,6 +215,26 @@ func TestReapOrphanSlotsReportsAPrefixWearingForeignSlot(t *testing.T) {
 	assert.True(t, slotExists(t, d.pool, foreign))
 }
 
+// A slot of the engine's name shape that decodes with another output plugin
+// was made by another tool, since every engine slot decodes with pgoutput:
+// the pass reports it as foreign and leaves it, though no row names it.
+func TestReapOrphanSlotsReportsAnEngineShapedSlotOfAnotherPluginAsForeign(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	const other = "pgsprite_0000beef"
+	_, err := d.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'test_decoding')`, other)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := d.pool.Exec(context.WithoutCancel(t.Context()), `SELECT pg_drop_replication_slot($1)`, other)
+		assert.NoError(t, err)
+	})
+
+	reaped, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.Reaped{Foreign: []string{other}}, reaped)
+	assert.True(t, slotExists(t, d.pool, other))
+}
+
 // Without the checkpoint table no row can speak for any slot, so the pass
 // is refused rather than read every slot as an orphan.
 func TestReapOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
@@ -228,7 +248,7 @@ func TestReapOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
 // The preview sorts one fixture of every kind — an orphan, a slot a live
 // row names, a slot a stream holds, and a prefix-wearing foreign name — into
 // the same lists the pass then reports, with the orphan the preview names
-// as Dropped the one the pass drops. The preview itself drops nothing and
+// as WouldDrop the one the pass drops. The preview itself drops nothing and
 // takes no lock, so every slot is still there after it (ST-3).
 func TestPreviewOrphanSlotsSortsAsTheReaperDoesAndDropsNothing(t *testing.T) {
 	d := newReapDatabase(t, newReapServer(t))
@@ -258,10 +278,10 @@ func TestPreviewOrphanSlotsSortsAsTheReaperDoesAndDropsNothing(t *testing.T) {
 	preview, err := d.store.PreviewOrphanSlots(t.Context())
 	require.NoError(t, err)
 	want := checkpoint.Reaped{
-		Dropped: []string{orphan.Name()},
-		Live:    []string{live.Name()},
-		Active:  []string{held.Name()},
-		Foreign: []string{foreign},
+		WouldDrop: []string{orphan.Name()},
+		Live:      []string{live.Name()},
+		Active:    []string{held.Name()},
+		Foreign:   []string{foreign},
 	}
 	assert.Equal(t, want, preview)
 	for _, name := range []string{orphan.Name(), live.Name(), held.Name(), foreign} {
@@ -270,7 +290,12 @@ func TestPreviewOrphanSlotsSortsAsTheReaperDoesAndDropsNothing(t *testing.T) {
 
 	reaped, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
 	require.NoError(t, err)
-	assert.Equal(t, preview, reaped, "the pass sorts the same reads the same way")
+	assert.Equal(t, checkpoint.Reaped{
+		Dropped: preview.WouldDrop,
+		Live:    preview.Live,
+		Active:  preview.Active,
+		Foreign: preview.Foreign,
+	}, reaped, "the pass drops what the preview would drop and keeps what it would keep")
 	assert.False(t, slotExists(t, d.pool, orphan.Name()))
 }
 
