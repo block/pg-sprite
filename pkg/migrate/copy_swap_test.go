@@ -272,6 +272,17 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
 	})
 
+	// A slot past the hard limit is the same family: a resume under the
+	// same ceiling stops there again, so the remedy names the setting too.
+	t.Run("a slot past the hard limit names the ceiling to raise", func(t *testing.T) {
+		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetainedHardLimit,
+			Retained: 4 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
+	})
+
 	t.Run("a stream behind the ceiling resumes without naming the ceiling", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagStreamBehind,
 			Retained: 2 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
