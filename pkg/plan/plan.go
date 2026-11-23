@@ -55,8 +55,9 @@ import (
 // add-integer-primary-key guidance code, which a
 // copy-and-swap-pk-unsupported refusal verdict for a keyless table
 // carries; no report emits it, but the report embeds the whole guidance
-// vocabulary.
-const FormatVersion = 21
+// vocabulary. Version 22 added the statement-level
+// drops field and its part in the fingerprint.
+const FormatVersion = 22
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -103,6 +104,12 @@ type Statement struct {
 	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
 	// out of the JSON for the same reason.
 	Validates *schemadiff.ConstraintValidation `json:"-"`
+	// Drops is the live object a diff-derived DROP INDEX, DROP CONSTRAINT,
+	// DROP COLUMN, or DROP NOT NULL removes, with the definition the diff
+	// read (see schemadiff.Change.Drops). A reviewer sees what the dropped
+	// name stood for, the fingerprint covers it, and execution refuses when
+	// the object has changed since. Absent on every other statement.
+	Drops *schemadiff.DroppedObject `json:"drops,omitempty"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
@@ -456,7 +463,9 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 
 // Fingerprint computes the plan's stable identity: "sha256:" plus the hex
 // digest over what would execute — each statement's canonical SQL, route,
-// backend, disposition, and exec_sql, in plan order. Explanatory fields
+// backend, disposition, and exec_sql, in plan order, and for a statement
+// that drops an object, the kind, name, and definition of what it drops
+// after a file separator. Explanatory fields
 // (decisions, kind, destructive, reason, cause, guidance) are excluded, so
 // a reworded reason does not change identity but a rerouted or resequenced
 // plan does. The exact
@@ -476,6 +485,15 @@ func Fingerprint(statements []Statement, extensionSchemas ...string) string {
 		writeField(h, string(st.Disposition))
 		for _, sql := range st.ExecSQL {
 			writeField(h, sql)
+		}
+		if st.Drops != nil {
+			h.Write([]byte{0x1c}) // file separator: the dropped object follows
+			writeField(h, string(st.Drops.Kind))
+			writeField(h, st.Drops.Name)
+			writeField(h, st.Drops.Definition)
+			for _, dep := range st.Drops.Dependents {
+				writeField(h, dep)
+			}
 		}
 		h.Write([]byte{0x1e}) // record separator: one per statement
 	}
