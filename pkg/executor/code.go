@@ -34,6 +34,10 @@ const (
 	// CodeCommitOutcomeUnknown requires catalog inspection before retry: a
 	// bounded attempt's COMMIT did not return success and may have landed.
 	CodeCommitOutcomeUnknown Code = "commit-outcome-unknown"
+	// CodeDropOutcomeUnknown requires catalog inspection before retry: a
+	// reviewed index drop completed, but the check of which index it
+	// dropped failed.
+	CodeDropOutcomeUnknown Code = "drop-outcome-unknown"
 	// CodeInvalidBlockingBudget identifies an unrepresentable or disabled bound.
 	CodeInvalidBlockingBudget Code = "invalid-blocking-budget"
 	// CodeUnsupportedAcceptedBlocking identifies a statement outside this narrow path.
@@ -223,6 +227,7 @@ func Codes() []Code {
 		CodeBudgetStatementExceeded,
 		CodeBlockingOutcomeUnknown,
 		CodeCommitOutcomeUnknown,
+		CodeDropOutcomeUnknown,
 		CodeRowSecurityPlanChanged,
 		CodeRowSecurityRefused,
 		CodeRowSecurityOutcomeUnknown,
@@ -345,6 +350,9 @@ func OutcomeCode(err error) Code {
 	}
 	if _, ok := errors.AsType[*CommitOutcomeUnknownError](err); ok {
 		return CodeCommitOutcomeUnknown
+	}
+	if _, ok := errors.AsType[*DropOutcomeUnknownError](err); ok {
+		return CodeDropOutcomeUnknown
 	}
 	return sentinelCode(err)
 }

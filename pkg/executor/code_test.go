@@ -106,6 +106,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
 		{name: "blocking outcome unknown", err: &executor.BlockingOutcomeUnknownError{Err: errors.New("lost")}, want: executor.CodeBlockingOutcomeUnknown},
 		{name: "commit outcome unknown", err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeCommitOutcomeUnknown},
+		{name: "drop outcome unknown", err: &executor.DropOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeDropOutcomeUnknown},
 		{
 			name: "commit outcome unknown at a sequence step carries its own code",
 			err: &executor.SequenceStepError{
@@ -214,6 +215,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
 		executor.CodeCommitOutcomeUnknown:            false,
+		executor.CodeDropOutcomeUnknown:              false,
 		executor.CodeRowSecurityRefused:              true,
 		executor.CodeRowSecurityPlanChanged:          true,
 		executor.CodeRowSecurityOutcomeUnknown:       false,
