@@ -29,6 +29,11 @@ func partitionedParentRefusal(m Model) error {
 			return fmt.Errorf("index %q is not attached on every partition: %w", ix.Name, ErrUnrenderableUnattachedIndex)
 		}
 	}
+	for _, c := range m.Constraints {
+		if c.IndexInvalid {
+			return fmt.Errorf("the index of constraint %q is not attached on every partition: %w", c.Name, ErrUnrenderableUnattachedIndex)
+		}
+	}
 	return nil
 }
 

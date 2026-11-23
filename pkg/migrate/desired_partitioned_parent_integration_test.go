@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -57,4 +58,34 @@ CREATE INDEX events_id_idx ON events USING btree (id);`)
 			SELECT 1 FROM information_schema.columns
 			WHERE table_schema = $1 AND table_name = 'events_2026_01' AND column_name = 'note')`, schema).Scan(&partitionHasNote))
 	assert.True(t, partitionHasNote, "the column added on the parent reaches its partition")
+}
+
+// A desired file for a partitioned parent the schema does not have creates
+// it with its partition key and its index. The file declares no partitions,
+// so the parent is created empty: rows need partitions created outside the
+// file before they have anywhere to go.
+func TestRunDesiredCreatesMissingPartitionedParent(t *testing.T) {
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+
+	desired := parseDesired(t, `CREATE TABLE "events" (
+    "id" bigint NOT NULL,
+    "created_at" timestamp with time zone NOT NULL,
+    CONSTRAINT "events_pkey" PRIMARY KEY (created_at, id)
+) PARTITION BY RANGE (created_at);
+
+CREATE INDEX events_id_idx ON events USING btree (id);`)
+	res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: schema, Desired: desired}, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	assert.Equal(t, "RANGE (created_at)", live.PartitionKey)
+	require.Len(t, live.Indexes, 1)
+	assert.Equal(t, "events_id_idx", live.Indexes[0].Name)
+	assert.False(t, live.Indexes[0].Invalid, "an index created on a parent with no partitions is valid")
 }

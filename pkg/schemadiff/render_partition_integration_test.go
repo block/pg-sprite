@@ -155,3 +155,73 @@ func TestRenderRefusesLivePartitionedParentWithUnattachedIndex(t *testing.T) {
 	_, err = schemadiff.Render(live)
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableUnattachedIndex)
 }
+
+// A primary key added to a parent with ALTER TABLE ONLY owns an index that
+// is not attached on any partition yet, so the key is enforced on none of
+// them. The constraint hides its index from the model's index list, so the
+// refusal reads the validity the constraint carries: the parent renders as
+// nothing rather than as a complete key.
+func TestRenderRefusesLivePartitionedParentWithUnattachedPrimaryKey(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.sp (
+			id bigint NOT NULL,
+			region text NOT NULL
+		) PARTITION BY LIST (region);
+
+		CREATE TABLE %[1]s.sp_eu PARTITION OF %[1]s.sp
+			FOR VALUES IN ('eu');
+
+		ALTER TABLE ONLY %[1]s.sp ADD CONSTRAINT sp_pkey PRIMARY KEY (region, id);`, schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "sp")
+	require.NoError(t, err)
+	require.Len(t, live.Constraints, 1)
+	require.True(t, live.Constraints[0].IndexInvalid, "the key's index is attached on no partition")
+	_, err = schemadiff.Render(live)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableUnattachedIndex)
+}
+
+// The partition key renders as the server prints it, and the scratch build
+// parses that text back. Keys that print more than a bare column — an
+// opclass and collation, an expression, HASH — round-trip to the same model
+// and an empty diff.
+func TestRenderRoundTripsPartitionKeyShapes(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	for name, create := range map[string]string{
+		"collated opclass column, expressions, and several columns": `
+			CREATE TABLE %s.k (
+				name text NOT NULL,
+				ts timestamp with time zone NOT NULL,
+				n integer NOT NULL
+			) PARTITION BY RANGE (name COLLATE "C" text_pattern_ops, (date_trunc('day', ts AT TIME ZONE 'UTC')), (n + 1))`,
+		"hash": `
+			CREATE TABLE %s.k (
+				name text NOT NULL,
+				n integer NOT NULL
+			) PARTITION BY HASH (n)`,
+		"list over an expression": `
+			CREATE TABLE %s.k (
+				name text NOT NULL,
+				n integer NOT NULL
+			) PARTITION BY LIST (lower(name))`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema := testutil.NewSchema(t, pool)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(create, schema))
+			require.NoError(t, err)
+
+			live, desired, changes := roundTrip(t, pool, schema, "k")
+			assert.Equal(t, live, modeltest.Comparable(desired))
+			assert.Empty(t, changes)
+		})
+	}
+}

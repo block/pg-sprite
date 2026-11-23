@@ -30,6 +30,8 @@ Each file contains one canonical `CREATE TABLE`, followed by that table's
 get no extra RLS SQL. Export is create-only: `pull` creates the output
 directory when necessary but never overwrites a file. Move or delete an old
 baseline before refreshing it.
+A partitioned parent is exported without its partitions, so its file creates
+an empty parent; create and attach the partitions outside pg-sprite.
 
 Tables are processed independently rather than fail-fast. The text report has
 one `PULLED`, `REFUSED`, or `ERROR` result per table and a final count. A fully
@@ -102,9 +104,10 @@ verified.
 Export fails closed when the declarative model cannot represent a table
 without losing meaning. Current refusals include:
 
-- a partitioned parent with an index not attached on every partition, or with
-  row security (a parent otherwise exports as `CREATE TABLE ... PARTITION BY`
-  with its indexes on the whole table; its partitions are not exported);
+- a partitioned parent with an index, or a primary key, unique, or exclusion
+  constraint, whose index is not attached on every partition, or with row
+  security (a parent otherwise exports as `CREATE TABLE ... PARTITION BY` with
+  its indexes on the whole table; its partitions are not exported);
 - either side of classic `INHERITS` relationships;
 - either side of a foreign-key relationship;
 - policies that read a table unqualified, or read their own table (qualified helpers such as `auth.uid()` and schema-qualified tables such as `public.team_members` are supported);

@@ -555,7 +555,10 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexD
 		       contype OPERATOR(pg_catalog.=) 'f', contype OPERATOR(pg_catalog.=) 'p',
 		       CASE WHEN $2 AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
 		            THEN pg_catalog.pg_get_indexdef(conindid) ELSE '' END,
-		       condeferrable, condeferred, NOT convalidated
+		       condeferrable, condeferred, NOT convalidated,
+		       contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
+		           AND EXISTS (SELECT 1 FROM pg_catalog.pg_index ix
+		                       WHERE ix.indexrelid OPERATOR(pg_catalog.=) conindid AND NOT ix.indisvalid)
 		FROM pg_catalog.pg_constraint
 		WHERE conrelid OPERATOR(pg_catalog.=) $1
 		  AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'c', 'f', 'x']::pg_catalog."char"[])
@@ -568,7 +571,7 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexD
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid); err != nil {
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid, &c.IndexInvalid); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
 		}
 		if c.IndexDef != "" {
