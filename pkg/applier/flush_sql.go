@@ -112,13 +112,15 @@ func deleteAllSQL(relation, pk string) string {
 // rendered as text, and last the server's WAL insert position as text. The
 // position is taken inside the statement, after its snapshot: every change
 // the read saw committed below it, so the buffer can tell when the stream
-// has delivered everything the read knew about.
+// has delivered everything the read knew about. The text casts name
+// pg_catalog.text; the key comparison is left to the flush transaction's
+// search_path, which is pinned catalog-first before this runs.
 func rowSQL(relation, pk string, names []string) string {
 	cols := make([]string, 0, len(names)+1)
 	for _, name := range names {
-		cols = append(cols, pgx.Identifier{name}.Sanitize()+"::text")
+		cols = append(cols, pgx.Identifier{name}.Sanitize()+"::pg_catalog.text")
 	}
-	cols = append(cols, "pg_catalog.pg_current_wal_insert_lsn()::text")
+	cols = append(cols, "pg_catalog.pg_current_wal_insert_lsn()::pg_catalog.text")
 	return "SELECT " + strings.Join(cols, ", ") + " FROM " + relation + " WHERE " + pk + " = $1"
 }
 
