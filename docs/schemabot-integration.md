@@ -670,6 +670,7 @@ operational errors retries forever. Route them ([runbook](invalid-index-recovery
 | Outcome code | `Recoverable()` | Orchestrator action |
 | --- | --- | --- |
 | `invalid-index-own-leftover`, `invalid-index-abandoned`, `invalid-index-builder-unobservable` | yes | Run `RebuildAbandonedIndex` with the same statement (opt in explicitly — the build never does it for you); it removes the entry only after proving it abandoned under the table lock, or reports `*BudgetError` (`CauseLock`) and touches nothing when a build it cannot see holds the lock. When the apply was cancelled and must not resume — the leftover is to be removed, not rebuilt — run `DropAbandonedIndex` instead: the same statement, budget, and proof, stopping after the drop, on a pool of two connections rather than three |
+| `data-fault` (the build failed on the table's rows: duplicate values under a unique index, or an index expression raising on a row) | no | Never rebuild: it meets the same rows and fails the same way. Surface to an operator to correct the rows; the error's `Cleanup` still says what the build left — its own leftover (`ErrBuildLeftInvalidIndex`) occupies the name until it is dropped, by `DropAbandonedIndex` or the operator's `DROP INDEX CONCURRENTLY` ([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)) |
 | `invalid-index-build-in-flight` | no | Wait and retry later; the error names the backend PID |
 | `invalid-index-other-table` | no | Not this change's index; surface to an operator |
 | `invalid-index-not-droppable` | no | A partitioned table's index, an index partition, or a constraint's index — never debris; surface to an operator |
@@ -883,7 +884,11 @@ says the run "could not be abandoned" and names the discard error). For both, co
 data or the statement, then run it with `--restart`; the corrected run builds its shadow from
 the source as it now is. An adapter tells the two data-fault outcomes apart by the verdict's
 `abandoned` field, not by the detail's wording: `code: data-fault` with `abandoned: true` is
-rerun as written; `code: data-fault` without it is rerun with `--restart`. On `RunDesired` the
+rerun as written; `code: data-fault` without it is rerun with `--restart`. A `data-fault`
+verdict that carries `failed_step` is not a copy-and-swap run at all but a native concurrent
+index build that failed on the rows (duplicate values under a unique index): there is no run
+to restart, and the build's own invalid index is the leftover to drop once the rows are
+corrected ([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)). On `RunDesired` the
 field is on the failed entry of `DesiredResult.Verdicts`, not on the aggregate. An engine from
 before the field existed abandons the same way but never writes it, so an adapter that reads
 CLI output from binaries of mixed age keeps reading the detail for those.

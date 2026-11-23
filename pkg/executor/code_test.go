@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -41,6 +42,24 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{
 			name: "own invalid leftover",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrBuildLeftInvalidIndex},
+			want: executor.CodeInvalidIndexOwnLeftover,
+		},
+		{
+			name: "own invalid leftover of a build that failed on duplicate rows",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: &pgconn.PgError{Code: "23505"}, Cleanup: executor.ErrBuildLeftInvalidIndex},
+			want: executor.CodeDataFault,
+		},
+		{
+			name: "own invalid leftover of a build an index expression failed on a row",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: fmt.Errorf("build: %w", &pgconn.PgError{Code: "22012"}), Cleanup: executor.ErrBuildLeftInvalidIndex},
+			want: executor.CodeDataFault,
+		},
+		{
+			name: "own invalid leftover of a build that failed outside the data classes",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: &pgconn.PgError{Code: "42P07"}, Cleanup: executor.ErrBuildLeftInvalidIndex},
 			want: executor.CodeInvalidIndexOwnLeftover,
 		},
 		{

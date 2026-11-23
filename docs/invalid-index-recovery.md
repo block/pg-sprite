@@ -67,6 +67,15 @@ recovery with the same statement sweeps it.
 
 `(*InvalidIndexError).Recoverable()` is the programmatic form of the third column.
 
+One build failure outranks the table: a build that failed on the table's **rows** — a
+unique index over duplicate values (SQLSTATE `23505`), or an index expression that raises
+on a row (class `22`) — reports `data-fault` whatever it left, and `Recoverable()` is
+false. The fault is the data, not the leftover: a rebuild meets the same rows and fails the
+same way, leaving a new invalid index behind. The `Cleanup` sentinel still says what the
+build left, and the server error stays in the chain (`errors.As` to `*pgconn.PgError`;
+for `23505` its `Detail` names the duplicated key). See
+[a build that failed on its rows](#a-build-that-failed-on-its-rows-data-fault).
+
 ## The automatic recovery: `RebuildAbandonedIndex` and `DropAbandonedIndex`
 
 `executor.RebuildAbandonedIndex` takes exactly the statement `BuildIndexConcurrently`
@@ -149,6 +158,29 @@ DROP INDEX CONCURRENTLY "schema"."index";
 `CONCURRENTLY` matters: a plain `DROP INDEX` takes an `ACCESS EXCLUSIVE` lock on the
 table and blocks all reads and writes while it waits. After the drop, the original change
 can be retried.
+
+### A build that failed on its rows (`data-fault`)
+
+The build's own failure was the server rejecting the table's rows: duplicate values under
+a unique index (`CREATE UNIQUE INDEX CONCURRENTLY`, which `migrate` also runs for
+`ADD UNIQUE` and `ADD PRIMARY KEY` on a plain table), or an index expression that raised
+on a row. The outcome code is `data-fault`, and `Recoverable()` is false: until the rows
+are corrected, `RebuildAbandonedIndex` — or a drop and a rerun — meets the same rows, fails
+the same way, and leaves a new invalid index behind. The error still reports what the
+failed build left; when that is its own leftover (`ErrBuildLeftInvalidIndex`), it occupies
+the name and a rerun is refused until it is gone:
+
+1. Find and correct the rows. The verdict's `sqlstate` and `server_error` name the
+   violation; a library caller's `*pgconn.PgError` also carries the server's `Detail`,
+   which for a unique violation names one duplicated key. Look for every duplicate, for
+   example with `SELECT email, count(*) FROM t GROUP BY email HAVING count(*) > 1`.
+2. Drop the leftover with the statement the error names, `DROP INDEX CONCURRENTLY
+   "schema"."index"` — or, once the rows are corrected, let `RebuildAbandonedIndex` drop it
+   and build in one call.
+3. Run the change again.
+
+An entry the run could not prove its own is reported with the same code; follow its
+state's section below before removing anything.
 
 ### Another backend's build is in flight (`ErrInvalidIndexBuildInFlight`)
 
