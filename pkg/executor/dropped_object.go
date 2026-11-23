@@ -20,19 +20,40 @@ import (
 // re-plan against the table as it stands and review the new plan.
 var ErrDroppedObjectDrift = errors.New("the object the plan drops changed after planning")
 
-// ErrDroppedColumnHasDescendants means a reviewed column drop would also
-// drop the column from the table's partitions or inheritance children, read
-// under the table's lock. The plan reviewed only the named table's column
-// and its dependents, not the children's copies and theirs, so nothing was
-// dropped. The outcome is permanent.
-var ErrDroppedColumnHasDescendants = errors.New("the column the plan drops also reaches tables below it")
+// ErrDroppedObjectHasDescendants means a reviewed column, constraint, or
+// NOT NULL drop names a table that has partitions or inheritance children,
+// read under the table's lock. The drop would reach into those tables too:
+// a column drop removes their copies of the column, a constraint drop
+// removes their copies of the constraint (and, for a partitioned table's
+// key, each partition's index), and a NOT NULL drop clears it on their
+// copies. The plan reviewed only the named table's object and its
+// dependents, so nothing was dropped. The outcome is permanent.
+var ErrDroppedObjectHasDescendants = errors.New("the object the plan drops also reaches tables below it")
+
+// opDrops reports whether op drops the column, constraint, or NOT NULL
+// that d names. An index drop is a DROP INDEX statement and never matches
+// here (see ExecuteDropIndexConcurrently).
+func opDrops(op statement.Op, d *schemadiff.DroppedObject) bool {
+	switch d.Kind {
+	case schemadiff.DroppedColumn:
+		return op.Kind == statement.OpDropColumn && op.Column == d.Name
+	case schemadiff.DroppedConstraint:
+		return op.Kind == statement.OpDropConstraint && op.Name == d.Name
+	case schemadiff.DroppedNotNull:
+		return op.Kind == statement.OpDropNotNull && op.Column == d.Name
+	default:
+		return false
+	}
+}
 
 // dropsObject reports whether st is an ALTER TABLE whose only operation
-// drops the column, constraint, or NOT NULL that d names. An index drop is
-// a DROP INDEX statement and never matches here (see
-// ExecuteDropIndexConcurrently). A matching drop that says CASCADE is an
-// error: it would remove objects d does not list, and a plan never drops
-// with CASCADE.
+// drops the column, constraint, or NOT NULL that d names. It is an error
+// for st to drop d in any other shape, because only a step whose sole
+// operation is the drop is checked against the plan: a statement that
+// drops d alongside other operations, or a single drop that says CASCADE,
+// which would remove objects d does not list (a plan never drops with
+// CASCADE). An ALTER TABLE with any CASCADE in a single operation is
+// refused as well, whichever object it names.
 func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, error) {
 	if st.Kind() != statement.KindAlterTable {
 		return false, nil
@@ -41,23 +62,24 @@ func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, err
 	if err != nil {
 		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
-	if len(ops) != 1 {
-		return false, nil
-	}
-	op := ops[0]
-	if op.Cascade {
+	if len(ops) == 1 && ops[0].Cascade {
 		return false, fmt.Errorf("%w: %q drops with CASCADE, which removes objects the plan did not review", ErrInvariantViolation, st.SQL())
 	}
-	switch d.Kind {
-	case schemadiff.DroppedColumn:
-		return op.Kind == statement.OpDropColumn && op.Column == d.Name, nil
-	case schemadiff.DroppedConstraint:
-		return op.Kind == statement.OpDropConstraint && op.Name == d.Name, nil
-	case schemadiff.DroppedNotNull:
-		return op.Kind == statement.OpDropNotNull && op.Column == d.Name, nil
-	default:
-		return false, nil
+	for _, op := range ops {
+		if !opDrops(op, d) {
+			continue
+		}
+		if op.Cascade {
+			return false, fmt.Errorf("%w: %q drops %s %s with CASCADE, which removes objects the plan did not review",
+				ErrInvariantViolation, st.SQL(), d.Kind, d.Name)
+		}
+		if len(ops) != 1 {
+			return false, fmt.Errorf("%w: %q drops %s %s alongside other operations, and only a step whose sole operation is the drop is checked",
+				ErrInvariantViolation, st.SQL(), d.Kind, d.Name)
+		}
+		return true, nil
 	}
+	return false, nil
 }
 
 // refuseDroppedObjectDrift locks st's table in ACCESS EXCLUSIVE, the lock
@@ -90,17 +112,16 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 		return fmt.Errorf("%w: dropping %s %s of %s would also remove %s, which the plan did not review; re-plan",
 			ErrDroppedObjectDrift, d.Kind, d.Name, target, strings.Join(extra, "; "))
 	}
-	if d.Kind == schemadiff.DroppedColumn {
-		return refuseColumnDropBelow(ctx, tx, st, d, target)
-	}
-	return nil
+	return refuseDropBelow(ctx, tx, st, d, target)
 }
 
-// refuseColumnDropBelow refuses a column drop on a table that has
-// partitions or inheritance children, read under the table's lock. A drop
-// without ONLY reaches their copies of the column too, and with them any
-// index or constraint on a copy, none of which the plan reviewed.
-func refuseColumnDropBelow(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
+// refuseDropBelow refuses a drop on a table that has partitions or
+// inheritance children, read under the table's lock. A drop without ONLY
+// reaches their copies of the object too, and with them anything that
+// depends on a copy, none of which the plan reviewed. A drop with ONLY is
+// refused as well: it would leave the children's copies standing, which is
+// not the change the plan reviewed either, and a plan never says ONLY.
+func refuseDropBelow(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	var below bool
 	if err := tx.QueryRow(ctx, `
@@ -109,11 +130,11 @@ func refuseColumnDropBelow(ctx context.Context, tx pgx.Tx, st statement.Statemen
 		  JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		 WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2)`,
 		st.Schema(), st.Table()).Scan(&below); err != nil {
-		return fmt.Errorf("read the tables below %s before dropping column %s: %w", target, d.Name, err)
+		return fmt.Errorf("read the tables below %s before dropping %s %s: %w", target, d.Kind, d.Name, err)
 	}
 	if below {
-		return fmt.Errorf("%w: %s has partitions or inheritance children, and dropping column %s would drop their copies "+
-			"and anything on them, which the plan did not review", ErrDroppedColumnHasDescendants, target, d.Name)
+		return fmt.Errorf("%w: %s has partitions or inheritance children, and dropping %s %s would reach their copies "+
+			"and anything on them, which the plan did not review", ErrDroppedObjectHasDescendants, target, d.Kind, d.Name)
 	}
 	return nil
 }
@@ -139,7 +160,9 @@ func droppingStep(admitted []sequenceStep, d *schemadiff.DroppedObject) (int, er
 				ErrInvariantViolation, i+1, d.Kind, d.Name, step.kind)
 		}
 		// Only this step is checked, so a later step that drops the same
-		// name would drop whatever took it in between, unchecked.
+		// name would drop whatever took it in between, unchecked. An
+		// earlier step that drops it in another shape has already been
+		// refused by dropsObject.
 		for j := i + 1; j < len(admitted); j++ {
 			again, err := dropsObject(admitted[j].st, d)
 			if err != nil {

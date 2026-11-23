@@ -308,8 +308,10 @@ func TestRunSequenceDroppingRefusesAReplacedDependent(t *testing.T) {
 	assert.True(t, columnExists(t, pool, schema, "t", "note"))
 }
 
-// Only one step's drop is checked against the plan, so a plan in which a
-// second step drops the same name again is refused before anything runs.
+// Only one step's drop is checked against the plan, so a plan in which
+// another step drops the same name again, alone or alongside other
+// operations and before or after the checked step, is refused before
+// anything runs.
 func TestRunSequenceDroppingRefusesTwoStepsThatDropTheObject(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`, schema))
@@ -317,13 +319,21 @@ func TestRunSequenceDroppingRefusesTwoStepsThatDropTheObject(t *testing.T) {
 	d := modeltest.PlannedDrop(t, pool, schema, "t", schemadiff.DroppedColumn, "note")
 	pt := mustPreflight(t, pool, schema, "t")
 
-	_, err = executor.RunSequenceDropping(t.Context(), pool, pt, []string{
-		fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema),
-		fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN note int", schema),
-		fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema),
-	}, runBudget, executor.DefaultRetryPolicy(), d)
-	require.ErrorIs(t, err, executor.ErrInvariantViolation)
-	assert.True(t, columnExists(t, pool, schema, "t", "note"))
+	drop := fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema)
+	readd := fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN note int", schema)
+	dropAmongOthers := fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note, ADD COLUMN y int", schema)
+	for name, steps := range map[string][]string{
+		"a later single drop":         {drop, readd, drop},
+		"a later multi-operation one": {drop, readd, dropAmongOthers},
+		"an earlier multi-operation":  {dropAmongOthers, readd, drop},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := executor.RunSequenceDropping(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy(), d)
+			require.ErrorIs(t, err, executor.ErrInvariantViolation)
+			assert.True(t, columnExists(t, pool, schema, "t", "note"))
+			assert.False(t, columnExists(t, pool, schema, "t", "y"))
+		})
+	}
 }
 
 // A column drop on a table with an inheritance child drops the child's
@@ -340,10 +350,57 @@ func TestRunSequenceDroppingRefusesAColumnOnATableWithChildren(t *testing.T) {
 	require.NoError(t, err)
 
 	err = runDropping(t, pool, schema, d, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema))
-	require.ErrorIs(t, err, executor.ErrDroppedColumnHasDescendants)
-	assert.Equal(t, executor.CodeDroppedColumnHasDescendants, executor.OutcomeCode(err))
+	require.ErrorIs(t, err, executor.ErrDroppedObjectHasDescendants)
+	assert.Equal(t, executor.CodeDroppedObjectHasDescendants, executor.OutcomeCode(err))
 	assert.True(t, columnExists(t, pool, schema, "t", "note"))
 	assert.True(t, columnExists(t, pool, schema, "t_child", "note"))
+}
+
+// A constraint or NOT NULL drop on a table with an inheritance child
+// reaches the child's copy too, which the plan did not review. It is
+// refused like a column drop, and the child keeps its copy.
+func TestRunSequenceDroppingRefusesAConstraintOrNotNullOnATableWithChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kind  schemadiff.DroppedKind
+		obj   string
+		sql   string
+		alive func(t *testing.T, pool *pgxpool.Pool, schema string) bool
+	}{
+		{
+			name: "check constraint",
+			kind: schemadiff.DroppedConstraint,
+			obj:  "t_qty_positive",
+			sql:  "ALTER TABLE %s.t DROP CONSTRAINT t_qty_positive",
+			alive: func(t *testing.T, pool *pgxpool.Pool, schema string) bool {
+				return constraintExists(t, pool, schema, "t_child", "t_qty_positive")
+			},
+		},
+		{
+			name: "not null",
+			kind: schemadiff.DroppedNotNull,
+			obj:  "qty",
+			sql:  "ALTER TABLE %s.t ALTER COLUMN qty DROP NOT NULL",
+			alive: func(t *testing.T, pool *pgxpool.Pool, schema string) bool {
+				return columnNotNull(t, pool, schema, "t_child", "qty")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, schema := newPool(t)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(
+				`CREATE TABLE %[1]s.t (id int PRIMARY KEY, qty int NOT NULL, CONSTRAINT t_qty_positive CHECK (qty > 0))`, schema))
+			require.NoError(t, err)
+			d := modeltest.PlannedDrop(t, pool, schema, "t", tc.kind, tc.obj)
+			_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t_child () INHERITS (%[1]s.t)`, schema))
+			require.NoError(t, err)
+
+			err = runDropping(t, pool, schema, d, fmt.Sprintf(tc.sql, schema))
+			require.ErrorIs(t, err, executor.ErrDroppedObjectHasDescendants)
+			assert.Equal(t, executor.CodeDroppedObjectHasDescendants, executor.OutcomeCode(err))
+			assert.True(t, tc.alive(t, pool, schema), "the child keeps its copy")
+		})
+	}
 }
 
 // The definition is read after the table lock is granted, not before. A
