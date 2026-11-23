@@ -530,7 +530,7 @@ same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — or under a path pg-sprite builds that lists a user schema — introspection's
 target schema then `public`, the shadow build's source schema then `public` — qualify every
-relation, function, operator, and type with `pg_catalog`.
+relation, function, operator, type, and collation with `pg_catalog`.
 Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
 operator resolution ranks candidates across every schema on the path, so an exact-type overload
 planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
@@ -577,7 +577,14 @@ shadowing `<schema>, pg_catalog` path would otherwise name an owner that is not 
 refuse the engine's own table as foreign, and an empty `pg_namespace` or `pg_attribute` would
 report the schema absent or every column missing — decoy relations, functions, and operators on
 that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the text is held
-by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot reaper's slot
+by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the row statements `Load`,
+`Save`'s upsert and guard, and `Delete` run on the same pool and spell their casts and
+comparisons through `pg_catalog` too, so a lookalike `text` cannot cut the saved position short
+and a lookalike `=` cannot hide the row (`TestLoadReadsTheSavedPositionUnderALookalikeTextType`,
+`TestLoadFindsTheRowUnderLookalikeTextComparisons`, the text held by
+`TestRowStatementsQualifyEveryCastAndOperator`) — the table lock confirmation `Save` and
+`Delete` run first is `pkg/dbconn`'s, its comparisons still bare, so on such a pool they refuse
+with LK-1 rather than write; the orphan-slot reaper's slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
@@ -598,12 +605,25 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 `TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
 `TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
 `TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
-prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone), and
-the text is held by
+prove its `name` comparisons; its `text` and `jsonb` operators rest on the catalog-qualification check alone);
+the WAL marker (`MarkWAL`), written in a transaction on the caller's pool, and the stream's read
+of `wal_sender_timeout`, on the replication session, whose `search_path` comes from the caller's
+connection settings and the role's and database's and is never repaired, spell their cast and
+comparison through `pg_catalog` too: on a shadowing `<schema>, pg_catalog` path a lookalike
+`text` type would cut the marker's position to `0/1`, short of every change the caller's
+snapshot saw, and a lookalike `text = text` that answers false would match no setting and refuse
+the stream, `TestMarkWALReturnsTheServersPositionUnderALookalikeTextType` and
+`TestHeartbeatReadsTheSenderTimeoutUnderALookalikeEquals`; and the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
 `TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
-`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
-character outside `OPERATOR(pg_catalog.…)`), and `pkg/checksum` (the column-type read, the relation check,
+`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which walk each read's parse
+tree and reject every operator, the keyword comparisons included, not spelled
+`OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
+write-position reads, on the caller's pool every cycle, cast through `pg_catalog.text`: a
+lookalike `text` type on a shadowing path would cut the snapshot into one the drain refuses and
+the write position to `0/1`, below anything the stream has confirmed,
+`TestCatchupMeasuresTheServersPositionUnderALookalikeTextType`, the text held by
+`TestCatchupPoolReadsQualifyEveryFunctionAndCast`), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -1127,12 +1147,17 @@ Replication slots are created with a recognizable name prefix; a reaper drops or
 engine-prefixed slots (including one stranded on a demoted writer after failover); a slot-lag
 ceiling aborts the schema change before an abandoned slot can fill the volume. The ceiling is
 hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
-may stand over it for a bounded grace (the server's release interval plus one cycle) while the
-server releases what the stream confirmed, so the volume needs headroom above the ceiling of
-about the cluster's WAL rate, the copy's own writes included, times that grace. The ceiling must
-hold that much of the cluster's WAL as well, with margin: with a transaction in progress at a running-transactions record the
-server releases the slot only to the record before, so a busy source's slot keeps between one
-and two release intervals of writes while the stream keeps up. No exit path
+may stand over it for a bounded grace (the server's release interval plus one cycle, the cycle
+itself capped at the release interval) while the server releases what the stream confirmed,
+and a reading past three times the ceiling ends the run at once, grace or not. The volume
+needs headroom above the ceiling of about the cluster's WAL rate, the copy's own writes
+included, times that grace, and at most about two ceilings plus one cycle of that rate, since
+the hard limit is judged on each cycle's reading; the slot keeps retaining WAL after a stop
+until the run resumes or is abandoned. The ceiling must hold that much
+of the cluster's WAL as well, with margin: with a transaction in progress at a
+running-transactions record the server releases the slot only to the record before, so a busy
+source's slot keeps between one and two release intervals of writes while the stream keeps up,
+and peaks at about twice a ceiling sized that way. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
 attempt to reuse — and drops a slot the server created but did not describe usably;
@@ -1151,8 +1176,11 @@ unconfirmed WAL over the ceiling a typed `SlotLagExceededError` on one reading (
 `stream-behind`), retained WAL over it the same error (cause `wal-retained`) only once the
 readings have stayed over for a grace of `RestartReleaseInterval` plus the consumer's own
 cycle, since the server moves a slot's restart position only at the running-transactions
-records it logs on that interval and so releases confirmed WAL in steps — and refuses a
-ceiling below one byte or a negative grace) + `pkg/checkpoint`
+records it logs on that interval and so releases confirmed WAL in steps; retained WAL past
+`RetainedWALHardMultiple` (three times) the ceiling is the same error on one reading, grace or
+not (cause `wal-retained-hard-limit`), since a healthy slot sized with margin peaks at about
+twice the ceiling and more is a write rate the ceiling refuses anyway — and refuses a ceiling below one byte or a
+negative grace) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
 database: the slots are listed first and the checkpoint rows that own them read in a later
 statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
@@ -1172,10 +1200,12 @@ exist is refused with `ErrTableMissing` rather than read as all orphans; two rea
 database take turns at each slot, the one that waited finding the slot gone) + `pkg/applier`
 `Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it,
 through one `decode.SlotLagWatch` for the run whose grace is `RestartReleaseInterval` plus
-the cycle's `Interval`, against `CatchupOptions.SlotLagCeiling`, default
+the cycle's `Interval`, which cannot be set above `MaxCatchupInterval` (the release
+interval), against `CatchupOptions.SlotLagCeiling`, default
 `decode.DefaultSlotLagCeiling`, which cannot be set below one byte; a slot that vanished is
 `SlotLostError`; the stream's unconfirmed WAL over the ceiling ends `Run` at once, the slot's
-retained WAL over it ends `Run` once it has outlasted the grace, either with the table lock
+retained WAL over it ends `Run` once it has outlasted the grace or at once past three times
+the ceiling, either with the table lock
 intact and the slot in place for the operator to read which measure crossed) +
 `pkg/schemachange.Runner` (on a decoding target it creates the slot under the store's lock on
 the slot's name, in the same step as the row that names it, so the reaper never meets the slot

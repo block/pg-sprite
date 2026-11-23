@@ -485,7 +485,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		return "the server rejected the rows as the statement would shape them and the run could not be abandoned, so running the same statement again would copy the same rows and stop here again; " + startOver
 	}
 	resume := "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
-	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause == decode.SlotLagWALRetained {
+	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause.RetainsWAL() {
 		return resume + "; when no open or prepared write transaction on the source holds the WAL back, the write rate is the cause, " +
 			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); the resume counts that ceiling against --free-disk beside the shadow, less the shadow already built and the WAL the slot already retains, so pass the free space the volume has now"
 	}
@@ -558,6 +558,9 @@ func copySwapDetail(result schemachange.Result, quiesced bool) string {
 	s := fmt.Sprintf("verified %d rows in %d chunks", result.Verification.Rows, result.Verification.Chunks)
 	if result.Verification.Settled > 0 {
 		s += fmt.Sprintf(" (%d settled against the stream)", result.Verification.Settled)
+	}
+	if result.CarriedCompare.Keys > 0 {
+		s += fmt.Sprintf("; compared %d still-changing keys under the swap lock in %s", result.CarriedCompare.Keys, result.CarriedCompare.Elapsed)
 	}
 	if result.OldTableDropped {
 		s += "; the retained source is dropped"

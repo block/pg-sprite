@@ -272,6 +272,17 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
 	})
 
+	// A slot past the hard limit is the same family: a resume under the
+	// same ceiling stops there again, so the remedy names the setting too.
+	t.Run("a slot past the hard limit names the ceiling to raise", func(t *testing.T) {
+		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetainedHardLimit,
+			Retained: 4 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
+	})
+
 	t.Run("a stream behind the ceiling resumes without naming the ceiling", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagStreamBehind,
 			Retained: 2 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
@@ -439,6 +450,17 @@ func TestCopySwapDetail(t *testing.T) {
 	assert.Equal(t, "verified 10 rows in 1 chunks (1 settled against the stream); "+
 		"the retained source is kept under its _old name; "+
 		"the run reconciled a lost replication slot before catching up", kept)
+
+	// A swap that compared the keys its live pass left names how many and
+	// how long the compare ran under the lock, so a host reading the
+	// verdict sees what the swap paid without --debug.
+	carried := copySwapDetail(schemachange.Result{
+		Verification:    checksum.Report{Rows: 300, Chunks: 1},
+		CarriedCompare:  schemachange.CarriedCompare{Keys: 7, Elapsed: 12 * time.Millisecond},
+		OldTableDropped: true,
+	}, false)
+	assert.Equal(t, "verified 300 rows in 1 chunks; compared 7 still-changing keys under the swap lock in 12ms; "+
+		"the retained source is dropped", carried)
 
 	quiesced := copySwapDetail(schemachange.Result{
 		Verification:    checksum.Report{Rows: 4, Chunks: 1},
