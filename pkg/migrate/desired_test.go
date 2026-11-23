@@ -236,6 +236,26 @@ func TestAdmitPlan(t *testing.T) {
 			"the front door would refuse the drop; the detail must not point there")
 	})
 
+	t.Run("points a partitioned parent's index drop at the plain drop with both acknowledgements", func(t *testing.T) {
+		// PostgreSQL has no concurrent drop for a partitioned index, so the
+		// plan refuses the drop with the partitioned-parent reason and the
+		// refusal must not name the concurrent idiom.
+		report := executable()
+		report.Statements = append(report.Statements, plan.Statement{
+			SQL:         `DROP INDEX "app"."t_v_idx"`,
+			Kind:        schemadiff.ChangeDropIndex,
+			Destructive: true,
+			Disposition: router.DispositionRefuse,
+			Reason:      verdict.ReasonUnsupportedPartitionedParent,
+			Class:       verdict.ClassByDesign,
+		})
+		res, ok := admitPlan(DesiredRequest{}, report)
+		require.False(t, ok)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.NotContains(t, res.Detail, "DROP INDEX CONCURRENTLY")
+		assert.Contains(t, res.Detail, "plain DROP INDEX through the imperative front door")
+	})
+
 	t.Run("maps the first non-executable disposition to its refusal", func(t *testing.T) {
 		cases := []struct {
 			disposition router.Disposition
