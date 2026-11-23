@@ -1,7 +1,6 @@
 package checkpoint_test
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -51,33 +50,7 @@ func TestReaperKeepsALiveRowsSlotUnderLookalikeTextComparisons(t *testing.T) {
 	_, live := d.slotFor(t, "orders")
 	d.claim(t, "orders", live.Name(), checkpoint.PhaseCopying)
 
-	schema := testutil.NewSchema(t, d.pool)
-	for _, ddl := range []string{
-		`
-		CREATE FUNCTION %[1]s.never_text(text, text) RETURNS boolean
-		LANGUAGE sql AS 'SELECT false'`,
-		`
-		CREATE OPERATOR %[1]s.= (
-			LEFTARG  = text,
-			RIGHTARG = text,
-			FUNCTION = %[1]s.never_text
-		)`,
-		`
-		CREATE OPERATOR %[1]s.<> (
-			LEFTARG  = text,
-			RIGHTARG = text,
-			FUNCTION = %[1]s.never_text
-		)`,
-	} {
-		_, err := d.pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
-		require.NoError(t, err, "plant a lookalike text operator")
-	}
-	lookalike := testutil.NewCatalogShadowingPool(t, d.cfg.URL, schema)
-	var equal, unequal bool
-	require.NoError(t, lookalike.QueryRow(t.Context(),
-		`SELECT 'a'::text = 'a'::text, 'a'::text <> 'b'::text`).Scan(&equal, &unequal))
-	require.False(t, equal, "the lookalike text = must answer on this pool")
-	require.False(t, unequal, "the lookalike text <> must answer on this pool")
+	lookalike := testutil.NewLookalikeTextMismatchPool(t, d.cfg.URL, d.pool)
 	store, err := checkpoint.NewStore(lookalike, checkpoint.Options{})
 	require.NoError(t, err)
 

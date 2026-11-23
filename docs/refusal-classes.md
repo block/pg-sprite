@@ -137,17 +137,19 @@ environment refusal also carries the typed `CopySwapSetting` the operator must c
 `max_replication_slots` or `max_wal_senders`; none for disk), so an adapter never parses
 the prose detail to learn which knob to turn.
 
-An adapter that calls `CheckCopySwap`, which folds the privilege, shape, and environment checks
-into one call, sees refusals from all three in that order, and must read each in its own
-vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environment refusals:
+An adapter that calls `schemachange.CheckCopySwap` or `preflight.CheckCopySwap`, which both
+fold the privilege, shape, and environment checks into one call, sees refusals from all three
+in that order, and must read each in its own vocabulary — `CopySwapRefusalCauseOf` answers
+only for the shape and environment refusals:
 
-| Outcome of `CheckCopySwap` | How to read it | What it means |
+| Outcome of `schemachange.CheckCopySwap` or `preflight.CheckCopySwap` | How to read it | What it means |
 | --- | --- | --- |
 | `*PrivilegeError` | `errors.As`; `Grant` is the exact statement to run | The engine role lacks the copy-and-swap tier against this table, or (for a run that decodes WAL) replication access. Raised before any shape or cluster read. |
 | `*UnsupportedCopySwapShapeError` | `CopySwapRefusalCauseOf` → a shape cause from the table below | The table's shape is outside what the route supports. |
 | `*CopySwapEnvironmentError` | `CopySwapRefusalCauseOf` → a cluster or volume cause from the table below, plus `Setting`, and for a measured disk refusal `FreeDiskBytes`, `RequiredShadowBytes` (the space required for the shadow, twice the table), and `SlotLagCeilingBytes` (the effective ceiling for a run that decodes WAL, even when the shadow alone does not fit; zero only for a quiesced run), and for a resumed run `HeldShadowBytes` and `HeldWALBytes` (the shadow already built and the WAL the stopped run's slot already retains, as the server measured them, each capped at the requirement it is taken from and zero for a fresh run; the space refused for is `RequiredShadowBytes − HeldShadowBytes + SlotLagCeilingBytes − HeldWALBytes`) | The cluster or the volume cannot carry the run. |
 | `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
-| any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
+| `schemachange.ErrInvalidOptions` | `errors.Is` | `schemachange.CheckCopySwap` only: the start was neither `CopySwapResume` nor `CopySwapRestart`, or a resume was given no checkpoint store. A defect in the caller; nothing was read. |
+| any other error | wrapped query error | A catalog read failed, or, for `schemachange.CheckCopySwap` on a resume, the read of the table's checkpoint row did; retry or surface it as an engine failure. |
 
 `CopySwapRefusalCause.Class()` answers the `class` column below as a `refusal.Class`, which
 converts to `verdict.Class` with a plain conversion. The imperative front door carries every

@@ -415,6 +415,10 @@ func TestRunnerLiveRestartDiscardsAStoppedRunWhole(t *testing.T) {
 	require.NoError(t, err)
 	f.assertLiveDone(t, result)
 	assert.NotEqual(t, stoppedShadowOID, result.Shadow.ShadowOID, "the restart built a shadow of its own")
+	// Nothing writes the table, so the pass judges every row and the swap
+	// has no key to compare.
+	assert.Equal(t, 0, result.Verification.Carried)
+	assert.Equal(t, schemachange.CarriedCompare{}, result.CarriedCompare, "a swap left no key compares none")
 }
 
 // hotRowInterval paces the rewrites of the row the live pass cannot judge:
@@ -469,4 +473,6 @@ func TestRunnerLeavesARowThatNeverHoldsStillForTheSwap(t *testing.T) {
 	f.assertLiveDone(t, result)
 	assert.Equal(t, 1, result.Verification.Carried, "the pass left the one row it could not judge")
 	assert.Equal(t, 1, result.Verification.Unsettled)
+	assert.Equal(t, 1, result.CarriedCompare.Keys, "the swap compared the one row the pass left")
+	assert.Positive(t, result.CarriedCompare.Elapsed, "the compare's reads took time under the swap lock")
 }

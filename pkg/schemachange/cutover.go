@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // ErrLockRetriesExhausted reports that every bounded attempt to take ACCESS
@@ -82,6 +83,11 @@ type CutoverOptions struct {
 	// wall clock. Tests inject one to drive the retry loop without real
 	// time passing.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// Clock times the compare of the keys a live pass left for the swap,
+	// which SwappedTable.CarriedCompare reports; nil reads the wall clock.
+	// Now is called inside the swap's ACCESS EXCLUSIVE lock, so it must
+	// return at once: every moment it takes is a moment the table is held.
+	Clock progress.Clock
 
 	// requireWriteFence makes the swap of a quiesced proof refuse unless the
 	// source still carries the engine's write fence. Only the Runner, which
@@ -130,6 +136,13 @@ func (o CutoverOptions) sleep() func(context.Context, time.Duration) error {
 		return sleepContext
 	}
 	return o.Sleep
+}
+
+func (o CutoverOptions) clock() progress.Clock {
+	if o.Clock == nil {
+		return progress.WallClock{}
+	}
+	return o.Clock
 }
 
 // sleepContext waits for d or until ctx ends, whichever comes first.
@@ -220,13 +233,13 @@ func cutoverWithRetry(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 	attempts := opts.lockAttempts()
 	var last error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		swapped, backend, err := swapOnce(ctx, pool, lock, ready, drain, opts.requireWriteFence, opts.Options)
+		swapped, backend, err := swapOnce(ctx, pool, lock, ready, drain, opts)
 		if err == nil {
 			swapped.attempts = attempt
 			return swapped, nil
 		}
 		if outcomeUnknown(err) {
-			return resolveUnknownOutcome(ctx, pool, ready, backend, attempt, err, opts)
+			return resolveUnknownOutcome(ctx, pool, ready, backend, attempt, swapped.carried, err, opts)
 		}
 		if !lockRetryable(err) {
 			return SwappedTable{}, rolledBack(err)

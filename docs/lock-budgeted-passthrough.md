@@ -154,6 +154,24 @@ are UTC. The read takes no lock; if it fails, including when the server lists no
 for a leaf index, nothing executes and the error is returned instead of the refusal. `REINDEX INDEX` and `REINDEX TABLE` discard nothing and need only
 `--accept-blocking`.
 
+### Dropping an index of a partitioned table
+
+PostgreSQL has no concurrent drop for an index of a partitioned table, so the plain drop of
+the parent's index is the only drop there is, and it removes each partition's attached index
+with it. Name the parent in both acknowledgements:
+
+```sh
+pg-sprite migrate \
+  --alter 'DROP INDEX app.events_name_idx' \
+  --accept-blocking app.events \
+  --allow-destructive app.events \
+  --lock-timeout 3s
+```
+
+The engine requests `ACCESS EXCLUSIVE` on the parent, which reaches every partition, under the
+lock budget before the drop runs, and the drop holds it only while it changes the catalog. The
+verdict is `executed-without-online-safety` and the exit code is 3.
+
 The value names the table whose lock the operator accepts, because that is the relation the
 blocking form makes unavailable: a plain `DROP INDEX` takes `ACCESS EXCLUSIVE` on the index's
 table, and a parent index build locks the parent. The partitioned-parent statements and

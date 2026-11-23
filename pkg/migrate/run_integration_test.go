@@ -241,6 +241,39 @@ func TestRunDispatch(t *testing.T) {
 		assert.Contains(t, def, "WITH (fillfactor='70')")
 	})
 
+	t.Run("fails a unique key over duplicate rows as a data fault at the index build", func(t *testing.T) {
+		// The key is built online as CREATE UNIQUE INDEX CONCURRENTLY, which
+		// the duplicate emails fail with 23505. The code names the rows, not
+		// the invalid index the build leaves under the key's name: no
+		// recovery of that index gets a rerun past the same rows.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.t (
+				id    int PRIMARY KEY,
+				email text
+			);
+			INSERT INTO %[1]s.t (id, email) VALUES
+				(1, 'a@example.com'),
+				(2, 'a@example.com')`, schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(`
+			ALTER TABLE %s.t
+				ADD CONSTRAINT k UNIQUE (email)`, schema)), runOptions())
+
+		require.ErrorIs(t, err, executor.ErrBuildLeftInvalidIndex, "the leftover is still reported")
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Equal(t, "23505", v.SQLState)
+		assert.Equal(t, 1, v.FailedStep, "the index build is the first of the two steps")
+		assert.Empty(t, v.ExecutedSQL, "nothing committed before the build failed")
+		var valid bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT indisvalid FROM pg_index WHERE indexrelid = $1::regclass",
+			schema+".k").Scan(&valid))
+		assert.False(t, valid, "the failed build's invalid index stays for the operator to drop")
+	})
+
 	t.Run("refuses a key whose storage parameter it cannot carry, naming the manual sequence", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))

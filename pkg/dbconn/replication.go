@@ -58,7 +58,10 @@ func WithServerSideCancel(grace time.Duration) ReplicationOption {
 // receives (the lock_timeout and statement_timeout SET statements and the
 // search_path repair) is not run on it. Neither matters here: a replication
 // connection issues replication commands, which PostgreSQL does not bound by
-// statement_timeout at all, and reads no catalog by name. The caller bounds
+// statement_timeout at all, and every read pg-sprite itself runs on it
+// spells its names through pg_catalog (CO-9). A statement a caller of its
+// own runs on it resolves through whatever search_path the connection
+// settings, role and database give it. The caller bounds
 // every command with ctx and closes the connection when it is done; a
 // command's context ending cuts the connection on the client's side only,
 // unless the caller asked for WithServerSideCancel.
