@@ -118,6 +118,26 @@ func TestMigrateAlterBuildsAPartitionedParentIndex(t *testing.T) {
 		"running the statement again finds the finished index and changes nothing")
 }
 
+// A TABLESPACE clause would place the parent's index and not the
+// partitions', so the build refuses it before it runs anything. The verdict
+// is a refusal, not a failure that asks the operator to inspect and rerun.
+func TestMigrateAlterRefusesAPartitionedIndexWithATablespace(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := partitionedIndexFixture(t, pool, 0)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v) TABLESPACE pg_default", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	v := decodeVerdict(t, out.String())
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+	assert.Empty(t, indexStates(t, pool, schema), "a refusal builds no index")
+}
+
 // --force never bypasses the partitioned parent's refusal: a forced plain
 // CREATE INDEX is still refused and builds nothing, because the forced form
 // would take the parent's blocking build.

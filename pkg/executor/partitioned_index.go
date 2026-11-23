@@ -110,7 +110,9 @@ type PartitionedIndexReport struct {
 // lock's dedicated session dials, the same Config the pool was made from. Under
 // the lock it:
 //
-//  1. refuses a tree that holds a foreign table (ErrForeignTablePartition);
+//  1. refuses a tree that holds a foreign table (ErrForeignTablePartition),
+//     and a unique index that does not contain the partition key of every
+//     partitioned table in the tree (ErrUniqueIndexPartitionKey);
 //  2. creates the parent's index with ON ONLY, or resumes one an earlier run
 //     left when it is a partitioned index of the requested definition
 //     (ErrPartitionedIndexNameTaken otherwise);
@@ -257,15 +259,30 @@ func lockLostError(lost, stepErr error) error {
 // runs on the pool, so a cfg and a pool that reach different databases would
 // give the build no exclusion while both looked healthy.
 func confirmLockInPoolDatabase(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, req partitionedIndexRequest) error {
+	name := qualifiedName(req.schema, req.table)
 	holder, found, err := dbconn.LookupTableLockHolder(ctx, pool, req.schema, req.table)
 	if err != nil {
-		return fmt.Errorf("confirm the table lock for %s from the pool: %w", qualifiedName(req.schema, req.table), err)
+		return fmt.Errorf("confirm the table lock for %s from the pool: %w", name, err)
+	}
+	if !found {
+		return fmt.Errorf("%w: LK-1: no session holds the table lock for %s in the database the pool is connected to; the connection target and the pool must reach the same database",
+			ErrInvariantViolation, name)
+	}
+	if holder.PID != lock.BackendPID() {
+		return fmt.Errorf("%w: LK-1: backend %d holds the table lock for %s in the pool's database, not the build's lock session (backend %d); the connection target and the pool must reach the same database",
+			ErrInvariantViolation, holder.PID, name, lock.BackendPID())
 	}
 	// A PID is unique only within one server, so the holder's backend start
 	// must match too: the pair is what identifies the lock's own session.
-	if !found || holder.PID != lock.BackendPID() || !holder.BackendStart.Equal(lock.BackendStart()) {
-		return fmt.Errorf("%w: LK-1: the table lock for %s is not held in the database the pool is connected to; the connection target and the pool must reach the same database",
-			ErrInvariantViolation, qualifiedName(req.schema, req.table))
+	// pg_stat_activity hides another role's backend start, and without it
+	// the pair cannot be compared, so the build refuses rather than assume.
+	if holder.BackendStart.IsZero() {
+		return fmt.Errorf("%w: the pool's role cannot read when the session holding the table lock for %s started, so it cannot tell that session from one on another server; connect the pool as the role the connection target uses, or grant the pool's role pg_read_all_stats",
+			ErrTableLockUnconfirmed, name)
+	}
+	if !holder.BackendStart.Equal(lock.BackendStart()) {
+		return fmt.Errorf("%w: LK-1: backend %d in the pool's database holds the table lock for %s but started at %s, and the build's lock session started at %s; the connection target and the pool must reach the same server",
+			ErrInvariantViolation, holder.PID, name, holder.BackendStart.Format(time.RFC3339Nano), lock.BackendStart().Format(time.RFC3339Nano))
 	}
 	return nil
 }
@@ -275,6 +292,11 @@ type partitionedIndexRequest struct {
 	schema string
 	table  string
 	index  string
+	// unique and keyColumns are what the partition key check needs: a
+	// unique index must contain every partitioned table's partition key
+	// among its plain key columns.
+	unique     bool
+	keyColumns []string
 }
 
 // admitPartitionedIndex is the executor's own admission check: exactly one
@@ -283,7 +305,7 @@ type partitionedIndexRequest struct {
 // nothing is executed on one.
 func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partitionedIndexRequest, error) {
 	var req partitionedIndexRequest
-	st, index, err := admitPartitionedIndexShape(sql)
+	st, op, err := admitPartitionedIndexShape(sql)
 	if err != nil {
 		return req, err
 	}
@@ -296,7 +318,13 @@ func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partition
 	if !pt.Partitioned() {
 		return req, fmt.Errorf("%w: %s", ErrNotPartitionedTable, qualifiedName(pt.Schema(), pt.Table()))
 	}
-	return partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: index}, nil
+	req = partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: op.Name, unique: op.Unique}
+	if req.unique {
+		if req.keyColumns, err = statement.IndexKeyColumns(sql); err != nil {
+			return req, fmt.Errorf("read the key columns of index %s: %w", qualifiedName(req.schema, req.index), err)
+		}
+	}
+	return req, nil
 }
 
 // AdmitPartitionedIndexShape is the statement-shape half of the partitioned
@@ -309,34 +337,34 @@ func AdmitPartitionedIndexShape(sql string) error {
 	return err
 }
 
-// admitPartitionedIndexShape returns the parsed statement and the name of the
-// index it creates.
-func admitPartitionedIndexShape(sql string) (statement.Statement, string, error) {
+// admitPartitionedIndexShape returns the parsed statement and the index
+// operation it holds.
+func admitPartitionedIndexShape(sql string) (statement.Statement, statement.Op, error) {
 	st, err := statement.ParseOne(sql)
 	if err != nil {
-		return statement.Statement{}, "", err
+		return statement.Statement{}, statement.Op{}, err
 	}
 	if st.Kind() != statement.KindCreateIndex {
-		return statement.Statement{}, "", fmt.Errorf("%w: got %s", ErrNotCreateIndex, st.Kind())
+		return statement.Statement{}, statement.Op{}, fmt.Errorf("%w: got %s", ErrNotCreateIndex, st.Kind())
 	}
 	ops, err := statement.ParseOps(sql)
 	if err != nil {
-		return statement.Statement{}, "", err
+		return statement.Statement{}, statement.Op{}, err
 	}
 	// A CREATE INDEX yields exactly one operation; anything else is
 	// parse-boundary version skew and is refused rather than guessed.
 	if len(ops) != 1 || ops[0].Kind != statement.OpCreateIndex {
-		return statement.Statement{}, "", ErrNotCreateIndex
+		return statement.Statement{}, statement.Op{}, ErrNotCreateIndex
 	}
 	switch {
 	case ops[0].Name == "":
-		return statement.Statement{}, "", ErrUnnamedIndex
+		return statement.Statement{}, statement.Op{}, ErrUnnamedIndex
 	case ops[0].IfNotExists:
-		return statement.Statement{}, "", ErrIfNotExistsUnsupported
+		return statement.Statement{}, statement.Op{}, ErrIfNotExistsUnsupported
 	case ops[0].Tablespace != "":
-		return statement.Statement{}, "", fmt.Errorf("%w: TABLESPACE %q", ErrPartitionedIndexTablespace, ops[0].Tablespace)
+		return statement.Statement{}, statement.Op{}, fmt.Errorf("%w: TABLESPACE %q", ErrPartitionedIndexTablespace, ops[0].Tablespace)
 	case st.Schema() == "":
-		return statement.Statement{}, "", ErrUnqualifiedTable
+		return statement.Statement{}, statement.Op{}, ErrUnqualifiedTable
 	}
-	return st, ops[0].Name, nil
+	return st, ops[0], nil
 }

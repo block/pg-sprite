@@ -75,6 +75,24 @@ func PartitionIndex(parentIndexDef, schema, table, name string, form PartitionIn
 	return deparseOne(node)
 }
 
+// IndexKeyColumns returns the key columns of sql, a single named CREATE
+// INDEX, in key order: the columns its key names as plain columns. An
+// expression key and an INCLUDE column are not key columns, so neither is
+// listed.
+func IndexKeyColumns(sql string) ([]string, error) {
+	idx, _, err := parseCreateIndex(sql)
+	if err != nil {
+		return nil, err
+	}
+	var cols []string
+	for _, p := range idx.GetIndexParams() {
+		if name := p.GetIndexElem().GetName(); name != "" {
+			cols = append(cols, name)
+		}
+	}
+	return cols, nil
+}
+
 // parseCreateIndex parses sql as one named CREATE INDEX without IF NOT
 // EXISTS and returns its index node and root node for in-place editing.
 func parseCreateIndex(sql string) (*pganalyze.IndexStmt, *pganalyze.Node, error) {
