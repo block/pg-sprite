@@ -575,6 +575,13 @@ type Verdict struct {
 	// swap had committed, or one that lost its connection and learned of
 	// the commit from the catalog. Empty for every other verdict.
 	SwapLSN string `json:"swap_lsn,omitempty"`
+	// Verification is set on an executed-via-copy-and-swap verdict whose
+	// run verified the shadow before its swap: the figures of that
+	// verification pass, the same ones Detail states in prose. Nil when
+	// the pass compared no chunk — a run resumed after its swap had
+	// committed makes no pass, and an empty table has nothing to compare —
+	// and for every other verdict.
+	Verification *Verification `json:"verification,omitempty"`
 	// TableCreated is true on an executed verdict whose run created the
 	// table, committing it in the same transaction as its row security, so
 	// automation can tell a create from a run that converged a table that
@@ -684,6 +691,30 @@ type Verdict struct {
 	// refusal of an accepted DROP INDEX would have dropped; nil for every
 	// other verdict.
 	IndexUsage *IndexUsage `json:"index_usage,omitempty"`
+}
+
+// Verification is what a copy-and-swap run's verification pass compared
+// before the swap: the source against its shadow, chunk by chunk, up to the
+// copy's complete watermark. Every field is present, zero included, so a
+// reader tells a pass that settled nothing from one that did not say.
+type Verification struct {
+	// Rows is the number of source rows the pass hashed.
+	Rows int64 `json:"rows"`
+	// Chunks is the number of chunks the pass compared.
+	Chunks int `json:"chunks"`
+	// Settled is the number of chunks a live pass found differing in its
+	// sweep and then settled key by key against the stream; zero for a run
+	// that blocked writes.
+	Settled int `json:"settled"`
+	// Unsettled is the number of chunks a live pass could settle neither
+	// way, every one of them holding keys the pass left for the swap; zero
+	// whenever Carried is.
+	Unsettled int `json:"unsettled"`
+	// Carried is the number of keys the live pass left for the swap to
+	// compare under its lock, the keys of the unsettled chunks that never
+	// held still; the swap compared each and found it equal, or it would
+	// have refused. The count only: the keys themselves are row data.
+	Carried int `json:"carried"`
 }
 
 // IndexUsage is how the server pg-sprite is connected to has seen an index

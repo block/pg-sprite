@@ -238,12 +238,23 @@ A successful run prints one verdict, `executed-via-copy-and-swap`, and exits 0. 
   "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
   "table": "public.order_archive",
   "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run",
-  "swap_lsn": "0/3F2A1B8"
+  "swap_lsn": "0/3F2A1B8",
+  "verification": {
+    "rows": 5000,
+    "chunks": 3,
+    "settled": 0,
+    "unsettled": 0,
+    "carried": 0
+  }
 }
 ```
 
 `swap_lsn` is the server's WAL position read inside the swap transaction, under its lock:
-writes to the table after it exist only in the new table.
+writes to the table after it exist only in the new table. `verification` is what the
+verification pass compared, the figures `detail` states in prose: rows hashed, chunks
+compared, and, for a live run, the chunks it settled against the stream, the chunks it could
+not settle, and how many keys of those it left for the swap to compare under its lock
+(`carried`, a count, never the keys).
 
 The old table is dropped once the swap commits. Add `--keep-old` to keep it under its `_old`
 name for a rollback window; you drop it yourself when the window ends.

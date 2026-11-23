@@ -191,6 +191,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		BlockingPassthrough:       true,
 		WritesBlocked:             true,
 		SwapLSN:                   "0/1A2B3C8",
+		Verification:              &verdict.Verification{Rows: 1000, Chunks: 2, Settled: 1, Unsettled: 1, Carried: 1},
 		TableCreated:              true,
 		ExtensionSchemas:          []string{"extensions"},
 		Abandoned:                 true,

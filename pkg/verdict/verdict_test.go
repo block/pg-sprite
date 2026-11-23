@@ -332,6 +332,7 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	assert.NotContains(t, s, "code")
 	assert.NotContains(t, s, "failed_step")
 	assert.NotContains(t, s, "abandoned")
+	assert.NotContains(t, s, "verification", "a native run made no verification pass")
 }
 
 // Abandoned is the field an adapter branches on to tell an abandoned

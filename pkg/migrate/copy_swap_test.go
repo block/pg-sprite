@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -342,6 +343,13 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		assert.Equal(t, "1/A2B3C8", v.SwapLSN)
 	})
 
+	t.Run("a done row without a verification pass carries no verification", func(t *testing.T) {
+		done := schemachange.Result{Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}}
+		v, err := copySwapOutcome(st, holdSlot, done, nil)
+		require.NoError(t, err)
+		assert.Nil(t, v.Verification, "a run resumed after its swap made no pass to report")
+	})
+
 	t.Run("a block-writes done row is marked writes-blocked", func(t *testing.T) {
 		done := schemachange.Result{Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}}
 		v, err := copySwapOutcome(st, holdFence, done, nil)
@@ -446,4 +454,31 @@ func TestCopySwapDetail(t *testing.T) {
 	}, true)
 	assert.Equal(t, "verified 4 rows in 1 chunks; the retained source is dropped; "+
 		"writes to the table were blocked for the length of the run", quiesced)
+}
+
+// The verification pass's figures reach automation as the verdict's
+// verification object, not only as the detail's prose: a live pass that
+// settled one chunk against the stream and left three keys of two unsettled
+// chunks for the swap serialises those exact counts, the key count and
+// never the keys, while the detail stays the prose it always was.
+func TestCopySwapVerdictCarriesTheVerificationFigures(t *testing.T) {
+	st := parseCopySwapStatement(t)
+	done := schemachange.Result{
+		Checkpoint:      checkpoint.Checkpoint{Phase: checkpoint.PhaseDone},
+		Verification:    checksum.Report{Rows: 52693, Chunks: 26, Settled: 1, Unsettled: 2, Carried: 3},
+		OldTableDropped: true,
+	}
+	v, err := copySwapOutcome(st, holdSlot, done, nil)
+	require.NoError(t, err)
+
+	js, err := v.JSON()
+	require.NoError(t, err)
+	var decoded struct {
+		Verification json.RawMessage `json:"verification"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(js), &decoded))
+	assert.JSONEq(t, `{"rows": 52693, "chunks": 26, "settled": 1, "unsettled": 2, "carried": 3}`,
+		string(decoded.Verification))
+	assert.Equal(t, "verified 52693 rows in 26 chunks (1 settled against the stream); "+
+		"the retained source is dropped", v.Detail)
 }
