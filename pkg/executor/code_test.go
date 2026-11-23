@@ -106,6 +106,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
 		{name: "blocking outcome unknown", err: &executor.BlockingOutcomeUnknownError{Err: errors.New("lost")}, want: executor.CodeBlockingOutcomeUnknown},
 		{name: "commit outcome unknown", err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeCommitOutcomeUnknown},
+		{name: "drop outcome unknown", err: &executor.DropOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeDropOutcomeUnknown},
 		{
 			name: "commit outcome unknown at a sequence step carries its own code",
 			err: &executor.SequenceStepError{
@@ -171,6 +172,8 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "partitioned index unsettled", err: fmt.Errorf("app.t: %w", executor.ErrPartitionedIndexUnsettled), want: executor.CodePartitionedIndexUnsettled},
 		{name: "replica identity drop", err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop), want: executor.CodeReplicaIdentityDrop},
 		{name: "adopted index drift", err: fmt.Errorf("adopt: %w", executor.ErrAdoptedIndexDrift), want: executor.CodeAdoptedIndexDrift},
+		{name: "dropped index drift", err: fmt.Errorf("drop: %w", executor.ErrDroppedIndexDrift), want: executor.CodeDroppedIndexDrift},
+		{name: "dropped index replaced", err: fmt.Errorf("drop: %w", executor.ErrDroppedIndexReplaced), want: executor.CodeDroppedIndexReplaced},
 		{name: "validated constraint drift", err: fmt.Errorf("validate: %w", executor.ErrValidatedConstraintDrift), want: executor.CodeValidatedConstraintDrift},
 		{name: "renamed index drift", err: fmt.Errorf("rename: %w", executor.ErrRenamedIndexDrift), want: executor.CodeRenamedIndexDrift},
 		{name: "enum type drift", err: fmt.Errorf("add value: %w", executor.ErrEnumTypeDrift), want: executor.CodeEnumTypeDrift},
@@ -218,6 +221,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
 		executor.CodeCommitOutcomeUnknown:            false,
+		executor.CodeDropOutcomeUnknown:              false,
 		executor.CodeRowSecurityRefused:              true,
 		executor.CodeRowSecurityPlanChanged:          true,
 		executor.CodeRowSecurityOutcomeUnknown:       false,
@@ -256,6 +260,8 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodePoolTooSmall:                    true,
 		executor.CodeReplicaIdentityDrop:             true,
 		executor.CodeAdoptedIndexDrift:               true,
+		executor.CodeDroppedIndexDrift:               true,
+		executor.CodeDroppedIndexReplaced:            true,
 		executor.CodeValidatedConstraintDrift:        true,
 		executor.CodeRenamedIndexDrift:               true,
 		executor.CodeEnumTypeDrift:                   true,
@@ -353,4 +359,6 @@ func TestOutcomeCodeInvariantViolationOutranksTypedFailures(t *testing.T) {
 			assert.Equal(t, executor.CodeInvariantViolation, executor.OutcomeCode(err))
 		})
 	}
+	invalidErr := &executor.InvalidIndexError{Schema: "s", Index: "i", Build: breach, Cleanup: executor.ErrBuildLeftInvalidIndex}
+	assert.Equal(t, executor.CodeInvariantViolation, invalidErr.Code(), "the typed error's own code agrees with OutcomeCode")
 }
