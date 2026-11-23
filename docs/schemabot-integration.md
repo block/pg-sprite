@@ -336,7 +336,7 @@ that tests the sentinel first would send an operator-dropped shadow or a held sl
 | --- | --- | --- |
 | `resume-row-terminal` | The row is `done` or `failed`; there is no run to resume | Report the recorded outcome; a new run needs `Store.Delete` of the row the caller was shown |
 | `resume-row-cutover` | The row says a swap began and nothing says how it ended; neither a clean resume nor a reconcile may touch the slot or the shadow until that is known. The refusal is answered before the slot is read, so it says nothing about whether the slot survived | Call `InspectSwapped` first; a committed swap continues from `DropOldTable`. A rolled-back swap (`ErrNotSwapped`) is a run still catching up: write the row back to `catching_up` and call `InspectResume` again — it answers clean when the slot is intact, and reconcile when the slot was lost during the cutover window, in which case `Reconcile` repairs the gap before the cutover is retried |
-| `restart-swap-committed` (from `Runner`, with `RunOptions.Restart`) | A run asked to start over met a `cutover` row whose swap the catalog shows committed: the shadow already bears the source's name, so there is nothing to discard and the change is past the point of starting over. Nothing is written | Run the same statement without the restart; `InspectSwapped` answers that the swap committed and the run finishes from `DropOldTable` — drops the slot of a live run, drops or keeps the retained source, writes the row `done` |
+| `restart-swap-committed` (from `Runner`, with `RunOptions.Restart`, and from `Runner.Discard`) | A run asked to start over, or a discard, met a `cutover` row whose swap the catalog shows committed: the shadow already bears the source's name, so there is nothing to discard and the change is past the point of starting over. Nothing is written | Run the same statement without the restart; `InspectSwapped` answers that the swap committed and the run finishes from `DropOldTable` — drops the slot of a live run, drops or keeps the retained source, writes the row `done` |
 | `resume-row-mismatch` | The row is for another table, names another slot, or (in `Reconcile` and `Runner`) carries another statement's shadow name, fingerprints, or shadow proof; from `Runner` also a row whose recorded statement is not the one `Run` was given, compared as parsed, or a row that records no statement | Configuration or operator action: the target and the row disagree; retrying cannot succeed. A caller that means a second, different change on the same table deletes the row (`Store.Delete`) — and drops the shadow and the fence — first |
 | `shadow-statement-target` (from `Runner`, on resume) | The statement `Run` was given names another table than the proven target, caught before the row's statement is compared with it | Configuration: the statement and the target disagree; retrying cannot succeed |
 | `resume-row-decoding` (from `Runner`) | The row was written by the other kind of run: a target proven without logical decoding was handed a row that names a slot or publication, or is in `catching_up` or `reconciling`, and has no slot to continue it with; a target proven for decoding was handed a row that names no slot, whose source was fenced, not captured | Run the row under the kind of `CopySwapTarget` proof that made it; the proof, not the caller, chooses the route |
@@ -911,6 +911,25 @@ rejects the field with `ErrRestartNotSupported` before planning anything: a desi
 resumes a stopped copy-and-swap on its own, and a run that must start over is the stopped
 statement run through `Run` — `migrate --alter … --restart SCHEMA.TABLE` on the CLI — before
 the plan is run again.
+
+**Discarding without running the change.** An orchestrator's `Cancel` — end the change and
+leave nothing behind, without running it — is `schemachange.Runner.Discard(ctx, pool, shape)`.
+It takes a `preflight.CopySwapShape` (`preflight.CheckPrivileges` with
+`TierCopyAndSwap`, and `LogicalDecoding` set when the stopped run may be a live one, then
+`preflight.CheckCopySwapShape`), not a target: a discard grows nothing, so it is not asked for
+the disk or the slot headroom the stopped run itself holds. It has no CLI flag or verb.
+
+| Outcome | What it means | What the adapter does |
+| --- | --- | --- |
+| `Discarded` with `Nothing()` false | The call held the table lock, and dropped what the stopped run left in the restart's order — the shadow (`Shadow`), the hold on the source (`Slot` and `Publication` for a live row, `WriteFence` for a blocked-writes row), then the row (`RowPhase` is the phase it was in). With no row, a shadow or fence under the table's names and a slot and publication of its derived name are dropped the same way, the slot as the orphan reaper drops one | Done: the table is as if no run had started, and the next `Run` of any statement starts from the beginning |
+| `Discarded` with `Nothing()` true, nil error | Nothing of a run stands on the table | Done. This is the answer to a discard called again after one that completed, so a `Cancel` retried after a crash is safe to repeat |
+| `*dbconn.TableLockHeldError` | A run, or another discard, holds the table lock; the call waited for nothing and touched nothing | Stop the run first (cancel its context and wait for `Run` to return), then call `Discard` again |
+| `restart-swap-committed` | The row is in `cutover` and the catalog shows its swap committed: the new table is live under the source's name. Nothing was dropped | The change cannot be discarded. Run the same statement again, without a restart, to finish it; undoing it is a new schema change |
+| `resume-row-terminal` | The row is `done`: the change completed. Nothing was dropped | Treat the change as applied; a `KeepOld` rollback window is the caller's own to end |
+| `resume-row-mismatch` | The row names a slot other than the table's derived name. Nothing was dropped | Operator: the row is not this table's run's; inspect it before deleting anything |
+| error wrapping `decode.ErrSlotActive` | No row records the table's derived slot and a process holds it, so the discard, which drops such a slot only as the reaper would, left it; the shadow and fence before it may already be gone | Find the holder, end it, and call `Discard` again |
+| error wrapping `preflight.ErrCopySwapProofMismatch` | A slot stands to be dropped and the shape was proven without replication access. Nothing was dropped | Prove the shape with `LogicalDecoding` and call again |
+| any other error | A drop failed partway; what the call dropped before the failure is gone, and the row still records whatever stands | Call `Discard` again; each step is idempotent, and its `Discarded` names only what that call dropped |
 
 ## Design constraints the integration imposes
 

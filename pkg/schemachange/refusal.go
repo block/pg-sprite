@@ -177,11 +177,11 @@ const (
 	// run back before its cutover, and the caller writes the row there.
 	CauseResumeCutover RefusalCause = "resume-row-cutover"
 	// CauseRestartSwapCommitted means a Run asked to start over
-	// (RunOptions.Restart) met a cutover row whose swap the catalog shows
-	// committed (LK-4): the shadow already bears the source's name, so
-	// there is nothing to discard and the change is past the point of
-	// starting over. The row is left as found for a Run without the
-	// restart to finish.
+	// (RunOptions.Restart), or a Discard, met a cutover row whose swap the
+	// catalog shows committed (LK-4): the shadow already bears the source's
+	// name, so there is nothing to discard and the change is past the
+	// point of starting over. The row is left as found for a Run without
+	// the restart to finish.
 	CauseRestartSwapCommitted RefusalCause = "restart-swap-committed"
 	// CauseResumeRowMismatch means the checkpoint row handed to a resume
 	// does not describe the proven target and built shadow (ST-2): it is
