@@ -164,6 +164,9 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "partition of", err: executor.ErrPartitionOfUnsupported, want: executor.CodePartitionOfUnsupported},
 		{name: "unsupported create step", err: executor.ErrUnsupportedCreateStep, want: executor.CodeUnsupportedCreateStep},
 		{name: "pool too small", err: executor.ErrPoolTooSmall, want: executor.CodePoolTooSmall},
+		{name: "not create index", err: executor.ErrNotCreateIndex, want: executor.CodeNotCreateIndex},
+		{name: "not partitioned table", err: fmt.Errorf("target app.t: %w", executor.ErrNotPartitionedTable), want: executor.CodeNotPartitionedTable},
+		{name: "partitioned index name taken", err: fmt.Errorf("app.idx: %w", executor.ErrPartitionedIndexNameTaken), want: executor.CodePartitionedIndexNameTaken},
 		{name: "replica identity drop", err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop), want: executor.CodeReplicaIdentityDrop},
 		{name: "adopted index drift", err: fmt.Errorf("adopt: %w", executor.ErrAdoptedIndexDrift), want: executor.CodeAdoptedIndexDrift},
 		{name: "dropped index drift", err: fmt.Errorf("drop: %w", executor.ErrDroppedIndexDrift), want: executor.CodeDroppedIndexDrift},
@@ -232,6 +235,9 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeInvalidIndexNotDroppable:        true,
 		executor.CodeInvalidIndexBuilderUnobservable: false,
 		executor.CodeInvalidIndexUnproven:            false,
+		executor.CodeNotCreateIndex:                  true,
+		executor.CodeNotPartitionedTable:             true,
+		executor.CodePartitionedIndexNameTaken:       true,
 		executor.CodeEmptySequence:                   true,
 		executor.CodeUnsupportedSequenceStep:         true,
 		executor.CodeUnsupportedPartitionedParent:    true,
@@ -336,4 +342,21 @@ func TestSequenceReportJSONContractIsStable(t *testing.T) {
 			}
 		]
 	}`, string(got))
+}
+
+// An invariant breach is the fail-closed outcome, so its code outranks every
+// typed failure that carries it.
+func TestOutcomeCodeInvariantViolationOutranksTypedFailures(t *testing.T) {
+	breach := fmt.Errorf("%w: LK-2", executor.ErrInvariantViolation)
+	for name, err := range map[string]error{
+		"invalid index":  &executor.InvalidIndexError{Schema: "s", Index: "i", Build: breach, Cleanup: executor.ErrBuildLeftInvalidIndex},
+		"budget":         fmt.Errorf("%w: %w", &executor.BudgetError{Cause: executor.CauseStatement, Budget: time.Second}, breach),
+		"unknown commit": &executor.CommitOutcomeUnknownError{Err: breach},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, executor.CodeInvariantViolation, executor.OutcomeCode(err))
+		})
+	}
+	invalidErr := &executor.InvalidIndexError{Schema: "s", Index: "i", Build: breach, Cleanup: executor.ErrBuildLeftInvalidIndex}
+	assert.Equal(t, executor.CodeInvariantViolation, invalidErr.Code(), "the typed error's own code agrees with OutcomeCode")
 }
