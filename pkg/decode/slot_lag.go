@@ -139,9 +139,55 @@ type SlotLagExceededError struct {
 	// for a copy the stream kept up with, and for an abort from a catch-up
 	// no Runner drives.
 	CopyPaced copier.Paced
+	// Deadlocks is the catch-up's run of deadlocked flushes as the ceiling
+	// stopped it, as applier.Catchup records it on the stop, whatever the
+	// cause. It is the zero CatchupDeadlocks when no deadlock was in
+	// progress. Error names it only for a cause that does not retain WAL:
+	// on a retained-WAL stop the stream was within the ceiling, so the
+	// deadlocks were not what crossed it.
+	Deadlocks CatchupDeadlocks
+}
+
+// CatchupDeadlocks is a catch-up's run of flushes the server rolled back
+// as a deadlock victim, at the moment the slot lag ceiling stopped it: a
+// stop that lands during such a run may be the deadlocks' doing, since a
+// batch waiting out its backoff keeps the slot's WAL unconfirmed.
+type CatchupDeadlocks struct {
+	// Consecutive is how many flushes in a row the server had rolled back
+	// as a deadlock victim; zero when the last flush ended any other way.
+	Consecutive int
+	// BackingOff is set when the rolled-back batch was still waiting out
+	// its backoff before its next retry.
+	BackingOff bool
 }
 
 func (e *SlotLagExceededError) Error() string {
+	if e.Cause.RetainsWAL() {
+		// The stream was within the ceiling, so the deadlocks did not cross
+		// it; the cause's own remedy is the one that changes the outcome.
+		return e.ceilingText()
+	}
+	return e.ceilingText() + e.Deadlocks.text()
+}
+
+// text is what Error adds for a run of deadlocks in progress at a stop
+// whose cause does not retain WAL, and nothing when none was.
+func (d CatchupDeadlocks) text() string {
+	if d.Consecutive == 0 {
+		return ""
+	}
+	waiting := ""
+	if d.BackingOff {
+		waiting = " and its batch was waiting out the backoff before the next retry"
+	}
+	return fmt.Sprintf("; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (%d in a row)%s, "+
+		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
+		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		d.Consecutive, waiting)
+}
+
+// ceilingText is the account of the measure that crossed the ceiling.
+func (e *SlotLagExceededError) ceilingText() string {
 	switch e.Cause {
 	case SlotLagStreamBehind:
 		return fmt.Sprintf("slot %s has %s of WAL its stream has not confirmed, over the %s ceiling (%d > %d bytes); "+

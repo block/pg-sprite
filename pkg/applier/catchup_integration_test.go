@@ -137,6 +137,10 @@ type catchupSetup struct {
 	// copierClock, when set, is the copier's clock, which it reads as each
 	// chunk attempt starts and as each one commits.
 	copierClock progress.Clock
+	// pool, when set, is the pool Run is given, on which it reads the
+	// server's snapshot, write position, and slot every cycle; nil means
+	// the fixture's.
+	pool *pgxpool.Pool
 }
 
 // requeueRecords keeps the level and attributes of every record the
@@ -253,9 +257,13 @@ func startCatchupWith(t *testing.T, f catchupFixture, setup catchupSetup) *catch
 	require.NoError(t, err)
 	run.catchup = catchup
 
+	runPool := f.pool
+	if setup.pool != nil {
+		runPool = setup.pool
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	run.cancel = cancel
-	go func() { run.done <- catchup.Run(ctx, f.pool) }()
+	go func() { run.done <- catchup.Run(ctx, runPool) }()
 	t.Cleanup(func() {
 		// A test that stopped the run already has its result; this is the
 		// stop path for one that failed before it could, and it only has

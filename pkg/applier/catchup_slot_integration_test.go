@@ -264,13 +264,27 @@ func TestCatchupEndsAtOnceWhenTheStreamFallsBehindTheCeiling(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(resume)
 
-	// Several MiB of committed rows: the catch-up buffers them under the
-	// hold and cannot confirm past their commit until they are flushed.
-	_, err = f.pool.Exec(t.Context(), `
-		INSERT INTO `+f.table.Qualified()+` (uniq, amount, label, blob)
-		SELECT -g, 0, 'held', repeat('w', 1024)
-		FROM generate_series(1, 4096) AS g`)
-	require.NoError(t, err)
+	// Several MiB of rows in four committed transactions: the catch-up
+	// buffers them under the hold and cannot confirm past the first one's
+	// commit until they are flushed. One transaction would not do: a
+	// keepalive the server sends while it is still writing can move the
+	// confirmable position to its middle, so the lag left behind its
+	// commit could stay under the ceiling. The three after the first are
+	// several times the ceiling whatever the keepalives say, which the
+	// precondition after the loop holds.
+	var afterFirst decode.LSN
+	for batch := range 4 {
+		if batch == 1 {
+			afterFirst = f.currentWALLSN(t)
+		}
+		_, err = f.pool.Exec(t.Context(), `
+			INSERT INTO `+f.table.Qualified()+` (uniq, amount, label, blob)
+			SELECT -g, 0, 'held', repeat('w', 1024)
+			FROM generate_series($1 * 1024 + 1, ($1 + 1) * 1024) AS g`, batch)
+		require.NoError(t, err)
+	}
+	require.Greater(t, int64(f.currentWALLSN(t)-afterFirst), slotLagTestCeiling,
+		"the transactions after the first must write more WAL than the ceiling, whatever a keepalive confirms")
 
 	err = run.wait(t)
 	require.ErrorIs(t, err, decode.ErrSlotLagCeiling)
