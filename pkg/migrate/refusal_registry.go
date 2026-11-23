@@ -196,15 +196,17 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 // planner refuses while it builds the desired table on the scratch
 // schema: a CREATE TABLE that names a live parent, refused before the
 // build runs; one that declares a constraint twice, which the build shows
-// the server kept only once; and an expression whose printed text never
-// settles. RunDesired maps them to a refusal, since nothing was planned or
-// executed.
+// the server kept only once; an expression whose printed text never
+// settles; and a TABLESPACE on an index the partitioned index build would
+// create, which that build does not honor. RunDesired maps them to a
+// refusal, since nothing was planned or executed.
 func desiredShapeSentinels() []error {
 	return []error{
 		schemadiff.ErrDesiredPartitionOf,
 		schemadiff.ErrDesiredInherits,
 		schemadiff.ErrDesiredConstraintMerged,
 		schemadiff.ErrExpressionUnsettled,
+		executor.ErrPartitionedIndexTablespace,
 	}
 }
 

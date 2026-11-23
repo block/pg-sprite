@@ -87,9 +87,11 @@ const (
 	ReasonInsufficientPrivileges Reason = "insufficient-privileges"
 	// ReasonUnsupportedPartitionedParent: the plan has a step pg-sprite
 	// cannot run on a partitioned parent: adopting an index as a
-	// constraint, a NOT VALID foreign key before PostgreSQL 18, or a
-	// blocking index build. A CREATE INDEX is not one of these, because it
-	// runs as the partitioned index build.
+	// constraint, a NOT VALID foreign key before PostgreSQL 18, a
+	// concurrent DROP INDEX of the parent's index, or a blocking index
+	// build, which is what a forced CREATE INDEX takes. An unforced CREATE
+	// INDEX is not one of these, because it runs as the partitioned index
+	// build.
 	ReasonUnsupportedPartitionedParent Reason = "unsupported-partitioned-parent"
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.

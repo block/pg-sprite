@@ -292,6 +292,7 @@ func TestMigrateDryRunRefusesPartitionedIndexShapesLikeApply(t *testing.T) {
 	}{
 		{"an unnamed index", url, fmt.Sprintf("CREATE INDEX ON %s.p (v)", schema), verdict.ClassCapabilityBoundary},
 		{"IF NOT EXISTS", url, fmt.Sprintf("CREATE INDEX IF NOT EXISTS p_v_idx ON %s.p (v)", schema), verdict.ClassByDesign},
+		{"a TABLESPACE clause", url, fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v) TABLESPACE pg_default", schema), verdict.ClassCapabilityBoundary},
 		{"an unnamed index on a table the search_path resolves", u.String(), "CREATE INDEX ON p (v)", verdict.ClassCapabilityBoundary},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

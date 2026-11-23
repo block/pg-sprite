@@ -245,7 +245,7 @@ type Report struct {
 // it runs. Every other statement is checked against
 // preflight.RefusesPartitionedParent and refused by its cause, so the
 // unsupported shapes (index adoption, a NOT VALID foreign key before version
-// 18) stay refused. A report on a table that is not partitioned must not
+// 18, a concurrent drop of the parent's index) stay refused. A report on a table that is not partitioned must not
 // pass through here.
 func RoutePartitionedParent(report *Report, serverMajor int) error {
 	causes := make([]preflight.PartitionRefusalCause, len(report.Statements))

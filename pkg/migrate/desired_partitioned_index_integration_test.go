@@ -76,3 +76,27 @@ func TestRunDesiredStopsBeforeAnyStatementWhenThePartitionedIndexConnectionIsWro
 		assert.True(t, d.hasNoteColumn(t, schema))
 	})
 }
+
+// The partitioned index build does not honor TABLESPACE, so a desired file
+// that places the parent's index in one is refused before anything runs, as
+// a refusal and not as an error an orchestrator would retry.
+func TestRunDesiredRefusesAPartitionedIndexWithATablespace(t *testing.T) {
+	d := newTwoDatabases(t)
+	schema := d.createEvents(t)
+	desired := parseDesired(t, `CREATE TABLE events (
+	id   int,
+	note text
+) PARTITION BY RANGE (id);
+CREATE INDEX events_note_idx ON events (note) TABLESPACE pg_default;`)
+	opts := runOptions()
+	opts.Connection = dbconn.Config{URL: d.poolURL}
+
+	res, err := migrate.RunDesired(t.Context(), d.pool, migrate.DesiredRequest{Schema: schema, Desired: desired}, opts)
+
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, res.Class)
+	assert.Contains(t, res.Detail, "nothing was planned or executed")
+	assert.False(t, d.hasNoteColumn(t, schema), "the ADD COLUMN planned ahead of the index did not run")
+}
