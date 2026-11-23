@@ -18,20 +18,25 @@ import (
 // anything is created, and a foreign-table partition can be found on a later
 // catalog read after indexes committed, so every stop says earlier steps may
 // have committed and tells the operator to inspect and rerun, whichever error
-// stopped it. An unknown commit outcome says so in its own words.
+// stopped it. A permanent cause also tells the operator to fix it first,
+// since a rerun fails the same way until then. An unknown commit outcome says so in its own words.
 func TestPartitionedIndexFailureVerdictClaimsOnlyWhatTheErrorProves(t *testing.T) {
 	st, err := statement.ParseOne("CREATE INDEX orders_total_idx ON billing.orders (total)")
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
-		name string
-		err  error
+		name      string
+		err       error
+		permanent bool
 	}{
-		{"a name collision", executor.ErrPartitionedIndexNameTaken},
-		{"a foreign-table partition", executor.ErrForeignTablePartition},
-		{"a table that is not partitioned", executor.ErrNotPartitionedTable},
-		{"a pool that is too small", executor.ErrPoolTooSmall},
-		{"a wrapped database error", fmt.Errorf("read the partitions: %w", errors.New("connection reset"))},
+		{"a name collision", executor.ErrPartitionedIndexNameTaken, true},
+		{"a foreign-table partition", executor.ErrForeignTablePartition, true},
+		{"a table that is not partitioned", executor.ErrNotPartitionedTable, true},
+		{"a pool that is too small", executor.ErrPoolTooSmall, true},
+		{"a unique index that misses a partition key", executor.ErrUniqueIndexPartitionKey, true},
+		{"a lock session the pool cannot see", executor.ErrTableLockUnconfirmed, true},
+		{"a budget that ran out", &executor.BudgetError{Cause: executor.CauseLock}, false},
+		{"a wrapped database error", fmt.Errorf("read the partitions: %w", errors.New("connection reset")), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			v := partitionedIndexFailureVerdict(st, tc.err)
@@ -42,6 +47,12 @@ func TestPartitionedIndexFailureVerdictClaimsOnlyWhatTheErrorProves(t *testing.T
 			assert.Contains(t, v.Detail, "run the same statement again")
 			assert.NotContains(t, v.Detail, "before it created anything", "the error does not prove nothing was created")
 			assert.NotContains(t, v.Detail, "remain,", "the error does not prove what remains")
+			if tc.permanent {
+				assert.Contains(t, v.Detail, "fix the cause the error names", "a permanent cause fails a rerun the same way")
+				assert.Contains(t, v.Detail, "("+v.Code+")")
+			} else {
+				assert.NotContains(t, v.Detail, "fix the cause")
+			}
 		})
 	}
 
