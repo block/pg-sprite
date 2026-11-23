@@ -259,7 +259,7 @@ ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lo
 | `SET TABLESPACE` | ACCESS EXCLUSIVE | **Yes** (moves heap) | No | ✅ **Yes** (repack-style) | Rewrite/move; use a repack-style copy instead |
 | `SET (fillfactor=...)` and most reloptions | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | Applies to new rows |
 | `CLUSTER` / `VACUUM FULL` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** (`pg_repack`) | Use `pg_repack` |
-| `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief and no scan, but it queues behind long-running queries and then blocks every reader of the parent |
+| `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief unless the parent has a `DEFAULT` partition, which it scans while it holds the parent; it also queues behind long-running queries and then blocks every reader of the parent. With a `DEFAULT` partition, create the table on its own and [attach it](#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build) instead |
 | `ATTACH PARTITION` | SHARE UPDATE EXCLUSIVE on parent; ACCESS EXCLUSIVE on the attached table and on the `DEFAULT` partition, which are scanned unless proven | No | Yes on the parent; blocked on the attached table and `DEFAULT` while held | ➖ Native pattern | [Prove the bound on both tables and build the parent's indexes first](#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build) |
 | `DETACH PARTITION` | ACCESS EXCLUSIVE | No | No | ➖ Use `CONCURRENTLY` | |
 | `DETACH PARTITION CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | PG 14+ |
@@ -273,7 +273,7 @@ already proves it is unnecessary:
 | --- | --- | --- |
 | Scan the attached table, to prove every row fits the new bound | A validated `CHECK` on the attached table implies the bound | ACCESS EXCLUSIVE on the attached table |
 | Scan the `DEFAULT` partition, to prove none of its rows belongs in the new bound | The parent has no `DEFAULT` partition, or a validated `CHECK` on it excludes the bound | ACCESS EXCLUSIVE on the `DEFAULT` partition |
-| Build each of the parent's indexes on the attached table | The attached table already has a matching index. For the parent's primary key or unique constraint, the matching index must also back a constraint (`ADD CONSTRAINT … USING INDEX`): a bare unique index is left alone and a new one is built | ACCESS EXCLUSIVE on the attached table |
+| Build each of the parent's indexes on the attached table | The attached table already has an index equivalent to the parent's (see below). For the parent's primary key or unique constraint, the matching index must also back a constraint (`ADD CONSTRAINT … USING INDEX`): a bare unique index is left alone and a new one is built | ACCESS EXCLUSIVE on the attached table |
 
 Do all three ahead of time, online, and the attach changes only the catalog. For a parent
 `events`, range-partitioned on `created_at`, with primary key `(id, created_at)`, an index on
@@ -311,6 +311,16 @@ ALTER TABLE events_default DROP CONSTRAINT events_default_not_2027_01;
 - Each statement commits on its own. Step 4's `ADD … NOT VALID` takes a brief ACCESS
   EXCLUSIVE on the `DEFAULT` partition; its `VALIDATE` scans it under SHARE UPDATE
   EXCLUSIVE, so reads and writes continue.
+- From step 4's `ADD` until step 5 commits, a row written through `events` for the new
+  range routes to `events_default` and fails its `CHECK`, and step 4's `VALIDATE` fails if
+  `events_default` already holds a row in the range. The recipe is for a range nobody writes
+  to yet, such as next month's partition; for a live range, move its rows out of the
+  `DEFAULT` partition first and expect those writes to fail until the attach.
+- The attach adopts an index only when it is equivalent to the parent's: the same columns
+  in the same order, operator classes, collations, predicate, `INCLUDE` columns, access
+  method, and uniqueness. A near miss is left in place as an extra index and a new one is
+  built under the attach's lock. Before attaching, compare `pg_get_indexdef` of each of the
+  new table's indexes with the parent's.
 - A partition key column that allows nulls must be proven non-null too: the partition
   constraint includes `IS NOT NULL` on the key. Add `created_at IS NOT NULL AND` to the
   step 3 `CHECK`, or the attach scans the new table anyway.

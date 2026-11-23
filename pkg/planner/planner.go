@@ -961,9 +961,9 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
 
 	case statement.OpAttachPartition:
-		// Native pattern: pre-add a validated CHECK matching the bound on
-		// the child to skip the attach-time scan. The planner cannot
-		// construct that CHECK, so it routes native without a rewrite.
+		// Native pattern, stated by suggest.GuidancePrevalidatedCheck. The
+		// planner cannot construct its CHECKs from the statement, so it
+		// routes native without a rewrite.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 
 	case statement.OpDetachPartition:
