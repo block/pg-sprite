@@ -37,6 +37,14 @@ const (
 type Column struct {
 	// Name is the column name.
 	Name string
+	// AttNum is the column's attribute number (pg_attribute.attnum), which
+	// a column dropped and added again under its name never keeps. Only a
+	// live table is read for it; it never reaches a digest.
+	AttNum int16 `json:"-"`
+	// Dependents are the objects that go with the column when it is
+	// dropped, as a live table's introspection reads them (see Dependent).
+	// Only a live table is read for them; they never reach a digest.
+	Dependents []Dependent `json:"-"`
 	// Type is the canonical type text (format_type), e.g. "character
 	// varying(50)" — never an alias like varchar(50).
 	Type string
