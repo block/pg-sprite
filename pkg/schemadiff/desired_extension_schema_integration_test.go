@@ -80,7 +80,7 @@ func TestIntrospectDesiredResolvesExtensionSchemas(t *testing.T) {
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
 	require.NoError(t, err)
-	assert.Equal(t, live, modeltest.Comparable(desired))
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired))
 
 	columns := make(map[string]schemadiff.Column)
 	for _, col := range desired.Columns {
