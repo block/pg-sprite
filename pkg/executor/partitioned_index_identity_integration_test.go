@@ -3,13 +3,11 @@ package executor_test
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -197,11 +195,13 @@ func TestBuildPartitionedIndexRefusesALockHeldInAnotherDatabase(t *testing.T) {
 			_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `DROP DATABASE IF EXISTS `+pgx.Identifier{other}.Sanitize()+` WITH (FORCE)`)
 			assert.NoError(t, err)
 		})
-		dsn, err := withDatabase(f.cfg.URL, other)
-		require.NoError(t, err)
-		elsewhere := dbconn.Config{URL: dsn}
+		elsewhere := f.cfg
+		elsewhere.BeforeConnect = func(_ context.Context, cc *pgx.ConnConfig) error {
+			cc.Database = other
+			return nil
+		}
 
-		_, err = executor.BuildPartitionedIndex(t.Context(), elsewhere, f.pool, mustPreflight(t, f.pool, f.schema, "orders"),
+		_, err := executor.BuildPartitionedIndex(t.Context(), elsewhere, f.pool, mustPreflight(t, f.pool, f.schema, "orders"),
 			fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema), buildBudget)
 
 		require.ErrorIs(t, err, executor.ErrInvariantViolation)
@@ -210,38 +210,37 @@ func TestBuildPartitionedIndexRefusesALockHeldInAnotherDatabase(t *testing.T) {
 	})
 }
 
-// withDatabase points a connection string, in URL or keyword form, at another
-// database and keeps every other setting. In the keyword form a later setting
-// overrides an earlier one.
-func withDatabase(dsn, database string) (string, error) {
-	if !strings.Contains(dsn, "://") {
-		return dsn + " dbname='" + database + "'", nil
-	}
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return "", err
-	}
-	u.Path = "/" + database
-	return u.String(), nil
-}
+// A pool whose role cannot see when another role's session started cannot
+// tell the lock session apart from one with the same PID on another server.
+// The build refuses with its own reason, which names the role setup to fix,
+// rather than report a lock held in another database, and creates nothing.
+func TestBuildPartitionedIndexRefusesWhenThePoolCannotSeeTheLockSession(t *testing.T) {
+	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
+		f := newFixture(t)
+		partitions := f.ordersByRegion(t)
 
-func TestWithDatabaseKeepsEveryOtherSetting(t *testing.T) {
-	for name, dsn := range map[string]string{
-		"url":     "postgres://u:p@db.example:5433/first?sslmode=require&application_name=probe",
-		"keyword": "host=db.example port=5433 user=u password=p dbname=first sslmode=require application_name=probe",
-	} {
-		t.Run(name, func(t *testing.T) {
-			moved, err := withDatabase(dsn, "second")
-			require.NoError(t, err)
-			cfg, err := pgconn.ParseConfig(moved)
-			require.NoError(t, err)
-			assert.Equal(t, "second", cfg.Database)
-			assert.Equal(t, "db.example", cfg.Host)
-			assert.Equal(t, uint16(5433), cfg.Port)
-			assert.Equal(t, "u", cfg.User)
-			assert.Equal(t, "p", cfg.Password)
-			assert.NotNil(t, cfg.TLSConfig, "sslmode is kept")
-			assert.Equal(t, "probe", cfg.RuntimeParams["application_name"])
+		role := "pool_" + strings.ToLower(f.schema)
+		f.exec(t, `CREATE ROLE %s LOGIN PASSWORD 'pool'`, pgx.Identifier{role}.Sanitize())
+		t.Cleanup(func() {
+			_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `DROP ROLE IF EXISTS `+pgx.Identifier{role}.Sanitize())
+			assert.NoError(t, err)
 		})
-	}
+		asRole := f.cfg
+		asRole.BeforeConnect = func(_ context.Context, cc *pgx.ConnConfig) error {
+			cc.User = role
+			cc.Password = "pool"
+			return nil
+		}
+		pool, err := dbconn.NewPool(t.Context(), asRole)
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
+
+		_, err = executor.BuildPartitionedIndex(t.Context(), f.cfg, pool, mustPreflight(t, f.pool, f.schema, "orders"),
+			fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema), buildBudget)
+
+		require.ErrorIs(t, err, executor.ErrTableLockUnconfirmed)
+		assert.NotErrorIs(t, err, executor.ErrInvariantViolation)
+		assert.Equal(t, executor.CodeTableLockUnconfirmed, executor.OutcomeCode(err))
+		f.requireNothingBuilt(t, "orders", partitions...)
+	})
 }

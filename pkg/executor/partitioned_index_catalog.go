@@ -23,6 +23,11 @@ type partitionNode struct {
 	schema    string
 	name      string
 	relkind   string
+	// detachPending is true while a DETACH PARTITION CONCURRENTLY that did
+	// not finish leaves the partition in pg_inherits. The server leaves such
+	// a partition out when it attaches an index, so no index can be attached
+	// for it.
+	detachPending bool
 }
 
 func (n partitionNode) subPartitioned() bool { return n.relkind == "p" }
@@ -40,7 +45,7 @@ func listPartitionTree(ctx context.Context, q querier, tableOID uint32) ([]parti
 	var nodes []partitionNode
 	for rows.Next() {
 		var n partitionNode
-		if err := rows.Scan(&n.oid, &n.parentOID, &n.schema, &n.name, &n.relkind); err != nil {
+		if err := rows.Scan(&n.oid, &n.parentOID, &n.schema, &n.name, &n.relkind, &n.detachPending); err != nil {
 			return nil, fmt.Errorf("scan partitions of table %d: %w", tableOID, err)
 		}
 		nodes = append(nodes, n)
@@ -52,18 +57,50 @@ func listPartitionTree(ctx context.Context, q querier, tableOID uint32) ([]parti
 }
 
 const listPartitionTreeSQL = `WITH RECURSIVE tree AS (
-		        SELECT h.inhrelid AS oid, h.inhparent AS parent, 1 AS depth
+		        SELECT h.inhrelid AS oid, h.inhparent AS parent, 1 AS depth, h.inhdetachpending AS detach_pending
 		          FROM pg_catalog.pg_inherits h
 		         WHERE h.inhparent OPERATOR(pg_catalog.=) $1
 		        UNION ALL
-		        SELECT h.inhrelid, h.inhparent, tree.depth OPERATOR(pg_catalog.+) 1
+		        SELECT h.inhrelid, h.inhparent, tree.depth OPERATOR(pg_catalog.+) 1, h.inhdetachpending
 		          FROM pg_catalog.pg_inherits h
 		          JOIN tree ON h.inhparent OPERATOR(pg_catalog.=) tree.oid)
-		 SELECT tree.oid, tree.parent, n.nspname, c.relname, c.relkind::pg_catalog.text
+		 SELECT tree.oid, tree.parent, n.nspname, c.relname, c.relkind::pg_catalog.text, tree.detach_pending
 		   FROM tree
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.oid
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		  ORDER BY tree.depth, tree.oid`
+
+// partitionKeyColumns returns each partitioned table's partition key columns
+// by name, in key order, for the tables with the given OIDs. An expression in
+// the key is listed as the empty string.
+func partitionKeyColumns(ctx context.Context, q querier, oids []uint32) (map[uint32][]string, error) {
+	rows, err := q.Query(ctx, partitionKeyColumnsSQL, oids)
+	if err != nil {
+		return nil, fmt.Errorf("read the partition keys of tables %v: %w", oids, err)
+	}
+	defer rows.Close()
+	keys := map[uint32][]string{}
+	for rows.Next() {
+		var oid uint32
+		var col *string
+		if err := rows.Scan(&oid, &col); err != nil {
+			return nil, fmt.Errorf("scan the partition keys of tables %v: %w", oids, err)
+		}
+		keys[oid] = append(keys[oid], deref(col))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the partition keys of tables %v: %w", oids, err)
+	}
+	return keys, nil
+}
+
+const partitionKeyColumnsSQL = `SELECT pt.partrelid, a.attname::pg_catalog.text
+		   FROM pg_catalog.pg_partitioned_table pt
+		  CROSS JOIN LATERAL pg_catalog.unnest(pt.partattrs::pg_catalog.int2[]) WITH ORDINALITY AS k(attnum, ord)
+		   LEFT JOIN pg_catalog.pg_attribute a
+		     ON a.attrelid OPERATOR(pg_catalog.=) pt.partrelid AND a.attnum OPERATOR(pg_catalog.=) k.attnum
+		  WHERE pt.partrelid OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.oid[])
+		  ORDER BY pt.partrelid, k.ord`
 
 // childrenOf returns the direct partitions of parentOID from a tree listing.
 func childrenOf(tree []partitionNode, parentOID uint32) []partitionNode {
@@ -81,6 +118,18 @@ func foreignPartitions(tree []partitionNode) []string {
 	var names []string
 	for _, n := range tree {
 		if n.foreign() {
+			names = append(names, n.qualified())
+		}
+	}
+	return names
+}
+
+// detachPendingPartitions names the partitions whose detach has not
+// finished.
+func detachPendingPartitions(tree []partitionNode) []string {
+	var names []string
+	for _, n := range tree {
+		if n.detachPending {
 			names = append(names, n.qualified())
 		}
 	}
