@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/applier"
+	"github.com/block/pg-sprite/pkg/decode"
 )
 
 // deadlockTestBackoff is the deadlock backoff the test here sets: far
@@ -97,6 +98,47 @@ func TestCatchupStatusKeepsTheRequeuedEntriesWhileBackingOff(t *testing.T) {
 	assert.Equal(t, rolledBack.Confirmed, s.Confirmed, "the confirmed position stays below the requeued batch")
 	assert.Greater(t, s.Delivered, s.Confirmed, "the stream delivered the marks past the requeued batch")
 	run.stop(t)
+	require.NoError(t, writer.tx.Rollback(t.Context()))
+}
+
+// A deadlocked batch waiting out its backoff holds the confirmation below
+// it, so on a busy source the slot can reach the ceiling before the
+// deadlocks use up their attempts. The stop is the ceiling's, at once, as
+// the stream falling behind, and it carries the deadlocks in progress —
+// one flush rolled back, its batch still backing off — so a host can name
+// both causes. The backoff is an hour, so no retry comes due before the
+// committed rows take the unconfirmed WAL over the small ceiling.
+func TestCatchupLagStopDuringADeadlockBackoffCarriesTheDeadlocks(t *testing.T) {
+	f := newCatchupFixture(t, 20)
+	run := startCatchupWith(t, f, catchupSetup{
+		positions: &switchPosition{pos: allLanded()},
+		opts:      applier.CatchupOptions{SlotLagCeiling: slotLagTestCeiling, DeadlockBackoff: deadlockTestBackoff},
+	})
+	writer := f.holdShadowValue(t, run, rowsOneAndTwo)
+	f.moveUniqueValues(t, rowsOneAndTwo)
+
+	writer.deadlockWithTheFlush(t)
+	run.awaitStatus(t, "back off after the flush the server rolled back", func(s applier.Status) bool {
+		return s.BatchesDeadlocked == 1 && s.BackingOff
+	})
+
+	// Several MiB of committed rows: the catch-up buffers them while it
+	// backs off and cannot confirm past the requeued batch below them.
+	_, err := f.pool.Exec(t.Context(), `
+		INSERT INTO `+f.table.Qualified()+` (uniq, amount, label, blob)
+		SELECT -g, 0, 'busy', repeat('w', 1024)
+		FROM generate_series(1, 4096) AS g`)
+	require.NoError(t, err)
+
+	err = run.wait(t)
+	require.ErrorIs(t, err, decode.ErrSlotLagCeiling)
+	assert.NotErrorIs(t, err, applier.ErrBatchDeadlocked, "the ceiling stopped the run before the deadlocks used up their attempts")
+	var exceeded *decode.SlotLagExceededError
+	require.ErrorAs(t, err, &exceeded)
+	assert.Equal(t, decode.SlotLagStreamBehind, exceeded.Cause, "the backoff held the confirmation below the requeued batch")
+	assert.Greater(t, exceeded.Unconfirmed, slotLagTestCeiling)
+	assert.Equal(t, decode.CatchupDeadlocks{Consecutive: 1, BackingOff: true}, exceeded.Deadlocks,
+		"the stop names the deadlock in progress and the backoff it was waiting out")
 	require.NoError(t, writer.tx.Rollback(t.Context()))
 }
 

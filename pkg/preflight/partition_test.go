@@ -111,6 +111,22 @@ func TestEveryRoutedPartitionedIndexBuildShapeIsRefusedWhenItBypassesTheBuild(t 
 	}
 }
 
+// Every index of a partitioned parent is a partitioned index, and
+// PostgreSQL rejects DROP INDEX CONCURRENTLY for one (SQLSTATE 0A000) in
+// every supported version, so the concurrent drop is refused while the
+// plain drop, the one PostgreSQL accepts, is not this check's to refuse.
+func TestRefusesPartitionedParentConcurrentIndexDrop(t *testing.T) {
+	for _, major := range []int{14, 15, 16, 17, 18} {
+		cause, err := RefusesPartitionedParent(major, []string{"DROP INDEX CONCURRENTLY s.events_name_idx"})
+		require.NoError(t, err)
+		assert.Equal(t, PartitionCauseConcurrentIndexDrop, cause)
+
+		cause, err = RefusesPartitionedParent(major, []string{"DROP INDEX s.events_name_idx"})
+		require.NoError(t, err)
+		assert.Empty(t, cause)
+	}
+}
+
 func TestRefusesPartitionedParentAdoptsExistingIndex(t *testing.T) {
 	for _, major := range []int{14, 15, 16, 17, 18} {
 		cause, err := RefusesPartitionedParent(major,
@@ -146,6 +162,7 @@ func TestEveryPartitionRefusalCauseNamesItsClass(t *testing.T) {
 		PartitionCauseBlockingIndexBuild:   refusal.ClassCapabilityBoundary,
 		PartitionCauseIndexAdoption:        refusal.ClassByDesign,
 		PartitionCauseNotValidForeignKey:   refusal.ClassEnvironmental,
+		PartitionCauseConcurrentIndexDrop:  refusal.ClassByDesign,
 	}
 	assert.Len(t, PartitionRefusalCauses(), len(want), "every registered cause has an expected class")
 	for _, cause := range PartitionRefusalCauses() {

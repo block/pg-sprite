@@ -1,5 +1,7 @@
 # pg-sprite
 
+[![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
+
 > [!WARNING]
 > **Early release — not production-ready.** This project is under active
 > development. Tagged releases exist, but pre-1.0 there are no stability
@@ -115,6 +117,11 @@ refusal — never a silently wrong or incomplete result:
   `--force` names the table ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+  An index of a partitioned table has no concurrent drop at all: drop it with
+  the plain `DROP INDEX` under `--accept-blocking SCHEMA.TABLE` and
+  `--allow-destructive SCHEMA.TABLE`, naming the parent, which locks the parent and
+  every partition while it runs
+  ([example](docs/lock-budgeted-passthrough.md#dropping-an-index-of-a-partitioned-table)).
 - **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
   instant in the catalog but break every running application instance that
   still uses the old name, and no safer sequence can be built from the

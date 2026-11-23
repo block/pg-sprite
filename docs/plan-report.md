@@ -29,7 +29,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **21**: version 21 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **22**: version 22 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -170,7 +170,7 @@ treat the statement and report as refused.
 | Value | Meaning |
 |---|---|
 | `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
-| `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. |
+| `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. The report carries no partition cause: a `drop-index` statement with this reason is a drop PostgreSQL cannot run concurrently, whose plain form `migrate --alter` runs under `--accept-blocking` and `--allow-destructive` (`blocking_passthrough_eligible` is true), and any other `kind` is an index build or a constraint the parent cannot take online. |
 | `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs `ADD FOREIGN KEY` online. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
@@ -220,6 +220,7 @@ code's full manual path; this contract embeds it, so a new guidance code bumps t
 | `coordinated-table-rename` | Coordinate the table rename with the application deploy that adopts the new name, then run it with `--force` naming the table. |
 | `coordinated-constraint-rename` | The renamed index backs a constraint, which the rename renames: coordinate the rename with the application deploy that stops naming the old constraint (`ON CONFLICT ON CONSTRAINT`, error handling). |
 | `alter-column-type-in-place` | Never on a report statement: a `migrate` refusal verdict with reason `destructive-change` carries it when one ALTER TABLE drops a column and adds it back under the same name. Change the column in place with ALTER COLUMN ... TYPE ... USING ..., which keeps its values. |
+| `add-integer-primary-key` | Never on a report statement: a `migrate` refusal verdict with reason `copy-and-swap-refused` and cause `copy-and-swap-pk-unsupported` carries it when the table has no primary key. Add a single-column integer primary key online, as [primary-keys.md](primary-keys.md#add-a-primary-key-online) shows, then run the change again, which checks the table's other shape facts, such as its replica identity and foreign keys. |
 
 ### Causes (`cause`, greenfield create-shape refusals only)
 
@@ -367,7 +368,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 21,
+  "format_version": 22,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -410,7 +411,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 21,
+  "format_version": 22,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -477,7 +478,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 21,
+  "format_version": 22,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",
