@@ -275,6 +275,9 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			// Where the route's own sessions connect, and how they verify TLS.
 			"Options.CopySwap.Connection.URL":        true,
 			"Options.CopySwap.Connection.CACertPath": true,
+			// The same, for the partitioned index build's table lock session.
+			"Options.Connection.URL":        true,
+			"Options.Connection.CACertPath": true,
 		}
 		var unaccounted, walked []string
 		for _, sw := range policySwitches(reflect.TypeFor[Options](), "Options", nil) {

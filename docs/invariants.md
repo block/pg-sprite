@@ -1657,13 +1657,17 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   for an eligible policy refusal (AB-3..AB-5). *Source:* [high-level-design § advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one),
   [lock-budgeted passthrough](lock-budgeted-passthrough.md).
 - **RF-6** — A partitioned-parent sequence is refused before its first step when it would build
-  an index, drop an index concurrently (PostgreSQL has no concurrent drop for a partitioned
-  index), or on PostgreSQL before 18 when it would add a foreign key `NOT VALID`. pg-sprite
-  does not substitute a blocking parent build for the missing partition-aware online flow.
-  *Enforced:* preflight and sequence-executor admission; the concurrent drop by preflight and
-  plan reporting, since sequence-executor admission refuses every `DROP INDEX` step on any
-  table before it reads the relation kind. *Source:* PostgreSQL relation-kind and
-  version capabilities.
+  an index any way but the partition-aware index build, drop an index concurrently (PostgreSQL
+  has no concurrent drop for a partitioned index), or on PostgreSQL before 18 when it would add a
+  foreign key `NOT VALID`. pg-sprite does not run a blocking parent build, and `--force` does not
+  bypass that. A `CREATE INDEX` on a partitioned parent is not refused: it runs as that build
+  (`CREATE INDEX ON ONLY`, then a concurrent build and attach per partition), each step committing
+  on its own. *Enforced:* preflight (`RefusesPartitionedParent`, with
+  `RoutesToPartitionedIndexBuild` naming the one shape that is routed instead) and
+  sequence-executor admission, which refuses every index-building step on a parent because the
+  build is its own executor entry point; the concurrent drop by preflight and plan reporting,
+  since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
+  the relation kind. *Source:* PostgreSQL relation-kind and version capabilities.
 - **RF-7** — Every refusal carries exactly one non-zero class from the closed refusal-class
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a

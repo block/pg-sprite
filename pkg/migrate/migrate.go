@@ -125,6 +125,15 @@ type Options struct {
 	// without CopySwap.Connection.
 	CopySwap CopySwapOptions
 
+	// Connection is the connection target the run opens dedicated sessions
+	// from when a statement needs one the pool cannot supply: a CREATE INDEX
+	// on a partitioned table takes the parent's table lock on a session of its
+	// own. It must reach the database the pool was dialed with, which the run
+	// proves before it opens anything; a run that needs it and finds it unset
+	// returns [ErrConnectionRequired]. The CLI always sets it. A statement
+	// that needs no dedicated session never reads it.
+	Connection dbconn.Config
+
 	// Logger receives decision diagnostics (routing, preflight, execution
 	// transitions) at Debug; nil discards them. A copy-and-swap's catch-up
 	// also writes Info and Warn records here when it requeues a batch
@@ -570,11 +579,23 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
-	if err := preflight.CheckPartitionSupport(pt, serverMajor, execSQL); err != nil {
-		if partitionErr, ok := errors.AsType[*preflight.UnsupportedPartitionedParentError](err); ok {
-			return partitionedParentVerdict(st, partitionErr, forced)
+	// A CREATE INDEX on a partitioned table runs as the partition-aware
+	// index build, which no step list can carry; a forced submitted form is
+	// the operator's override of that routing and meets the partitioned-parent
+	// refusal like any other step list.
+	buildsPartitioned := false
+	if pt.Partitioned() && !forced {
+		if buildsPartitioned, err = preflight.RoutesToPartitionedIndexBuild(execSQL); err != nil {
+			return verdict.Verdict{}, err
 		}
-		return verdict.Verdict{}, err
+	}
+	if !buildsPartitioned {
+		if err := preflight.CheckPartitionSupport(pt, serverMajor, execSQL); err != nil {
+			if partitionErr, ok := errors.AsType[*preflight.UnsupportedPartitionedParentError](err); ok {
+				return partitionedParentVerdict(st, partitionErr, forced)
+			}
+			return verdict.Verdict{}, err
+		}
 	}
 	tier, err := preflight.RequiredTier(execSQL)
 	if err != nil {
@@ -595,6 +616,10 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	if substituted {
 		logger.Debug("substituting safer native sequence",
 			"table", qualified(st), "steps", len(execSQL))
+	}
+
+	if buildsPartitioned {
+		return partitionedIndexBuild(ctx, pool, pt, st, opts, step, logger)
 	}
 
 	retry := opts.retry()
