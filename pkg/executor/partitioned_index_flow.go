@@ -39,17 +39,20 @@ type partitionedIndexFlow struct {
 	// it where it found it has nothing left to do.
 	changes int
 	// step is the progress step in flight; seen is the partitions already
-	// counted into the tracker's total.
-	step int
-	seen map[uint32]struct{}
-	rep  PartitionedIndexReport
+	// counted into the tracker's total. A nonzero runStep means the build is
+	// one step of a run that owns the tracker: every report goes to that step
+	// and the total is not raised.
+	step    int
+	runStep int
+	seen    map[uint32]struct{}
+	rep     PartitionedIndexReport
 }
 
 // runPartitionedIndex is the build's body, run under the context the table lock
 // is bound to.
-func runPartitionedIndex(ctx context.Context, pool *pgxpool.Pool, req partitionedIndexRequest, sql string, b ConcurrentBudget, tracker *progress.Tracker) (PartitionedIndexReport, error) {
+func runPartitionedIndex(ctx context.Context, pool *pgxpool.Pool, req partitionedIndexRequest, sql string, b ConcurrentBudget, tracker *progress.Tracker, runStep int) (PartitionedIndexReport, error) {
 	f := &partitionedIndexFlow{
-		tx: briefTx{pool: pool}, pool: pool, budget: b, tracker: tracker, sql: sql, req: req,
+		tx: briefTx{pool: pool}, pool: pool, budget: b, tracker: tracker, sql: sql, req: req, runStep: runStep,
 		seen: map[uint32]struct{}{},
 		rep:  PartitionedIndexReport{Schema: req.schema, Index: req.index},
 	}
@@ -207,7 +210,7 @@ func (f *partitionedIndexFlow) countNewPartitions(tree []partitionNode) {
 			added++
 		}
 	}
-	if f.tracker != nil {
+	if f.tracker != nil && f.runStep == 0 {
 		f.tracker.AddSteps(added)
 	}
 }
@@ -218,9 +221,14 @@ func (f *partitionedIndexFlow) startStep(op progress.Operation, sql string, next
 	if next {
 		f.step++
 	}
-	if f.tracker != nil {
-		f.tracker.StartStep(f.step, op, sql)
+	if f.tracker == nil {
+		return
 	}
+	step := f.step
+	if f.runStep > 0 {
+		step = f.runStep
+	}
+	f.tracker.StartStep(step, op, sql)
 }
 
 // ensureParentIndex creates the parent's index with ON ONLY, or resumes the one

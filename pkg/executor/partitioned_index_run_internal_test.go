@@ -53,7 +53,7 @@ func (f runFixture) run(t *testing.T, index string) (PartitionedIndexReport, err
 func (f runFixture) runSQL(t *testing.T, index, sql string) (PartitionedIndexReport, error) {
 	t.Helper()
 	req := partitionedIndexRequest{schema: f.schema, table: "orders", index: index}
-	return runPartitionedIndex(t.Context(), f.pool, req, sql, ConcurrentBudget{Overall: time.Minute}, nil)
+	return runPartitionedIndex(t.Context(), f.pool, req, sql, ConcurrentBudget{Overall: time.Minute}, nil, 0)
 }
 
 // builtFlow runs the build for index to completion and returns a flow that

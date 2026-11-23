@@ -155,7 +155,28 @@ func BuildPartitionedIndexWithProgress(ctx context.Context, cfg dbconn.Config, p
 	return buildPartitionedIndex(ctx, cfg, pool, pt, sql, b, tracker)
 }
 
+// BuildPartitionedIndexAsStep is BuildPartitionedIndex reported to the run step
+// at: the whole build is step at.Step of a run that owns the tracker, so the
+// partitions it works on are each a statement of that one step, named in the
+// step's detail, and the run's step total is untouched. The call never calls
+// Start or Finish; the front door that runs several statements under one
+// tracker keeps one elapsed time and one terminal outcome across them.
+func BuildPartitionedIndexAsStep(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget, at RunStep) (PartitionedIndexReport, error) {
+	if err := at.validate(); err != nil {
+		return PartitionedIndexReport{}, err
+	}
+	return buildPartitionedIndexAt(ctx, cfg, pool, pt, sql, b, at.Tracker, at.Step)
+}
+
 func buildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget, tracker *progress.Tracker) (PartitionedIndexReport, error) {
+	return buildPartitionedIndexAt(ctx, cfg, pool, pt, sql, b, tracker, 0)
+}
+
+// buildPartitionedIndexAt runs the build. A nonzero runStep keeps every
+// progress report on that one step of a run that owns the tracker; zero gives
+// each partition a step of its own and raises the tracker's total as the build
+// finds partitions.
+func buildPartitionedIndexAt(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, b ConcurrentBudget, tracker *progress.Tracker, runStep int) (PartitionedIndexReport, error) {
 	var rep PartitionedIndexReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -201,7 +222,7 @@ func buildPartitionedIndex(ctx context.Context, cfg dbconn.Config, pool *pgxpool
 	// Everything the lock protects runs under a context that ends when the
 	// lock is lost, so no statement outlives the exclusion it relied on.
 	lockedCtx, stop := lock.Bind(ctx)
-	rep, err = runPartitionedIndex(lockedCtx, pool, req, sql, b, tracker)
+	rep, err = runPartitionedIndex(lockedCtx, pool, req, sql, b, tracker, runStep)
 	stop()
 	// INV: LK-1 — a lock lost while the build ran voids what it did under the
 	// exclusion, whatever else it reported.
@@ -284,31 +305,9 @@ type partitionedIndexRequest struct {
 // nothing is executed on one.
 func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partitionedIndexRequest, error) {
 	var req partitionedIndexRequest
-	st, err := statement.ParseOne(sql)
+	st, op, err := admitPartitionedIndexShape(sql)
 	if err != nil {
 		return req, err
-	}
-	if st.Kind() != statement.KindCreateIndex {
-		return req, fmt.Errorf("%w: got %s", ErrNotCreateIndex, st.Kind())
-	}
-	ops, err := statement.ParseOps(sql)
-	if err != nil {
-		return req, err
-	}
-	// A CREATE INDEX yields exactly one operation; anything else is
-	// parse-boundary version skew and is refused rather than guessed.
-	if len(ops) != 1 || ops[0].Kind != statement.OpCreateIndex {
-		return req, ErrNotCreateIndex
-	}
-	switch {
-	case ops[0].Name == "":
-		return req, ErrUnnamedIndex
-	case ops[0].IfNotExists:
-		return req, ErrIfNotExistsUnsupported
-	case ops[0].Tablespace != "":
-		return req, fmt.Errorf("%w: TABLESPACE %q", ErrPartitionedIndexTablespace, ops[0].Tablespace)
-	case st.Schema() == "":
-		return req, ErrUnqualifiedTable
 	}
 	// INV: ST-7 — the executor runs exactly the statement that was gated, and
 	// only against the table the preflight proof verified.
@@ -319,11 +318,53 @@ func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partition
 	if !pt.Partitioned() {
 		return req, fmt.Errorf("%w: %s", ErrNotPartitionedTable, qualifiedName(pt.Schema(), pt.Table()))
 	}
-	req = partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: ops[0].Name, unique: ops[0].Unique}
+	req = partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: op.Name, unique: op.Unique}
 	if req.unique {
 		if req.keyColumns, err = statement.IndexKeyColumns(sql); err != nil {
 			return req, fmt.Errorf("read the key columns of index %s: %w", qualifiedName(req.schema, req.index), err)
 		}
 	}
 	return req, nil
+}
+
+// AdmitPartitionedIndexShape is the statement-shape half of the partitioned
+// index build's admission: exactly one named CREATE INDEX, without IF NOT
+// EXISTS or TABLESPACE, on a schema-qualified table. It needs no connection, so
+// a dry run learns the refusals the build would return before it runs
+// anything. The refusals are the build's own, typed.
+func AdmitPartitionedIndexShape(sql string) error {
+	_, _, err := admitPartitionedIndexShape(sql)
+	return err
+}
+
+// admitPartitionedIndexShape returns the parsed statement and the index
+// operation it holds.
+func admitPartitionedIndexShape(sql string) (statement.Statement, statement.Op, error) {
+	st, err := statement.ParseOne(sql)
+	if err != nil {
+		return statement.Statement{}, statement.Op{}, err
+	}
+	if st.Kind() != statement.KindCreateIndex {
+		return statement.Statement{}, statement.Op{}, fmt.Errorf("%w: got %s", ErrNotCreateIndex, st.Kind())
+	}
+	ops, err := statement.ParseOps(sql)
+	if err != nil {
+		return statement.Statement{}, statement.Op{}, err
+	}
+	// A CREATE INDEX yields exactly one operation; anything else is
+	// parse-boundary version skew and is refused rather than guessed.
+	if len(ops) != 1 || ops[0].Kind != statement.OpCreateIndex {
+		return statement.Statement{}, statement.Op{}, ErrNotCreateIndex
+	}
+	switch {
+	case ops[0].Name == "":
+		return statement.Statement{}, statement.Op{}, ErrUnnamedIndex
+	case ops[0].IfNotExists:
+		return statement.Statement{}, statement.Op{}, ErrIfNotExistsUnsupported
+	case ops[0].Tablespace != "":
+		return statement.Statement{}, statement.Op{}, fmt.Errorf("%w: TABLESPACE %q", ErrPartitionedIndexTablespace, ops[0].Tablespace)
+	case st.Schema() == "":
+		return statement.Statement{}, statement.Op{}, ErrUnqualifiedTable
+	}
+	return st, ops[0], nil
 }
