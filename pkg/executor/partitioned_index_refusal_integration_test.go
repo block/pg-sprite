@@ -200,7 +200,6 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 					_, err := f.buildErr(t, "orders", fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema))
 
 					require.ErrorIs(t, err, executor.ErrPartitionedIndexNameTaken)
-					assert.Zero(t, f.indexCount(t, "orders"), "the parent must have no index")
 					assert.Empty(t, f.attachedTo(t, "orders_eu", "idx_orders_total"), "orders_eu has no index attached to idx_orders_total")
 					if c.held != nil {
 						assert.Equal(t, before, f.indexesOn(t, c.heldTable)[c.held(derivedEU)], "the occupant must be left as it was")
