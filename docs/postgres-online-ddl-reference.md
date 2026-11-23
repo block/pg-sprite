@@ -243,6 +243,50 @@ TABLE` statement, scans every row under the `ADD`'s lock instead. `lint` flags t
 block form as [`validate-in-transaction`](#validate-in-transaction), and the planner
 refuses the one-statement form until it is split.
 
+### Safe pattern: add a foreign key on a partitioned table before PostgreSQL 18
+
+PostgreSQL 14 to 17 refuse `NOT VALID` for a foreign key on a partitioned table (`cannot add
+NOT VALID foreign key on partitioned table`), so the pattern above cannot start on the
+parent, and a plain `ADD FOREIGN KEY` there validates every partition in one statement.
+Prove each partition first; the parent statement then adopts the partitions' foreign keys
+and scans nothing. For `events`, range-partitioned on `created_at`, referencing
+`communities`:
+
+```sql
+-- 1. On every partition, DEFAULT included: add NOT VALID, then validate online.
+ALTER TABLE events_2026_11 ADD CONSTRAINT events_2026_11_community_fk
+    FOREIGN KEY (community_id) REFERENCES communities (id) NOT VALID;
+ALTER TABLE events_2026_11 VALIDATE CONSTRAINT events_2026_11_community_fk;
+-- … the same for events_2026_12, events_default, and every other partition …
+
+-- 2. On the parent: adopts each partition's validated foreign key.
+ALTER TABLE events ADD CONSTRAINT events_community_fk
+    FOREIGN KEY (community_id) REFERENCES communities (id);
+```
+
+| Step | Locks | Scan |
+| --- | --- | --- |
+| Partition `ADD … NOT VALID` | SHARE ROW EXCLUSIVE on the partition and on `communities` | No |
+| Partition `VALIDATE` | SHARE UPDATE EXCLUSIVE on the partition, ROW SHARE on `communities` | Yes, online |
+| Parent `ADD FOREIGN KEY` | SHARE ROW EXCLUSIVE on `events` and every partition; **ACCESS EXCLUSIVE on `communities`** | No |
+
+- Each partition's foreign key must match the parent's exactly: the same columns, referenced
+  table and columns, `ON DELETE` / `ON UPDATE` actions, and deferrability. A partition whose
+  foreign key differs keeps it, gets a second one from step 2, and that one is validated by
+  a scan inside step 2.
+- Step 2 is brief, but it takes ACCESS EXCLUSIVE on the referenced table, so every query on
+  `communities` waits while it runs, and it queues behind any long-running query on
+  `communities`. Writes to `events` wait too. Run it under a short `lock_timeout`.
+- A partition created between the two steps without the foreign key is validated by a scan
+  inside step 2.
+
+On PostgreSQL 14 to 18, with 1.3 million rows across four partitions, step 2 took about
+2 ms and every partition's foreign key became a child of the parent's. The plain parent
+statement without step 1 took 60 to 100 ms scanning every partition; with one partition's
+foreign key declared `ON DELETE CASCADE`, step 2 added a new foreign key to that partition and
+took about 20 ms. On 18, `NOT VALID` works on the parent, and pg-sprite runs the
+[pattern above](#safe-pattern-add-a-foreign-key--check-without-a-blocking-scan) there itself.
+
 ### Safe pattern: add a primary key / unique constraint online
 
 ```sql

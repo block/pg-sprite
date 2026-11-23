@@ -194,7 +194,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Supported on version 18 and later; refused on 14–17 with an environmental class"
+    reason_notes: "Supported on version 18 and later; refused on 14–17 with an environmental class, as is a plain `ADD FOREIGN KEY` on a parent, whose online sequence starts with this form. On 14–17 the online path runs by hand: `NOT VALID` then `VALIDATE` on every partition, then a plain `ADD FOREIGN KEY` on the parent, which adopts them without a scan but takes a brief `ACCESS EXCLUSIVE` on the referenced table"
   - id: exclude-constraints-and-unrecognized-constraint-forms
     area: "constraints"
     operation: "`EXCLUDE` constraints (and unrecognized constraint forms)"
