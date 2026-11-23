@@ -158,18 +158,28 @@ func (f *partitionedIndexFlow) findLeafIndex(ctx context.Context, node partition
 	return relationFacts{}, len(quarantine) > 0, nil
 }
 
-// readBuiltIndex reads the index a build just verified valid, by identity.
+// readBuiltIndex reads the index a build just verified valid, by identity,
+// and refuses it unless it is on the partition the tree listed. The build
+// names its table, so a partition dropped and created again under the same
+// name while the build ran leaves the index on a table the walk never read.
 func (f *partitionedIndexFlow) readBuiltIndex(ctx context.Context, node partitionNode, name string, oid uint32) (relationFacts, error) {
 	var idx relationFacts
 	err := f.tx.read(ctx, "read the index built on partition "+node.qualified(), func(ctx context.Context, q querier) error {
 		var found bool
 		var err error
 		idx, found, err = relationByOID(ctx, q, oid)
-		if err == nil && !found {
-			err = fmt.Errorf("%w: index %s built on partition %s is not in the catalog",
+		switch {
+		case err != nil:
+			return err
+		case !found:
+			return fmt.Errorf("%w: index %s built on partition %s is not in the catalog",
 				ErrInvariantViolation, qualifiedName(node.schema, name), node.qualified())
+		case idx.tableOID != node.oid:
+			return fmt.Errorf("%w: index %s was built on table oid %d, not on partition %s (oid %d) that the build listed, "+
+				"so the partition was replaced while the build ran", ErrInvariantViolation,
+				qualifiedName(node.schema, name), idx.tableOID, node.qualified(), node.oid)
 		}
-		return err
+		return nil
 	})
 	return idx, err
 }
