@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -379,59 +378,6 @@ func (f *partitionedIndexFlow) proveNode(ctx context.Context, node partitionNode
 	})
 }
 
-const proveNodeSQL = `SELECT EXISTS (
-		   SELECT 1
-		     FROM pg_catalog.pg_class c
-		     JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
-		     JOIN pg_catalog.pg_inherits h ON h.inhrelid OPERATOR(pg_catalog.=) c.oid
-		    WHERE c.oid OPERATOR(pg_catalog.=) $1
-		      AND n.nspname OPERATOR(pg_catalog.=) $2
-		      AND c.relname OPERATOR(pg_catalog.=) $3
-		      AND h.inhparent OPERATOR(pg_catalog.=) $4)`
-
-func proveNodeIn(ctx context.Context, q querier, node partitionNode) error {
-	present, err := nodeInTree(ctx, q, node)
-	if err != nil {
-		return err
-	}
-	if !present {
-		return fmt.Errorf("%w: ST-7: partition %s (table %d) is no longer a partition under that name; the partition tree changed since it was listed",
-			ErrInvariantViolation, node.qualified(), node.oid)
-	}
-	return nil
-}
-
-// nodeInTree reports whether the partition is still the relation, under the
-// schema and name, and the direct partition of the parent, that it was
-// listed as.
-func nodeInTree(ctx context.Context, q querier, node partitionNode) (bool, error) {
-	var present bool
-	if err := q.QueryRow(ctx, proveNodeSQL, node.oid, node.schema, node.name, node.parentOID).Scan(&present); err != nil {
-		return false, fmt.Errorf("prove partition %s: %w", node.qualified(), err)
-	}
-	return present, nil
-}
-
-// lockAndProveNode takes a bounded lock on a partition and proves, under it,
-// that the partition is still in the tree. A detach needs an ACCESS EXCLUSIVE
-// lock on the partition, which this lock excludes until the transaction ends,
-// so a partition proved here cannot leave the tree before the statement that
-// follows. The lock is the weakest one that excludes a detach, and it does not
-// block the partition's writers. It is taken under the transaction's own
-// lock_timeout (LK-2).
-// INV: ST-7 — the statement runs against the partition that was proven.
-func lockAndProveNode(ctx context.Context, tx pgx.Tx, node partitionNode) error {
-	_, err := tx.Exec(ctx, "LOCK TABLE ONLY "+pgx.Identifier{node.schema, node.name}.Sanitize()+" IN SHARE UPDATE EXCLUSIVE MODE")
-	if err != nil {
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateUndefinedTable {
-			return fmt.Errorf("%w: ST-7: partition %s no longer exists under that name; it was renamed or dropped since the build listed it",
-				ErrInvariantViolation, node.qualified())
-		}
-		return err
-	}
-	return proveNodeIn(ctx, tx, node)
-}
-
 // attach attaches child, an index on node, to parentIdx. Both are named in
 // the statement, and PostgreSQL resolves a name, not an identity, so the
 // transaction first proves under its own snapshot that each name still
@@ -453,10 +399,10 @@ func (f *partitionedIndexFlow) attach(ctx context.Context, node partitionNode, p
 				}
 				return err
 			}
-			if err := f.proveIdentity(ctx, tx, parentIdx, parentIdx.tableOID); err != nil {
+			if err := proveIdentity(ctx, tx, parentIdx, parentIdx.tableOID); err != nil {
 				return err
 			}
-			if err := f.proveIdentity(ctx, tx, child, node.oid); err != nil {
+			if err := proveIdentity(ctx, tx, child, node.oid); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, attachSQL); err != nil {
@@ -506,32 +452,3 @@ const attachReadBackSQL = `SELECT EXISTS (
 		   SELECT 1 FROM pg_catalog.pg_inherits h
 		    WHERE h.inhrelid OPERATOR(pg_catalog.=) $1
 		      AND h.inhparent OPERATOR(pg_catalog.=) $2)`
-
-// proveNameBinding checks that the name the build resolved still names the
-// same relation.
-func proveNameBinding(ctx context.Context, q querier, want relationFacts) error {
-	got, found, err := relationByName(ctx, q, want.schema, want.name)
-	if err != nil {
-		return err
-	}
-	if !found || got.oid != want.oid {
-		return fmt.Errorf("%w: ST-7: after the attach, the name %s no longer resolves to index %d; a name resolved to another index",
-			ErrInvariantViolation, qualifiedName(want.schema, want.name), want.oid)
-	}
-	return nil
-}
-
-// proveIdentity checks that the relation the build resolved under a name
-// still has that identity: the same OID under the same name and schema, of
-// the same kind, on the same table.
-func (f *partitionedIndexFlow) proveIdentity(ctx context.Context, q querier, want relationFacts, tableOID uint32) error {
-	got, found, err := relationByOID(ctx, q, want.oid)
-	if err != nil {
-		return err
-	}
-	if !found || got.schema != want.schema || got.name != want.name || got.relkind != want.relkind || got.tableOID != tableOID {
-		return fmt.Errorf("%w: ST-7: index %s no longer has the identity the build resolved",
-			ErrInvariantViolation, qualifiedName(want.schema, want.name))
-	}
-	return nil
-}
