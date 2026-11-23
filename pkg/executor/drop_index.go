@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,6 +30,30 @@ var ErrDroppedIndexDrift = errors.New("the index the plan drops changed after pl
 // permanent.
 var ErrDroppedIndexReplaced = errors.New("the drop removed an index the plan did not review")
 
+// DropOutcomeUnknownError means DROP INDEX CONCURRENTLY returned success,
+// so an index was dropped, but the lookup that confirms it was the reviewed
+// one failed: the connection dropped or the caller's context ended right
+// after the drop. Whether the reviewed index or one that took its name in
+// between was dropped is unknown, so a caller must inspect the table's
+// indexes before retrying. A rerun alone does not settle it: once the name
+// is gone, it reports dropped-index-drift whichever index was dropped. Err
+// keeps the cause for errors.Is and errors.As.
+type DropOutcomeUnknownError struct {
+	Schema, Table, Index string
+	// IndexOID is the OID of the index the pre-drop read checked. If it is
+	// no longer in the catalog, the reviewed index is the one dropped.
+	IndexOID uint32
+	Err      error
+}
+
+func (e *DropOutcomeUnknownError) Error() string {
+	return fmt.Sprintf("DROP INDEX CONCURRENTLY %s completed, but the check that it dropped the reviewed index (oid %d) failed, "+
+		"so which index was dropped is unknown until the indexes of %s are inspected: %v",
+		pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.IndexOID, pgx.Identifier{e.Schema, e.Table}.Sanitize(), e.Err)
+}
+
+func (e *DropOutcomeUnknownError) Unwrap() error { return e.Err }
+
 // ExecuteDropIndexConcurrently drops one reviewed index with DROP INDEX
 // CONCURRENTLY, so the drop never takes the ACCESS EXCLUSIVE lock a plain
 // DROP INDEX holds while it waits behind the table's other transactions. A
@@ -51,7 +74,8 @@ var ErrDroppedIndexReplaced = errors.New("the drop removed an index the plan did
 // checked index's OID is looked up once more. That lookup is detective
 // only: it catches a swap that renamed the checked index aside, reports it
 // as ErrDroppedIndexReplaced, and cannot undo the drop or see a swap that
-// dropped the checked index as well.
+// dropped the checked index as well. If the lookup itself fails, the drop
+// returns a *DropOutcomeUnknownError.
 //
 // statement_timeout is the overall budget, or the caller's cancellation in
 // caller-owned mode, and lock_timeout is disabled for the reasons
@@ -64,7 +88,7 @@ func ExecuteDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schem
 }
 
 // executeDropIndexConcurrently is ExecuteDropIndexConcurrently with the
-// clock it reads once, after the pre-drop checks and right before the drop.
+// clock it reads right before the drop and again right after it.
 func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, b ConcurrentBudget, clock progress.Clock) (DroppedIndex, error) {
 	if err := b.validate(); err != nil {
 		return DroppedIndex{}, err
@@ -165,7 +189,7 @@ func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schem
 
 	start := clock.Now()
 	_, dropErr := conn.Exec(ctx, "DROP INDEX CONCURRENTLY "+ref.Sanitize())
-	elapsed := time.Since(start)
+	elapsed := clock.Now().Sub(start)
 	if dropErr != nil {
 		return DroppedIndex{}, asConcurrentBudgetError(ctx, dropErr, b, elapsed, "drop index "+ref.Sanitize())
 	}
@@ -175,8 +199,7 @@ func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schem
 	if err := conn.QueryRow(ctx,
 		`SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1`,
 		oid).Scan(&remaining); err != nil {
-		return DroppedIndex{}, fmt.Errorf("DROP INDEX CONCURRENTLY %s completed, but the check that it dropped the reviewed index (oid %d) "+
-			"failed, so inspect the indexes of %s before retrying: %w", ref.Sanitize(), oid, tableRef.Sanitize(), err)
+		return DroppedIndex{}, &DropOutcomeUnknownError{Schema: schema, Table: table, Index: index, IndexOID: oid, Err: err}
 	}
 	if remaining != 0 {
 		return DroppedIndex{}, fmt.Errorf("%w: %s was dropped by name, but the index the plan checked (oid %d) is still in the catalog, "+
