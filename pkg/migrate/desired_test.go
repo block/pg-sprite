@@ -177,8 +177,8 @@ func TestAdmitPlan(t *testing.T) {
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "statement 2")
 		assert.Contains(t, res.Detail, "DROP COLUMN old")
-		assert.Contains(t, res.Detail, "imperative front door",
-			"an ALTER TABLE drop is pointed at the door that runs it deliberately")
+		assert.Contains(t, res.Detail, "ExpectedFingerprint fp-live and AllowDestructive app.t",
+			"a destructive refusal names the pinned, acknowledged run that would admit the plan")
 		assert.Contains(t, res.Detail, "the plan's other statement, even if non-destructive, was not run",
 			"a multi-statement refusal discloses that the rest of the plan was skipped too")
 		assert.Equal(t, report, res.Plan, "a refusal carries the plan it refused")
@@ -217,10 +217,10 @@ func TestAdmitPlan(t *testing.T) {
 			"there is nothing else in the plan to disclose as skipped")
 	})
 
-	t.Run("points a destructive index drop at its concurrent idiom", func(t *testing.T) {
+	t.Run("points a destructive index drop at the reviewed run", func(t *testing.T) {
 		// The imperative front door refuses a plain DROP INDEX, so the
-		// refusal must not send an index drop there — it names the
-		// concurrent idiom the operator can run directly.
+		// refusal must not send an index drop there; the reviewed desired
+		// run is the way through, and it drops the index concurrently.
 		report := executable()
 		report.Statements = append(report.Statements, plan.Statement{
 			SQL:         `DROP INDEX "app"."t_v_idx"`,
@@ -231,7 +231,7 @@ func TestAdmitPlan(t *testing.T) {
 		res, ok := admitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
-		assert.Contains(t, res.Detail, "DROP INDEX CONCURRENTLY")
+		assert.Contains(t, res.Detail, "ExpectedFingerprint fp-live and AllowDestructive app.t")
 		assert.NotContains(t, res.Detail, "imperative front door",
 			"the front door would refuse the drop; the detail must not point there")
 	})
