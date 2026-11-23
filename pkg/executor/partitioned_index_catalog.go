@@ -13,8 +13,9 @@ import (
 // server prints names every schema its objects live in, and every relation and
 // operator is pg_catalog-qualified (CO-9).
 
-// partitionNode is one partition under the target, as the catalog lists it.
-// relkind is 'r' for a leaf and 'p' for a sub-partitioned partition.
+// partitionNode is one partition in the tree under the target, as the catalog
+// lists it. relkind is 'r' for a leaf, 'p' for a sub-partitioned partition, and
+// 'f' for a foreign table.
 type partitionNode struct {
 	oid       uint32
 	parentOID uint32
@@ -24,6 +25,7 @@ type partitionNode struct {
 }
 
 func (n partitionNode) subPartitioned() bool { return n.relkind == "p" }
+func (n partitionNode) foreign() bool        { return n.relkind == "f" }
 func (n partitionNode) qualified() string    { return qualifiedName(n.schema, n.name) }
 
 // listPartitionTree returns every partition under the table with the given
@@ -62,6 +64,38 @@ const listPartitionTreeSQL = `WITH RECURSIVE tree AS (
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		  ORDER BY tree.depth, tree.oid`
 
+// partitionKeyColumns returns each partitioned table's partition key columns
+// by name, in key order, for the tables with the given OIDs. An expression in
+// the key is listed as the empty string.
+func partitionKeyColumns(ctx context.Context, q querier, oids []uint32) (map[uint32][]string, error) {
+	rows, err := q.Query(ctx, partitionKeyColumnsSQL, oids)
+	if err != nil {
+		return nil, fmt.Errorf("read the partition keys of tables %v: %w", oids, err)
+	}
+	defer rows.Close()
+	keys := map[uint32][]string{}
+	for rows.Next() {
+		var oid uint32
+		var col *string
+		if err := rows.Scan(&oid, &col); err != nil {
+			return nil, fmt.Errorf("scan the partition keys of tables %v: %w", oids, err)
+		}
+		keys[oid] = append(keys[oid], deref(col))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the partition keys of tables %v: %w", oids, err)
+	}
+	return keys, nil
+}
+
+const partitionKeyColumnsSQL = `SELECT pt.partrelid, a.attname::pg_catalog.text
+		   FROM pg_catalog.pg_partitioned_table pt
+		  CROSS JOIN LATERAL pg_catalog.unnest(pt.partattrs::pg_catalog.int2[]) WITH ORDINALITY AS k(attnum, ord)
+		   LEFT JOIN pg_catalog.pg_attribute a
+		     ON a.attrelid OPERATOR(pg_catalog.=) pt.partrelid AND a.attnum OPERATOR(pg_catalog.=) k.attnum
+		  WHERE pt.partrelid OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.oid[])
+		  ORDER BY pt.partrelid, k.ord`
+
 // childrenOf returns the direct partitions of parentOID from a tree listing.
 func childrenOf(tree []partitionNode, parentOID uint32) []partitionNode {
 	var children []partitionNode
@@ -71,6 +105,17 @@ func childrenOf(tree []partitionNode, parentOID uint32) []partitionNode {
 		}
 	}
 	return children
+}
+
+// foreignPartitions names every foreign table in the tree.
+func foreignPartitions(tree []partitionNode) []string {
+	var names []string
+	for _, n := range tree {
+		if n.foreign() {
+			names = append(names, n.qualified())
+		}
+	}
+	return names
 }
 
 // relationFacts is what one catalog read says about a relation found by name
