@@ -250,6 +250,48 @@ CREATE UNIQUE INDEX CONCURRENTLY t_pkey ON t (id);   -- online build
 ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lock
 ```
 
+### Safe pattern: add a primary key / unique constraint on a partitioned table
+
+The pattern above does not work on a partitioned parent: PostgreSQL has no
+`CREATE INDEX CONCURRENTLY` on a partitioned table and no `USING INDEX` on one. A plain
+`ADD UNIQUE` on the parent builds the index on every partition while holding ACCESS
+EXCLUSIVE on the parent. Instead, give every partition its own constraint first; the parent
+statement then adopts them and builds nothing. For `events`, range-partitioned on
+`created_at`:
+
+```sql
+-- 1. On every partition, DEFAULT included: build the index online, then make it a constraint.
+CREATE UNIQUE INDEX CONCURRENTLY events_2026_11_id_created_at_key
+    ON events_2026_11 (id, created_at);
+ALTER TABLE events_2026_11 ADD CONSTRAINT events_2026_11_id_created_at_key
+    UNIQUE USING INDEX events_2026_11_id_created_at_key;
+-- … the same for events_2026_12, events_default, and every other partition …
+
+-- 2. On the parent: adopts each partition's constraint and index.
+ALTER TABLE events ADD CONSTRAINT events_id_created_at_key UNIQUE (id, created_at);
+```
+
+For a primary key, use `PRIMARY KEY USING INDEX` in step 1 and `ADD PRIMARY KEY (id,
+created_at)` in step 2; the key columns must already be `NOT NULL`.
+
+- The key must include every partition key column, as for any unique constraint on a
+  partitioned table.
+- Step 1's `ADD CONSTRAINT … USING INDEX` takes a brief ACCESS EXCLUSIVE on that partition.
+- Step 2 takes ACCESS EXCLUSIVE on the parent and SHARE on every partition and partition
+  index, so every query on `events` waits while it runs. It runs in about a millisecond, but
+  it queues behind any long-running query on `events`; run it under a short `lock_timeout`.
+- Step 1's constraint is required. With only the unique index on each partition, step 2
+  ignores those indexes, builds a second unique index on every partition under the parent's
+  ACCESS EXCLUSIVE lock, and leaves the originals behind to drop.
+- A partition created between the two steps without the constraint gets its index built by
+  step 2, under the same lock.
+
+On PostgreSQL 14 to 18, with 1.3 million rows across four partitions, step 2 took about
+1 ms, each partition's index kept its OID and file, and each partition's constraint became a
+child of the parent's. With the step 1 constraints left out, the same statement took 200 to
+450 ms holding ACCESS EXCLUSIVE on `events`, and each partition ended with two unique
+indexes. The primary key form behaved the same.
+
 ## Table / partition operations
 
 | Operation | Lock held | Table rewrite | Concurrent DML | Needs copy-and-swap? | Notes |

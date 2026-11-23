@@ -291,7 +291,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-partitioned-parent
-    reason_notes: "PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution"
+    reason_notes: "PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution. The online path runs by hand: `CREATE UNIQUE INDEX CONCURRENTLY` and `ADD CONSTRAINT ... USING INDEX` on every partition, then a plain `ADD CONSTRAINT` on the parent, which adopts them and builds nothing"
   - id: create-table-partition-of
     area: "partitioned_tables"
     operation: "`CREATE TABLE ... PARTITION OF`"
