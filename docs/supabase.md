@@ -224,6 +224,7 @@ Do not create the table from a file without RLS and add the RLS later. Until the
 second run commits, anyone with your project's anon key can read and write the
 table.
 
+<!-- scripts/check-guide-versions.sh reads the first paragraph under this heading: keep the heading text and the tested versions in that paragraph. -->
 ## What works today
 
 A disposable local `supabase/postgres:17.6.1.136` database (PostgreSQL 17.6)
