@@ -310,7 +310,7 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 		}
 		seen := 0
 		for _, op := range ops {
-			if op.desired == desiredRefusesPlan {
+			if op.desired == desiredAdmitsPinnedPlan {
 				assert.Equal(t, ackAllowDestructive, op.ack, "entry %q", op.key)
 				assert.Equal(t, verdict.ReasonDestructiveChange, op.refusal, "entry %q", op.key)
 				continue
@@ -329,7 +329,7 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 	t.Run("every destructive shape has exactly one entry", func(t *testing.T) {
 		var shapes []string
 		for _, op := range ops {
-			if op.desired == desiredRefusesPlan {
+			if op.desired == desiredAdmitsPinnedPlan {
 				shapes = append(shapes, op.key)
 			}
 		}
@@ -346,7 +346,7 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			assert.Contains(t, acks, op.ack, "entry %q", op.key)
 			gated[op.ack] = true
 			assert.Contains(t, []loss{lossStructure, lossAvailability, lossProgress}, op.loss, "entry %q", op.key)
-			assert.Contains(t, []desiredHandling{desiredRefusesPlan, desiredRejectsAck}, op.desired, "entry %q", op.key)
+			assert.Contains(t, []desiredHandling{desiredAdmitsPinnedPlan, desiredRejectsAck}, op.desired, "entry %q", op.key)
 			if op.loss == lossProgress {
 				assert.Empty(t, op.refusal, "entry %q: without the acknowledgement the run resumes", op.key)
 				continue
@@ -358,8 +358,77 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 		}
 	})
 
+	// The one acknowledgement desired-state execution takes lives on the
+	// request, never on the policy. Every string on each desired-state
+	// request is either the plan's identity, the pin, or that
+	// acknowledgement, so a new string that could carry another
+	// acknowledgement fails here until it is classified.
+	t.Run("each request carries at most the one acknowledgement", func(t *testing.T) {
+		declared := map[string]bool{
+			// The target schema the desired object lives in.
+			"DesiredRequest.Schema":     true,
+			"RowSecurityRequest.Schema": true,
+			"EnumTypeRequest.Schema":    true,
+			// The pin that binds the destructive acknowledgement to the
+			// reviewed plan.
+			"DesiredRequest.ExpectedFingerprint":     true,
+			"RowSecurityRequest.ExpectedFingerprint": true,
+			"EnumTypeRequest.ExpectedFingerprint":    true,
+			// The destructive acknowledgement, valid only with the pin. An
+			// enum type plan drops nothing, so its request carries none.
+			"DesiredRequest.AllowDestructive":     true,
+			"RowSecurityRequest.AllowDestructive": true,
+		}
+		var names []string
+		for _, req := range []struct {
+			typ  reflect.Type
+			name string
+		}{
+			{reflect.TypeFor[DesiredRequest](), "DesiredRequest"},
+			{reflect.TypeFor[RowSecurityRequest](), "RowSecurityRequest"},
+			{reflect.TypeFor[EnumTypeRequest](), "EnumTypeRequest"},
+		} {
+			for _, sw := range policySwitches(req.typ, req.name, nil) {
+				names = append(names, sw.name)
+				assert.False(t, sw.isBool, "%s: a bool cannot name its table, so it cannot be an acknowledgement", sw.name)
+				assert.True(t, declared[sw.name], "%s is a string on a desired-state request that is not classified", sw.name)
+			}
+		}
+		assert.ElementsMatch(t, []string{
+			"DesiredRequest.Schema", "DesiredRequest.ExpectedFingerprint", "DesiredRequest.AllowDestructive",
+			"RowSecurityRequest.Schema", "RowSecurityRequest.ExpectedFingerprint", "RowSecurityRequest.AllowDestructive",
+			"EnumTypeRequest.Schema", "EnumTypeRequest.ExpectedFingerprint",
+		}, names)
+		for _, op := range ops {
+			if op.desired == desiredAdmitsPinnedPlan {
+				assert.Equal(t, ackAllowDestructive, op.ack, "entry %q: the request's acknowledgement is the destructive one", op.key)
+			}
+		}
+	})
+
+	t.Run("a destructive acknowledgement without a fingerprint is a usage error before any database work", func(t *testing.T) {
+		res, err := RunDesired(t.Context(), nil, DesiredRequest{Schema: "public", AllowDestructive: "public.t"}, DefaultOptions())
+		require.ErrorIs(t, err, ErrAllowDestructiveNeedsFingerprint)
+		assert.Equal(t, DesiredResult{}, res)
+
+		res, err = RunDesiredWithRowSecurity(t.Context(), nil, RowSecurityRequest{Schema: "public", AllowDestructive: "public.t"}, DefaultOptions())
+		require.ErrorIs(t, err, ErrAllowDestructiveNeedsFingerprint)
+		assert.Equal(t, DesiredResult{}, res)
+	})
+
+	t.Run("the policy's destructive acknowledgement is still rejected beside the request's", func(t *testing.T) {
+		opts := DefaultOptions()
+		opts.AllowDestructive = "public.t"
+		res, err := RunDesired(t.Context(), nil, DesiredRequest{
+			Schema: "public", AllowDestructive: "public.t", ExpectedFingerprint: "sha256:abc",
+		}, opts)
+		require.ErrorIs(t, err, ErrAllowDestructiveNotSupported)
+		assert.Equal(t, DesiredResult{}, res)
+	})
+
 	// The shapes desired-state execution can derive are refused at plan
-	// admission, whole, before any statement runs.
+	// admission, whole, before any statement runs, unless the request pins
+	// the reviewed plan and names its table.
 	t.Run("desired-state admission refuses a destructive plan whole", func(t *testing.T) {
 		report := plan.Report{
 			Schema: "app",
@@ -369,12 +438,12 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 				{SQL: `ALTER TABLE app.orders DROP COLUMN legacy_id`, Destructive: true},
 			},
 		}
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		for _, op := range ops {
-			if op.desired == desiredRefusesPlan {
+			if op.desired == desiredAdmitsPinnedPlan {
 				assert.Equal(t, verdict.ReasonDestructiveChange, op.refusal, "entry %q", op.key)
 			}
 		}
