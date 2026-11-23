@@ -262,12 +262,14 @@ func TestAcceptedBlockingEligibleRowsArePinned(t *testing.T) {
 		"gate:DROP INDEX/concurrent=false/target=single-relation",
 		"gate:REINDEX/concurrent=false/target=single-relation",
 		"partition:" + string(preflight.PartitionCauseBlockingIndexBuild),
+		"partition:" + string(preflight.PartitionCauseConcurrentIndexDrop),
 	}, eligible)
 
 	for _, cause := range preflight.PartitionRefusalCauses() {
 		r, ok := partitionRefusal(cause)
 		require.True(t, ok, cause)
-		assert.Equal(t, cause == preflight.PartitionCauseBlockingIndexBuild, verdict.AcceptedBlockingEligible(r), cause)
+		wantEligible := cause == preflight.PartitionCauseBlockingIndexBuild || cause == preflight.PartitionCauseConcurrentIndexDrop
+		assert.Equal(t, wantEligible, verdict.AcceptedBlockingEligible(r), cause)
 	}
 	assert.False(t, verdict.AcceptedBlockingEligible(rewriteRequiredRefusal()))
 	assert.False(t, verdict.AcceptedBlockingEligible(backendUnavailableRefusal()))

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -42,6 +43,35 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			name: "own invalid leftover",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrBuildLeftInvalidIndex},
 			want: executor.CodeInvalidIndexOwnLeftover,
+		},
+		{
+			name: "own invalid leftover of a build that failed on duplicate rows",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: &pgconn.PgError{Code: "23505"}, Cleanup: executor.ErrBuildLeftInvalidIndex},
+			want: executor.CodeDataFault,
+		},
+		{
+			name: "own invalid leftover of a build an index expression failed on a row",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: fmt.Errorf("build: %w", &pgconn.PgError{Code: "22012"}), Cleanup: executor.ErrBuildLeftInvalidIndex},
+			want: executor.CodeDataFault,
+		},
+		{
+			name: "own invalid leftover of a build that failed outside the data classes",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: &pgconn.PgError{Code: "42P07"}, Cleanup: executor.ErrBuildLeftInvalidIndex},
+			want: executor.CodeInvalidIndexOwnLeftover,
+		},
+		{
+			// Two concurrent builds that pick one index name in one schema
+			// collide in pg_class's unique name index: a 23505 that names a
+			// catalog relation, not the table's rows.
+			name: "a build that lost a catalog name collision to another table's index",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "other",
+				Build: &pgconn.PgError{Code: "23505", SchemaName: "pg_catalog", TableName: "pg_class",
+					ConstraintName: "pg_class_relname_nsp_index"},
+				Cleanup: executor.ErrInvalidIndexOnOtherTable},
+			want: executor.CodeInvalidIndexOtherTable,
 		},
 		{
 			name: "invalid index build in flight",
@@ -141,6 +171,8 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "validated constraint drift", err: fmt.Errorf("validate: %w", executor.ErrValidatedConstraintDrift), want: executor.CodeValidatedConstraintDrift},
 		{name: "renamed index drift", err: fmt.Errorf("rename: %w", executor.ErrRenamedIndexDrift), want: executor.CodeRenamedIndexDrift},
 		{name: "enum type drift", err: fmt.Errorf("add value: %w", executor.ErrEnumTypeDrift), want: executor.CodeEnumTypeDrift},
+		{name: "enum label exists", err: fmt.Errorf("add value: %w", executor.ErrEnumLabelExists), want: executor.CodeEnumLabelExists},
+		{name: "enum neighbor missing", err: fmt.Errorf("add value: %w", executor.ErrEnumNeighborMissing), want: executor.CodeEnumNeighborMissing},
 		{name: "table not found", err: executor.ErrTableNotFound, want: executor.CodeTableNotFound},
 		{name: "invariant violation", err: executor.ErrInvariantViolation, want: executor.CodeInvariantViolation},
 		{name: "untyped error is the fallback", err: errors.New("connection reset"), want: executor.CodeExecutionFailed},
@@ -221,6 +253,8 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeValidatedConstraintDrift:        true,
 		executor.CodeRenamedIndexDrift:               true,
 		executor.CodeEnumTypeDrift:                   true,
+		executor.CodeEnumLabelExists:                 true,
+		executor.CodeEnumNeighborMissing:             true,
 		executor.CodeTableNotFound:                   true,
 		executor.CodeDataFault:                       true,
 		executor.CodeInvariantViolation:              true,

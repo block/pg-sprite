@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // InvalidIndexError reports that an invalid index exists (or may remain)
@@ -42,9 +43,14 @@ type InvalidIndexError struct {
 // recovery's proof is a table lock, not the progress view, so it decides
 // what the view could not. A visibly in-flight build, another table's
 // debris, an index the server will not drop concurrently, and an unproven
-// state are not this actor's to recover.
+// state are not this actor's to recover. A build that failed on a data
+// fault is not recoverable either, whatever it left: the rebuild would
+// meet the same rows and fail the same way, so the rows are corrected
+// first and the leftover removed as the error says.
 func (e *InvalidIndexError) Recoverable() bool {
 	switch {
+	case e.buildDataFault():
+		return false
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
 		return true
 	case errors.Is(e.Cleanup, ErrAbandonedInvalidIndex):
@@ -62,10 +68,14 @@ func (e *InvalidIndexError) Recoverable() bool {
 // itself to. An in-flight build says wait; another table's debris, an
 // index the server will not drop concurrently, and an unproven state get
 // investigation steps, never a statement to copy-paste: the index under
-// that name may be healthy, or may be exactly what it is meant to be.
+// that name may be healthy, or may be exactly what it is meant to be. A
+// build that failed on a data fault leads with the fault, since no
+// recovery of the leftover gets past the rows (dataFaultError).
 func (e *InvalidIndexError) Error() string {
 	name := fmt.Sprintf("%s.%s", e.Schema, e.Index)
 	switch {
+	case e.buildDataFault():
+		return e.dataFaultError(name)
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
 		return fmt.Sprintf("index %s is this build's own invalid leftover; recover with RebuildAbandonedIndex or DROP INDEX CONCURRENTLY %s, see docs/invalid-index-recovery.md: %v",
 			name, pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
@@ -88,6 +98,41 @@ func (e *InvalidIndexError) Error() string {
 		return fmt.Sprintf("index %s may be invalid but the catalog state could not be proven; inspect pg_index.indisvalid and pg_stat_progress_create_index yourself before any recovery, see docs/invalid-index-recovery.md: %v",
 			name, e.Cleanup)
 	}
+}
+
+// buildDataFault reports whether the build failed because the server
+// rejected the table's rows (SQLSTATE class 22 or 23): duplicate values
+// under a unique index, or an index expression that raises on a row. Every
+// rerun of the same build meets the same rows until they are corrected. A
+// violation the server reports on a pg_catalog relation is not the rows':
+// two builds that pick one index name in one schema collide in pg_class's
+// unique name index, and the loser's leftover is judged by Cleanup instead.
+func (e *InvalidIndexError) buildDataFault() bool {
+	return isDataFault(e.Build) && !violatesCatalog(e.Build)
+}
+
+// violatesCatalog reports whether err is the server rejecting a write to
+// one of its own catalogs rather than to the target table.
+func violatesCatalog(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.SchemaName == catalogSchema
+}
+
+// dataFaultError renders a build that failed on its rows. The server error
+// rides in the message and in the chain, where a unique violation's detail
+// names the duplicated key. The leftover is still reported: the build's
+// own invalid index occupies the name and blocks a rerun, so its proven
+// removal is named once the rows are corrected; an entry this run could not
+// prove its own gets investigation steps instead, as in Error.
+func (e *InvalidIndexError) dataFaultError(name string) string {
+	fault := fmt.Sprintf("index %s was not built because the table's rows violate it (%v); every rerun meets the same rows until the data is corrected",
+		name, e.Build)
+	if errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex) {
+		return fmt.Sprintf("%s; the failed build left its own invalid index on table %s.%s, which blocks a rerun under the same name: correct the rows, then DROP INDEX CONCURRENTLY %s and run the change again, see docs/invalid-index-recovery.md: %v",
+			fault, e.Schema, e.Table, pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
+	}
+	return fmt.Sprintf("%s; an invalid index remains under the name that this run could not prove its own; correct the rows, and inspect pg_index.indisvalid and pg_stat_progress_create_index before any removal, see docs/invalid-index-recovery.md: %v",
+		fault, e.Cleanup)
 }
 
 // Unwrap exposes the underlying failures to errors.Is/As.

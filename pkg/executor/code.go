@@ -46,7 +46,8 @@ const (
 	CodeCancelledExternally Code = "cancelled-externally"
 	// CodeInvalidIndexOwnLeftover: the failed build's own invalid index
 	// remains and is proven this run's leftover; the recovery runbook
-	// applies.
+	// applies. A build that failed on its rows reports CodeDataFault
+	// instead, with the leftover still on its Cleanup.
 	CodeInvalidIndexOwnLeftover Code = "invalid-index-own-leftover"
 	// CodeInvalidIndexBuildInFlight: the invalid index under the requested
 	// name is another backend's concurrent build still in progress; wait.
@@ -172,19 +173,34 @@ const (
 	// the name to a different type; nothing was added. Plan again against
 	// the catalog as it stands.
 	CodeEnumTypeDrift Code = "enum-type-drift"
+	// CodeEnumLabelExists: the enum type the engine checked already
+	// carries the label an ALTER TYPE ... ADD VALUE without IF NOT EXISTS
+	// adds, because another change added it after planning; nothing was
+	// added. Plan again against the catalog as it stands.
+	CodeEnumLabelExists Code = "enum-label-exists"
+	// CodeEnumNeighborMissing: the enum type the engine checked no longer
+	// carries the label an ALTER TYPE ... ADD VALUE places its value
+	// BEFORE or AFTER, because another change renamed or removed it after
+	// planning; nothing was added. Plan again against the catalog as it
+	// stands.
+	CodeEnumNeighborMissing Code = "enum-neighbor-missing"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
 	// CodeDataFault: the server rejected the table's rows as the statement
-	// would shape them (SQLSTATE class 22, a value the new type will not
-	// hold; class 23, a constraint the rows break). The code names the
-	// fault, not what was left behind: any rerun meets the same rows, so
-	// the copy-and-swap run tries to abandon itself — shadow, hold on the
-	// source, and checkpoint row discarded — and returns
-	// *schemachange.AbandonedError only when that finished, which the
-	// verdict reports as Abandoned. Correct the data or the statement,
-	// then run it again from the beginning; when the abandon did not
+	// would shape them (SQLSTATE class 22, a value the new type or an index
+	// expression will not take; class 23, a constraint the rows break, such
+	// as duplicate values under a unique index). The code names the fault,
+	// not what was left behind: any rerun meets the same rows until the data
+	// or the statement is corrected. A copy-and-swap run tries to abandon
+	// itself — shadow, hold on the source, and checkpoint row discarded —
+	// and returns *schemachange.AbandonedError only when that finished,
+	// which the verdict reports as Abandoned; when the abandon did not
 	// finish, start it over with the restart acknowledgement, as the
-	// verdict's detail says.
+	// verdict's detail says. A concurrent index build returns an
+	// *InvalidIndexError whose Recoverable is false and whose Cleanup
+	// still says what it left: its own invalid index occupies the name,
+	// so correct the rows, drop the leftover concurrently, and run the
+	// change again.
 	CodeDataFault Code = "data-fault"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
 	// retry candidate.
@@ -244,6 +260,8 @@ func Codes() []Code {
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
+		CodeEnumLabelExists,
+		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation,
@@ -291,6 +309,8 @@ func (c Code) Permanent() bool {
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
+		CodeEnumLabelExists,
+		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation:
@@ -408,6 +428,10 @@ func sentinelCode(err error) Code {
 		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrEnumTypeDrift):
 		return CodeEnumTypeDrift
+	case errors.Is(err, ErrEnumLabelExists):
+		return CodeEnumLabelExists
+	case errors.Is(err, ErrEnumNeighborMissing):
+		return CodeEnumNeighborMissing
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:
@@ -430,12 +454,17 @@ func (e *BudgetError) Code() Code {
 }
 
 // Code returns the invalid-index outcome's stable code, derived from the
-// same cleanup state the error's rendering distinguishes: proven own
-// leftover, another backend's build in flight, abandoned on the target
-// table, on another table, not droppable, builder unobservable, or
-// unproven.
+// same state the error's rendering distinguishes: a build that failed on a
+// data fault, then the cleanup state — proven own leftover, another
+// backend's build in flight, abandoned on the target table, on another
+// table, not droppable, builder unobservable, or unproven. The data fault
+// outranks the cleanup state because it names what the operator corrects:
+// no handling of the leftover gets a rerun past the same rows. The cleanup
+// sentinel stays in the chain for errors.Is.
 func (e *InvalidIndexError) Code() Code {
 	switch {
+	case e.buildDataFault():
+		return CodeDataFault
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
 		return CodeInvalidIndexOwnLeftover
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuildInFlight):
