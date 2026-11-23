@@ -218,3 +218,80 @@ func TestBuildPartitionedIndexPicksUpAFirstPartitionCreatedDuringARun(t *testing
 		f.requireCovered(t, "orders", "idx_orders_total", "orders_late")
 	})
 }
+
+// A foreign table attached after the parent's index exists cannot carry an
+// index, so the parent's index could never become valid. The next pass lists
+// the tree again and refuses the run.
+func TestBuildPartitionedIndexRefusesAForeignTableAttachedDuringARun(t *testing.T) {
+	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
+		f := newFixture(t)
+		f.ordersByRegion(t)
+		wrapper := "fdw_" + f.schema
+		f.exec(t, `CREATE FOREIGN DATA WRAPPER %s`, wrapper)
+		t.Cleanup(func() {
+			_, err := f.pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(`DROP FOREIGN DATA WRAPPER IF EXISTS %s CASCADE`, wrapper))
+			assert.NoError(t, err)
+		})
+		f.exec(t, `CREATE SERVER srv_%s FOREIGN DATA WRAPPER %s`, f.schema, wrapper)
+		hook := func() bool {
+			if !f.relationExists(t, "idx_orders_total") {
+				return false
+			}
+			f.exec(t, `CREATE FOREIGN TABLE %[1]s.orders_fx PARTITION OF %[1]s.orders
+	FOR VALUES IN ('fx')
+	SERVER srv_%[1]s`, f.schema)
+			return true
+		}
+		tracker := f.trackerWithHook(t, hook)
+
+		_, err := executor.BuildPartitionedIndexWithProgress(t.Context(), f.cfg, f.pool, mustPreflight(t, f.pool, f.schema, "orders"),
+			fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema), buildBudget, tracker)
+
+		require.ErrorIs(t, err, executor.ErrForeignTablePartition)
+		assert.True(t, f.relationExists(t, "orders_fx"), "the hook must have attached the foreign table")
+	})
+}
+
+// A partition created below a sub-partitioned partition after the tree was
+// listed, and before that partition's own index exists, has no index. The
+// first pass attaches the sub-partitioned partition's index all the same; the
+// next pass descends into it again and builds the new partition's index, and
+// a third confirms nothing is left.
+func TestBuildPartitionedIndexPicksUpAPartitionCreatedBelowASubPartitionedPartition(t *testing.T) {
+	withPartitionedServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFixture) {
+		f := newFixture(t)
+		f.exec(t, `CREATE TABLE %s.events (
+	id bigint NOT NULL,
+	region text NOT NULL,
+	ts date NOT NULL
+) PARTITION BY RANGE (ts)`, f.schema)
+		f.exec(t, `CREATE TABLE %[1]s.events_2024 PARTITION OF %[1]s.events
+	FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+	PARTITION BY LIST (region)`, f.schema)
+		f.exec(t, `CREATE TABLE %[1]s.events_2024_eu PARTITION OF %[1]s.events_2024
+	FOR VALUES IN ('eu')`, f.schema)
+		f.exec(t, `CREATE TABLE %[1]s.events_2025 PARTITION OF %[1]s.events
+	FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')`, f.schema)
+		subIndex := f.derived(t, "idx_events_region", "events_2024")
+		hook := func() bool {
+			if !f.tableLockHeld(t, "events") {
+				return false
+			}
+			require.False(t, f.relationExists(t, subIndex), "the hook must act before the sub-partitioned partition's index exists")
+			f.exec(t, `CREATE TABLE %[1]s.events_2024_us PARTITION OF %[1]s.events_2024
+	FOR VALUES IN ('us')`, f.schema)
+			return true
+		}
+		tracker := f.trackerWithHook(t, hook)
+
+		rep, err := executor.BuildPartitionedIndexWithProgress(t.Context(), f.cfg, f.pool, mustPreflight(t, f.pool, f.schema, "events"),
+			fmt.Sprintf("CREATE INDEX idx_events_region ON %s.events (region, id)", f.schema), buildBudget, tracker)
+
+		require.NoError(t, err)
+		assert.Equal(t, 4, rep.Partitions)
+		assert.Equal(t, 3, rep.Passes)
+		assert.ElementsMatch(t, []string{"events_2024", "events_2024_eu", "events_2024_us", "events_2025"}, workedTables(rep))
+		f.requireCovered(t, "events", "idx_events_region", "events_2024", "events_2025")
+		f.requireCovered(t, "events_2024", subIndex, "events_2024_eu", "events_2024_us")
+	})
+}

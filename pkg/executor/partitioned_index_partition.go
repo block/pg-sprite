@@ -116,8 +116,12 @@ func (f *partitionedIndexFlow) findLeafIndex(ctx context.Context, node partition
 	)
 	err = f.tx.read(ctx, "inspect the index of partition "+node.qualified(), func(ctx context.Context, q querier) error {
 		var err error
-		if occupant, occupied, err = relationByName(ctx, q, node.schema, name); err != nil || occupied {
+		if occupant, occupied, err = relationByName(ctx, q, node.schema, name); err != nil {
 			return err
+		}
+		if occupied {
+			// The derived name decides; the occupant is judged below.
+			return nil
 		}
 		if reusable, err = reusableIndexes(ctx, q, node.oid); err != nil {
 			return err

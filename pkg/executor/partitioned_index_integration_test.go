@@ -305,6 +305,41 @@ func TestBuildPartitionedIndex(t *testing.T) {
 			assert.Empty(t, f.indexesOn(t, "orders_us")["orders_us_total_desc"].parent)
 		})
 
+		// Only a valid, ready index that is attached to no other partitioned
+		// index and matches the requested definition exactly is adopted. An
+		// index attached under another parent, an invalid one, and ones that
+		// differ only by a predicate or an INCLUDE column are left as they
+		// were, and the build makes its own index beside them.
+		t.Run("leaves alone an index it cannot adopt", func(t *testing.T) {
+			f := newFixture(t)
+			f.ordersByRegion(t)
+			f.exec(t, `CREATE INDEX other_total ON ONLY %s.orders (total)`, f.schema)
+			f.exec(t, `CREATE INDEX orders_eu_other ON %s.orders_eu (total)`, f.schema)
+			f.exec(t, `ALTER INDEX %[1]s.other_total ATTACH PARTITION %[1]s.orders_eu_other`, f.schema)
+			f.exec(t, `CREATE INDEX orders_us_broken ON %s.orders_us (total)`, f.schema)
+			f.exec(t, `UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = '%s.orders_us_broken'::regclass`, f.schema)
+			f.exec(t, `CREATE INDEX orders_ap_partial ON %s.orders_ap (total) WHERE total > 0`, f.schema)
+			f.exec(t, `CREATE INDEX orders_ap_include ON %s.orders_ap (total) INCLUDE (note)`, f.schema)
+
+			rep := f.build(t, "orders", fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema))
+
+			byTable := map[string]executor.PartitionIndexResult{}
+			for _, w := range rep.Worked {
+				byTable[w.Table] = w
+			}
+			for _, p := range []string{"orders_eu", "orders_us", "orders_ap"} {
+				assert.Equal(t, executor.PartitionIndexBuilt, byTable[p].Action, p)
+				assert.Equal(t, f.derived(t, "idx_orders_total", p), byTable[p].Index, p)
+			}
+			f.requireCovered(t, "orders", "idx_orders_total", "orders_eu", "orders_us", "orders_ap")
+			assert.Equal(t, "other_total", f.indexesOn(t, "orders_eu")["orders_eu_other"].parent, "the index stays under its own parent")
+			broken := f.indexesOn(t, "orders_us")["orders_us_broken"]
+			assert.Empty(t, broken.parent)
+			assert.False(t, broken.valid, "the invalid index is left as it was")
+			assert.Empty(t, f.indexesOn(t, "orders_ap")["orders_ap_partial"].parent)
+			assert.Empty(t, f.indexesOn(t, "orders_ap")["orders_ap_include"].parent)
+		})
+
 		// A partition created after the parent's index exists comes with an
 		// index already attached, cloned by the server, so a rerun finds
 		// nothing to do for it.
