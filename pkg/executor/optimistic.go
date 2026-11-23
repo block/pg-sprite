@@ -194,7 +194,7 @@ func (b Budget) validate() error {
 // work that exceeded its execution budget is not a lock-acquisition
 // strategy.
 func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
-	return executeNative(ctx, pool, pt, st, b, retry, nil, nil, nil)
+	return executeNative(ctx, pool, pt, st, b, retry, nil, nil, nil, nil)
 }
 
 // ExecuteNativeWithProgress runs an optimistic native attempt while updating
@@ -240,15 +240,18 @@ func executeNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt prefl
 	tracker.Start(1, operation)
 	tracker.StartStep(1, operation, st.SQL())
 	defer func() { tracker.Finish(err) }()
-	return executeNative(ctx, pool, pt, st, b, retry, adopts, validates, tracker)
+	return executeNative(ctx, pool, pt, st, b, retry, adopts, validates, nil, tracker)
 }
 
 // executeNative runs st as bounded native attempts. When adopts is set, st
 // is the ADD CONSTRAINT ... USING INDEX that takes over that index, and
 // each attempt checks the index against the planned definition under the
 // table's lock before attaching it. When validates is set, st is the
-// VALIDATE CONSTRAINT of that constraint, checked the same way.
-func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, tracker *progress.Tracker) error {
+// VALIDATE CONSTRAINT of that constraint, checked the same way. When
+// dropped is set, st is the ALTER TABLE that drops that column, constraint,
+// or NOT NULL, and each attempt checks its definition against the plan's
+// under the table's lock before dropping it.
+func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject, tracker *progress.Tracker) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -305,6 +308,19 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		}
 		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
 			return refuseValidatedConstraintDrift(ctx, tx, st, *validates)
+		})
+	}
+	if dropped != nil {
+		ok, err := dropsObject(st, dropped)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: %q was planned to drop %s %s but does not",
+				ErrInvariantViolation, st.SQL(), dropped.Kind, dropped.Name)
+		}
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refuseDroppedObjectDrift(ctx, tx, st, *dropped)
 		})
 	}
 	var before func(context.Context, pgx.Tx) error
