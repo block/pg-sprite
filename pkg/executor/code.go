@@ -96,6 +96,10 @@ const (
 	// partition key of every partitioned table in the tree; nothing was
 	// created.
 	CodeUniqueIndexPartitionKey Code = "unique-index-partition-key"
+	// CodeTableLockUnconfirmed: the pool's role cannot see when the session
+	// holding the build's table lock started, so the build cannot confirm
+	// the lock is its own; nothing was created.
+	CodeTableLockUnconfirmed Code = "table-lock-unconfirmed"
 	// CodePartitionedIndexUnsettled: partitions kept appearing without an
 	// index until the build ran out of passes; a rerun resumes.
 	CodePartitionedIndexUnsettled Code = "partitioned-index-unsettled"
@@ -267,6 +271,7 @@ func Codes() []Code {
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
 		CodeUniqueIndexPartitionKey,
+		CodeTableLockUnconfirmed,
 		CodePartitionedIndexUnsettled,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
@@ -323,6 +328,7 @@ func (c Code) Permanent() bool {
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
 		CodeUniqueIndexPartitionKey,
+		CodeTableLockUnconfirmed,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -433,6 +439,8 @@ func sentinelCode(err error) Code {
 		return CodeForeignTablePartition
 	case errors.Is(err, ErrUniqueIndexPartitionKey):
 		return CodeUniqueIndexPartitionKey
+	case errors.Is(err, ErrTableLockUnconfirmed):
+		return CodeTableLockUnconfirmed
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
 		return CodePartitionedIndexUnsettled
 	case errors.Is(err, ErrEmptySequence):
