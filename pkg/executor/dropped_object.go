@@ -50,10 +50,10 @@ func opDrops(op statement.Op, d *schemadiff.DroppedObject) bool {
 // drops the column, constraint, or NOT NULL that d names. It is an error
 // for st to drop d in any other shape, because only a step whose sole
 // operation is the drop is checked against the plan: a statement that
-// drops d alongside other operations, or a single drop that says CASCADE,
-// which would remove objects d does not list (a plan never drops with
-// CASCADE). An ALTER TABLE with any CASCADE in a single operation is
-// refused as well, whichever object it names.
+// drops d alongside other operations is refused. Any operation that says
+// CASCADE is refused too, whichever object it names and however many
+// operations the statement has: it would remove objects no plan lists, and
+// a plan never drops with CASCADE.
 func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, error) {
 	if st.Kind() != statement.KindAlterTable {
 		return false, nil
@@ -62,16 +62,14 @@ func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, err
 	if err != nil {
 		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
-	if len(ops) == 1 && ops[0].Cascade {
-		return false, fmt.Errorf("%w: %q drops with CASCADE, which removes objects the plan did not review", ErrInvariantViolation, st.SQL())
+	for _, op := range ops {
+		if op.Cascade {
+			return false, fmt.Errorf("%w: %q drops with CASCADE, which removes objects the plan did not review", ErrInvariantViolation, st.SQL())
+		}
 	}
 	for _, op := range ops {
 		if !opDrops(op, d) {
 			continue
-		}
-		if op.Cascade {
-			return false, fmt.Errorf("%w: %q drops %s %s with CASCADE, which removes objects the plan did not review",
-				ErrInvariantViolation, st.SQL(), d.Kind, d.Name)
 		}
 		if len(ops) != 1 {
 			return false, fmt.Errorf("%w: %q drops %s %s alongside other operations, and only a step whose sole operation is the drop is checked",
