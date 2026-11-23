@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -53,4 +55,55 @@ func TestDropIndexConcurrentlyReportsAnIndexReplacedBeforeTheDrop(t *testing.T) 
 		`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = 't_a_idx'`,
 		schema).Scan(&named))
 	assert.Zero(t, named, "the index that took the name is the one dropped")
+}
+
+// afterDropClock cancels the drop's context on its second reading, which
+// executeDropIndexConcurrently takes right after DROP INDEX CONCURRENTLY
+// returns and before the lookup that confirms which index it dropped.
+type afterDropClock struct {
+	readings int
+	cancel   context.CancelFunc
+}
+
+func (c *afterDropClock) Now() time.Time {
+	c.readings++
+	if c.readings == 2 {
+		c.cancel()
+	}
+	return time.Now()
+}
+
+// The caller's context ends right after the drop completes, so the lookup
+// that confirms the reviewed index is the one dropped cannot run. The
+// executor reports drop-outcome-unknown, naming the checked index's OID,
+// rather than a retryable execution failure: the index is already gone.
+func TestDropIndexConcurrentlyReportsAnUnconfirmedDropAsOutcomeUnknown(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id int PRIMARY KEY, a int);
+		CREATE INDEX t_a_idx ON %[1]s.t (a)`, schema))
+	require.NoError(t, err)
+	var checked uint32
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT $1::regclass::oid`, schema+".t_a_idx").Scan(&checked))
+	reviewed, found, err := schemadiff.ReadDroppedObject(t.Context(), pool, schema, "t", schemadiff.DroppedIndex, "t_a_idx")
+	require.NoError(t, err)
+	require.True(t, found)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	_, err = executeDropIndexConcurrently(ctx, pool, schema, "t", "t_a_idx", reviewed.Definition,
+		ConcurrentBudget{Overall: time.Minute}, &afterDropClock{cancel: cancel})
+	unknown, ok := errors.AsType[*DropOutcomeUnknownError](err)
+	require.True(t, ok, "got %v", err)
+	assert.Equal(t, checked, unknown.IndexOID)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, CodeDropOutcomeUnknown, OutcomeCode(err))
+	assert.False(t, OutcomeCode(err).Permanent())
+
+	var remaining int
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_class WHERE oid = $1`, checked).Scan(&remaining))
+	assert.Zero(t, remaining, "the drop itself completed")
 }
