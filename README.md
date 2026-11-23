@@ -116,7 +116,9 @@ refusal — never a silently wrong or incomplete result:
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
   An index of a partitioned table has no concurrent drop at all: drop it with
   the plain `DROP INDEX` under `--accept-blocking` and `--allow-destructive`,
-  which locks the parent and every partition while it runs.
+  which locks the parent and every partition while it runs. A partition's
+  index attached under the parent's is refused in either form; drop the
+  parent's index instead.
 - **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
   instant in the catalog but break every running application instance that
   still uses the old name, and no safer sequence can be built from the

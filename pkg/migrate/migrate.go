@@ -249,8 +249,9 @@ func (o Options) retry() executor.RetryPolicy {
 //
 // A bare table name resolves on the pool's own search_path, so two pools
 // with different paths can address different tables from the same
-// statement text. Run's own catalog reads — the resolve and the
-// accept-blocking lookup — are pg_catalog-qualified whatever that path
+// statement text. Run's own catalog reads — the resolve, the kind of an
+// index a DROP INDEX names, and the accept-blocking lookup — are
+// pg_catalog-qualified whatever that path
 // lists; a pool from dbconn.NewPool also drops a shadowing pg_catalog
 // entry on every session, which the engine's other reads rely on (CO-9,
 // docs/schemabot-integration.md).
@@ -289,14 +290,22 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		return verdict.Verdict{}, err
 	}
 	logger := opts.logger()
-	if v, refused := Gate(st); refused {
-		if proof, ok := AcceptedRefusal(opts.AcceptBlocking, v); ok {
+	gated, gateRefused, err := GateWithCatalog(ctx, pool, st)
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	if gateRefused {
+		// The passthrough runs the submitted statement as-is inside an
+		// engine-owned transaction, which a concurrent form cannot run in;
+		// a refused concurrent drop of a partitioned index names the plain
+		// drop to submit instead.
+		if proof, ok := AcceptedRefusal(opts.AcceptBlocking, gated); ok && !st.Concurrent() {
 			// The acknowledged passthrough: the refusal stands as
 			// analysis, and the refused statement runs as-is under the
 			// brief budgets instead of not at all.
-			return acceptBlocking(ctx, pool, st, v, proof, opts, step)
+			return acceptBlocking(ctx, pool, st, gated, proof, opts, step)
 		}
-		return v, nil
+		return gated, nil
 	}
 	if st.Kind() == statement.KindRenameIndex {
 		return renameIndex(ctx, pool, st, opts, step, logger)
@@ -304,7 +313,7 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	if st.Kind() == statement.KindAddEnumValue {
 		return addEnumValue(ctx, pool, st, opts, step, logger)
 	}
-	st, err := resolveTarget(ctx, pool, st, logger)
+	st, err = resolveTarget(ctx, pool, st, logger)
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
