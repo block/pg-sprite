@@ -908,7 +908,9 @@ only because the stopped run swapped it in, and the retained source and the row 
 otherwise stay with nothing to finish them; a non-empty plan meets the row statement by
 statement through `Run`. A read of the row that fails stops `Run` before a verdict, with
 nothing executed. A row that is `done`, or that this engine cannot read (another format, an
-unknown phase), holds nothing here.
+unknown phase), holds nothing here, and nor does a checkpoint store the connecting role has no
+privilege to read: such a role cannot run copy-and-swap through that store, so its statements
+route as they would with no row and meet the privilege preflight as usual.
 
 **What `--restart` excludes.** It is a copy-and-swap acknowledgement, so it is an error —
 before any verdict, with nothing executed or discarded — on a statement the router sends

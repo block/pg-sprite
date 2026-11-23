@@ -2,8 +2,10 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
@@ -29,8 +31,9 @@ type stoppedRun struct {
 // schema.table through schemachange.ResumableRow. No table (a statement
 // that names none), no row, a terminal row, and a row this engine cannot
 // read are no stopped run, as they are to the copy-and-swap route's own
-// preflight: the route decides those itself under the table's lock. A
-// read that fails is returned and nothing runs.
+// preflight: the route decides those itself under the table's lock. So
+// is a store the role has no privilege to read. Any other read that fails
+// is returned and nothing runs.
 func findStoppedRun(ctx context.Context, pool *pgxpool.Pool, schema, table string) (stoppedRun, error) {
 	if schema == "" || table == "" {
 		return stoppedRun{}, nil
@@ -40,10 +43,31 @@ func findStoppedRun(ctx context.Context, pool *pgxpool.Pool, schema, table strin
 		return stoppedRun{}, err
 	}
 	cp, found, err := schemachange.ResumableRow(ctx, store, schema, table)
+	if isPermissionDenied(err) {
+		// A role that may not read the checkpoint store cannot resume or
+		// start a copy-and-swap run through it either, so its statements
+		// route as they would with no row: the copy-and-swap route refuses
+		// it on that store itself, and a native statement meets the
+		// privilege preflight that names what the role lacks. Refusing
+		// here would stop every native statement on a database where
+		// another role once ran a copy-and-swap.
+		return stoppedRun{}, nil
+	}
 	if err != nil {
 		return stoppedRun{}, fmt.Errorf("look for a stopped copy-and-swap run on %s.%s: %w", schema, table, err)
 	}
 	return stoppedRun{cp: cp, found: found}, nil
+}
+
+// sqlstateInsufficientPrivilege is the server's refusal of a read the role
+// has no privilege for, such as a schema it lacks USAGE on.
+const sqlstateInsufficientPrivilege = "42501"
+
+// isPermissionDenied reports whether err is the server refusing the read
+// for want of a privilege.
+func isPermissionDenied(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.Code == sqlstateInsufficientPrivilege
 }
 
 // resumedBy reports whether st is the statement the stopped run records,
