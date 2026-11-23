@@ -38,12 +38,12 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 	report := destructiveReport()
 
 	t.Run("a pinned plan with its table named is admitted", func(t *testing.T) {
-		_, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, report)
+		_, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, report)
 		assert.True(t, ok)
 	})
 
 	t.Run("no acknowledgement refuses and names the way through", func(t *testing.T) {
-		res, ok := admitPlan(DesiredRequest{ExpectedFingerprint: "sha256:reviewed"}, report)
+		res, ok := AdmitPlan(DesiredRequest{ExpectedFingerprint: "sha256:reviewed"}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
@@ -56,7 +56,7 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 	})
 
 	t.Run("a run with no pin is also pointed at the path that needs none", func(t *testing.T) {
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "ExpectedFingerprint sha256:reviewed and AllowDestructive app.orders in the request")
@@ -66,7 +66,7 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 	t.Run("an acknowledged drop with no definition of what it drops is refused before anything runs", func(t *testing.T) {
 		undefined := destructiveReport()
 		undefined.Statements[1].Drops = nil
-		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, undefined)
+		res, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, undefined)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ClassInvariantViolation, res.Class)
 		assert.Equal(t, "planned statement 2 (ALTER TABLE app.orders DROP COLUMN legacy_id) is destructive but carries no definition of what it drops", res.Detail)
@@ -82,7 +82,7 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 			Reason:      verdict.ReasonUnsupportedPartitionedParent,
 			Class:       verdict.ClassByDesign,
 		}
-		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, partitioned)
+		res, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, partitioned)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "plain DROP INDEX through the imperative front door")
@@ -95,7 +95,7 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 			Disposition: router.DispositionExecute,
 			Backend:     router.BackendCopyAndSwap,
 		})
-		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, withCopySwap)
+		res, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, withCopySwap)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Contains(t, res.Detail, "planned statement 2 discards live structure (ALTER TABLE app.orders DROP COLUMN legacy_id)")
@@ -103,19 +103,19 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 	})
 
 	t.Run("an acknowledgement without a pin is not admitted", func(t *testing.T) {
-		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders"}, report)
+		res, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.orders"}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 	})
 
 	t.Run("an acknowledgement naming another table is not admitted", func(t *testing.T) {
-		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.other", ExpectedFingerprint: "sha256:reviewed"}, report)
+		res, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.other", ExpectedFingerprint: "sha256:reviewed"}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 	})
 
 	t.Run("a stale pin refuses before the acknowledgement is read", func(t *testing.T) {
-		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:older"}, report)
+		res, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:older"}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonPlanFingerprintMismatch, res.Reason)
 		assert.Contains(t, res.Detail, "sha256:older")
@@ -126,7 +126,7 @@ func TestAdmitPlanDestructiveAcknowledgement(t *testing.T) {
 		blocked := destructiveReport()
 		blocked.Disposition = router.DispositionRewriteRequired
 		blocked.Statements[0].Disposition = router.DispositionRewriteRequired
-		res, ok := admitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, blocked)
+		res, ok := AdmitPlan(DesiredRequest{AllowDestructive: "app.orders", ExpectedFingerprint: "sha256:reviewed"}, blocked)
 		require.False(t, ok)
 		assert.Equal(t, verdict.ReasonRewriteRequired, res.Reason)
 	})

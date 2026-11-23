@@ -61,10 +61,10 @@ func (c *MigrateCmd) desiredOptions(logger *slog.Logger) migrate.Options {
 // For a refusal it also returns the fingerprint a run must pin, which is not
 // the refused preview's own.
 func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report, pinnable string) {
-	if !slices.ContainsFunc(report.Statements, func(ps plan.Statement) bool { return ps.Destructive }) {
+	if !hasDestructive(report) {
 		return report, ""
 	}
-	if c.AllowDestructive == report.Schema+"."+report.Table && c.ExpectFingerprint == report.Fingerprint {
+	if c.liftsDestructiveRefusal(report) {
 		return report, ""
 	}
 	plan.RefuseDestructive(&report)
@@ -74,13 +74,20 @@ func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report
 // writeDesiredPreview prints a desired-state dry run's plan and, for a
 // refused destructive plan, the flags that lift the refusal. It checks the
 // acknowledged table first and the pin next, as the run does, before
-// anything is rendered.
+// anything is rendered. A plan the flags cannot lift gets the refusal a
+// pinned run gives it: as the result when the dry run carries the flags,
+// and in place of the flags when it does not.
 func (c *MigrateCmd) writeDesiredPreview(out io.Writer, report plan.Report) error {
 	if err := migrate.CheckDesiredAllowDestructiveTable(c.AllowDestructive, report); err != nil {
 		return err
 	}
 	if stale, ok := migrate.CheckPlanPin(c.ExpectFingerprint, report); !ok {
 		return c.finishDesired(out, stale, nil)
+	}
+	if c.liftsDestructiveRefusal(report) {
+		if refusal, ok := refusedEvenWhenPinned(report); !ok {
+			return c.finishDesired(out, refusal, nil)
+		}
 	}
 	preview, pinnable := c.previewDesiredPlan(report)
 	diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, ExtensionSchema: c.ExtensionSchema, JSON: c.JSON}
@@ -89,6 +96,13 @@ func (c *MigrateCmd) writeDesiredPreview(out io.Writer, report plan.Report) erro
 		return reportErr
 	}
 	w := &stickyWriter{out: out, pal: c.palette(out), started: true}
+	if refusal, ok := refusedEvenWhenPinned(report); !ok {
+		w.diag("note", "", "pinning this plan does not let it run: "+refusal.Detail)
+		if w.err != nil {
+			return w.err
+		}
+		return reportErr
+	}
 	w.diag("note", "", "a run refuses a plan that discards live structure unless it pins the reviewed plan and names the table; to run this plan, add to the command:")
 	w.printf("  --expect-fingerprint %s --allow-destructive %s.%s\n", pinnable, report.Schema, report.Table)
 	w.diag("note", "", "with both flags this dry run previews the plan the run would execute")
@@ -96,6 +110,36 @@ func (c *MigrateCmd) writeDesiredPreview(out io.Writer, report plan.Report) erro
 		return w.err
 	}
 	return reportErr
+}
+
+// hasDestructive reports whether the plan discards any live structure.
+func hasDestructive(report plan.Report) bool {
+	return slices.ContainsFunc(report.Statements, func(ps plan.Statement) bool { return ps.Destructive })
+}
+
+// liftsDestructiveRefusal reports whether the dry run carries the pin and the
+// acknowledgement a run needs for the plan's destructive statements.
+func (c *MigrateCmd) liftsDestructiveRefusal(report plan.Report) bool {
+	if !hasDestructive(report) {
+		return false
+	}
+	return c.AllowDestructive == report.Schema+"."+report.Table && c.ExpectFingerprint == report.Fingerprint
+}
+
+// refusedEvenWhenPinned reports the refusal a run gives a destructive plan
+// that the pin and the acknowledgement cannot lift, such as a drop beside a
+// copy-and-swap statement, a partitioned parent's index drop, or a statement
+// with no safe path. The dry run prints that refusal, as the run would,
+// instead of the flags, which would only lead to it.
+func refusedEvenWhenPinned(report plan.Report) (migrate.DesiredResult, bool) {
+	if !hasDestructive(report) {
+		return migrate.DesiredResult{}, true
+	}
+	res, ok := migrate.AdmitPlan(migrate.DesiredRequest{
+		ExpectedFingerprint: report.Fingerprint,
+		AllowDestructive:    report.Schema + "." + report.Table,
+	}, report)
+	return res, ok
 }
 
 func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {

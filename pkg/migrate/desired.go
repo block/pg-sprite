@@ -288,7 +288,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if tableMissing && refuseMissing != nil {
 		return refuseMissing(report), nil
 	}
-	if refused, ok := admitPlan(req, report); !ok {
+	if refused, ok := AdmitPlan(req, report); !ok {
 		return refused, nil
 	}
 	if tableMissing {
@@ -594,7 +594,7 @@ func planStatementSQL(report plan.Report, i int) string {
 	return report.Statements[i].SQL
 }
 
-// admitPlan is the all-or-nothing plan-time admission: it refuses the whole
+// AdmitPlan is the all-or-nothing plan-time admission: it refuses the whole
 // plan — before anything runs — when the plan cannot converge the table as
 // a unit. The checks run from the caller's contract outward: the pinned
 // fingerprint first (the caller's approval is void whatever else holds),
@@ -610,7 +610,7 @@ func planStatementSQL(report plan.Report, i int) string {
 // definition of what it drops are refused even when the run is
 // acknowledged: the first so the operator gets its specific guidance, the
 // second so the refusal comes before any statement runs.
-func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
+func AdmitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 	refused := DesiredResult{Plan: report}
 	if stale, ok := CheckPlanPin(req.ExpectedFingerprint, report); !ok {
 		return stale, false
@@ -722,7 +722,7 @@ func CheckPlanPin(expected string, report plan.Report) (DesiredResult, bool) {
 }
 
 // destructiveAcknowledged reports whether the request names the plan's table
-// and pins a fingerprint, which admitPlan has already checked against report.
+// and pins a fingerprint, which AdmitPlan has already checked against report.
 func destructiveAcknowledged(req DesiredRequest, report plan.Report) bool {
 	return req.AllowDestructive != "" && req.ExpectedFingerprint != "" &&
 		req.AllowDestructive == desiredTable(report)

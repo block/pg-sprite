@@ -11,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -26,6 +27,7 @@ func desiredReport(destructive bool) plan.Report {
 	if destructive {
 		report.Statements = append(report.Statements, plan.Statement{
 			SQL: "ALTER TABLE app.orders DROP COLUMN legacy", Destructive: true, Disposition: router.DispositionExecute,
+			Drops: &schemadiff.DroppedObject{Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "legacy bigint"},
 		})
 	}
 	report.Fingerprint = report.ComputeFingerprint()
@@ -106,6 +108,54 @@ func TestWriteDesiredPreviewNamesTheWayThrough(t *testing.T) {
 		assert.NotContains(t, out.String(), "a run refuses a plan")
 		assert.NotContains(t, out.String(), "pinnable_fingerprint")
 		assert.Contains(t, out.String(), report.Fingerprint)
+	}
+}
+
+// A destructive plan the pin and the acknowledgement cannot unlock is
+// previewed as the run refuses it, with or without the flags, and the dry run
+// does not suggest flags that would only lead to the same refusal.
+func TestWriteDesiredPreviewShowsARefusalTheFlagsCannotLift(t *testing.T) {
+	withCopySwap := desiredReport(true)
+	withCopySwap.Statements = append(withCopySwap.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.orders ALTER COLUMN total TYPE int",
+		Disposition: router.DispositionExecute,
+		Backend:     router.BackendCopyAndSwap,
+	})
+	withCopySwap.Fingerprint = withCopySwap.ComputeFingerprint()
+
+	partitioned := desiredReport(false)
+	partitioned.Disposition = router.DispositionRefuse
+	partitioned.Statements = append(partitioned.Statements, plan.Statement{
+		SQL:         `DROP INDEX "app"."orders_qty_idx"`,
+		Kind:        schemadiff.ChangeDropIndex,
+		Destructive: true,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedPartitionedParent,
+		Class:       verdict.ClassByDesign,
+	})
+	partitioned.Fingerprint = partitioned.ComputeFingerprint()
+
+	for name, tc := range map[string]struct {
+		report plan.Report
+		detail string
+	}{
+		"a drop beside a copy-and-swap statement": {withCopySwap, "routes to copy-and-swap"},
+		"a partitioned parent's index drop":       {partitioned, "plain DROP INDEX through the imperative front door"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, cmd := range []*MigrateCmd{
+				{},
+				{AllowDestructive: "app.orders", ExpectFingerprint: tc.report.Fingerprint},
+			} {
+				var out strings.Builder
+				require.ErrorIs(t, cmd.writeDesiredPreview(&out, tc.report), verdict.ErrRefused)
+				// The text renderer wraps lines, so compare with the
+				// whitespace collapsed.
+				text := strings.Join(strings.Fields(out.String()), " ")
+				assert.Contains(t, text, tc.detail)
+				assert.NotContains(t, text, "to run this plan, add to the command")
+			}
+		})
 	}
 }
 

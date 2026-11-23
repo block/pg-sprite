@@ -438,7 +438,7 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 				{SQL: `ALTER TABLE app.orders DROP COLUMN legacy_id`, Destructive: true},
 			},
 		}
-		res, ok := admitPlan(DesiredRequest{}, report)
+		res, ok := AdmitPlan(DesiredRequest{}, report)
 		require.False(t, ok)
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)

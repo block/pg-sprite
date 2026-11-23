@@ -527,7 +527,10 @@ refused (plan-fingerprint-mismatch)
 - A plan that fails part-way keeps the statements that already committed. Run
   `diff --desired` again to review what is left.
 - `--dry-run` prints the fingerprint to pin and executes nothing; with both
-  flags it previews the plan the run would execute. In `--json` output on a
+  flags it previews the plan the run would execute. Some plans stay refused
+  with both flags, such as a drop beside a copy-and-swap statement or a drop
+  of a partitioned table's index. For those, the dry run prints the refusal
+  the pinned run gives instead of the flags. In `--json` output on a
   destructive plan, `fingerprint` covers the refused plan and cannot be
   pinned: pin `pinnable_fingerprint`, the same value the text output prints.
   A dry run compares `--expect-fingerprint` as the run does and refuses with

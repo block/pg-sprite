@@ -1813,7 +1813,7 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
-  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`, `admitPlan` and
+  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`, `AdmitPlan` and
   `checkDesiredAllowDestructive` for the one admitted acknowledgement,
   `CheckDesiredAllowDestructiveTable`, which `RunDesired`, `RunDesiredWithRowSecurity` (before
   its converged-table return), and the CLI's dry run all apply to the resolved table,

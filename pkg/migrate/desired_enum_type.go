@@ -73,7 +73,7 @@ func RunDesiredEnumType(ctx context.Context, pool *pgxpool.Pool, req EnumTypeReq
 			Detail:  "already converged: the live enum type carries every label the file lists; nothing to run",
 		}, nil
 	}
-	if refused, ok := admitPlan(DesiredRequest{ExpectedFingerprint: req.ExpectedFingerprint}, report); !ok {
+	if refused, ok := AdmitPlan(DesiredRequest{ExpectedFingerprint: req.ExpectedFingerprint}, report); !ok {
 		return refused, nil
 	}
 	return executePlan(ctx, pool, report, opts, "", replan)
