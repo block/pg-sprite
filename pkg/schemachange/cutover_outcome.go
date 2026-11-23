@@ -25,6 +25,7 @@ type SwappedTable struct {
 	statistics DependentPairing
 	sequences  []OwnedSequence
 	identities []IdentityColumn
+	carried    CarriedCompare
 	attempts   int
 	// swapPosition is set by the swap transaction itself; zero in a proof
 	// minted from the catalog.
@@ -34,7 +35,7 @@ type SwappedTable struct {
 // newSwappedTable records what the swap transaction renamed and handed off.
 // The identities are the ones the handoff left on the live table, read back
 // from it, not the source's: a widened column carries widened bounds.
-func newSwappedTable(ready CutoverReady, identities []IdentityColumn, attempts int) SwappedTable {
+func newSwappedTable(ready CutoverReady, identities []IdentityColumn, carried CarriedCompare, attempts int) SwappedTable {
 	built := ready.built
 	return SwappedTable{
 		schema:     built.Schema(),
@@ -46,6 +47,7 @@ func newSwappedTable(ready CutoverReady, identities []IdentityColumn, attempts i
 		statistics: ready.statistics,
 		sequences:  ready.sequences,
 		identities: identities,
+		carried:    carried,
 		attempts:   attempts,
 	}
 }
@@ -107,6 +109,13 @@ func (s SwappedTable) Attempts() int { return s.attempts }
 // Cutover learned of the commit from the catalog after losing its
 // connection.
 func (s SwappedTable) SwapPosition() decode.LSN { return s.swapPosition }
+
+// CarriedCompare is what the committed attempt's compare of the keys a
+// live pass left for the swap cost under its lock: the zero value for a
+// swap that compared none, and for a SwappedTable InspectSwapped
+// re-derived, which cannot know. It is not part of the Proof, since no
+// later read can recover it.
+func (s SwappedTable) CarriedCompare() CarriedCompare { return s.carried }
 
 // confirmSwap re-reads the catalog inside the swap transaction, after the
 // renames and handoffs, and refuses to commit unless it shows exactly what
