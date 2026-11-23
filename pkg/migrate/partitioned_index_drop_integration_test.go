@@ -2,8 +2,10 @@ package migrate_test
 
 import (
 	"fmt"
+	"net/url"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -131,8 +133,8 @@ func TestRunRefusesConcurrentDropOfPartitionedIndex(t *testing.T) {
 // attached under a parent index ends in: PostgreSQL drops such an index
 // only together with its parent, in either form, so the refusal is by
 // design, no acknowledgement reaches it, and the detail names the root
-// partitioned index to drop instead.
-func assertAttachedIndexDropRefused(t *testing.T, v verdict.Verdict, table, rootIndex string) {
+// partitioned index to drop instead and the root's table to acknowledge.
+func assertAttachedIndexDropRefused(t *testing.T, v verdict.Verdict, table, rootIndex, rootTable string) {
 	t.Helper()
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
@@ -142,6 +144,8 @@ func assertAttachedIndexDropRefused(t *testing.T, v verdict.Verdict, table, root
 	assert.Equal(t, table, v.Table)
 	assert.False(t, v.BlockingPassthrough)
 	assert.Contains(t, v.Detail, "attached under the partitioned index "+rootIndex)
+	assert.Contains(t, v.Detail, "--accept-blocking "+rootTable+" and --allow-destructive "+rootTable+",",
+		"the acknowledgements name the root index's table, the one the accepted drop locks")
 }
 
 // A partition's index attached under the parent's index cannot be dropped
@@ -160,11 +164,11 @@ func TestRunRefusesDropOfAttachedPartitionIndex(t *testing.T) {
 		t.Run(sql, func(t *testing.T) {
 			v, err := migrate.Run(t.Context(), pool, parseOne(t, sql), runOptions())
 			require.NoError(t, err)
-			assertAttachedIndexDropRefused(t, v, schema+".ev_1", schema+".ev_name_idx")
+			assertAttachedIndexDropRefused(t, v, schema+".ev_1", schema+".ev_name_idx", schema+".ev")
 
 			accepted, err := migrate.Run(t.Context(), pool, parseOne(t, sql), acceptBlockingOptions(schema+".ev_1"))
 			require.NoError(t, err)
-			assertAttachedIndexDropRefused(t, accepted, schema+".ev_1", schema+".ev_name_idx")
+			assertAttachedIndexDropRefused(t, accepted, schema+".ev_1", schema+".ev_name_idx", schema+".ev")
 			assert.True(t, indexExists(t, pool, schema, "ev_1_name_idx"), "a refusal executes nothing")
 		})
 	}
@@ -212,5 +216,87 @@ func TestRunRefusesDropOfAttachedSubpartitionIndex(t *testing.T) {
 		parseOne(t, fmt.Sprintf("DROP INDEX %s.ev_1_name_idx", schema)),
 		runOptions())
 	require.NoError(t, err)
-	assertAttachedIndexDropRefused(t, v, schema+".ev_1", schema+".ev_name_idx")
+	assertAttachedIndexDropRefused(t, v, schema+".ev_1", schema+".ev_name_idx", schema+".ev")
+}
+
+// A partitioned table's primary key owns its index and the index attached
+// under it on each partition, so PostgreSQL refuses every DROP INDEX of
+// either ("cannot drop index ... because constraint ... requires it"),
+// whatever the acknowledgements. Both drops are refused up front, never
+// offered the accepted path, and named the ALTER TABLE ... DROP CONSTRAINT
+// that removes the index; that statement then runs.
+func TestRunRefusesDropOfAConstraintBackedPartitionedIndex(t *testing.T) {
+	pool := partitionedDropPool(t)
+	schema := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.ev (
+			id bigint NOT NULL,
+			day date NOT NULL,
+			PRIMARY KEY (id, day)
+		) PARTITION BY RANGE (day);
+		CREATE TABLE %[1]s.ev_1 PARTITION OF %[1]s.ev
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`, schema))
+	require.NoError(t, err)
+	dropConstraint := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s",
+		pgx.Identifier{schema, "ev"}.Sanitize(), pgx.Identifier{"ev_pkey"}.Sanitize())
+
+	for _, tc := range []struct{ index, table string }{
+		{"ev_pkey", "ev"},
+		{"ev_1_pkey", "ev_1"},
+	} {
+		t.Run(tc.index, func(t *testing.T) {
+			sql := fmt.Sprintf("DROP INDEX %s.%s", schema, tc.index)
+			for _, opts := range []migrate.Options{runOptions(), acceptBlockingOptions(schema + "." + tc.table)} {
+				v, err := migrate.Run(t.Context(), pool, parseOne(t, sql), opts)
+				require.NoError(t, err)
+				assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+				assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+				assert.Equal(t, verdict.ClassByDesign, v.Class)
+				assert.Empty(t, v.SaferIdiom)
+				assert.False(t, v.BlockingPassthrough)
+				assert.Equal(t, schema+"."+tc.table, v.Table)
+				assert.NotContains(t, v.Detail, "--accept-blocking")
+				assert.Contains(t, v.Detail, "drop the constraint: "+dropConstraint)
+			}
+			assert.True(t, indexExists(t, pool, schema, tc.index), "a refusal executes nothing")
+		})
+	}
+
+	_, err = pool.Exec(t.Context(), dropConstraint)
+	require.NoError(t, err, "the statement the refusal names removes the index")
+	assert.False(t, indexExists(t, pool, schema, "ev_pkey"))
+	assert.False(t, indexExists(t, pool, schema, "ev_1_pkey"))
+}
+
+// A role without USAGE on the index's schema cannot read the index's kind,
+// and cannot drop the index either, so the catalog read adds nothing: the
+// statement gets the gate's catalog-free refusal, not an operational error.
+func TestRunKeepsTheGateRefusalOfADropInASchemaTheRoleCannotUse(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	schema := testutil.NewSchema(t, admin)
+	const password = "no-usage-password"
+	role := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	_, err = admin.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.plain (
+			id int
+		);
+		CREATE INDEX plain_idx ON %[1]s.plain (id);
+		REVOKE ALL ON SCHEMA %[1]s FROM PUBLIC`, pgx.Identifier{schema}.Sanitize()))
+	require.NoError(t, err)
+	u, err := url.Parse(serverURL)
+	require.NoError(t, err)
+	u.User = url.UserPassword(role, password)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: u.String()})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	v, err := migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("DROP INDEX %s.plain_idx", schema)), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonIndexStatement, v.Reason)
+	assert.Equal(t, "DROP INDEX CONCURRENTLY", v.SaferIdiom)
 }

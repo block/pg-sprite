@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/executor"
@@ -40,6 +41,12 @@ func GateWithCatalog(ctx context.Context, pool *pgxpool.Pool, st statement.State
 		return v, refused, nil
 	}
 	index, found, err := readDroppedIndex(ctx, pool, st.IndexRelation())
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateInsufficientPrivilege {
+		// A role that cannot read the index's schema cannot drop the
+		// index either; the gate's refusal stands, as it did before the
+		// catalog was read.
+		return v, true, nil
+	}
 	if err != nil {
 		return verdict.Verdict{}, false, err
 	}
@@ -47,6 +54,9 @@ func GateWithCatalog(ctx context.Context, pool *pgxpool.Pool, st statement.State
 		// Nothing to refine: the gate's refusal stands, and an accepted
 		// run reports the missing relation when it resolves the table.
 		return v, true, nil
+	}
+	if index.constraintBacked() {
+		return constraintIndexDropVerdict(st, index), true, nil
 	}
 	if index.attached() {
 		return attachedIndexDropVerdict(st, index), true, nil
@@ -65,14 +75,29 @@ func GateWithCatalog(ctx context.Context, pool *pgxpool.Pool, st statement.State
 }
 
 // droppedIndex is what the catalog says about the index a DROP INDEX
-// names: its relkind, its owning table, and — when it is attached under a
-// parent index — the root partitioned index of its tree and that index's
-// table.
+// names: its relkind, its owning table, when it is attached under a
+// parent index the root partitioned index of its tree and that index's
+// table, and the primary key, unique, or exclusion constraint, if any,
+// that owns the index whose drop the verdict would advise (the root when
+// the index is attached), with that constraint's table quoted for SQL.
 type droppedIndex struct {
 	relkind              string
 	table                string
 	rootIndex, rootTable string
+	constraint           string
+	constraintTable      string
 }
+
+// constraintBacked reports whether a partitioned or attached index's drop
+// would be refused by PostgreSQL because a constraint owns the index it
+// comes down to: the constraint, not any DROP INDEX, removes it.
+func (d droppedIndex) constraintBacked() bool {
+	return d.constraint != "" && (d.partitioned() || d.attached())
+}
+
+// sqlstateInsufficientPrivilege is the SQLSTATE PostgreSQL raises when the
+// role may not look up a name in a schema it has no USAGE on.
+const sqlstateInsufficientPrivilege = "42501"
 
 // partitioned reports whether the index is a partitioned index, one whose
 // table is a partitioned parent.
@@ -103,15 +128,25 @@ func readDroppedIndex(ctx context.Context, pool *pgxpool.Pool, rel statement.Ind
 	// search_path cannot change which index is judged. to_regclass itself
 	// still resolves the bare name on that path, exactly as the statement
 	// will.
+	//
+	// The last two columns name the primary key, unique, or exclusion
+	// constraint on the index's own table that the index backs, and the
+	// one the root index backs: PostgreSQL drops such an index only with
+	// its constraint.
 	const q = `
 		SELECT c.relkind::pg_catalog.text,
 		       tn.nspname, t.relname,
 		       rn.nspname, r.relname,
-		       rtn.nspname, rt.relname
+		       rtn.nspname, rt.relname,
+		       cc.conname, rc.conname
 		FROM pg_catalog.pg_class c
 		JOIN pg_catalog.pg_index i ON i.indexrelid OPERATOR(pg_catalog.=) c.oid
 		JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
 		JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
+		LEFT JOIN pg_catalog.pg_constraint cc
+		       ON cc.conindid OPERATOR(pg_catalog.=) c.oid
+		      AND cc.conrelid OPERATOR(pg_catalog.=) i.indrelid
+		      AND cc.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
 		LEFT JOIN pg_catalog.pg_class r
 		       ON c.relispartition
 		      AND r.oid OPERATOR(pg_catalog.=) pg_catalog.pg_partition_root(c.oid::pg_catalog.regclass)
@@ -119,15 +154,21 @@ func readDroppedIndex(ctx context.Context, pool *pgxpool.Pool, rel statement.Ind
 		LEFT JOIN pg_catalog.pg_index ri ON ri.indexrelid OPERATOR(pg_catalog.=) r.oid
 		LEFT JOIN pg_catalog.pg_class rt ON rt.oid OPERATOR(pg_catalog.=) ri.indrelid
 		LEFT JOIN pg_catalog.pg_namespace rtn ON rtn.oid OPERATOR(pg_catalog.=) rt.relnamespace
+		LEFT JOIN pg_catalog.pg_constraint rc
+		       ON rc.conindid OPERATOR(pg_catalog.=) r.oid
+		      AND rc.conrelid OPERATOR(pg_catalog.=) ri.indrelid
+		      AND rc.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
 		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)`
 	name := regclassName(rel)
 	var (
 		relkind, tableSchema, table string
 		// NULL unless the index is attached under a parent index.
 		rootSchema, rootIndex, rootTableSchema, rootTable *string
+		// NULL unless a constraint owns the index, or the root index.
+		constraint, rootConstraint *string
 	)
 	err := pool.QueryRow(ctx, q, name).Scan(&relkind, &tableSchema, &table,
-		&rootSchema, &rootIndex, &rootTableSchema, &rootTable)
+		&rootSchema, &rootIndex, &rootTableSchema, &rootTable, &constraint, &rootConstraint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return droppedIndex{}, false, nil
 	}
@@ -136,6 +177,9 @@ func readDroppedIndex(ctx context.Context, pool *pgxpool.Pool, rel statement.Ind
 	}
 	d := droppedIndex{relkind: relkind, table: tableSchema + "." + table}
 	if rootIndex == nil {
+		if constraint != nil {
+			d.constraint, d.constraintTable = *constraint, pgx.Identifier{tableSchema, table}.Sanitize()
+		}
 		return d, true, nil
 	}
 	// A root index always has a schema, a pg_index row, and a table, so a
@@ -146,6 +190,9 @@ func readDroppedIndex(ctx context.Context, pool *pgxpool.Pool, rel statement.Ind
 	}
 	d.rootIndex = *rootSchema + "." + *rootIndex
 	d.rootTable = *rootTableSchema + "." + *rootTable
+	if rootConstraint != nil {
+		d.constraint, d.constraintTable = *rootConstraint, pgx.Identifier{*rootTableSchema, *rootTable}.Sanitize()
+	}
 	return d, true, nil
 }
 
@@ -184,6 +231,24 @@ func partitionedIndexDropVerdict(st statement.Statement, index droppedIndex) (ve
 		Table:     index.table,
 		Detail:    detail,
 	}.WithRefusal(r), nil
+}
+
+// constraintIndexDropVerdict refuses a DROP INDEX of a partitioned or
+// attached index that comes down to an index a primary key, unique, or
+// exclusion constraint owns: PostgreSQL refuses that drop in either form
+// whatever the acknowledgements, and removes the index only with the
+// constraint, so the detail names the ALTER TABLE ... DROP CONSTRAINT
+// that does.
+func constraintIndexDropVerdict(st statement.Statement, index droppedIndex) verdict.Verdict {
+	constraint := pgx.Identifier{index.constraint}.Sanitize()
+	return verdict.Verdict{
+		Statement: st.SQL(),
+		Table:     index.table,
+		Detail: fmt.Sprintf("constraint %[1]s on %[2]s owns this index or the partitioned index it is attached under, "+
+			"so PostgreSQL refuses every DROP INDEX of it, whatever the acknowledgements, and removes it only together "+
+			"with the constraint; to remove it, drop the constraint: ALTER TABLE %[2]s DROP CONSTRAINT %[1]s",
+			constraint, index.constraintTable),
+	}.WithRefusal(constraintIndexDropRefusal())
 }
 
 // attachedIndexDropVerdict refuses a DROP INDEX of an index attached under
