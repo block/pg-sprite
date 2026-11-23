@@ -225,6 +225,65 @@ func TestReapOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
 	assert.True(t, slotExists(t, d.pool, orphan.Name()), "a refused pass drops nothing")
 }
 
+// The preview sorts one fixture of every kind — an orphan, a slot a live
+// row names, a slot a stream holds, and a prefix-wearing foreign name — into
+// the same lists the pass then reports, with the orphan the preview names
+// as Dropped the one the pass drops. The preview itself drops nothing and
+// takes no lock, so every slot is still there after it (ST-3).
+func TestPreviewOrphanSlotsSortsAsTheReaperDoesAndDropsNothing(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	_, orphan := d.slotFor(t, "ledger")
+	_, live := d.slotFor(t, "orders")
+	d.claim(t, "orders", live.Name(), checkpoint.PhaseCopying)
+	heldTarget, held := d.slotFor(t, "events")
+	stream, err := decode.OpenStream(t.Context(), d.cfg, d.pool, heldTarget, held.ConsistentPoint())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, stream.Close(context.WithoutCancel(t.Context()))) })
+	const activeDeadline = 10 * time.Second
+	const activePoll = 20 * time.Millisecond
+	require.Eventually(t, func() bool {
+		status, found, err := decode.InspectSlot(t.Context(), d.pool, held.Name())
+		require.NoError(t, err)
+		return found && status.Active
+	}, activeDeadline, activePoll, "the stream's walsender should hold the slot")
+	const foreign = "pgsprite_backup"
+	_, err = d.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, foreign)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := d.pool.Exec(context.WithoutCancel(t.Context()), `SELECT pg_drop_replication_slot($1)`, foreign)
+		assert.NoError(t, err)
+	})
+
+	preview, err := d.store.PreviewOrphanSlots(t.Context())
+	require.NoError(t, err)
+	want := checkpoint.Reaped{
+		Dropped: []string{orphan.Name()},
+		Live:    []string{live.Name()},
+		Active:  []string{held.Name()},
+		Foreign: []string{foreign},
+	}
+	assert.Equal(t, want, preview)
+	for _, name := range []string{orphan.Name(), live.Name(), held.Name(), foreign} {
+		assert.True(t, slotExists(t, d.pool, name), "the preview drops nothing: %s", name)
+	}
+
+	reaped, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, preview, reaped, "the pass sorts the same reads the same way")
+	assert.False(t, slotExists(t, d.pool, orphan.Name()))
+}
+
+// The preview, like the pass, refuses a database without the checkpoint
+// table rather than read every slot as an orphan.
+func TestPreviewOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	_, orphan := d.slotFor(t, "orders")
+	_, err := d.store.PreviewOrphanSlots(t.Context())
+	require.ErrorIs(t, err, checkpoint.ErrTableMissing)
+	assert.True(t, slotExists(t, d.pool, orphan.Name()))
+}
+
 // reapOutcome is what a reaper pass run in the background came back with.
 type reapOutcome struct {
 	reaped checkpoint.Reaped

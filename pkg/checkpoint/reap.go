@@ -109,22 +109,62 @@ func (s *Store) ReapOrphanSlots(ctx context.Context, cfg dbconn.Config) (Reaped,
 	}
 	var reaped Reaped
 	for _, c := range candidates {
-		switch {
-		case !decode.IsEngineSlotName(c.name):
-			reaped.Foreign = append(reaped.Foreign, c.name)
-		case live[c.name]:
-			// INV: ST-3 — a row in flight owns its slot; the reaper never
-			// drops a slot a schema change can still resume on.
-			reaped.Live = append(reaped.Live, c.name)
-		case c.active:
-			reaped.Active = append(reaped.Active, c.name)
-		default:
-			if err := s.dropIfStillOrphan(ctx, cfg, c.name, &reaped); err != nil {
-				return reaped, err
-			}
+		if !reaped.fileUnlessOrphan(c, live) {
+			continue
+		}
+		if err := s.dropIfStillOrphan(ctx, cfg, c.name, &reaped); err != nil {
+			return reaped, err
 		}
 	}
 	return reaped, nil
+}
+
+// PreviewOrphanSlots reports what ReapOrphanSlots would make of the engine
+// slots of the store's database right now, dropping nothing: Dropped names
+// the orphans a pass would go on to drop, and the other lists are the slots
+// it would keep. It reads the same slot listing and live rows and sorts
+// them with the same rule, but takes no slot lock and writes nothing, so it
+// is a snapshot and not a promise: by the time a pass runs, a run may have
+// claimed an orphan, which the pass then keeps as live, or a process may
+// hold it, which the pass then keeps as active. A database where Ensure has
+// never run is refused with ErrTableMissing, as ReapOrphanSlots refuses it.
+func (s *Store) PreviewOrphanSlots(ctx context.Context) (Reaped, error) {
+	candidates, err := s.candidateSlots(ctx)
+	if err != nil {
+		return Reaped{}, err
+	}
+	live, err := s.liveRowSlots(ctx, slotNames(candidates))
+	if err != nil {
+		return Reaped{}, err
+	}
+	var preview Reaped
+	for _, c := range candidates {
+		if preview.fileUnlessOrphan(c, live) {
+			preview.Dropped = append(preview.Dropped, c.name)
+		}
+	}
+	return preview, nil
+}
+
+// fileUnlessOrphan files a candidate the pass keeps under the list that
+// keeps it and reports false, or reports true and files nothing for an
+// orphan, which the caller drops or previews. live is the candidates'
+// live-row read. ReapOrphanSlots and PreviewOrphanSlots both sort through
+// it, so a preview never disagrees with a pass over the same reads.
+func (r *Reaped) fileUnlessOrphan(c candidateSlot, live map[string]bool) bool {
+	switch {
+	case !decode.IsEngineSlotName(c.name):
+		r.Foreign = append(r.Foreign, c.name)
+	case live[c.name]:
+		// INV: ST-3 — a row in flight owns its slot; the reaper never
+		// drops a slot a schema change can still resume on.
+		r.Live = append(r.Live, c.name)
+	case c.active:
+		r.Active = append(r.Active, c.name)
+	default:
+		return true
+	}
+	return false
 }
 
 // dropIfStillOrphan re-reads the slot's row and then drops the slot without

@@ -506,13 +506,43 @@ it verifies and swaps. A slot with `active` false belongs to a stopped run: it
 keeps WAL on the server until you resume the run or start it over, as
 [copy-and-swap.md](copy-and-swap.md#stop-resume-and-start-over) describes.
 
+### Drop orphan slots
+
+A slot no checkpoint row in a non-terminal phase names is an orphan: a run
+that ended before its row landed, or one whose cleanup did not finish. It
+keeps WAL like any other slot. `reap` drops the orphans of the connected
+database, publications included; `--dry-run` shows what it would drop first:
+
+```console
+$ pg-sprite reap --dry-run
+would drop (orphans, with their publications): 1
+  pgsprite_deadbeef
+live (kept: a checkpoint row in a non-terminal phase names it): 1
+  pgsprite_cafebabe
+active (kept: a process holds it): 0
+foreign (kept: wears the pgsprite_ prefix without the engine's name shape): 1
+  pgsprite_backup
+dry run: nothing was dropped
+```
+
+A slot a live row names, a slot a process holds, and a `pgsprite_` name the
+engine did not make are kept; slots of other databases are never read. The
+pass is safe while a schema change runs: it reads each orphan's row again
+right before the drop, under the lock a run takes to claim its slot. A
+database where no schema change has run has no checkpoint table, which `reap`
+reports with nothing dropped and exit 0. `--json` prints the lists as
+`dropped`, `would_drop`, `live`, `active`, and `foreign` (always arrays),
+with `dry_run`, `checkpoint_table_exists`, and `stopped`, which is true when
+a drop failed: the lists then hold what was sorted before the failure and the
+command exits 1.
+
 A program that embeds pg-sprite as a Go library can poll a run's phase, step,
 and row, checksum, and catch-up counters directly; that snapshot is the
 [progress report contract](progress-report.md).
 
 ## Use the CLI from scripts and agents
 
-`migrate`, `diff`, `status`, `lint`, `suggest`, and `capabilities` take
+`migrate`, `diff`, `status`, `reap`, `lint`, `suggest`, and `capabilities` take
 `--json`. stdout carries only the report; diagnostics go to stderr, and
 `--debug` adds statement-level tracing there.
 
