@@ -23,6 +23,12 @@ var (
 	// never become valid; the build refuses the whole tree before it creates
 	// anything.
 	ErrForeignTablePartition = errors.New("the partition tree holds a foreign table, which cannot carry an index")
+	// ErrUniqueIndexPartitionKey is returned for a unique index that does not
+	// contain the partition key of every partitioned table in the tree as
+	// plain key columns. PostgreSQL checks each partitioned table on its
+	// own, so the build refuses the whole tree before it creates anything
+	// rather than fail at the first level that does not match.
+	ErrUniqueIndexPartitionKey = errors.New("a unique index must contain the partition key of every partitioned table in the tree")
 	// ErrPartitionedIndexUnsettled is returned when partitions kept appearing
 	// without an attached index for as long as the build's bounded number of
 	// passes. What the build finished stays attached.

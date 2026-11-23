@@ -353,6 +353,7 @@ concurrently is.
 | `not-partitioned-table` | yes | The target of a partitioned index build is not a partitioned table; a plain table's index is the concurrent build's job |
 | `partitioned-index-name-taken` | yes | A name the partitioned index build needs is held by a relation that is not the requested index: another kind of relation, an index of another definition, or an index on another table, under the parent index's name or a partition index's derived name. The occupant is left for an operator |
 | `foreign-table-partition` | yes | The partition tree holds a foreign table, which cannot carry an index, so the parent's index could never become valid; refused before anything is created |
+| `unique-index-partition-key` | yes | A unique index does not contain, among its plain key columns, the partition key of the parent and of every sub-partitioned partition. PostgreSQL checks each partitioned table only when it gets its index, so the build checks every level first; refused before anything is created. Add the missing partition key columns to the index's key |
 | `partitioned-index-unsettled` | no | Partitions kept appearing without an index until the build ran out of passes; everything finished stays attached and a rerun resumes |
 | `empty-sequence` | yes | The sequence had no steps to run |
 | `unsupported-sequence-step` | yes | A step is not a shape the sequence executor can run safely |

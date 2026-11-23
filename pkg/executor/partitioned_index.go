@@ -95,7 +95,9 @@ type PartitionedIndexReport struct {
 // lock's dedicated session dials, the same Config the pool was made from. Under
 // the lock it:
 //
-//  1. refuses a tree that holds a foreign table (ErrForeignTablePartition);
+//  1. refuses a tree that holds a foreign table (ErrForeignTablePartition),
+//     and a unique index that does not contain the partition key of every
+//     partitioned table in the tree (ErrUniqueIndexPartitionKey);
 //  2. creates the parent's index with ON ONLY, refusing a name that is already
 //     taken (ErrPartitionedIndexNameTaken);
 //  3. gives each partition an attached index, recursively: a leaf gets an index
@@ -187,6 +189,11 @@ type partitionedIndexRequest struct {
 	schema string
 	table  string
 	index  string
+	// unique and keyColumns are what the partition key check needs: a
+	// unique index must contain every partitioned table's partition key
+	// among its plain key columns.
+	unique     bool
+	keyColumns []string
 }
 
 // admitPartitionedIndex is the executor's own admission check: exactly one
@@ -228,5 +235,11 @@ func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partition
 	if !pt.Partitioned() {
 		return req, fmt.Errorf("%w: %s", ErrNotPartitionedTable, qualifiedName(pt.Schema(), pt.Table()))
 	}
-	return partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: ops[0].Name}, nil
+	req = partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: ops[0].Name, unique: ops[0].Unique}
+	if req.unique {
+		if req.keyColumns, err = statement.IndexKeyColumns(sql); err != nil {
+			return req, fmt.Errorf("read the key columns of index %s: %w", qualifiedName(req.schema, req.index), err)
+		}
+	}
+	return req, nil
 }
