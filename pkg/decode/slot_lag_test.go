@@ -244,6 +244,60 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 		Retained: 1536, Unconfirmed: 512, Ceiling: 1000}
 	assert.Equal(t, `slot pgsprite_0123abcd is over the 1000 B ceiling (cause "future-cause"): retains 1.5 KiB, 512 B unconfirmed`,
 		unknown.Error())
+
+	// A run of deadlocks in progress at the stop is named after the
+	// measure, so the operator sees both causes; the zero CatchupDeadlocks
+	// above adds nothing.
+	backingOff := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: "future-cause",
+		Retained: 1536, Unconfirmed: 512, Ceiling: 1000,
+		Deadlocks: decode.CatchupDeadlocks{Consecutive: 6, BackingOff: true}}
+	assert.Equal(t, `slot pgsprite_0123abcd is over the 1000 B ceiling (cause "future-cause"): retains 1.5 KiB, 512 B unconfirmed`+
+		"; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (6 in a row) and its batch was waiting out the backoff before the next retry, "+
+		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
+		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		backingOff.Error())
+
+	retrying := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: "future-cause",
+		Retained: 1536, Unconfirmed: 512, Ceiling: 1000,
+		Deadlocks: decode.CatchupDeadlocks{Consecutive: 1}}
+	assert.Equal(t, `slot pgsprite_0123abcd is over the 1000 B ceiling (cause "future-cause"): retains 1.5 KiB, 512 B unconfirmed`+
+		"; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (1 in a row), "+
+		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
+		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		retrying.Error())
+}
+
+// A stream-behind stop during a run of deadlocks names them after the
+// measure: the batch waiting out its backoff is what kept the WAL
+// unconfirmed, so resuming once the churn eases is the remedy.
+func TestStreamBehindStopNamesTheDeadlocksInProgress(t *testing.T) {
+	behind := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: decode.SlotLagStreamBehind,
+		Retained: 1536, Unconfirmed: 1200, Ceiling: 1000,
+		Deadlocks: decode.CatchupDeadlocks{Consecutive: 6, BackingOff: true}}
+	assert.Equal(t, "slot pgsprite_0123abcd has 1.2 KiB of WAL its stream has not confirmed, over the 1000 B ceiling (1200 > 1000 bytes); "+
+		"the stream has fallen behind the source's writes, and running the schema change again resumes it from the slot once the write rate allows"+
+		"; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (6 in a row) and its batch was waiting out the backoff before the next retry, "+
+		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
+		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		behind.Error())
+}
+
+// A retained-WAL stop renders only its own cause, deadlocks or not: the
+// stream was within the ceiling, so a resume once the deadlocks ease would
+// stop again, and the cause's remedy (end the open transaction, or raise
+// the ceiling) is the one that changes the outcome. The field still
+// carries the deadlocks for a host.
+func TestRetainedWALStopLeavesTheDeadlocksOutOfItsRemedy(t *testing.T) {
+	deadlocks := decode.CatchupDeadlocks{Consecutive: 2, BackingOff: true}
+	for _, cause := range []decode.SlotLagCause{decode.SlotLagWALRetained, decode.SlotLagWALRetainedHardLimit} {
+		t.Run(string(cause), func(t *testing.T) {
+			quiet := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: cause,
+				Retained: 3073, Unconfirmed: 512, Ceiling: 1024}
+			during := *quiet
+			during.Deadlocks = deadlocks
+			assert.Equal(t, quiet.Error(), during.Error())
+		})
+	}
 }
 
 // A slot that is gone is the lost state too, worded as absence.
