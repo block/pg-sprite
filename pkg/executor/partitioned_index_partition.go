@@ -285,6 +285,10 @@ func (f *partitionedIndexFlow) ensureSubPartitionIndex(ctx context.Context, node
 			// The partition is locked and proved by identity before the
 			// statement names it, and the index is checked to be on it
 			// before the step commits (INV: ST-7).
+			// createOnlyIndex locks and proves the partition again. This
+			// first lock is what keeps proveNodeIn's read of the tree under
+			// the lock; taking a lock the transaction already holds again
+			// costs one catalog check.
 			if err := lockAndProveTable(ctx, tx, onlyIndexTable{oid: node.oid, schema: node.schema, name: node.name}); err != nil {
 				return err
 			}
