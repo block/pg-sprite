@@ -329,7 +329,8 @@ CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, sche
 
 // A table change that the table's own plan refuses, here a serial column,
 // is refused through the table path when the row security matches, so the
-// operator sees the table definition's refusal and nothing runs.
+// operator sees the table definition's refusal, classed as a file without
+// row security gets it, and nothing runs.
 func TestMigrateDesiredRLSRefusesATableChangeTheTablePlanRefuses(t *testing.T) {
 	url, schema, pool := desiredFixture(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
@@ -350,29 +351,33 @@ CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, sche
 	_, tableErr := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: desired.TableDefinition()})
 	require.ErrorIs(t, tableErr, schemadiff.ErrUnsupportedChange)
 
+	assertTableRefusal := func(t *testing.T, out string, err error) verdict.Verdict {
+		t.Helper()
+		require.ErrorIs(t, err, verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out), &v), out)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+		assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+		assert.Contains(t, v.Detail, tableErr.Error())
+		return v
+	}
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)
-	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
-	assert.ErrorContains(t, err, tableErr.Error())
-	assert.NotErrorIs(t, err, verdict.ErrRefused, "no row security refusal verdict")
-	assert.Empty(t, out.String())
+	assertTableRefusal(t, out.String(), err)
 
-	// The preview refuses it the same way, as diff and migrate --dry-run do
-	// for a file without row security.
+	// The preview and diff refuse it the same way, as they do for a file
+	// without row security.
 	cmd.DryRun = true
 	out.Reset()
 	err = cmd.run(t.Context(), &out)
-	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
-	assert.ErrorContains(t, err, tableErr.Error())
-	assert.NotErrorIs(t, err, verdict.ErrRefused, "no row security refusal verdict")
-	assert.Empty(t, out.String())
+	assertTableRefusal(t, out.String(), err)
 	diff := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: cmd.Desired, JSON: true}
 	out.Reset()
 	err = diff.run(t.Context(), &out)
-	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
-	assert.ErrorContains(t, err, tableErr.Error())
-	assert.NotErrorIs(t, err, verdict.ErrRefused, "no row security refusal verdict")
-	assert.Empty(t, out.String())
+	v := assertTableRefusal(t, out.String(), err)
+	assert.Equal(t, desired.TableDefinition().Statements()[0].SQL(), v.Statement, "diff names the file's CREATE TABLE")
+	assert.Contains(t, v.Statement, "seq serial")
 
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)

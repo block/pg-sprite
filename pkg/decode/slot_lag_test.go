@@ -1,6 +1,7 @@
 package decode_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func TestSlotLagWatchAbortsAtOnceWhenTheStreamIsBehind(t *testing.T) {
 func TestSlotLagWatchLetsRetainedWALStandOverTheCeilingForTheGrace(t *testing.T) {
 	const ceiling = int64(4096)
 	watch := newLagWatch(t, ceiling, lagTestGrace)
-	over := reading(ceiling*3, ceiling/2)
+	over := reading(ceiling*2, ceiling/2)
 	require.NoError(t, watch.Judge(over, lagTestStart), "the first reading over starts the grace")
 	require.NoError(t, watch.Judge(over, lagTestStart.Add(lagTestGrace-time.Nanosecond)), "still within the grace")
 
@@ -67,7 +68,73 @@ func TestSlotLagWatchLetsRetainedWALStandOverTheCeilingForTheGrace(t *testing.T)
 	var exceeded *decode.SlotLagExceededError
 	require.ErrorAs(t, err, &exceeded)
 	assert.Equal(t, &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: decode.SlotLagWALRetained,
-		Retained: ceiling * 3, Unconfirmed: ceiling / 2, Ceiling: ceiling}, exceeded)
+		Retained: ceiling * 2, Unconfirmed: ceiling / 2, Ceiling: ceiling}, exceeded)
+}
+
+// The grace has a hard edge in bytes: retained WAL at exactly three times the
+// ceiling is let stand while the grace runs, and one byte past it is the
+// abort on that reading, with its own cause, well before the grace would
+// have run out.
+func TestSlotLagWatchAbortsAtOnceWhenRetainedWALPassesTheHardLimitWithinTheGrace(t *testing.T) {
+	const ceiling = int64(4096)
+	hardLimit := decode.RetainedWALHardMultiple * ceiling
+	require.Equal(t, int64(12288), hardLimit, "the hard limit is three times the ceiling")
+	watch := newLagWatch(t, ceiling, lagTestGrace)
+	require.NoError(t, watch.Judge(reading(ceiling+1, 0), lagTestStart), "the first reading over starts the grace")
+	require.NoError(t, watch.Judge(reading(hardLimit, ceiling), lagTestStart.Add(time.Second)), "at the hard limit the grace still stands")
+
+	err := watch.Judge(reading(hardLimit+1, ceiling), lagTestStart.Add(2*time.Second))
+	require.ErrorIs(t, err, decode.ErrSlotLagCeiling)
+	var exceeded *decode.SlotLagExceededError
+	require.ErrorAs(t, err, &exceeded)
+	assert.Equal(t, &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: decode.SlotLagWALRetainedHardLimit,
+		Retained: hardLimit + 1, Unconfirmed: ceiling, Ceiling: ceiling}, exceeded)
+}
+
+// The hard limit applies from the first reading over the ceiling, before
+// any grace has passed, and does not change the cause once the grace has
+// run out: then the slot has stayed over the ceiling for the grace, which
+// is the abort it names whatever the amount.
+func TestSlotLagWatchHardLimitOnTheFirstReadingAndAfterTheGrace(t *testing.T) {
+	const ceiling = int64(4096)
+	hardLimit := decode.RetainedWALHardMultiple * ceiling
+	var exceeded *decode.SlotLagExceededError
+
+	first := newLagWatch(t, ceiling, lagTestGrace)
+	require.ErrorAs(t, first.Judge(reading(hardLimit+1, 0), lagTestStart), &exceeded)
+	assert.Equal(t, decode.SlotLagWALRetainedHardLimit, exceeded.Cause)
+
+	outlasted := newLagWatch(t, ceiling, lagTestGrace)
+	require.NoError(t, outlasted.Judge(reading(ceiling+1, 0), lagTestStart))
+	require.ErrorAs(t, outlasted.Judge(reading(hardLimit+1, 0), lagTestStart.Add(lagTestGrace)), &exceeded)
+	assert.Equal(t, decode.SlotLagWALRetained, exceeded.Cause)
+}
+
+// A ceiling so large that three times it would overflow holds the hard
+// limit at the largest byte count rather than wrap it and abort every
+// reading over the ceiling.
+func TestSlotLagWatchHardLimitDoesNotOverflow(t *testing.T) {
+	const ceiling = int64(math.MaxInt64/3 + 1)
+	watch := newLagWatch(t, ceiling, lagTestGrace)
+	require.NoError(t, watch.Judge(reading(math.MaxInt64, 0), lagTestStart))
+}
+
+// The hard limit a caller sizes a volume by is the one the watch judges
+// against: three times the ceiling, held at the largest byte count where
+// the product would overflow.
+func TestRetainedHardLimitIsThreeCeilingsWithoutOverflow(t *testing.T) {
+	assert.Equal(t, int64(3<<30), decode.RetainedHardLimit(1<<30))
+	assert.Equal(t, int64(math.MaxInt64), decode.RetainedHardLimit(math.MaxInt64/3+1))
+}
+
+// Both retained-WAL causes are one family for a caller acting on the stop,
+// and a stream that fell behind, or a cause this engine does not know, is
+// not in it.
+func TestSlotLagCauseRetainsWALNamesTheRetainedFamily(t *testing.T) {
+	assert.True(t, decode.SlotLagWALRetained.RetainsWAL())
+	assert.True(t, decode.SlotLagWALRetainedHardLimit.RetainsWAL())
+	assert.False(t, decode.SlotLagStreamBehind.RetainsWAL())
+	assert.False(t, decode.SlotLagCause("future-cause").RetainsWAL())
 }
 
 // A reading within the ceiling ends the grace: the server released the
@@ -162,6 +229,16 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 			"and the run can resume once it ends, or the cluster writes more WAL per release interval and catch-up cycle than the ceiling holds, "+
 			"and the run needs a higher SlotLagCeiling, with margin above that much WAL",
 		retained.Error())
+
+	hard := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: decode.SlotLagWALRetainedHardLimit,
+		Retained: 3073, Unconfirmed: 512, Ceiling: 1024}
+	assert.Equal(t,
+		"slot pgsprite_0123abcd retains 3.0 KiB of WAL, past the 3 KiB hard limit of 3 times the 1 KiB ceiling (3073 > 3072 bytes), "+
+			"before the server's time to release WAL the stream confirmed ran out, and the stream itself is 512 B behind; "+
+			"more than a healthy slot holds just before a release, which is about twice the ceiling; either a transaction on the source holds the WAL back "+
+			"(an open write transaction or a prepared one), and the run can resume once it ends, or the source wrote WAL faster than the server releases it, "+
+			"and the run needs a higher SlotLagCeiling or a lower write rate on the source",
+		hard.Error())
 
 	unknown := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: "future-cause",
 		Retained: 1536, Unconfirmed: 512, Ceiling: 1000}

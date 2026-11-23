@@ -58,10 +58,13 @@ left no more keys changing than it may, mints a `VerifiedShadow` that names thos
 (`VerifiedShadow.Carried`) and no `CleanWatermark`. That proof says nothing about a named key;
 comparing each is the swap's, under its lock and after its drain, where no key can change.
 `GateCutover` accepts a proof that names at most `MaxCarryKeys` of them and refuses one that
-names more (`cutover-unverified`). `Cutover` then reads every named key on both sides inside
-the swap transaction (`checksum.CompareCarried`), after the drain and the re-run checklist and
-before any name moves, and refuses the swap, rolled back with the source live, when one
-differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
+names more (`cutover-unverified`), before any catalog read
+(`TestGateCutoverRefusesAProofNamingMoreKeysThanAPassMayLeave`); the compare refuses one that
+names more as an invariant violation before it runs a statement
+(`TestCompareCarriedRefusesAProofNamingMoreKeysThanAPassMayLeave`). `Cutover` then reads
+every named key on both sides inside the swap transaction (`checksum.CompareCarried`), after
+the drain and the re-run checklist and before any name moves, and refuses the swap, rolled
+back with the source live, when one differs (`cutover-carried-diverged`): nothing is left to write the shadow by then, so a key
 that differs is a row the live table would hold wrong. The compare refuses a transaction that
 does not hold `ACCESS EXCLUSIVE` on both relations, since without it the two reads are two
 snapshots a writer could commit between (`TestCheckLiveLeavesKeysThatKeepChangingForTheSwap`,
@@ -558,7 +561,9 @@ lists the source schema do not change the indexes or statistics read; the reads 
 a path pg-sprite did not set — the cutover's backend reads on the caller's pool and the write
 fence function's `format` in the writer's session — are qualified too, pinned by
 `TestCutoverBackendReadsResolveToTheRealCatalog` and
-`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`), `pkg/migrate`
+`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`; the resume's shadow size read in
+`MeasureResumeHeld`, which runs on the caller's pool, qualifies every function, relation, and
+operator, the `pg_total_relation_size(oid)` call included), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
@@ -576,9 +581,10 @@ by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the
-ownership check (`slotIsOwn`), the server proof before every slot command (`proveSameServer`),
+ownership check (`InspectSlot`'s `Own`, the one statement that spells a logical slot of the
+pool's own database), the server proof before every slot command (`proveSameServer`),
 and the publication reads that judge whether the publication of the name is the route's, the
-create-side database guard included, and the slot inspection (`InspectSlot`) that
+create-side database guard included, and the same slot inspection (`InspectSlot`) that
 `InspectResume` adopts or refuses a slot on (ST-3) and treats a missing slot as lost on (ST-4),
 and that the catch-up's slot check reads: a lookalike `name = name` and `name ~~ text` that answer
 true, on a shadowing `<schema>, pg_catalog` path, would otherwise list another database's slot
@@ -601,8 +607,9 @@ comparison through `pg_catalog` too: on a shadowing `<schema>, pg_catalog` path 
 snapshot saw, and a lookalike `text = text` that answers false would match no setting and refuse
 the stream, `TestMarkWALReturnsTheServersPositionUnderALookalikeTextType` and
 `TestHeartbeatReadsTheSenderTimeoutUnderALookalikeEquals`; and the text is held by
-`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator` and
-`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
+`TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
+`TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
+`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
 character outside `OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
 write-position reads, on the caller's pool every cycle, cast through `pg_catalog.text`: a
 lookalike `text` type on a shadowing path would cut the snapshot into one the drain refuses and
@@ -646,7 +653,12 @@ sentinel — the copier as its `copy-conversion-drift`, the verifier and the app
 `copy-conversion-drift`, so a run stopped by a changed catalog reads the same cause whether
 a chunk, a verifying read, or a catch-up flush noticed it. The check and the statements that evaluate the
 expressions are separate statements, so the copier's chunk, the applier's flush, the verifier's
-repair, and the drain recompute it once more after their writes and before they commit. Each
+repair, and the drain recompute it once more after their writes and before they commit. The
+swap's carried-key compare (`checksum.CompareCarried`) checks it before it reads any key and
+again after both reads, so a drift in place at the start is refused before a key is judged
+through it (`TestCompareCarriedRefusesAConversionDriftBeforeItReadsAnyKey`) and one committed
+between the first check and the reads is refused after them
+(`TestCompareCarriedRefusesAConversionDriftCommittedBeforeTheReads`). Each
 of those write transactions is `READ COMMITTED` whatever the server or role configures as
 `default_transaction_isolation` — the copier, the flush, and the repair begin theirs so, and
 the cutover begins its swap transaction so — so that read takes a snapshot after the writes,
@@ -1127,12 +1139,17 @@ Replication slots are created with a recognizable name prefix; a reaper drops or
 engine-prefixed slots (including one stranded on a demoted writer after failover); a slot-lag
 ceiling aborts the schema change before an abandoned slot can fill the volume. The ceiling is
 hard for the WAL the stream has yet to confirm, judged on one reading; the WAL the slot retains
-may stand over it for a bounded grace (the server's release interval plus one cycle) while the
-server releases what the stream confirmed, so the volume needs headroom above the ceiling of
-about the cluster's WAL rate, the copy's own writes included, times that grace. The ceiling must
-hold that much of the cluster's WAL as well, with margin: with a transaction in progress at a running-transactions record the
-server releases the slot only to the record before, so a busy source's slot keeps between one
-and two release intervals of writes while the stream keeps up. No exit path
+may stand over it for a bounded grace (the server's release interval plus one cycle, the cycle
+itself capped at the release interval) while the server releases what the stream confirmed,
+and a reading past three times the ceiling ends the run at once, grace or not. The volume
+needs headroom above the ceiling of about the cluster's WAL rate, the copy's own writes
+included, times that grace, and at most about two ceilings plus one cycle of that rate, since
+the hard limit is judged on each cycle's reading; the slot keeps retaining WAL after a stop
+until the run resumes or is abandoned. The ceiling must hold that much
+of the cluster's WAL as well, with margin: with a transaction in progress at a
+running-transactions record the server releases the slot only to the record before, so a busy
+source's slot keeps between one and two release intervals of writes while the stream keeps up,
+and peaks at about twice a ceiling sized that way. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
 attempt to reuse — and drops a slot the server created but did not describe usably;
@@ -1140,6 +1157,7 @@ attempt to reuse — and drops a slot the server created but did not describe us
 sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
+drops only a slot `InspectSlot` reads as `Own` (the one ownership rule the drop and resume share; any read error refuses the drop, so the drop needs every function the inspection runs — `TestDropSlotRefusedWhenTheOwnershipReadFails`),
 drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
 drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
 reads two measures of WAL on a primary — retained, what the slot keeps on the volume, and
@@ -1150,8 +1168,11 @@ unconfirmed WAL over the ceiling a typed `SlotLagExceededError` on one reading (
 `stream-behind`), retained WAL over it the same error (cause `wal-retained`) only once the
 readings have stayed over for a grace of `RestartReleaseInterval` plus the consumer's own
 cycle, since the server moves a slot's restart position only at the running-transactions
-records it logs on that interval and so releases confirmed WAL in steps — and refuses a
-ceiling below one byte or a negative grace) + `pkg/checkpoint`
+records it logs on that interval and so releases confirmed WAL in steps; retained WAL past
+`RetainedWALHardMultiple` (three times) the ceiling is the same error on one reading, grace or
+not (cause `wal-retained-hard-limit`), since a healthy slot sized with margin peaks at about
+twice the ceiling and more is a write rate the ceiling refuses anyway — and refuses a ceiling below one byte or a
+negative grace) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
 database: the slots are listed first and the checkpoint rows that own them read in a later
 statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
@@ -1171,10 +1192,12 @@ exist is refused with `ErrTableMissing` rather than read as all orphans; two rea
 database take turns at each slot, the one that waited finding the slot gone) + `pkg/applier`
 `Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it,
 through one `decode.SlotLagWatch` for the run whose grace is `RestartReleaseInterval` plus
-the cycle's `Interval`, against `CatchupOptions.SlotLagCeiling`, default
+the cycle's `Interval`, which cannot be set above `MaxCatchupInterval` (the release
+interval), against `CatchupOptions.SlotLagCeiling`, default
 `decode.DefaultSlotLagCeiling`, which cannot be set below one byte; a slot that vanished is
 `SlotLostError`; the stream's unconfirmed WAL over the ceiling ends `Run` at once, the slot's
-retained WAL over it ends `Run` once it has outlasted the grace, either with the table lock
+retained WAL over it ends `Run` once it has outlasted the grace or at once past three times
+the ceiling, either with the table lock
 intact and the slot in place for the operator to read which measure crossed) +
 `pkg/schemachange.Runner` (on a decoding target it creates the slot under the store's lock on
 the slot's name, in the same step as the row that names it, so the reaper never meets the slot
@@ -1357,7 +1380,8 @@ still draw each identity default from the source's sequence). *Source:*
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table, plus the slot lag ceiling for a run that decodes WAL), execute-and-introspect
+(~2× the table, plus the slot lag ceiling for a run that decodes WAL, less what a resumed run
+already holds of each, measured from the server), execute-and-introspect
 workspace, lock LK-1 acquired, and the RF-* refusals
 below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
@@ -1368,9 +1392,12 @@ grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability
 IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement plus, for a run that
-decodes WAL, the slot lag ceiling), chained by type —
+decodes WAL, the slot lag ceiling, each less what `pkg/schemachange` `MeasureResumeHeld`
+reads from the server that a resumed run already holds of it, and nothing for a run that
+starts over), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last, and before them `pkg/schemachange` `CheckPool`, which
+require is minted by the last; `pkg/schemachange` `CheckCopySwap` runs the chain with the
+resume measure as one call, which `pkg/migrate` calls; and before them `pkg/schemachange` `CheckPool`, which
 `migrate.Run`, desired-state admission, and `Runner.Run` itself call to refuse a pool below
 `MinPoolConns`; inside the
 shadow build's transaction, `pkg/schemachange`
@@ -1392,8 +1419,9 @@ runs the same check so a resume of such a shadow stops before the copy
 target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
 enforcement; the size guard and privilege preflight need live facts and stay the apply's.
-Both front doors run the copy-and-swap checks through `preflight.CheckCopySwap` before the
-route writes anything. *Planned enforcement:* all other execution paths in preflight. *Source:*
+Both front doors run the copy-and-swap checks through `schemachange.CheckCopySwap`, which runs
+`preflight.CheckCopySwap`'s checks with the resume measure, before the route writes anything.
+*Planned enforcement:* all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ### ST-7 — The executor runs exactly the statement that was gated
@@ -1553,10 +1581,12 @@ the plan a rerun would execute. A greenfield create proves its outcome through t
 the create-name checks), because deriving a plan needs `CREATE` on the database.
 *Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`; for a file that declares row
 security, `RunDesiredWithRowSecurity` → `verifyRowSecurityConverged`, whose fresh plan
-includes the row security). Tests: `TestRunDesired`,
+includes the row security; for an enum type file, `RunDesiredEnumType` → `executePlan` →
+`verifyConverged`, whose fresh plan reads the type again). Tests: `TestRunDesired`,
 `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
 `TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`,
-`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`.
+`TestRunDesiredWithRowSecurityFailsWhenThePoliciesChangeDuringTheRun`,
+`TestRunDesiredEnumTypeFailsWhenTheTypeChangesAfterTheLastCommit`.
 *Source:* review of desired-state outcome reporting.
 
 ## Refusals and preflight (RF)

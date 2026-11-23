@@ -134,7 +134,7 @@ func rowSecurityPlanRefusal(err error) (DesiredResult, bool) {
 		return DesiredResult{}.refused(plan.RowSecurityMissingTableRefusal(),
 			fmt.Sprintf("%v; create the table with its row security through executor.ExecuteDesiredRowSecurity; nothing was executed", err)), true
 	}
-	if ref, ok := desiredShapeRefusal(err); ok {
+	if ref, ok := desiredPlanRefusal(err); ok {
 		return DesiredResult{}.refused(ref, fmt.Sprintf("%v; nothing was planned or executed", err)), true
 	}
 	return DesiredResult{}, false

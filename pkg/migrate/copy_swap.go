@@ -20,6 +20,7 @@ import (
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -75,8 +76,11 @@ type CopySwapOptions struct {
 	// FreeDiskBytes is the free space the operator reports on the volume
 	// the table lives on; the preflight refuses the run when the shadow and
 	// its indexes would not fit, or, for a live run, when they and
-	// SlotLagCeilingBytes of retained WAL would not fit together. Zero means
-	// no space, and refuses.
+	// SlotLagCeilingBytes of retained WAL would not fit together. A run
+	// that resumes a stopped one is asked only for what is left to grow:
+	// the shadow the stopped run built and the WAL its slot retains, both
+	// read from the server, are subtracted, since the measured free space
+	// already excludes them. Zero means no space, and refuses.
 	FreeDiskBytes int64
 
 	// KeepOld leaves the retained source under its derived _old name after
@@ -230,6 +234,18 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 	}
 }
 
+// checkCopySwap is the route's preflight for the table:
+// schemachange.CheckCopySwap under the options' environment, which asks a
+// resume only for the disk left to grow and checks a run that starts over
+// (Restart) as a fresh run.
+func checkCopySwap(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, schema, table string, o CopySwapOptions) (preflight.CopySwapTarget, error) {
+	start := schemachange.CopySwapResume
+	if o.Restart != "" {
+		start = schemachange.CopySwapRestart
+	}
+	return schemachange.CheckCopySwap(ctx, pool, store, schema, table, o.environment(), start)
+}
+
 // copyAndSwap runs a statement the router assigned to the copy-and-swap
 // backend through the schemachange.Runner and folds the result into one
 // verdict. The verdict-and-error contract is Run's: a preflight or shadow
@@ -273,7 +289,7 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	if err := schemachange.CheckPool(pool, opts.CopySwap.Copier); err != nil {
 		return copySwapPoolVerdict(st, err), fmt.Errorf("migrate: %w", err)
 	}
-	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
+	target, err := checkCopySwap(ctx, pool, store, st.Schema(), st.Table(), opts.CopySwap)
 	if err != nil {
 		return copySwapPreflightVerdict(st, err)
 	}
@@ -330,13 +346,21 @@ func swapLSN(result schemachange.Result) string {
 
 // copySwapPreflightVerdict folds a copy-and-swap preflight error into Run's
 // contract: a missing privilege and a refused shape or environment are
-// refused verdicts; anything else stopped the pipeline before a verdict.
+// refused verdicts; anything else stopped the pipeline before a verdict. A
+// table refused for having no primary key carries the guidance to add one,
+// and its detail states the steps and where the guide is; every other key
+// shape has no online route and carries none.
 func copySwapPreflightVerdict(st statement.Statement, err error) (verdict.Verdict, error) {
-	r, detail, err := classifyCopySwapPreflight(err)
-	if err != nil {
-		return verdict.Verdict{}, err
+	r, detail, classifyErr := classifyCopySwapPreflight(err)
+	if classifyErr != nil {
+		return verdict.Verdict{}, classifyErr
 	}
-	return refusedVerdict(st, r, detail), nil
+	v := refusedVerdict(st, r, detail)
+	if shape, ok := errors.AsType[*preflight.UnsupportedCopySwapShapeError](err); ok && shape.NoPrimaryKey {
+		v.Guidance = suggest.GuidanceAddIntegerPrimaryKey
+		v.Detail += "; to run it through copy-and-swap, " + manualPath(v.Guidance)
+	}
+	return v, nil
 }
 
 // classifyCopySwapPreflight sorts an error out of preflight.CheckCopySwap
@@ -461,9 +485,9 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		return "the server rejected the rows as the statement would shape them and the run could not be abandoned, so running the same statement again would copy the same rows and stop here again; " + startOver
 	}
 	resume := "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
-	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause == decode.SlotLagWALRetained {
+	if lag, ok := errors.AsType[*decode.SlotLagExceededError](err); ok && lag.Cause.RetainsWAL() {
 		return resume + "; when no open or prepared write transaction on the source holds the WAL back, the write rate is the cause, " +
-			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); the resume counts that ceiling against --free-disk beside the shadow, so the free space passed must cover it too"
+			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); the resume counts that ceiling against --free-disk beside the shadow, less the shadow already built and the WAL the slot already retains, so pass the free space the volume has now"
 	}
 	return resume
 }
@@ -534,6 +558,9 @@ func copySwapDetail(result schemachange.Result, quiesced bool) string {
 	s := fmt.Sprintf("verified %d rows in %d chunks", result.Verification.Rows, result.Verification.Chunks)
 	if result.Verification.Settled > 0 {
 		s += fmt.Sprintf(" (%d settled against the stream)", result.Verification.Settled)
+	}
+	if result.CarriedCompare.Keys > 0 {
+		s += fmt.Sprintf("; compared %d still-changing keys under the swap lock in %s", result.CarriedCompare.Keys, result.CarriedCompare.Elapsed)
 	}
 	if result.OldTableDropped {
 		s += "; the retained source is dropped"
