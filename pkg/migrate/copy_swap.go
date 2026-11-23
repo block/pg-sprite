@@ -559,6 +559,9 @@ func copySwapDetail(result schemachange.Result, quiesced bool) string {
 	if result.Verification.Settled > 0 {
 		s += fmt.Sprintf(" (%d settled against the stream)", result.Verification.Settled)
 	}
+	if result.CarriedCompare.Keys > 0 {
+		s += fmt.Sprintf("; compared %d still-changing keys under the swap lock in %s", result.CarriedCompare.Keys, result.CarriedCompare.Elapsed)
+	}
 	if result.OldTableDropped {
 		s += "; the retained source is dropped"
 	} else {

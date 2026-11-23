@@ -3,10 +3,12 @@ package schemachange
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // compareCarried finishes a live pass's proof inside the swap transaction:
@@ -23,24 +25,48 @@ import (
 // it found are judged, so the path does not depend on which way the
 // judgement goes. Only a compare that fails leaves it unset, and that
 // error rolls the swap back. A proof that carries no key costs the swap
-// no statement.
-func compareCarried(ctx context.Context, tx pgx.Tx, ready CutoverReady) error {
+// no statement and reports the zero CarriedCompare.
+func compareCarried(ctx context.Context, tx pgx.Tx, ready CutoverReady, clock progress.Clock) (CarriedCompare, error) {
 	built := ready.built
 	carried := len(ready.verified.Carried())
 	if carried == 0 {
-		return nil
+		return CarriedCompare{}, nil
 	}
+	started := clock.Now()
 	differing, err := checksum.CompareCarried(ctx, tx, built.target, built, ready.verified)
 	if err != nil {
-		return fmt.Errorf("compare the %d keys the verification pass left for the swap of %s.%s: %w", carried, built.Schema(), built.SourceTable(), err)
+		return CarriedCompare{}, fmt.Errorf("compare the %d keys the verification pass left for the swap of %s.%s, failed after %s: %w", carried, built.Schema(), built.SourceTable(), clock.Now().Sub(started), err)
 	}
+	compared := CarriedCompare{Keys: carried, Elapsed: clock.Now().Sub(started)}
 	if err := setSearchPath(ctx, tx, built.Schema()); err != nil {
-		return err
+		return CarriedCompare{}, err
 	}
 	if len(differing) > 0 {
+		// The message names no time, so the same divergence reads the
+		// same on every occurrence.
 		// INV: CO-1
-		return refuse(CauseCarriedDiverged, nil, "%d of the %d keys the verification pass left for the swap differ between %s.%s and its shadow %s under the swap lock, after the drain; the first is %d",
+		return CarriedCompare{}, refuse(CauseCarriedDiverged, nil, "%d of the %d keys the verification pass left for the swap differ between %s.%s and its shadow %s under the swap lock, after the drain; the first is %d",
 			len(differing), carried, built.Schema(), built.SourceTable(), built.ShadowTable(), differing[0])
 	}
-	return nil
+	return compared, nil
+}
+
+// CarriedCompare is what the swap's compare of the keys a live pass left
+// for it cost: how many keys it read on each side and how long those reads
+// ran inside the swap's ACCESS EXCLUSIVE lock. That is the compare's share
+// of the lock, not the whole hold, which also covers the drain, the
+// checklist, the renames, and the commit. A committed swap's compare found
+// every key equal, so there is no differing count to carry; a compare that
+// found one refuses the swap as cutover-carried-diverged instead. The zero
+// value is a swap that compared nothing (a quiesced proof, or a live pass
+// that left no key) or a SwappedTable InspectSwapped re-derived, which
+// cannot know what the swap compared. A swap whose commit the client never
+// heard of, and whose outcome the catalog then settled, keeps the compare
+// of the attempt that committed.
+type CarriedCompare struct {
+	// Keys is how many carried keys the swap compared.
+	Keys int
+	// Elapsed is how long the compare ran inside the swap's lock, as the
+	// cutover's clock measured it: a share of the time the lock was held.
+	Elapsed time.Duration
 }
