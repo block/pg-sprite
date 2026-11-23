@@ -20,12 +20,12 @@ import (
 // truncated sequence name, a nullable column — must be resolved by hand.
 var ErrUnrenderableDefault = errors.New("sequence-backed default cannot be rendered as a desired schema")
 
-// ErrUnrenderablePartition is returned for a partitioned parent or a
-// partition. The model does not carry partition bounds or the
-// parent/partition topology, so a rendered file would silently lose the
-// PARTITION BY clause or the partition attachment — the renderer refuses
-// instead of emitting a wrong baseline.
-var ErrUnrenderablePartition = errors.New("partitioned tables cannot be rendered as a desired schema")
+// ErrUnrenderablePartition is returned for a partition. The model does not
+// carry partition bounds or the parent/partition topology, so a rendered
+// file would silently lose the partition attachment — the renderer refuses
+// instead of emitting a wrong baseline. A partitioned parent renders as its
+// own definition, PARTITION BY clause included.
+var ErrUnrenderablePartition = errors.New("partitions cannot be rendered as a desired schema")
 
 // ErrUnrenderableInheritance is returned for either side of a classic
 // PostgreSQL inheritance relationship. The desired model cannot express
@@ -98,12 +98,17 @@ var ErrUnrenderableMergedConstraints = errors.New("constraints that repeat each 
 // unfinished concurrent build — renders as its definition and materializes
 // valid, so the round-trip diff of such a table is exactly the create-index
 // change that rebuilds it.
+// A partitioned parent renders with its PARTITION BY clause and its indexes
+// declared on the whole table; its partitions are not rendered, and one
+// with an index some partition lacks is refused.
 func Render(m Model) (string, error) {
 	if m.RowSecurity.present() {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableRowSecurity)
 	}
 	if m.PartitionKey != "" {
-		return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, ErrUnrenderablePartition)
+		if err := partitionedParentRefusal(m); err != nil {
+			return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, err)
+		}
 	}
 	if m.IsPartition {
 		return "", fmt.Errorf("render table %q: partition of a partitioned parent: %w", m.Table, ErrUnrenderablePartition)
@@ -152,6 +157,9 @@ func Render(m Model) (string, error) {
 		b.WriteString("\n" + strings.Join(defs, ",\n") + "\n")
 	}
 	b.WriteString(")")
+	if m.PartitionKey != "" {
+		b.WriteString(" PARTITION BY " + m.PartitionKey)
+	}
 	if m.ToastMayNotRebuild {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableToastOptions)
 	}
@@ -164,7 +172,11 @@ func Render(m Model) (string, error) {
 	}
 	b.WriteString(";\n")
 	for _, ix := range m.Indexes {
-		b.WriteString("\n" + ix.Def + ";\n")
+		def, err := renderIndexDef(m, ix)
+		if err != nil {
+			return "", fmt.Errorf("render table %q: %w", m.Table, err)
+		}
+		b.WriteString("\n" + def + ";\n")
 	}
 
 	out := b.String()

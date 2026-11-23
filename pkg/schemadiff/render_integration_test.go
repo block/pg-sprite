@@ -150,12 +150,11 @@ func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
-// Partitioned parents and their partitions are introspectable (the
-// statement front door supports in-place changes on them) but refuse to
-// render: the model captures the partition key and attachment exactly so
-// the refusal — and the diff guard against a partitioning mismatch — fire
-// on real catalogs, never silently.
-func TestRenderRefusesLivePartitionedTables(t *testing.T) {
+// Partitions are introspectable (the statement front door supports
+// in-place changes on them) but refuse to render: the model carries the
+// attachment but not the bounds, so the refusal — and the diff guard
+// against a partitioning mismatch — fire on real catalogs, never silently.
+func TestRenderRefusesLivePartition(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
 	defer pool.Close()
@@ -168,12 +167,6 @@ func TestRenderRefusesLivePartitionedTables(t *testing.T) {
 		_, err := pool.Exec(t.Context(), ddl)
 		require.NoError(t, err)
 	}
-
-	parent, err := schemadiff.Introspect(t.Context(), pool, schema, "metrics")
-	require.NoError(t, err)
-	assert.Equal(t, "RANGE (day)", parent.PartitionKey)
-	_, err = schemadiff.Render(parent)
-	require.ErrorIs(t, err, schemadiff.ErrUnrenderablePartition)
 
 	child, err := schemadiff.Introspect(t.Context(), pool, schema, "metrics_p1")
 	require.NoError(t, err)

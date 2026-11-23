@@ -45,7 +45,11 @@ func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, schema s
 // RenderWithRowSecurity exports the complete table-local RLS definition,
 // including explicit DISABLE when RLS is off. The result is admitted only by
 // ParseDesiredWithRowSecurity and cannot be passed to the live create executor.
+// A partitioned parent is refused (ErrUnrenderablePartitionedRowSecurity).
 func RenderWithRowSecurity(m Model) (string, error) {
+	if m.PartitionKey != "" {
+		return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, ErrUnrenderablePartitionedRowSecurity)
+	}
 	table := m
 	table.RowSecurity = RowSecurity{}
 	base, err := Render(table)

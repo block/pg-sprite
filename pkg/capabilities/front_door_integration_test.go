@@ -239,6 +239,7 @@ var migrateClaims = map[string]migrateClaim{
 // pkg/schemadiff, and internal/cli.
 var declarativeOnlyClaims = []string{
 	"plain-tables-their-indexes",
+	"partitioned-parents-in-the-declarative-model",
 	"greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one",
 	"declarative-row-security-library",
 	"declarative-not-valid-constraint",

@@ -108,8 +108,9 @@ refusal — never a silently wrong or incomplete result:
   difference is a typed `diff` refusal; change the declaration with owner
   tooling, then state it in the file. A serial cannot state one, so export
   refuses a serial whose sequence was declared otherwise.
-- **Partitioned tables** support in-place statement changes, but cannot be
-  expressed in or exported to desired files, and `migrate` refuses
+- **Partitions** support in-place statement changes, but only their
+  partitioned parent can be expressed in or exported to a desired file —
+  partitions and their bounds stay owned outside it — and `migrate` refuses
   `ATTACH PARTITION` and `DETACH PARTITION` unless `--force` names the table
   ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
