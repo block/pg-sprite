@@ -29,8 +29,10 @@ type classifiedKey struct {
 // deriveRefusalKeys walks every closed set the registry is keyed on —
 // executor.CreateShapeCauses(), preflight.PartitionRefusalCauses(),
 // preflight.CopySwapRefusalCauses(), schemachange.RefusalCauses(), the two
-// admission sentinel sets, statement.Kinds() (with and without CONCURRENTLY),
-// and the site walk — and classifies each key through the production
+// admission sentinel sets, schemadiff.UnsupportedCauses(), statement.Kinds()
+// (with and without CONCURRENTLY,
+// and as a statement a desired file may not hold), the desired file's second
+// table, and the site walk — and classifies each key through the production
 // registry. Admitted statement kinds are returned with ok false and are the
 // only keys allowed to be.
 func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
@@ -57,6 +59,30 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 	for _, err := range desiredShapeSentinels() {
 		r, ok := desiredShapeRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"desired-shape:" + err.Error(), r, ok})
+	}
+	for _, c := range schemadiff.UnsupportedCauses() {
+		r, ok := desiredPlanRefusal(fmt.Errorf("wrapped: %w", &schemadiff.UnsupportedChangeError{Cause: c}))
+		keys = append(keys, classifiedKey{"unsupported-change:" + string(c), r, ok})
+	}
+	for _, k := range statement.Kinds() {
+		r, ok := desiredFileRefusal(fmt.Errorf("statement 2: %w", &statement.DisallowedStatementError{SQL: "-", Kind: k}))
+		key := "desired-file:disallowed " + k.String()
+		if !ok {
+			admitted = append(admitted, key)
+			continue
+		}
+		keys = append(keys, classifiedKey{key, r, ok})
+	}
+	for _, partition := range []bool{false, true} {
+		r, ok := desiredFileRefusal(fmt.Errorf("statement 2: %w", &statement.SecondTableError{SQL: "-", Partition: partition}))
+		keys = append(keys, classifiedKey{fmt.Sprintf("desired-file:second-table/partition=%t", partition), r, ok})
+	}
+	for sentinel, err := range map[error]error{
+		statement.ErrEnumTypeAlone: &statement.EnumTypeFileError{SQL: "-"},
+		statement.ErrEnumLabel:     statement.ErrEnumLabel,
+	} {
+		r, ok := desiredFileRefusal(fmt.Errorf("statement 2: %w", err))
+		keys = append(keys, classifiedKey{"desired-file:" + sentinel.Error(), r, ok})
 	}
 	for _, err := range createAdmissionSentinels() {
 		r, ok := createAdmissionRefusal(fmt.Errorf("wrapped: %w", err))
@@ -108,6 +134,8 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 	require.NotEmpty(t, admissionSentinels())
 	require.NotEmpty(t, createAdmissionSentinels())
 	require.NotEmpty(t, desiredShapeSentinels())
+	require.NotEmpty(t, desiredFileSentinels())
+	require.NotEmpty(t, schemadiff.UnsupportedCauses())
 	require.NotEmpty(t, siteRefusals())
 	require.Greater(t, len(keys), 20, "the walk covers causes, sentinels, kinds, and sites")
 	require.ElementsMatch(t, []string{
@@ -115,7 +143,8 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 		"gate:CREATE INDEX/concurrent=false", "gate:CREATE INDEX/concurrent=true",
 		"gate:ALTER INDEX RENAME/concurrent=false", "gate:ALTER INDEX RENAME/concurrent=true",
 		"gate:ALTER TYPE ADD VALUE/concurrent=false", "gate:ALTER TYPE ADD VALUE/concurrent=true",
-	}, admitted, "only the admitted kinds may leave the gate unclassified")
+		"desired-file:disallowed CREATE TABLE", "desired-file:disallowed CREATE INDEX",
+	}, admitted, "only the admitted kinds may leave the gate and the desired file unclassified")
 	for _, sentinel := range []string{
 		"create-shape:" + string(executor.CreateShapeIfNotExists),
 		"partition:" + string(preflight.PartitionCauseIndexAdoption),
@@ -123,6 +152,12 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 		"shadow:" + string(schemachange.CauseStatementConversion),
 		"admission:" + executor.ErrIfNotExistsUnsupported.Error(),
 		"create-admission:" + executor.ErrDuplicateCreateName.Error(),
+		"desired-file:disallowed " + statement.KindCatalogWork.String(),
+		"desired-file:second-table/partition=true",
+		"unsupported-change:" + string(schemadiff.CauseStorageParameters),
+		"unsupported-change:" + string(schemadiff.CauseEnumValueRemoved),
+		"desired-file:" + statement.ErrEnumTypeAlone.Error(),
+		"desired-file:" + statement.ErrEnumLabel.Error(),
 		"gate:" + statement.KindOther.String() + "/concurrent=false",
 		"site:plan-incoherent",
 		"site:copy-and-swap-not-enabled",

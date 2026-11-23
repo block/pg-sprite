@@ -134,8 +134,8 @@ func TestRunDesiredWithRowSecurityRefusesWhatItDoesNotChange(t *testing.T) {
 
 // A table change the table's own plan refuses, here a serial column, is
 // refused in the terms a file without row security gets, not reported as a
-// row security difference: the row security matches, so the error names the
-// column, and nothing runs.
+// row security difference: the row security matches, so the refusal names
+// the column, and nothing runs.
 func TestRunDesiredWithRowSecurityReportsTheTablesOwnRefusal(t *testing.T) {
 	pool, schema := rowSecurityTable(t)
 	before, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
@@ -151,9 +151,12 @@ func TestRunDesiredWithRowSecurityReportsTheTablesOwnRefusal(t *testing.T) {
 	require.Error(t, tableErr)
 	assert.ErrorContains(t, err, tableErr.Error(), "the error is the table definition's own refusal")
 
-	_, err = migrate.RunDesiredWithRowSecurity(t.Context(), pool, migrate.RowSecurityRequest{Schema: schema, Desired: desired}, runOptions())
-	require.ErrorIs(t, err, schemadiff.ErrOnlyTableDiffers)
-	assert.ErrorContains(t, err, tableErr.Error())
+	res, err := migrate.RunDesiredWithRowSecurity(t.Context(), pool, migrate.RowSecurityRequest{Schema: schema, Desired: desired}, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, res.Class)
+	assert.Contains(t, res.Detail, tableErr.Error())
+	assert.Empty(t, res.Verdicts)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "nothing ran")

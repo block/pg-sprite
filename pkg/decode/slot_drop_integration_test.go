@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -247,4 +249,46 @@ func TestDropSlotLeavesAForeignPublicationOfTheName(t *testing.T) {
 	assert.Equal(t, decode.ForeignObjectPublication, foreign.Object)
 	assert.Equal(t, name, foreign.Name)
 	assert.True(t, f.publicationExists(t, name), "a publication CreateSlot calls foreign is left as found")
+}
+
+// A drop whose ownership read fails is refused with the read's own error in
+// the chain, and the slot stays: a slot the engine could not judge is never
+// handed to the drop, and the publication stays with it. The read fails here
+// because the pool's role may not run pg_current_wal_lsn(), one of the
+// functions the slot inspection calls. The role owns the publication, so the
+// read is the only step that can refuse it.
+func TestDropSlotRefusedWhenTheOwnershipReadFails(t *testing.T) {
+	f := newSlotFixture(t)
+	name := f.createSlot(t).Name()
+
+	const password = "owner-secret"
+	role := testutil.NewRole(t, f.pool, "LOGIN REPLICATION PASSWORD '"+password+"'")
+	publication := pgx.Identifier{name}.Sanitize()
+	_, err := f.pool.Exec(t.Context(), `ALTER PUBLICATION `+publication+` OWNER TO `+pgx.Identifier{role}.Sanitize())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Hand the publication back before the role is dropped.
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `ALTER PUBLICATION `+publication+` OWNER TO CURRENT_USER`)
+		assert.NoError(t, err)
+	})
+	_, err = f.pool.Exec(t.Context(), `REVOKE EXECUTE ON FUNCTION pg_catalog.pg_current_wal_lsn() FROM PUBLIC`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `GRANT EXECUTE ON FUNCTION pg_catalog.pg_current_wal_lsn() TO PUBLIC`)
+		assert.NoError(t, err)
+	})
+	roleCfg := dbconn.Config{URL: withCredentials(t, f.databaseURL, role, password)}
+	rolePool, err := dbconn.NewPool(t.Context(), roleCfg)
+	require.NoError(t, err)
+	t.Cleanup(rolePool.Close)
+
+	err = decode.DropSlot(t.Context(), roleCfg, rolePool, name)
+
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the read's server error stays in the chain")
+	assert.Equal(t, "42501", pgErr.Code, "insufficient_privilege on pg_current_wal_lsn()")
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, name)
+	require.NoError(t, err)
+	assert.True(t, found, "the slot is left as found")
+	assert.True(t, f.publicationExists(t, name), "a refused slot drop leaves the publication in place")
 }

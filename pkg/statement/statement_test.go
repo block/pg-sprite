@@ -90,7 +90,12 @@ func TestParseOneKinds(t *testing.T) {
 			// target, and the type and the label it adds.
 			name: "alter type add value names the type, not a table",
 			sql:  "ALTER TYPE mood ADD VALUE 'calm' AFTER 'happy'",
-			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Name: "mood"}, enumValue: "calm"},
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Name: "mood"}, enumValue: "calm", enumNeighbor: "happy"},
+		},
+		{
+			name: "alter type add value before a label keeps the label it is placed next to",
+			sql:  "ALTER TYPE app.mood ADD VALUE 'calm' BEFORE 'sad'",
+			want: Statement{kind: KindAddEnumValue, enumType: TypeName{Schema: "app", Name: "mood"}, enumValue: "calm", enumNeighbor: "sad"},
 		},
 		{
 			name: "alter type add value schema-qualified keeps the type's schema",
@@ -305,6 +310,26 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "standalone sequence is catalog work",
 			sql:  "CREATE SEQUENCE users_id_seq",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create enum type is catalog work",
+			sql:  "CREATE TYPE mood AS ENUM ('happy', 'sad')",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create domain is catalog work",
+			sql:  "CREATE DOMAIN positive AS int CHECK (VALUE > 0)",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create composite type is catalog work",
+			sql:  "CREATE TYPE address AS (zip text)",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create range type is catalog work",
+			sql:  "CREATE TYPE span AS RANGE (subtype = int4)",
 			want: Statement{kind: KindCatalogWork},
 		},
 		{
