@@ -345,6 +345,11 @@ func (c Code) Permanent() bool {
 // that underlying code — the step position and committed prefix ride on
 // the struct itself, not the vocabulary. An error outside the typed set
 // maps to CodeExecutionFailed.
+//
+// An error that carries ErrInvariantViolation maps to
+// CodeInvariantViolation whichever typed failure wraps it, so the
+// fail-closed code outranks every other one. Each typed error's own Code
+// method applies the same rule, so the two never disagree.
 func OutcomeCode(err error) Code {
 	if err == nil {
 		return ""
@@ -466,8 +471,12 @@ func sentinelCode(err error) Code {
 	}
 }
 
-// Code returns the budget outcome's stable code.
+// Code returns the budget outcome's stable code. A budget error whose
+// cause carries an invariant breach reports the breach, as OutcomeCode does.
 func (e *BudgetError) Code() Code {
+	if errors.Is(e, ErrInvariantViolation) {
+		return CodeInvariantViolation
+	}
 	switch e.Cause {
 	case CauseLock:
 		return CodeBudgetLockExceeded
@@ -486,10 +495,13 @@ func (e *BudgetError) Code() Code {
 // backend's build in flight, abandoned on the target table, on another
 // table, not droppable, builder unobservable, or unproven. The data fault
 // outranks the cleanup state because it names what the operator corrects:
-// no handling of the leftover gets a rerun past the same rows. The cleanup
-// sentinel stays in the chain for errors.Is.
+// no handling of the leftover gets a rerun past the same rows. An invariant
+// breach in either the build or the cleanup outranks both, as it does in
+// OutcomeCode. The cleanup sentinel stays in the chain for errors.Is.
 func (e *InvalidIndexError) Code() Code {
 	switch {
+	case errors.Is(e, ErrInvariantViolation):
+		return CodeInvariantViolation
 	case e.buildDataFault():
 		return CodeDataFault
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):

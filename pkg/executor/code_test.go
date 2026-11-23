@@ -353,4 +353,6 @@ func TestOutcomeCodeInvariantViolationOutranksTypedFailures(t *testing.T) {
 			assert.Equal(t, executor.CodeInvariantViolation, executor.OutcomeCode(err))
 		})
 	}
+	invalidErr := &executor.InvalidIndexError{Schema: "s", Index: "i", Build: breach, Cleanup: executor.ErrBuildLeftInvalidIndex}
+	assert.Equal(t, executor.CodeInvariantViolation, invalidErr.Code(), "the typed error's own code agrees with OutcomeCode")
 }

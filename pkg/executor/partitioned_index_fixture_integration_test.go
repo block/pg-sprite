@@ -161,6 +161,19 @@ func (f partitionedFixture) indexCount(t *testing.T, table string) int {
 	return len(f.indexesOn(t, table))
 }
 
+// attachedTo lists the table's indexes attached to the named partitioned
+// index.
+func (f partitionedFixture) attachedTo(t *testing.T, table, parentIndex string) []string {
+	t.Helper()
+	var names []string
+	for name, r := range f.indexesOn(t, table) {
+		if r.parent == parentIndex {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // requireNothingBuilt asserts the partitioned table and its partitions have
 // no index at all: the build refused before it created anything.
 func (f partitionedFixture) requireNothingBuilt(t *testing.T, table string, partitions ...string) {
