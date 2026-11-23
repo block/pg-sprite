@@ -483,6 +483,9 @@ const (
 	// CauseParentNotValidForeignKey identifies a NOT VALID foreign key on a
 	// partitioned parent.
 	CauseParentNotValidForeignKey Cause = "parent-not-valid-foreign-key"
+	// CauseParentConcurrentIndexDrop identifies a concurrent drop of an
+	// index of a partitioned parent, which PostgreSQL does not support.
+	CauseParentConcurrentIndexDrop Cause = "parent-concurrent-index-drop"
 	// CauseCopyAndSwapNotEnabled: the statement routes to the copy-and-swap
 	// backend, which the caller has not opted into; nothing was read or
 	// executed. The route is in preview, so it runs only when the policy

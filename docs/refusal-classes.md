@@ -104,7 +104,7 @@ runner (`statement.KindDataChange`). A statement the parse boundary does not nam
 
 ### `unsupported-partitioned-parent`, keyed on `PartitionRefusalCause`
 
-The four causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
+The five causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
 keeps the not-implemented case and the version-gated case apart in one sentence; this table
 agrees with it rather than collapsing them. An importer reads the cause from the `Cause` field of
 `*UnsupportedPartitionedParentError` (`errors.As`), and `PartitionRefusalCause.Class()` answers
@@ -116,6 +116,7 @@ conversion.
 | `parent-concurrent-index-build` | The `CREATE INDEX ON ONLY` → per-partition `CONCURRENTLY` → `ATTACH PARTITION` flow is not yet implemented | `capability-boundary` | A planned engine capability; the matrix marks it 🟡. |
 | `parent-blocking-index-build` | pg-sprite will not substitute a blocking parent build for the missing partition-aware flow | `capability-boundary` | Same missing flow; the refusal of the blocking substitute is the policy half of the same gap. The eligibility registry marks this cause acceptable, but `migrate --accept-blocking` does not reach it yet: the unforced imperative path refuses the parent build with the concurrent cause, and the flag rejects `--force`. |
 | `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
+| `parent-concurrent-index-drop` | PostgreSQL cannot drop an index of a partitioned table concurrently in any supported version, and a partition's own index cannot be dropped alone | `by-design` | No concurrent drop exists to wait for. The drop PostgreSQL accepts is a plain `DROP INDEX`, which takes `ACCESS EXCLUSIVE` on the parent, every partition, and every partition's index; the eligibility registry marks this cause acceptable, and `migrate --alter` runs that plain drop under `--accept-blocking` and `--allow-destructive` naming the table. |
 | `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
 ### `copy-and-swap-refused`, keyed on `CopySwapRefusalCause`
