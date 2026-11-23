@@ -39,8 +39,10 @@ const (
 // connection settings and the role's and database's, none of which the
 // engine repairs, so the comparison is spelled OPERATOR(pg_catalog.=): a
 // lookalike = on text on that path would otherwise match no setting, or
-// another one, and the heartbeat would run at an interval the server's
-// timeout does not call for (CO-9).
+// several, and the stream would refuse to open because the read did not
+// return exactly one row (CO-9).
+//
+// INV: CO-9
 const senderTimeoutSQL = `
 	SELECT setting
 	FROM pg_catalog.pg_settings

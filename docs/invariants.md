@@ -577,7 +577,14 @@ shadowing `<schema>, pg_catalog` path would otherwise name an owner that is not 
 refuse the engine's own table as foreign, and an empty `pg_namespace` or `pg_attribute` would
 report the schema absent or every column missing — decoy relations, functions, and operators on
 that path are never consulted, `TestEnsureReadsResolveToTheRealCatalog`, and the text is held
-by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the orphan-slot reaper's slot
+by `TestEnsureReadsQualifyEveryRelationFunctionCastAndOperator`; the row statements `Load`,
+`Save`'s upsert and guard, and `Delete` run on the same pool and spell their casts and
+comparisons through `pg_catalog` too, so a lookalike `text` cannot cut the saved position short
+and a lookalike `=` cannot hide the row (`TestLoadReadsTheSavedPositionUnderALookalikeTextType`,
+`TestLoadFindsTheRowUnderLookalikeTextComparisons`, the text held by
+`TestRowStatementsQualifyEveryCastAndOperator`) — the table lock confirmation `Save` and
+`Delete` run first is `pkg/dbconn`'s, its comparisons still bare, so on such a pool they refuse
+with LK-1 rather than write; the orphan-slot reaper's slot
 listing and live-row read and the slot lock's database identity read, which run on the same
 caller's pool, qualify every function, relation, cast, and operator too — `=`, `LIKE` as `~~`,
 `= ANY`, and `NOT IN` as `<> ALL` — and so do the reads `pkg/decode`'s drop decides on: the

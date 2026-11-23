@@ -17,6 +17,8 @@ const MarkerPrefix = "pgsprite"
 // the cast is spelled through pg_catalog as well as the function: a
 // lookalike text type on the path would otherwise reshape the position a
 // caller waits for the stream to pass (CO-9).
+//
+// INV: CO-9
 const markWALSQL = `SELECT pg_catalog.pg_logical_emit_message(false, $1, '')::pg_catalog.text`
 
 // MarkWAL writes a marker into the WAL from inside tx and returns the

@@ -88,7 +88,7 @@ the integration phase starts; they drift.)
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
 
-Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)). Either way, a read that runs under a path pg-sprite builds that lists the application schema is only as safe as its own qualification; CO-9 lists the reads that are not qualified yet.
+Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)). Either way, a read that runs under a path pg-sprite builds that lists the application schema is only as safe as its own qualification. The **Which pool** note under [what a live `Run` holds open](#what-a-live-run-holds-open) lists what holds on a pool built another way.
 
 A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason
 and names a safer native alternative where one exists. The adapter maps that verdict to
@@ -434,10 +434,13 @@ the pool besides; an importer running many tables from one process sizes for bot
 - **Which pool:** build it with `dbconn.NewPool`. That pool bounds every session's
   `lock_timeout` and `statement_timeout`, proves session affinity, and drops a `pg_catalog`
   entry that `search_path` lists after a user schema, so no lookalike catalog name can answer
-  the engine's reads. `checkpoint.NewStore` accepts any `*pgxpool.Pool`, and `Store.Ensure`'s
-  catalog reads resolve to `pg_catalog` whatever its `search_path`; the slot lock's and the
-  reaper's reads qualify their relations and functions but not their comparisons, and a pool
-  built another way brings its own timeouts or runs without them.
+  the engine's reads. `checkpoint.NewStore` accepts any `*pgxpool.Pool`. On a pool built another
+  way, these reads spell every relation, function, cast, and operator through `pg_catalog`, so
+  they hold whatever its `search_path`: `Store.Ensure`, `Store.Load`, the reaper, the slot
+  lock, `decode.MarkWAL`, `applier.ReadSnapshot`, and the catch-up's position read. `Store.Save`
+  and `Store.Delete` qualify their own statements, but first confirm the table lock through a
+  `pkg/dbconn` read whose comparisons are not qualified yet, so a lookalike `=` on that path makes
+  them refuse rather than write. Such a pool also brings its own timeouts or runs without them.
 
 ### What `Runner.Run` returns
 

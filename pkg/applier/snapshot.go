@@ -54,6 +54,8 @@ func AllVisible() Snapshot {
 // pg_catalog as well as the function: a lookalike text type on the path
 // would otherwise reshape the snapshot the drain judges visibility by
 // (CO-9).
+//
+// INV: CO-9
 const snapshotSQL = `SELECT pg_catalog.pg_current_snapshot()::pg_catalog.text`
 
 // ReadSnapshot takes the server's current snapshot on db. The snapshot is
