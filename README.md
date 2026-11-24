@@ -2,12 +2,15 @@
 
 [![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
 
-> [!WARNING]
-> **Early release — not production-ready.** This project is under active
-> development. Tagged releases exist, but pre-1.0 there are no stability
-> guarantees and no support. Interfaces, behavior, on-disk/database artifacts,
-> and the CLI surface may all change between releases. Do **not** run this
-> against any database you care about.
+> [!IMPORTANT]
+> **Preview: ready to try.** pg-sprite handles everyday changes
+> today, like adding a column, an index, or a constraint, and keeps locks short
+> so your app keeps running. Rewriting a whole table, like changing a column's
+> type, is still in preview and only runs if you pass `--copy-and-swap`.
+> `pg-sprite capabilities --json` lists which changes are generally available
+> (`maturity: ga`) and which are in preview.
+> We're not at 1.0 yet, so commands and output may change between releases,
+> and there's no support guarantee. Read the release notes before you upgrade.
 
 An online schema-change engine for **PostgreSQL** (community, RDS, and
 Aurora; 14+): a decoupled **planner → router → executor** design where the
