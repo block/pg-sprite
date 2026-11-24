@@ -489,6 +489,15 @@ func TestCopySwapDetail(t *testing.T) {
 	}, true)
 	assert.Equal(t, "verified 4 rows in 1 chunks; the retained source is dropped; "+
 		"writes to the table were blocked for the length of the run", quiesced)
+
+	// A run that only finished a swap an earlier run committed says so,
+	// rather than reading as a pass over an empty table.
+	finished := copySwapDetail(schemachange.Result{
+		FinishedEarlierSwap: true,
+		OldTableDropped:     true,
+	}, false)
+	assert.Equal(t, "finished the swap an earlier run committed; nothing was copied or verified by this run; "+
+		"the retained source is dropped", finished)
 }
 
 // The verification pass's figures reach automation as the verdict's

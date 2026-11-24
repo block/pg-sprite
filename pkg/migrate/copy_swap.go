@@ -575,6 +575,9 @@ func refusedVerdict(st statement.Statement, r verdict.Refusal, detail string) ve
 // a quiesced run fenced the source's writes for its length.
 func copySwapDetail(result schemachange.Result, quiesced bool) string {
 	s := fmt.Sprintf("verified %d rows in %d chunks", result.Verification.Rows, result.Verification.Chunks)
+	if result.FinishedEarlierSwap {
+		s = "finished the swap an earlier run committed; nothing was copied or verified by this run"
+	}
 	if result.Verification.Settled > 0 {
 		s += fmt.Sprintf(" (%d settled against the stream)", result.Verification.Settled)
 	}

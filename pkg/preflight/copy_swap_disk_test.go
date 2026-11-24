@@ -160,4 +160,7 @@ func TestRefuseCopySwapDiskAsksNothingOfACommittedSwap(t *testing.T) {
 	refusal := refuseCopySwapDisk(facts, env)
 	require.NotNil(t, refusal, "a negative ceiling is refused whatever the run has left")
 	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+
+	env.LogicalDecoding = false
+	assert.Nil(t, refuseCopySwapDisk(facts, env), "a quiesced run counts no ceiling, so its value is not judged")
 }

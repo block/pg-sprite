@@ -147,8 +147,14 @@ any run. Neither discount goes past its own requirement, and anything pg-sprite 
 (no shadow, a slot that is gone or lost, a server that cannot measure the WAL) counts as
 nothing held, so the check falls back to a fresh run's figure. A run that stopped after its
 swap committed, before it finished, is asked for no space at all when its statement runs
-through copy-and-swap again: that run only drops the slot and the retained old table and
-records the change done, which frees space. A run with
+through copy-and-swap again: that run only drops the slot, drops the retained old table (or,
+with `KeepOld`, leaves it and takes its write fence off), and records the change done, so it
+grows nothing on the volume. The admission is for that run alone: if the row has moved by the
+time the run holds the table's lock — another run finished it, or it was deleted or replaced —
+the run refuses with `finish-admission-stale` and writes nothing, and the next run is checked
+again. A stopped row whose retained old table was renamed away or changed owner is measured as
+a run that still copies, so a tight volume reports disk headroom first; with room, the run
+then refuses with `cutover-relation-replaced`. A run with
 `--restart SCHEMA.TABLE` is checked as a fresh run: it discards what the stopped run held
 before it builds anew.
 

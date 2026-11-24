@@ -110,10 +110,14 @@ type CopySwapHeld struct {
 	RetainedWALBytes int64
 	// SwapCommitted reports that the catalog shows the stopped run's swap
 	// committed: the shadow already bears the table's name, so the run
-	// being checked only finishes it — drops the slot and the retained
-	// source, and records the change done. That run builds no shadow and
-	// decodes no WAL, so the disk check asks it for neither the copy's
-	// headroom nor the slot lag ceiling; what it does frees space.
+	// being checked only finishes it — drops the slot, drops the retained
+	// source or (under KeepOld) takes the write fence off it, and records
+	// the change done. That run builds no shadow and decodes no WAL, so
+	// the disk check removes the whole requirement: neither the copy's
+	// headroom nor the slot lag ceiling is asked. Only MeasureResumeHeld
+	// in package schemachange should set it. The target it admits reports
+	// FinishesCommittedSwap, and a run on it that would do anything but
+	// finish that swap is refused before it writes.
 	SwapCommitted bool
 }
 
@@ -208,7 +212,7 @@ func CheckCopySwapEnvironment(ctx context.Context, pool *pgxpool.Pool, shape Cop
 	if refusal := refuseCopySwapEnvironment(facts, env); refusal != nil {
 		return CopySwapTarget{}, refusal
 	}
-	return CopySwapTarget{copySwapShape: shape.copySwapShape, decodesWAL: env.LogicalDecoding}, nil
+	return CopySwapTarget{copySwapShape: shape.copySwapShape, decodesWAL: env.LogicalDecoding, finishOnly: env.Held.SwapCommitted}, nil
 }
 
 // refuseCopySwapEnvironment decides the first cause that puts the facts

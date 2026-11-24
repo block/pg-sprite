@@ -127,10 +127,18 @@ implementation time):
   `cutover` row whose swap the catalog shows committed — the read `InspectSwapped` makes —
   is reported as `Held.SwapCommitted`, and the disk check then asks for neither the copy's
   headroom nor the slot lag ceiling: the run that finishes it builds nothing and decodes no
-  WAL, it only drops the slot and the retained source and saves `done`, which frees space,
-  so a volume tight because the retained source is still on it admits the cleanup. A
-  `cutover` row whose swap did not commit, or whose outcome that read cannot call yet, is
-  measured as any other resume, since its run verifies and swaps again over the shadow.
+  WAL, it only drops the slot, drops the retained source (or under `KeepOld` takes its
+  write fence off), and saves `done`, so a volume tight because the retained source is
+  still on it admits the cleanup. The target it returns reports `FinishesCommittedSwap`,
+  and a `Runner` handed it refuses with `finish-admission-stale`, writing nothing, when the
+  row it finds under its lock asks for more than that cleanup. A `cutover` row whose swap
+  did not commit, or whose outcome that read cannot call yet, is measured as any other
+  resume: a swap that rolled back verifies and swaps again over the shadow, and a retained
+  source renamed away or under another owner is refused by the run
+  (`cutover-relation-replaced`) once the disk check passes. The check takes no statement,
+  so at plan time, on a table with a stopped row, it describes that row's run: a different
+  statement is refused by the run as `resume-row-mismatch`, and its own copy was not
+  measured.
   `preflight.CheckCopySwap` runs the same three checks without that measure, so it asks a
   resume for the whole requirement again. Pass `schemachange.CopySwapRestart` for a run
   with `RunOptions.Restart` set and `schemachange.CopySwapResume` for every other run; the
@@ -344,6 +352,7 @@ that tests the sentinel first would send an operator-dropped shadow or a held sl
 | `resume-row-terminal` | The row is `done` or `failed`; there is no run to resume | Report the recorded outcome; a new run needs `Store.Delete` of the row the caller was shown |
 | `resume-row-cutover` | The row says a swap began and nothing says how it ended; neither a clean resume nor a reconcile may touch the slot or the shadow until that is known. The refusal is answered before the slot is read, so it says nothing about whether the slot survived | Call `InspectSwapped` first; a committed swap continues from `DropOldTable`. A rolled-back swap (`ErrNotSwapped`) is a run still catching up: write the row back to `catching_up` and call `InspectResume` again — it answers clean when the slot is intact, and reconcile when the slot was lost during the cutover window, in which case `Reconcile` repairs the gap before the cutover is retried |
 | `restart-swap-committed` (from `Runner`, with `RunOptions.Restart`) | A run asked to start over met a `cutover` row whose swap the catalog shows committed: the shadow already bears the source's name, so there is nothing to discard and the change is past the point of starting over. Nothing is written | Run the same statement without the restart; `InspectSwapped` answers that the swap committed and the run finishes from `DropOldTable` — drops the slot of a live run, drops or keeps the retained source, writes the row `done` |
+| `finish-admission-stale` (from `Runner`) | The target was admitted only to finish a committed swap, with no disk space asked, and the row the run found under its lock asks for more: none, a `done` row, a row a restart discards, or a row whose swap has not committed. Nothing is written | Call `CheckCopySwap` again, which measures the row as it is now, and run on the new target |
 | `resume-row-mismatch` | The row is for another table, names another slot, or (in `Reconcile` and `Runner`) carries another statement's shadow name, fingerprints, or shadow proof; from `Runner` also a row whose recorded statement is not the one `Run` was given, compared as parsed, or a row that records no statement | Configuration or operator action: the target and the row disagree; retrying cannot succeed. A caller that means a second, different change on the same table deletes the row (`Store.Delete`) — and drops the shadow and the fence — first |
 | `shadow-statement-target` (from `Runner`, on resume) | The statement `Run` was given names another table than the proven target, caught before the row's statement is compared with it | Configuration: the statement and the target disagree; retrying cannot succeed |
 | `resume-row-decoding` (from `Runner`) | The row was written by the other kind of run: a target proven without logical decoding was handed a row that names a slot or publication, or is in `catching_up` or `reconciling`, and has no slot to continue it with; a target proven for decoding was handed a row that names no slot, whose source was fenced, not captured | Run the row under the kind of `CopySwapTarget` proof that made it; the proof, not the caller, chooses the route |
