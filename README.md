@@ -113,8 +113,9 @@ refusal — never a silently wrong or incomplete result:
 - **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
   on a partitioned table runs partition by partition, resuming when the same
   statement is run again; a unique one that lacks a partition key column is
-  refused, as PostgreSQL rejects it. They cannot be expressed in or exported to desired
-  files, and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
+  refused, as PostgreSQL rejects it. Only a partitioned parent can be expressed in or
+  exported to a desired file — partitions and their bounds stay owned outside
+  it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
   `--force` names the table ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
