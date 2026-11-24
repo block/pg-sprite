@@ -112,7 +112,8 @@ refusal — never a silently wrong or incomplete result:
   refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
   on a partitioned table runs partition by partition, resuming when the same
-  statement is run again. Only a partitioned parent can be expressed in or
+  statement is run again; a unique one that lacks a partition key column is
+  refused, as PostgreSQL rejects it. Only a partitioned parent can be expressed in or
   exported to a desired file — partitions and their bounds stay owned outside
   it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
   `--force` names the table ([limitations](docs/limitations.md)).

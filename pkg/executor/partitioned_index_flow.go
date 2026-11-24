@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -67,6 +66,15 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 	tree, err := f.readTree(ctx)
 	if err != nil {
 		return err
+	}
+	// Checked once, before the parent's index exists, so a refusal comes
+	// with nothing created. A partition key cannot change, and once the
+	// parent's index exists the server refuses a later partition whose key
+	// the index does not contain.
+	if f.req.unique {
+		if err := f.refuseUncoveredPartitionKeys(ctx, tree); err != nil {
+			return err
+		}
 	}
 	if err := f.ensureParentIndex(ctx); err != nil {
 		return err
@@ -147,11 +155,6 @@ func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, e
 		return nil, fmt.Errorf("%w: %s under %s; finish each detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then rerun",
 			ErrPartitionDetachPending, strings.Join(pending, ", "), qualifiedName(f.target.schema, f.target.table))
 	}
-	if f.req.unique {
-		if err := f.refuseUncoveredPartitionKeys(ctx, tree); err != nil {
-			return nil, err
-		}
-	}
 	f.countNewPartitions(tree)
 	f.rep.Partitions = len(tree)
 	return tree, nil
@@ -159,45 +162,12 @@ func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, e
 
 // refuseUncoveredPartitionKeys refuses a unique index whose plain key columns
 // do not contain the partition key of the parent and of every sub-partitioned
-// partition. PostgreSQL makes the same check one partitioned table at a time,
-// as each gets its index, so without this a mismatch below the parent would
-// fail the run after earlier partitions were already built. An expression in
-// a partition key can never be covered, so it is refused too.
+// partition in tree, with the *UniqueIndexPartitionKeyError that names each
+// table and its missing columns.
 func (f *partitionedIndexFlow) refuseUncoveredPartitionKeys(ctx context.Context, tree []partitionNode) error {
-	names := map[uint32]string{f.target.tableOID: qualifiedName(f.target.schema, f.target.table)}
-	for _, n := range tree {
-		if n.subPartitioned() {
-			names[n.oid] = n.qualified()
-		}
-	}
-	oids := make([]uint32, 0, len(names))
-	for oid := range names {
-		oids = append(oids, oid)
-	}
-	var keys map[uint32][]string
-	err := f.tx.read(ctx, "read the partition keys", func(ctx context.Context, q querier) error {
-		var err error
-		keys, err = partitionKeyColumns(ctx, q, oids)
-		return err
+	return f.tx.read(ctx, "read the partition keys", func(ctx context.Context, q querier) error {
+		return readUncoveredPartitionKeys(ctx, q, f.req.schema, f.req.index, f.req.keyColumns, keyedTables(f.target, tree))
 	})
-	if err != nil {
-		return err
-	}
-	var uncovered []string
-	for _, oid := range oids {
-		for _, col := range keys[oid] {
-			if col == "" || !slices.Contains(f.req.keyColumns, col) {
-				uncovered = append(uncovered, names[oid])
-				break
-			}
-		}
-	}
-	if len(uncovered) == 0 {
-		return nil
-	}
-	slices.Sort(uncovered)
-	return fmt.Errorf("%w: %s does not contain the partition key of %s",
-		ErrUniqueIndexPartitionKey, qualifiedName(f.req.schema, f.req.index), strings.Join(uncovered, ", "))
 }
 
 // countNewPartitions raises the tracker's total by the partitions it has not

@@ -24,7 +24,8 @@ import (
 // the apply makes; so does the
 // destructive-change gate, unless --allow-destructive names the table, and
 // the executor's shape admission of the routed steps, once they are known, when
-// no earlier apply check refuses first. The checks that need the apply's
+// no earlier apply check refuses first, and the partitioned index build's
+// check of a unique index against the tree's partition keys. The checks that need the apply's
 // live facts — the size guard and the privilege preflight, which the apply
 // runs before admission — are not run. Introspecting the
 // target table sharpens type-change classification; a missing table means
@@ -136,6 +137,18 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			}
 			if refused {
 				return c.emit(out, v)
+			}
+			// A unique index must contain the tree's partition keys, which
+			// only the live catalog knows; the build refuses one that does
+			// not before it creates anything, and so does the dry run.
+			if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+				v, refused, admitErr = migrate.AdmitPartitionedUniqueIndex(ctx, pool, st, report.Schema, ps.ExecSQL)
+				if admitErr != nil {
+					return admitErr
+				}
+				if refused {
+					return c.emit(out, v)
+				}
 			}
 		}
 	}

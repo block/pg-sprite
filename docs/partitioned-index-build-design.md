@@ -70,8 +70,27 @@ pg-sprite run on the same parent is refused:
    - A **unique** index must contain the partition key of every partitioned
      table in the tree among its plain key columns. PostgreSQL checks each
      partitioned table only when that table gets its index, so the flow checks
-     every level before step 1 and refuses a mismatch
-     (`ErrUniqueIndexPartitionKey`).
+     every level once, after the first tree read and before step 1, and refuses
+     a mismatch with nothing created (`*UniqueIndexPartitionKeyError`, wrapping
+     `ErrUniqueIndexPartitionKey`; `Missing` names each table, as `Schema` and
+     `Table`, and the columns its key lacks, in key order). `migrate` maps it to
+     an `unsupported-statement`, `by-design` refusal. A dry run reads the same
+     keys and reports the same refusal; a host that plans through the library
+     calls `migrate.AdmitPartitionedUniqueIndex` with a pool from `pkg/dbconn`.
+     A desired-state plan never reaches this check: building the desired table
+     on the scratch schema runs the server's own check first, and the run stops
+     with that server error before anything executes.
+
+     The check matches columns by exact name. The server also requires each
+     matched column to share the partition key's collation and equality
+     operator. On the parent a mismatch is refused at step 1, which creates
+     nothing; on a sub-partitioned partition it is refused only at that
+     partition's step, after the parent's invalid index exists, and a rerun
+     resumes into that index and fails at the same step. Once the parent's index
+     exists, the server refuses a partition created or attached later whose key
+     the index does not contain; a sub-partitioned partition attached between
+     the check and step 1 is seen by neither and fails the run at its own step
+     the same way.
 3. **New partitions.** A partition created during the flow
    (`CREATE TABLE ... PARTITION OF`) gets a clone of every index on its parent,
    already attached. A table attached with `ATTACH PARTITION` ends up with an
