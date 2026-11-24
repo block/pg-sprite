@@ -144,6 +144,18 @@ func TestRenderRefusesPartitionedParentWithUnattachedIndex(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnrenderableUnattachedIndex)
 }
 
+// A sub-partitioned partition is itself partitioned, so it can carry an
+// unattached index too; it is still a partition and refuses as one.
+func TestRenderRefusesSubPartitionedPartitionWithUnattachedIndex(t *testing.T) {
+	m := base()
+	m.IsPartition = true
+	m.PartitionKey = "RANGE (id)"
+	m.Indexes = []Index{{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON ONLY events USING btree (name)", Invalid: true}}
+
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderablePartition)
+}
+
 // Row security on a partitioned parent does not cover a query that names a
 // partition, and the row security executors refuse the parent, so its
 // export is refused.

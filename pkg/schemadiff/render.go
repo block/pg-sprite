@@ -105,13 +105,16 @@ func Render(m Model) (string, error) {
 	if m.RowSecurity.present() {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableRowSecurity)
 	}
+	// A sub-partitioned partition carries a partition key too, so the
+	// partition refusal comes first: it is never rendered, whatever its own
+	// indexes are.
+	if m.IsPartition {
+		return "", fmt.Errorf("render table %q: partition of a partitioned parent: %w", m.Table, ErrUnrenderablePartition)
+	}
 	if m.PartitionKey != "" {
 		if err := partitionedParentRefusal(m); err != nil {
 			return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, err)
 		}
-	}
-	if m.IsPartition {
-		return "", fmt.Errorf("render table %q: partition of a partitioned parent: %w", m.Table, ErrUnrenderablePartition)
 	}
 	if len(m.InheritsParents) != 0 {
 		return "", fmt.Errorf("render table %q: inherits from %s: %w", m.Table, strings.Join(m.InheritsParents, ", "), ErrUnrenderableInheritance)
