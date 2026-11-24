@@ -6,6 +6,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
 // ReadTableDropDependents names the objects that make PostgreSQL refuse a
@@ -38,7 +40,7 @@ func ReadTableDropDependents(ctx context.Context, pool *pgxpool.Pool, schema, ta
 	// The server leaves the schema out of an object's description when the
 	// schema is on the search_path. Clearing it names every object with its
 	// schema, whatever the session's search_path is.
-	if _, err := tx.Exec(ctx, "SET LOCAL search_path = pg_catalog"); err != nil {
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
 		return nil, fmt.Errorf("clear the search_path to read the objects that keep %s from being dropped: %w", name, err)
 	}
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
