@@ -36,6 +36,10 @@ const sqlstateDependentObjectsStillExist = "2BP01"
 // that does not exist.
 const sqlstateInvalidSchemaName = "3F000"
 
+// sqlstateWrongObjectType is the server's refusal of a statement on a
+// relation of the wrong kind, such as LOCK TABLE on a sequence.
+const sqlstateWrongObjectType = "42809"
+
 // ExecuteDropTable drops one reviewed table with DROP TABLE, without
 // CASCADE, in a single transaction under the budget b, retrying a lock
 // timeout under retry. A caller has already admitted the drop as
@@ -87,8 +91,12 @@ func dropTableAttempt(ctx context.Context, pool *pgxpool.Pool, schema, table, de
 	defer func() {
 		// Redundant safety closer: after a successful Commit this returns
 		// the guaranteed ErrTxClosed; on a failure path the server aborts
-		// the transaction with its session either way.
-		_ = tx.Rollback(context.WithoutCancel(ctx))
+		// the transaction with its session either way. It runs detached and
+		// bounded so a cancelled attempt still releases the table's lock and
+		// a wedged socket cannot hold the attempt open.
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCleanupTimeout)
+		defer cancel()
+		_ = tx.Rollback(rollbackCtx)
 	}()
 	// INV: LK-2 — the lock wait, the check, and the drop all run under the
 	// caller's transaction-local budgets.
@@ -98,9 +106,14 @@ func dropTableAttempt(ctx context.Context, pool *pgxpool.Pool, schema, table, de
 		return fmt.Errorf("set the budgets of the drop of %s: %w", target, err)
 	}
 	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+target+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateWrongObjectType {
+			// The name now stands for a relation LOCK TABLE refuses, such
+			// as a sequence or a materialized view: not the reviewed table.
+			return fmt.Errorf("%w: %s is no longer a table; re-plan: %w", ErrDroppedObjectDrift, target, err)
+		}
 		return dropTableError(err, b, "lock "+target+" to check it before dropping it")
 	}
-	if err := refuseDroppedTableDrift(ctx, tx, schema, table, definition, target); err != nil {
+	if err := refuseDroppedTableDrift(ctx, tx, schema, table, definition, target, b); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, "DROP TABLE "+target); err != nil {
@@ -117,7 +130,7 @@ func dropTableAttempt(ctx context.Context, pool *pgxpool.Pool, schema, table, de
 // refuseDroppedTableDrift reads schema.table under the lock the caller
 // holds and refuses unless it still has the reviewed definition and is a
 // table whose drop removes nothing beyond it and changes no table above it.
-func refuseDroppedTableDrift(ctx context.Context, tx pgx.Tx, schema, table, definition, target string) error {
+func refuseDroppedTableDrift(ctx context.Context, tx pgx.Tx, schema, table, definition, target string, b Budget) error {
 	m, err := schemadiff.IntrospectTx(ctx, tx, schema, table)
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
@@ -125,7 +138,7 @@ func refuseDroppedTableDrift(ctx context.Context, tx pgx.Tx, schema, table, defi
 	case errors.Is(err, schemadiff.ErrNotTable):
 		return fmt.Errorf("%w: %s is no longer a table; re-plan: %w", ErrDroppedObjectDrift, target, err)
 	case err != nil:
-		return fmt.Errorf("read %s before dropping it: %w", target, err)
+		return dropTableError(err, b, "read "+target+" before dropping it")
 	}
 	if live := schemadiff.DroppedTableDefinition(m); live != definition {
 		return fmt.Errorf("%w: %s is now\n%s\nnot the\n%s\nthe plan reviewed; re-plan",

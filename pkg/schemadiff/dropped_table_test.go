@@ -55,3 +55,43 @@ constraint events_pkey: PRIMARY KEY (id)
 		Constraints: []Constraint{{Name: "events_pkey", Def: "PRIMARY KEY (id)"}},
 	}))
 }
+
+// A foreign key of another table that references a column is listed once,
+// by its "referenced by" line, not again under the column.
+func TestDroppedTableDefinitionListsAnIncomingForeignKeyOnce(t *testing.T) {
+	assert.Equal(t, `table regions
+column id: attnum 1: bigint NOT NULL
+  with constraint regions_pkey: PRIMARY KEY (id)
+constraint regions_pkey: PRIMARY KEY (id)
+referenced by warehouses.warehouses_region_id_fkey
+`, DroppedTableDefinition(Model{
+		Table: "regions",
+		Columns: []Column{{Name: "id", AttNum: 1, Type: "bigint", NotNull: true, Dependents: []Dependent{
+			{Kind: "constraint", Name: "constraint warehouses_region_id_fkey on table warehouses", Def: "FOREIGN KEY (region_id) REFERENCES regions(id)", Referencing: true},
+			{Kind: "constraint", Name: "regions_pkey", Def: "PRIMARY KEY (id)"},
+		}}},
+		Constraints:  []Constraint{{Name: "regions_pkey", Def: "PRIMARY KEY (id)"}},
+		ReferencedBy: []string{"warehouses.warehouses_region_id_fkey"},
+	}))
+}
+
+// Row security, each policy, and each object that goes with the whole table
+// are part of the definition, so a change to any of them shows.
+func TestDroppedTableDefinitionListsRowSecurityAndTableDependents(t *testing.T) {
+	using := "(owner = CURRENT_USER)"
+	assert.Equal(t, `table notes
+with trigger notes_audit on table notes: CREATE TRIGGER notes_audit BEFORE INSERT ON notes FOR EACH ROW EXECUTE FUNCTION audit()
+with publication of table notes in publication feed
+row security enabled
+policy notes_owner: permissive for r to app using "(owner = CURRENT_USER)" with check none comment none
+`, DroppedTableDefinition(Model{
+		Table: "notes",
+		TableDependents: []Dependent{
+			{Name: "trigger notes_audit on table notes", Def: "CREATE TRIGGER notes_audit BEFORE INSERT ON notes FOR EACH ROW EXECUTE FUNCTION audit()"},
+			{Name: "publication of table notes in publication feed"},
+		},
+		RowSecurity: RowSecurity{Enabled: true, Policies: []Policy{
+			{Name: "notes_owner", Command: PolicySelect, Permissive: true, Roles: []string{"app"}, Using: &using},
+		}},
+	}))
+}

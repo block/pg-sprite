@@ -355,6 +355,15 @@ type Model struct {
 	// definition and cannot be expressed in a desired file, so the model
 	// carries them only for the renderer to refuse on.
 	ReferencedBy []string
+	// TableDependents are the objects that depend on the table as a whole
+	// and that DROP TABLE removes with it, such as triggers, rules,
+	// statistics objects, and publication memberships, each named by the
+	// server's description with its definition where the server prints
+	// one, in a stable order. Policies are in RowSecurity, and the
+	// dependents of single columns are on the columns. They are live
+	// facts for a reviewed table drop, not part of the table's declared
+	// shape, so they are left out of the model's JSON.
+	TableDependents []Dependent `json:"-"`
 	// Columns are the table's columns in attribute order.
 	Columns []Column
 	// Constraints are the table constraints, name-sorted.

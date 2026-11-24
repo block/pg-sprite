@@ -142,6 +142,9 @@ func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path
 	if m.ReferencedBy, err = introspectReferencedBy(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect incoming foreign keys of %s.%s: %w", schema, table, err)
 	}
+	if m.TableDependents, err = introspectTableDependents(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect objects that depend on %s.%s: %w", schema, table, err)
+	}
 	if m.RowSecurity, err = introspectRowSecurity(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect row security of %s.%s: %w", schema, table, err)
 	}
@@ -544,6 +547,47 @@ func introspectColumns(ctx context.Context, tx Querier, oid uint32) ([]Column, e
 	return cols, nil
 }
 
+// introspectTableDependents reads the objects that depend on the table as
+// a whole and that DROP TABLE removes with it: every automatic dependency
+// on the table itself rather than on one of its columns. Constraints,
+// indexes, and policies are left out, since the model lists them already,
+// and so are other relations, whose drop the hierarchy checks govern.
+// Triggers, rules, and statistics objects carry the definition the server
+// prints for them, so a replacement under the same name shows.
+func introspectTableDependents(ctx context.Context, tx Querier, oid uint32) ([]Dependent, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	rows, err := tx.Query(ctx, `
+		SELECT COALESCE(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), ''),
+		       CASE d.classid
+		            WHEN 'pg_catalog.pg_trigger'::pg_catalog.regclass THEN pg_catalog.pg_get_triggerdef(d.objid)
+		            WHEN 'pg_catalog.pg_rewrite'::pg_catalog.regclass THEN pg_catalog.pg_get_ruledef(d.objid)
+		            WHEN 'pg_catalog.pg_statistic_ext'::pg_catalog.regclass THEN COALESCE(pg_catalog.pg_get_statisticsobjdef(d.objid), '')
+		            ELSE '' END
+		FROM pg_catalog.pg_depend d
+		WHERE d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.=) 0
+		  AND d.deptype OPERATOR(pg_catalog.=) 'a'
+		  AND d.classid OPERATOR(pg_catalog.<>) ALL (ARRAY['pg_catalog.pg_class'::pg_catalog.regclass,
+		      'pg_catalog.pg_constraint'::pg_catalog.regclass, 'pg_catalog.pg_policy'::pg_catalog.regclass])
+		ORDER BY 1, 2`, oid)
+	if err != nil {
+		return nil, fmt.Errorf("query table dependents: %w", err)
+	}
+	defer rows.Close()
+	var out []Dependent
+	for rows.Next() {
+		var d Dependent
+		if err := rows.Scan(&d.Name, &d.Def); err != nil {
+			return nil, fmt.Errorf("scan table dependent: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read table dependents: %w", err)
+	}
+	return out, nil
+}
+
 // introspectColumnDependents reads, per attribute number, what depends on
 // each column of the table and so goes with it when the column is dropped:
 // indexes, constraints (including a foreign key of another table that
@@ -557,7 +601,7 @@ func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (ma
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT d.refobjsubid::pg_catalog.int2, 'index'::pg_catalog.text, c.relname::pg_catalog.text,
-		       pg_catalog.pg_get_indexdef(c.oid)
+		       pg_catalog.pg_get_indexdef(c.oid), false
 		FROM pg_catalog.pg_depend d
 		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) d.objid
 		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
@@ -568,7 +612,7 @@ func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (ma
 		SELECT d.refobjsubid::pg_catalog.int2, 'constraint'::pg_catalog.text,
 		       CASE WHEN con.conrelid OPERATOR(pg_catalog.=) $1 THEN con.conname::pg_catalog.text
 		            ELSE COALESCE(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), '') END,
-		       pg_catalog.pg_get_constraintdef(con.oid)
+		       pg_catalog.pg_get_constraintdef(con.oid), con.conrelid OPERATOR(pg_catalog.<>) $1
 		FROM pg_catalog.pg_depend d
 		JOIN pg_catalog.pg_constraint con ON con.oid OPERATOR(pg_catalog.=) d.objid
 		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_constraint'::pg_catalog.regclass
@@ -582,7 +626,7 @@ func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (ma
 		       pg_catalog.format('%s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s',
 		                         pg_catalog.format_type(q.seqtypid, NULL), q.seqstart, q.seqincrement,
 		                         q.seqmin, q.seqmax, q.seqcache,
-		                         CASE WHEN q.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END)
+		                         CASE WHEN q.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END), false
 		FROM pg_catalog.pg_depend d
 		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) d.objid
 		JOIN pg_catalog.pg_namespace sn ON sn.oid OPERATOR(pg_catalog.=) c.relnamespace
@@ -593,7 +637,7 @@ func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (ma
 		  AND c.relkind OPERATOR(pg_catalog.=) 'S'
 		UNION ALL
 		SELECT d.refobjsubid::pg_catalog.int2, 'other'::pg_catalog.text,
-		       COALESCE(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), ''), ''::pg_catalog.text
+		       COALESCE(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), ''), ''::pg_catalog.text, false
 		FROM pg_catalog.pg_depend d
 		WHERE d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
 		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
@@ -613,7 +657,7 @@ func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (ma
 	for rows.Next() {
 		var attnum int16
 		var d Dependent
-		if err := rows.Scan(&attnum, &d.Kind, &d.Name, &d.Def); err != nil {
+		if err := rows.Scan(&attnum, &d.Kind, &d.Name, &d.Def, &d.Referencing); err != nil {
 			return nil, fmt.Errorf("scan column dependent: %w", err)
 		}
 		out[attnum] = append(out[attnum], d)

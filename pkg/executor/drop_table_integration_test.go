@@ -48,17 +48,45 @@ func TestExecuteDropTableDropsAnUnchangedTable(t *testing.T) {
 	assert.True(t, relationExists(t, pool, schema, "parent"))
 }
 
+// A plan that drops a referencing table and the table it references drops
+// the referencing table first. The referenced table's definition then lists
+// the foreign key once, as a "referenced by" line, so the plan records it
+// without that line and the drop that follows finds the table unchanged.
+func TestExecuteDropTableAfterItsReferencingTable(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.regions (id int PRIMARY KEY);
+		CREATE TABLE %[1]s.warehouses (id int PRIMARY KEY, region_id int REFERENCES %[1]s.regions)`, schema))
+	require.NoError(t, err)
+
+	warehouses := plannedTableDefinition(t, pool, schema, "warehouses")
+	regionsModel, err := schemadiff.Introspect(t.Context(), pool, schema, "regions")
+	require.NoError(t, err)
+	require.Equal(t, []string{"warehouses.warehouses_region_id_fkey"}, regionsModel.ReferencedBy)
+	assert.NotContains(t, schemadiff.DroppedTableDefinition(regionsModel), "on table warehouses",
+		"the incoming foreign key is listed once, as a referenced-by line")
+	regionsModel.ReferencedBy = nil
+	regions := schemadiff.DroppedTableDefinition(regionsModel)
+
+	require.NoError(t, dropTable(t, pool, schema, "warehouses", warehouses))
+	require.NoError(t, dropTable(t, pool, schema, "regions", regions))
+	assert.False(t, relationExists(t, pool, schema, "regions"))
+}
+
 // A table that changed after planning is not the table the reviewer
 // accepted losing: a column added, a table dropped and created again with
-// another shape, a foreign key of another table that now references it,
-// and a view that took the name all refuse, dropping nothing.
+// another shape, a foreign key of another table that now references it, an
+// object the drop would remove with the table (a trigger, a rule, a
+// publication membership, row security, or a policy), and another kind of
+// relation that took the name all refuse, dropping nothing.
 func TestExecuteDropTableRefusesATableThatChanged(t *testing.T) {
 	pool, schema := newPool(t)
 	setup := func(sql string) {
 		_, err := pool.Exec(t.Context(), fmt.Sprintf(sql, schema))
 		require.NoError(t, err)
 	}
-	setup(`CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`)
+	setup(`CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text);
+		CREATE FUNCTION %[1]s.noop() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`)
 	cases := []struct {
 		name   string
 		change string
@@ -66,10 +94,16 @@ func TestExecuteDropTableRefusesATableThatChanged(t *testing.T) {
 		{"column added", `ALTER TABLE %[1]s.t ADD COLUMN extra int`},
 		{"recreated with another shape", `DROP TABLE %[1]s.t; CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, note text)`},
 		{"referenced by another table", `CREATE TABLE %[1]s.child (t_id int REFERENCES %[1]s.t)`},
+		{"trigger added", `CREATE TRIGGER t_audit BEFORE INSERT ON %[1]s.t FOR EACH ROW EXECUTE FUNCTION %[1]s.noop()`},
+		{"rule added", `CREATE RULE t_ignore_deletes AS ON DELETE TO %[1]s.t DO INSTEAD NOTHING`},
+		{"added to a publication", `CREATE PUBLICATION ` + schema + `_pub FOR TABLE %[1]s.t`},
+		{"row security enabled", `ALTER TABLE %[1]s.t ENABLE ROW LEVEL SECURITY`},
+		{"policy added", `CREATE POLICY t_all ON %[1]s.t USING (true)`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			setup(`DROP TABLE IF EXISTS %[1]s.child; DROP TABLE IF EXISTS %[1]s.t; CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`)
+			setup(`DROP PUBLICATION IF EXISTS ` + schema + `_pub; DROP TABLE IF EXISTS %[1]s.child; DROP TABLE IF EXISTS %[1]s.t;
+				CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`)
 			definition := plannedTableDefinition(t, pool, schema, "t")
 			setup(tc.change)
 
@@ -80,15 +114,29 @@ func TestExecuteDropTableRefusesATableThatChanged(t *testing.T) {
 		})
 	}
 
-	t.Run("replaced by a view", func(t *testing.T) {
-		setup(`DROP TABLE IF EXISTS %[1]s.child; DROP TABLE IF EXISTS %[1]s.t; CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`)
-		definition := plannedTableDefinition(t, pool, schema, "t")
-		setup(`DROP TABLE %[1]s.t; CREATE VIEW %[1]s.t AS SELECT 1 AS id`)
+	replacements := []struct {
+		name    string
+		replace string
+		remove  string
+	}{
+		{"replaced by a view", `CREATE VIEW %[1]s.t AS SELECT 1 AS id`, `DROP VIEW %[1]s.t`},
+		{"replaced by a materialized view", `CREATE MATERIALIZED VIEW %[1]s.t AS SELECT 1 AS id`, `DROP MATERIALIZED VIEW %[1]s.t`},
+		{"replaced by a sequence", `CREATE SEQUENCE %[1]s.t`, `DROP SEQUENCE %[1]s.t`},
+	}
+	for _, tc := range replacements {
+		t.Run(tc.name, func(t *testing.T) {
+			setup(`DROP PUBLICATION IF EXISTS ` + schema + `_pub; DROP TABLE IF EXISTS %[1]s.child; DROP TABLE IF EXISTS %[1]s.t;
+				CREATE TABLE %[1]s.t (id int PRIMARY KEY, note text)`)
+			definition := plannedTableDefinition(t, pool, schema, "t")
+			setup(`DROP TABLE %[1]s.t; ` + tc.replace)
 
-		err := dropTable(t, pool, schema, "t", definition)
-		require.ErrorIs(t, err, executor.ErrDroppedObjectDrift)
-		assert.True(t, relationExists(t, pool, schema, "t"))
-	})
+			err := dropTable(t, pool, schema, "t", definition)
+			require.ErrorIs(t, err, executor.ErrDroppedObjectDrift)
+			assert.Equal(t, executor.CodeDroppedObjectDrift, executor.OutcomeCode(err))
+			assert.True(t, relationExists(t, pool, schema, "t"))
+			setup(tc.remove)
+		})
+	}
 }
 
 // A table that is already gone, or whose schema is, reports table-not-found
