@@ -117,8 +117,10 @@ refusal — never a silently wrong or incomplete result:
   exported to a desired file — partitions and their bounds stay owned outside
   it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
   `--force` names the table ([limitations](docs/limitations.md)).
-- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
-  `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+- **Index maintenance** is not driven by `migrate --alter`: it refuses `DROP INDEX`
+  and `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+  `migrate --desired` does run a planned index drop, as `DROP INDEX CONCURRENTLY`
+  under `--expect-fingerprint` and `--allow-destructive`.
   An index of a partitioned table has no concurrent drop at all: drop it with
   the plain `DROP INDEX` under `--accept-blocking SCHEMA.TABLE` and
   `--allow-destructive SCHEMA.TABLE`, naming the parent, which locks the parent and
@@ -204,7 +206,8 @@ refusal — never a silently wrong or incomplete result:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
-  which covers one ordinary table plus its indexes per file. A table may
+  which covers one ordinary table (or one partitioned parent) plus its
+  indexes per file. A table may
   use them: the file names an object outside the table's schema and
   `public` qualified, or names it bare when `--extension-schema` lists
   the schema it lives in. The object's own definition is never managed,

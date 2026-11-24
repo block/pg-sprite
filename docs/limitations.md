@@ -143,7 +143,9 @@ unless the URL sets `pool_max_conns`.
 ## Declarative model boundaries
 
 The declarative front door (desired-state files, `diff`, and schema export)
-models **one ordinary table plus its indexes**. These are the boundaries of
+models **one ordinary table plus its indexes** (or one partitioned parent with its
+partition key and indexes, or one enum type, whose labels `diff` and
+`migrate --desired` converge; export does not write one). These are the boundaries of
 that model today. Wherever an operation meets a boundary, it fails closed
 with a typed refusal — never a silently wrong or incomplete result:
 
