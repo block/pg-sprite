@@ -148,6 +148,10 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		Table:     "public.users",
 		Detail:    "verified 1000 rows in 2 chunks; the retained source is dropped",
 		SwapLSN:   "0/1A2B3C8",
+		Verification: &verdict.Verification{
+			Rows:   1000,
+			Chunks: 2,
+		},
 	}
 	// A live plan proves the default against the server; clock_timestamp()
 	// is computed per row, so the probe reports the default rewrites.
