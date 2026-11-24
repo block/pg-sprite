@@ -1404,7 +1404,8 @@ still draw each identity default from the source's sequence). *Source:*
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
 (~2× the table, plus the slot lag ceiling for a run that decodes WAL, less what a resumed run
-already holds of each, measured from the server), execute-and-introspect
+already holds of each, measured from the server, or nothing for a run that only finishes a
+swap that committed, which may do nothing else), execute-and-introspect
 workspace, lock LK-1 acquired, and the RF-* refusals
 below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
@@ -1417,7 +1418,16 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 caller-measured disk headroom against the shadow copy's requirement plus, for a run that
 decodes WAL, the slot lag ceiling, each less what `pkg/schemachange` `MeasureResumeHeld`
 reads from the server that a resumed run already holds of it, and nothing for a run that
-starts over), chained by type —
+starts over; a resume of a `cutover` row whose swap the catalog shows committed — read as
+`InspectSwapped` reads it — is asked for neither, since it builds no shadow and decodes no
+WAL, and `MeasureResumeHeld` reports it as `SwapCommitted`, while a `cutover` row whose swap
+did not commit is measured as any resume, pinned by
+`TestCheckCopySwapAdmitsFinishingACommittedSwapOnATightVolume` and
+`TestCheckCopySwapStillAsksACutoverRowWhoseSwapDidNotCommitForTheCopy`; the target that
+admission mints reports `FinishesCommittedSwap`, and a `Runner` that finds a row asking for
+more under its lock refuses it as `finish-admission-stale` before it writes, pinned by
+`TestRunRefusesAFinishOnlyTargetOnceTheRowIsDone` and
+`TestRunRefusesAFinishOnlyTargetOnARowWhoseSwapDidNotCommit`), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last; `pkg/schemachange` `CheckCopySwap` runs the chain with the
 resume measure as one call, which `pkg/migrate` calls; and before them `pkg/schemachange` `CheckPool`, which

@@ -271,6 +271,11 @@ type Result struct {
 	// or the zero Report when the run resumed after the swap had already
 	// committed and so made none.
 	Verification checksum.Report
+	// FinishedEarlierSwap reports that the run resumed a row whose swap
+	// the catalog already showed committed: it copied, verified, and
+	// swapped nothing, and only finished the change an earlier run made
+	// (dropped its slot, settled the retained source, recorded done).
+	FinishedEarlierSwap bool
 	// CarriedCompare is what this run's swap paid, under its ACCESS
 	// EXCLUSIVE lock, to compare the keys its live verification pass left
 	// for it: how many keys, and how long the compare ran inside the lock,
@@ -455,7 +460,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 	if err != nil {
 		return Result{}, err
 	}
-	result := Result{Shadow: state.proof}
+	result := Result{Shadow: state.proof, FinishedEarlierSwap: state.swapped}
 	if !state.swapped {
 		report, err := r.swap(ctx, pool, lock, target, &state)
 		result.Verification = report
