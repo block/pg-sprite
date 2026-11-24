@@ -77,7 +77,7 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 	if err := f.ensureParentIndex(ctx); err != nil {
 		return err
 	}
-	passes, err := settlePasses(ctx, maxPartitionedIndexPasses, func(ctx context.Context, pass int) (bool, error) {
+	passes, err := settlePasses(ctx, maxPartitionedIndexPasses, ErrPartitionedIndexUnsettled, func(ctx context.Context, pass int) (bool, error) {
 		if pass > 1 {
 			var err error
 			if tree, err = f.readTree(ctx); err != nil {
@@ -382,8 +382,8 @@ func (f *partitionedIndexFlow) verify(ctx context.Context) error {
 // settlePasses runs walk until a pass changes nothing, at most limit times, and
 // returns how many passes ran. A walk that still changes something on the last
 // pass has not settled: another session keeps adding partitions faster than the
-// walks cover them.
-func settlePasses(ctx context.Context, limit int, walk func(ctx context.Context, pass int) (changed bool, err error)) (int, error) {
+// walks cover them, and the caller's unsettled error is returned.
+func settlePasses(ctx context.Context, limit int, unsettled error, walk func(ctx context.Context, pass int) (changed bool, err error)) (int, error) {
 	for pass := 1; pass <= limit; pass++ {
 		changed, err := walk(ctx, pass)
 		if err != nil {
@@ -393,5 +393,5 @@ func settlePasses(ctx context.Context, limit int, walk func(ctx context.Context,
 			return pass, nil
 		}
 	}
-	return limit, ErrPartitionedIndexUnsettled
+	return limit, unsettled
 }
