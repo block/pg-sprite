@@ -841,9 +841,11 @@ transaction: the step's own `LOCK TABLE` on the tree takes those locks first und
 `lock_timeout`, the step defers to another pass a leaf no leaf step covered (the statement would
 build its index under the lock), and after the statement it reads back that every leaf's adopted
 constraint is the one its leaf step recorded on the same index OID, rolling back with an invariant
-violation otherwise, so the window only changes the catalog; a primary key over a column the parent
-allows to be NULL is refused before any leaf is touched
-(`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitionedKeyParentStepLocks`,
+violation otherwise, so the window only changes the catalog, and the proof and the read-back read
+every leaf in a fixed number of statements, so the window does not grow with the number of
+partitions; a primary key over a column the parent allows to be NULL is refused before any leaf is
+touched (`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitionedKeyParentStepJudgesEveryLeaf`,
+`TestAddPartitionedKeyParentStepRoundTrips`, `TestAddPartitionedKeyParentStepLocks`,
 `TestAddPartitionedKeyPrimaryKeyOnline`,
 `TestAddPartitionedKeyRefusals/a_primary_key_over_a_column_the_parent_allows_to_be_NULL`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
