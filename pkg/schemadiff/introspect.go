@@ -139,8 +139,11 @@ func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path
 	if m.Indexes, err = introspectIndexes(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect indexes of %s.%s: %w", schema, table, err)
 	}
-	if m.ReferencedBy, err = introspectReferencedBy(ctx, tx, oid); err != nil {
+	if m.IncomingForeignKeys, err = introspectReferencedBy(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect incoming foreign keys of %s.%s: %w", schema, table, err)
+	}
+	for _, fk := range m.IncomingForeignKeys {
+		m.ReferencedBy = append(m.ReferencedBy, fk.Table+"."+fk.Constraint)
 	}
 	if m.TableDependents, err = introspectTableDependents(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect objects that depend on %s.%s: %w", schema, table, err)
@@ -733,32 +736,33 @@ func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndex
 }
 
 // introspectReferencedBy reads the incoming foreign keys: constraints on
-// other tables whose referenced relation is this table, as
-// "table.constraint" strings. A self-referential foreign key is excluded —
+// other tables whose referenced relation is this table, each with the
+// schema and table that hold it. A self-referential foreign key is excluded —
 // it is already carried as one of the table's own constraints. Partition
 // clones are excluded too (conislocal, as in introspectConstraints): a
 // foreign key on a partitioned referencing table is mirrored onto every
 // partition, and those mirrors are the same relationship, not independent
 // ones. These are not part of this table's definition; the model carries
 // them only for the renderer to refuse on.
-func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
+func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]IncomingForeignKey, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT c.relname OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) con.conname
+		SELECT n.nspname, c.relname, con.conname
 		FROM pg_catalog.pg_constraint con
 		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) con.conrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		WHERE con.confrelid OPERATOR(pg_catalog.=) $1 AND con.contype OPERATOR(pg_catalog.=) 'f'
 		      AND con.conrelid OPERATOR(pg_catalog.<>) $1
 		      AND con.conislocal
-		ORDER BY c.relname, con.conname`, oid)
+		ORDER BY c.relname, con.conname, n.nspname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("query incoming foreign keys: %w", err)
 	}
 	defer rows.Close()
-	var refs []string
+	var refs []IncomingForeignKey
 	for rows.Next() {
-		var ref string
-		if err := rows.Scan(&ref); err != nil {
+		var ref IncomingForeignKey
+		if err := rows.Scan(&ref.Schema, &ref.Table, &ref.Constraint); err != nil {
 			return nil, fmt.Errorf("scan incoming foreign key: %w", err)
 		}
 		refs = append(refs, ref)

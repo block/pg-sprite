@@ -247,6 +247,33 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
 }
 
+// Two schemas can each hold an orders table with a foreign key of the same
+// name. ReferencedBy names both the same way, and IncomingForeignKeys tells
+// them apart by the schema that holds each.
+func TestIntrospectIncomingForeignKeysNameTheirSchema(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	home := testutil.NewSchema(t, pool)
+	other := testutil.NewSchema(t, pool)
+	for _, ddl := range []string{
+		fmt.Sprintf("CREATE TABLE %s.users (id bigint PRIMARY KEY)", home),
+		fmt.Sprintf("CREATE TABLE %s.orders (id bigint PRIMARY KEY, user_id bigint CONSTRAINT orders_user_fkey REFERENCES %s.users)", home, home),
+		fmt.Sprintf("CREATE TABLE %s.orders (id bigint PRIMARY KEY, user_id bigint CONSTRAINT orders_user_fkey REFERENCES %s.users)", other, home),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	users, err := schemadiff.Introspect(t.Context(), pool, home, "users")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"orders.orders_user_fkey", "orders.orders_user_fkey"}, users.ReferencedBy)
+	assert.ElementsMatch(t, []schemadiff.IncomingForeignKey{
+		{Schema: home, Table: "orders", Constraint: "orders_user_fkey"},
+		{Schema: other, Table: "orders", Constraint: "orders_user_fkey"},
+	}, users.IncomingForeignKeys)
+}
+
 // A foreign key on a partitioned referencing table is cloned onto every
 // partition in pg_constraint; ReferencedBy must carry the one real
 // relationship, not a row per partition clone.
