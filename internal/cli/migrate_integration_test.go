@@ -111,12 +111,6 @@ func TestMigratePartitionedTableAwareness(t *testing.T) {
 		assert.True(t, v.Forced)
 	})
 
-	t.Run("parent unique constraint", func(t *testing.T) {
-		schema := createPartitionFixture(t, pool)
-		assertPartitionedParentRefusal(t, url, pool, schema,
-			fmt.Sprintf("ALTER TABLE %s.p ADD CONSTRAINT p_id_unique UNIQUE (id)", schema))
-	})
-
 	t.Run("parent using index adoption", func(t *testing.T) {
 		schema := createPartitionFixture(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX ix_p_id ON %s.p (id)", schema))
@@ -204,27 +198,6 @@ func createPartitionFixture(t *testing.T, pool *pgxpool.Pool) string {
 		"CREATE TABLE %s.p1 PARTITION OF %s.p FOR VALUES FROM (0) TO (100)", schema, schema))
 	require.NoError(t, err)
 	return schema
-}
-
-func assertPartitionedParentRefusal(t *testing.T, url string, pool *pgxpool.Pool, schema, sql string) {
-	t.Helper()
-	cmd := newMigrateCmd(url, sql)
-	cmd.JSON = true
-	var out strings.Builder
-	err := cmd.run(t.Context(), &out)
-	require.ErrorIs(t, err, verdict.ErrRefused)
-
-	var v verdict.Verdict
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
-	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
-	assert.Empty(t, v.ExecutedSQL)
-
-	var indexes int
-	require.NoError(t, pool.QueryRow(t.Context(), `
-		SELECT count(*) FROM pg_indexes
-		WHERE schemaname = $1 AND tablename IN ('p', 'p1')`, schema).Scan(&indexes))
-	assert.Zero(t, indexes, "preflight refusal must execute no index-building step")
 }
 
 // ALTER TABLE ... RENAME COLUMN parses as a RenameStmt, not an

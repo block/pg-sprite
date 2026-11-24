@@ -16,13 +16,15 @@ const (
 	// concurrent index build on the parent, which PostgreSQL has no
 	// statement for. The front doors send a CREATE INDEX on a partitioned
 	// table to the partition-aware build before this check
-	// (RoutesToPartitionedIndexBuild), so only a step list that bypasses the
-	// routing carries one.
+	// (RoutesToPartitionedIndexBuild), and an ADD PRIMARY KEY or ADD UNIQUE
+	// to the partitioned key build (RoutesToPartitionedKeyBuild), so only a
+	// step list that bypasses the routing carries one.
 	PartitionCauseConcurrentIndexBuild PartitionRefusalCause = "parent-concurrent-index-build"
 	// PartitionCauseBlockingIndexBuild means a step would build an index on
 	// the parent while holding a lock that blocks writes to the whole tree.
-	// A CREATE INDEX reaches it only when the operator forced the submitted
-	// form, which overrides the routing to the partition-aware build.
+	// A CREATE INDEX, ADD PRIMARY KEY, or ADD UNIQUE reaches it only when the
+	// operator forced the submitted form, which overrides the routing to the
+	// partition-aware build.
 	PartitionCauseBlockingIndexBuild PartitionRefusalCause = "parent-blocking-index-build"
 	// PartitionCauseIndexAdoption means a step adopts an existing index as a
 	// primary-key or unique constraint on the parent.
@@ -89,10 +91,10 @@ func (e *UnsupportedPartitionedParentError) Error() string {
 		return "PostgreSQL does not support ALTER TABLE ... ADD CONSTRAINT ... USING INDEX on partitioned tables in any supported version"
 	case PartitionCauseBlockingIndexBuild:
 		return "PostgreSQL supports a blocking parent-level index build, but pg-sprite refuses to run it as written because it blocks writes to the whole table; " +
-			"a CREATE INDEX on a partitioned table, without the force override, is built partition by partition instead"
+			"a CREATE INDEX, ADD PRIMARY KEY, or ADD UNIQUE on a partitioned table, without the force override, is built partition by partition instead"
 	case PartitionCauseConcurrentIndexBuild:
 		return "PostgreSQL cannot build parent-level indexes concurrently, so a sequence of steps cannot carry one on a partitioned table; " +
-			"a CREATE INDEX on a partitioned table is built partition by partition instead"
+			"a CREATE INDEX, ADD PRIMARY KEY, or ADD UNIQUE on a partitioned table is built partition by partition instead"
 	default:
 		return "pg-sprite refuses an unsupported operation on a partitioned table"
 	}
@@ -116,6 +118,47 @@ func RoutesToPartitionedIndexBuild(execSQL []string) (bool, error) {
 		return false, fmt.Errorf("check partitioned index build routing: %w", err)
 	}
 	return st.Kind() == statement.KindCreateIndex, nil
+}
+
+// RoutesToPartitionedKeyBuild reports whether a statement whose target is a
+// partitioned table is the one ADD PRIMARY KEY or ADD UNIQUE that the
+// partitioned key build carries: an ALTER TABLE whose only subcommand adds a
+// primary key or unique constraint over columns, not USING INDEX. A front
+// door asks it of the submitted statement, after it knows the target is
+// partitioned and before the steps the planner made for a plain table (a
+// concurrent unique build and an ADD CONSTRAINT ... USING INDEX, which
+// PostgreSQL refuses on a partitioned table) reach RefusesPartitionedParent,
+// and runs the build with the statement itself. A statement the build's own
+// admission refuses, such as an unnamed constraint or one with INCLUDE,
+// still routes, so it is refused with the build's reason. ADD CONSTRAINT ...
+// USING INDEX is false and stays the index-adoption refusal, as is a
+// statement with any other subcommand beside the key. A statement that does
+// not parse is an error, as it is for RefusesPartitionedParent.
+func RoutesToPartitionedKeyBuild(sql string) (bool, error) {
+	st, err := statement.ParseOne(sql)
+	if err != nil {
+		return false, fmt.Errorf("check partitioned key build routing: %w", err)
+	}
+	if st.Kind() != statement.KindAlterTable {
+		return false, nil
+	}
+	ops, err := statement.ParseOps(sql)
+	if err != nil {
+		return false, fmt.Errorf("check partitioned key build routing: %w", err)
+	}
+	if len(ops) != 1 {
+		return false, nil
+	}
+	return addsKeyOverColumns(ops[0]), nil
+}
+
+// addsKeyOverColumns reports whether op adds a primary key or unique
+// constraint that builds its own index.
+func addsKeyOverColumns(op statement.Op) bool {
+	if op.Kind != statement.OpAddConstraint || op.UsingIndex {
+		return false
+	}
+	return op.Constraint == statement.ConstraintPrimaryKey || op.Constraint == statement.ConstraintUnique
 }
 
 // CheckPartitionSupport verifies that the execution steps are safe

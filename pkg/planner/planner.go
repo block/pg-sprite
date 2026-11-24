@@ -252,6 +252,18 @@ const (
 	// leaves an invalid parent index and the partition indexes built so far;
 	// running the same statement again resumes from them.
 	ExecutionPartitionedIndexBuild Execution = "partitioned-index-build"
+	// ExecutionPartitionedKeyBuild: the one step is an ALTER TABLE ... ADD
+	// PRIMARY KEY or ADD UNIQUE on a partitioned table, and it runs as the
+	// partitioned key build, not as the statement: each partition's unique
+	// index is built concurrently and given the constraint with ADD
+	// CONSTRAINT ... USING INDEX, then the parent's ADD CONSTRAINT adopts
+	// them in one brief transaction that builds nothing. The partitions are
+	// listed when the build runs, not when the plan is made. The statement
+	// must not be run as written, which would build every partition's index
+	// under ACCESS EXCLUSIVE on the whole tree. A failed or interrupted run
+	// leaves the partition constraints finished so far; running the same
+	// statement again resumes from them.
+	ExecutionPartitionedKeyBuild Execution = "partitioned-key-build"
 )
 
 // Executions returns the closed set of Execution values. It is part of the
@@ -259,7 +271,7 @@ const (
 // format_version bump, and a consumer that meets an unrecognized value must
 // treat the sequence as unknown and refuse to run it.
 func Executions() []Execution {
-	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild}
+	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionPartitionedKeyBuild}
 }
 
 // Decision is the classification of one operation.

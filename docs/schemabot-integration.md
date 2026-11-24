@@ -722,6 +722,38 @@ An adapter that enumerates `executor.Codes()` exhaustively must map every row ab
 is the contract, and [execution-model](execution-model.md#outcome-codes) is its canonical
 list. The design is in [partitioned-index-build-design](partitioned-index-build-design.md).
 
+## Outcomes of a partitioned key build
+
+A lone `ALTER TABLE ... ADD CONSTRAINT name {PRIMARY KEY | UNIQUE} (columns)` on a partitioned
+table that reaches `migrate.Run` runs as `executor.AddPartitionedKey`: each partition's unique
+index is built concurrently and given the constraint, then the parent's `ADD CONSTRAINT` adopts
+them in one brief transaction. The `migrate --dry-run` plan statement carries
+`execution: partitioned-key-build` (plan `format_version` 22). It needs `migrate.Options.Connection`
+for its table lock session exactly as the partitioned index build does, with the same two wiring
+errors. `migrate.RunDesired` does not route it yet: a desired-state plan refuses the statement
+with `unsupported-partitioned-parent`, cause `parent-concurrent-index-build`. A forced run meets
+cause `parent-blocking-index-build`, and `ADD CONSTRAINT ... USING INDEX` meets
+`parent-index-adoption`, as before.
+
+The build stops at the first error and keeps every partition constraint it finished; **running
+the same statement again resumes from there.** `migrate.Run` maps its stops as follows; every
+refusal row executed nothing and exits 2:
+
+| Executor code | Verdict | Orchestrator action |
+| --- | --- | --- |
+| `not-add-key-constraint`, `partitioned-key-unsupported-shape` | refused, `unsupported-statement`, `capability-boundary`; the dry run reports it too | The statement is not a lone named key over plain distinct columns (an unnamed constraint, `INCLUDE`, `NULLS NOT DISTINCT`, `DEFERRABLE`, `WITH (...)`, `USING INDEX TABLESPACE`, `NOT VALID`, `ONLY`, or a repeated column); change the statement |
+| `unique-index-missing-partition-key` | refused, `unsupported-statement`, `by-design`; the dry run reports it too | The key lacks a partition key column; PostgreSQL rejects it, so add the columns to the key |
+| `partitioned-key-parent-conflict`, `partitioned-key-nullable-column` | refused, `unsupported-statement`, `environmental`, when returned before any partition got the key; otherwise failed with the code | The parent already has a primary key, another object under the name, or a primary key column allows `NULL`; change the table (drop or rename the occupant, `SET NOT NULL` first), then rerun |
+| `partitioned-key-sub-partitioned` | refused, `unsupported-statement`, `capability-boundary`, when returned before any partition got the key; otherwise failed with the code | A partition is itself partitioned, which the build does not take yet |
+| `partitioned-key-name-taken`, `partitioned-key-conflict`, `foreign-table-partition` | failed with the code | Something on a partition stands in the way (an occupant of the derived name, a conflicting key, a foreign table); an operator removes it, then the same statement resumes |
+| `partitioned-key-unsettled` | failed with the code | Partitions kept appearing; retry the same statement |
+| `not-partitioned-table`, `invariant-violation`, `invalid-index-*`, `commit-outcome-unknown`, `budget-*`, `*dbconn.TableLockHeldError` | failed, as for the partitioned index build above | Route as in [the partitioned index build table](#outcomes-of-a-partitioned-index-build) |
+
+A failed verdict never claims nothing changed: earlier partitions' constraints may have
+committed, so inspect the constraints and indexes of the table and its partitions, then rerun.
+The codes are in [execution-model](execution-model.md#outcome-codes); the design is in
+[partitioned-index-build-design](partitioned-index-build-design.md#primary-key-and-unique-constraints).
+
 ## Execution-mode verdicts and direct execution
 
 SchemaBot records a per-statement **execution-mode verdict** on each planned `TableChange`:

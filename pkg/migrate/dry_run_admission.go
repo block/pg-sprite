@@ -71,6 +71,38 @@ func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, st sta
 	})
 }
 
+// AdmitPartitionedKeyRequest is [AdmitRoutedSteps] for a statement routed to
+// the partitioned key build, whose one step is the ADD PRIMARY KEY or ADD
+// UNIQUE itself: it runs the build's own static admission, so an unnamed
+// constraint, or one with a clause the build cannot carry to every partition,
+// is refused in the dry run as it is in the run.
+func AdmitPartitionedKeyRequest(st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRouted(st, schema, steps, func(steps []string) error {
+		if len(steps) != 1 {
+			return fmt.Errorf("%w: the partitioned key build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
+		}
+		return executor.AdmitPartitionedKeyShape(steps[0])
+	})
+}
+
+// AdmitPartitionedKeyColumns is the catalog half of the partitioned key
+// build's admission, for a statement [AdmitPartitionedKeyRequest] admitted: a
+// key that does not include every partition key column of every partitioned
+// table under the target is refused, read from the live catalog on pool, as
+// the build refuses it under its table lock before it creates anything. The
+// build's other checks under its lock (a parent constraint in the way, a
+// nullable primary key column, a sub-partitioned partition) are not part of
+// it, so a dry run does not claim them. The verdict, the boolean, and the
+// error mean what they mean for [AdmitRoutedSteps].
+func AdmitPartitionedKeyColumns(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRouted(st, schema, steps, func(steps []string) error {
+		if len(steps) != 1 {
+			return fmt.Errorf("%w: the partitioned key build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
+		}
+		return executor.AdmitPartitionedKey(ctx, pool, steps[0])
+	})
+}
+
 // admitRouted qualifies the steps of an unqualified st and applies admit to
 // them, returning the refusal verdict [Run] ends in when admit refuses.
 func admitRouted(st statement.Statement, schema string, steps []string, admit func([]string) error) (verdict.Verdict, bool, error) {

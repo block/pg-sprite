@@ -56,6 +56,10 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 		r, ok := admissionRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"admission:" + err.Error(), r, ok})
 	}
+	for _, err := range partitionedKeySentinels() {
+		r, ok := partitionedKeyRefusal(fmt.Errorf("wrapped: %w", err))
+		keys = append(keys, classifiedKey{"partitioned-key:" + err.Error(), r, ok})
+	}
 	for _, err := range desiredShapeSentinels() {
 		r, ok := desiredShapeRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"desired-shape:" + err.Error(), r, ok})

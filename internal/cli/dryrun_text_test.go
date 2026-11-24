@@ -133,6 +133,33 @@ func TestDryRunTextPartitionedIndexBuild(t *testing.T) {
 	assert.NotContains(t, text, "runs as written")
 }
 
+// A dry run of a key on a partitioned table names the partitioned key build:
+// the statement does not run as written, and the note says how an
+// interrupted run continues.
+func TestDryRunTextPartitionedKeyBuild(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "events", "16.10"
+	report.Disposition = router.DispositionExecute
+	sql := `ALTER TABLE "public"."events" ADD CONSTRAINT "events_pkey" PRIMARY KEY ("id", "created")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionPartitionedKeyBuild,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	flat := strings.Join(strings.Fields(text), " ")
+	assert.Contains(t, flat, "will add the constraint partition by partition instead of running the statement")
+	assert.Contains(t, flat, "an interrupted run is resumed by running the same statement again")
+	assert.Contains(t, text, "plan:\n  public.events (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	assert.NotContains(t, text, "runs as written")
+}
+
 // A copy-and-swap route the engine carries renders as one step: no literal
 // SQL is listed, the note says what the run does, and the apply footer
 // invites the real run.

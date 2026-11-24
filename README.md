@@ -111,7 +111,10 @@ refusal — never a silently wrong or incomplete result:
 - **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
   on a partitioned table runs partition by partition, resuming when the same
   statement is run again; a unique one that lacks a partition key column is
-  refused, as PostgreSQL rejects it. They cannot be expressed in or exported to desired
+  refused, as PostgreSQL rejects it. `migrate --alter` runs a named
+  `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table the same way, one
+  partition at a time; a key on a tree with sub-partitioned partitions is
+  refused, and `diff` does not plan one yet. They cannot be expressed in or exported to desired
   files, and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
   `--force` names the table ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and

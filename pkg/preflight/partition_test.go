@@ -26,14 +26,15 @@ func TestCheckPartitionSupport(t *testing.T) {
 }
 
 // The index-build refusals are raised for any statement that builds an index
-// on a parent, including a constraint-building ALTER TABLE a forced run
-// submits as written, which the partitioned build does not take. Their
-// messages therefore name the statement the build does take, a CREATE INDEX,
-// and never promise the same alternative for the request in hand.
-func TestIndexBuildRefusalNamesOnlyTheStatementTheBuildTakes(t *testing.T) {
+// on a parent, including an index-building ALTER TABLE such as an inline
+// ADD COLUMN ... UNIQUE, which the partitioned builds do not take. Their
+// messages therefore name the statements the builds do take, a CREATE INDEX
+// and a lone ADD PRIMARY KEY or ADD UNIQUE, and never promise the same
+// alternative for the request in hand.
+func TestIndexBuildRefusalNamesOnlyTheStatementsTheBuildsTake(t *testing.T) {
 	for _, cause := range []PartitionRefusalCause{PartitionCauseBlockingIndexBuild, PartitionCauseConcurrentIndexBuild} {
 		msg := (&UnsupportedPartitionedParentError{Cause: cause}).Error()
-		assert.Contains(t, msg, "a CREATE INDEX on a partitioned table", string(cause))
+		assert.Contains(t, msg, "a CREATE INDEX, ADD PRIMARY KEY, or ADD UNIQUE on a partitioned table", string(cause))
 		assert.Contains(t, msg, "partition by partition instead", string(cause))
 		assert.NotContains(t, msg, "pg-sprite builds the index", string(cause),
 			"the message must not promise the build for whatever statement was refused")
@@ -82,6 +83,38 @@ func TestRoutesToPartitionedIndexBuild(t *testing.T) {
 	}
 
 	_, err := RoutesToPartitionedIndexBuild([]string{"CREATE INDEX"})
+	require.Error(t, err)
+}
+
+// A lone ADD PRIMARY KEY or ADD UNIQUE over columns is the statement the
+// partitioned key build carries, named or not and whatever clauses it has,
+// so the build's own admission decides the rest. Adopting an index with
+// USING INDEX, any other constraint, and a key with company are not.
+func TestRoutesToPartitionedKeyBuild(t *testing.T) {
+	for _, sql := range []string{
+		"ALTER TABLE s.t ADD CONSTRAINT t_pkey PRIMARY KEY (id, created_at)",
+		"ALTER TABLE s.t ADD CONSTRAINT t_code_key UNIQUE (code, created_at)",
+		"ALTER TABLE s.t ADD PRIMARY KEY (id)",
+		"ALTER TABLE t ADD CONSTRAINT t_code_key UNIQUE (code) INCLUDE (note)",
+	} {
+		routes, err := RoutesToPartitionedKeyBuild(sql)
+		require.NoError(t, err, sql)
+		assert.True(t, routes, sql)
+	}
+
+	for name, sql := range map[string]string{
+		"an index adoption":       "ALTER TABLE s.t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX ix",
+		"a check constraint":      "ALTER TABLE s.t ADD CONSTRAINT t_ck CHECK (id > 0)",
+		"a key with company":      "ALTER TABLE s.t ADD COLUMN c int, ADD CONSTRAINT t_u UNIQUE (id)",
+		"an inline unique column": "ALTER TABLE s.t ADD COLUMN c int UNIQUE",
+		"a CREATE INDEX":          "CREATE UNIQUE INDEX i ON s.t (id)",
+	} {
+		routes, err := RoutesToPartitionedKeyBuild(sql)
+		require.NoError(t, err, name)
+		assert.False(t, routes, name)
+	}
+
+	_, err := RoutesToPartitionedKeyBuild("ALTER TABLE")
 	require.Error(t, err)
 }
 
