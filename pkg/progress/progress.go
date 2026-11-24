@@ -260,6 +260,19 @@ func (t *Tracker) StartStep(step int, operation Operation, statement string) {
 	t.session, t.buildPID, t.source = nil, 0, nil
 }
 
+// AddSteps raises the run's step count by n, for a run that learns its steps
+// while it runs, such as a partitioned index build listing partitions from the
+// catalog. A count below one changes nothing, so the total never falls behind
+// the step.
+func (t *Tracker) AddSteps(n int) {
+	if n < 1 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.total += n
+}
+
 // SetAttempt records the current bounded retry attempt.
 func (t *Tracker) SetAttempt(attempt int) {
 	t.mu.Lock()

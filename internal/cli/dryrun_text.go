@@ -217,6 +217,11 @@ func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner, desiredTabl
 		w.diag("note", "", "the route's preflight — free disk, logical decoding, triggers, dependent views, publication membership — is not part of this dry run; the run reads it before anything executes and refuses with nothing run when it fails")
 		return 1
 	}
+	if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+		w.diag("note", "", runner+" will build the index partition by partition instead of running the statement: create the parent's index with ON ONLY, build each partition's index concurrently and attach it, and the parent's index turns valid with the last attach")
+		w.diag("note", "", "the partitions are listed when the run starts, each step commits on its own, and an interrupted run is resumed by running the same statement again")
+		return 1
+	}
 	if substituted(ps) {
 		w.diag("note", "", runner+" will run a safer online sequence instead:")
 		for n, sql := range ps.ExecSQL {
@@ -413,6 +418,11 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — " +
 			"create the table without the foreign key, then add it with pg-sprite migrate --alter, " +
 			"naming the referenced table with its schema"
+	}
+	if r == verdict.ReasonUnsupportedPartitionedParent && ps.Kind == schemadiff.ChangeDropIndex {
+		return "PostgreSQL has no concurrent drop for an index of a partitioned table; the drop is this plain DROP INDEX, " +
+			"which takes ACCESS EXCLUSIVE on the parent, every partition, and every partition's index — run it with " +
+			"pg-sprite migrate --alter, --accept-blocking, and --allow-destructive naming the table"
 	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)

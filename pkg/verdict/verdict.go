@@ -85,9 +85,13 @@ const (
 	// the change needs; Detail names the exact missing GRANT (see
 	// docs/engine-role.md).
 	ReasonInsufficientPrivileges Reason = "insufficient-privileges"
-	// ReasonUnsupportedPartitionedParent: the routed plan builds an index
-	// on a partitioned parent, for which the required partition-aware
-	// online sequence is not implemented.
+	// ReasonUnsupportedPartitionedParent: the plan has a step pg-sprite
+	// cannot run on a partitioned parent: adopting an index as a
+	// constraint, a NOT VALID foreign key before PostgreSQL 18, a
+	// concurrent DROP INDEX of the parent's index, or a blocking index
+	// build, which is what a forced CREATE INDEX takes. An unforced CREATE
+	// INDEX is not one of these, because it runs as the partitioned index
+	// build.
 	ReasonUnsupportedPartitionedParent Reason = "unsupported-partitioned-parent"
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.
@@ -483,6 +487,9 @@ const (
 	// CauseParentNotValidForeignKey identifies a NOT VALID foreign key on a
 	// partitioned parent.
 	CauseParentNotValidForeignKey Cause = "parent-not-valid-foreign-key"
+	// CauseParentConcurrentIndexDrop identifies a concurrent drop of an
+	// index of a partitioned parent, which PostgreSQL does not support.
+	CauseParentConcurrentIndexDrop Cause = "parent-concurrent-index-drop"
 	// CauseCopyAndSwapNotEnabled: the statement routes to the copy-and-swap
 	// backend, which the caller has not opted into; nothing was read or
 	// executed. The route is in preview, so it runs only when the policy
@@ -575,6 +582,14 @@ type Verdict struct {
 	// swap had committed, or one that lost its connection and learned of
 	// the commit from the catalog. Empty for every other verdict.
 	SwapLSN string `json:"swap_lsn,omitempty"`
+	// Verification is set on an executed-via-copy-and-swap verdict whose
+	// run verified the shadow before its swap: the figures of that
+	// verification pass. Detail states the rows, chunks, and settled
+	// chunks too; Unsettled and Carried are only here. Nil when
+	// the pass compared no chunk — a run resumed after its swap had
+	// committed makes no pass, and an empty table has nothing to compare —
+	// and for every other verdict.
+	Verification *Verification `json:"verification,omitempty"`
 	// TableCreated is true on an executed verdict whose run created the
 	// table, committing it in the same transaction as its row security, so
 	// automation can tell a create from a run that converged a table that
@@ -688,6 +703,30 @@ type Verdict struct {
 	// refusal of an accepted DROP INDEX would have dropped; nil for every
 	// other verdict.
 	IndexUsage *IndexUsage `json:"index_usage,omitempty"`
+}
+
+// Verification is what a copy-and-swap run's verification pass compared
+// before the swap: the source against its shadow, chunk by chunk, up to the
+// copy's complete watermark. Every field is present, zero included, so a
+// reader tells a pass that settled nothing from one that did not say.
+type Verification struct {
+	// Rows is the number of source rows the pass hashed.
+	Rows int64 `json:"rows"`
+	// Chunks is the number of chunks the pass compared.
+	Chunks int `json:"chunks"`
+	// Settled is the number of chunks a live pass found differing in its
+	// sweep and then settled key by key against the stream; zero for a run
+	// that blocked writes.
+	Settled int `json:"settled"`
+	// Unsettled is the number of chunks a live pass could settle neither
+	// way, every one of them holding keys the pass left for the swap; zero
+	// whenever Carried is.
+	Unsettled int `json:"unsettled"`
+	// Carried is the number of keys the live pass left for the swap to
+	// compare under its lock, the keys of the unsettled chunks that never
+	// held still; the swap compared each and found it equal, or it would
+	// have refused. The count only: the keys themselves are row data.
+	Carried int `json:"carried"`
 }
 
 // IndexUsage is how the server pg-sprite is connected to has seen an index
