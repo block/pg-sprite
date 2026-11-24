@@ -117,7 +117,7 @@ refusal — never a silently wrong or incomplete result:
   exported to a desired file — partitions and their bounds stay owned outside
   it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
   `--force` names the table ([limitations](docs/limitations.md)).
-- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
+- **Index maintenance** is not driven: `migrate --alter` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
   An index of a partitioned table has no concurrent drop at all: drop it with
   the plain `DROP INDEX` under `--accept-blocking SCHEMA.TABLE` and
