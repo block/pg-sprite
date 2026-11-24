@@ -138,8 +138,8 @@ func checkUniquePartitionKeys(schema, index string, keyColumns []string, tables 
 // build's own *UniqueIndexPartitionKeyError, which the build returns under
 // its table lock before it creates anything. A dry run calls it to learn that
 // refusal without running the build. It only reads the catalog, in bounded
-// read-only transactions on the pool, which must come from pkg/dbconn. A
-// non-unique index is admitted without a read.
+// transactions on the pool that always roll back; the pool must come from
+// pkg/dbconn. A non-unique index is admitted without a read.
 func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, sql string) error {
 	st, op, err := admitPartitionedIndexShape(sql)
 	if err != nil {

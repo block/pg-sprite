@@ -75,8 +75,10 @@ func (b briefTx) run(ctx context.Context, what string, path []string, commit boo
 	return nil
 }
 
-// read runs fn against the catalog in a read-only transaction under
-// catalogReadPath.
+// read runs fn against the catalog under catalogReadPath in a transaction that
+// always rolls back, so nothing fn runs persists. It does not open the
+// transaction READ ONLY: the rollback, not the server, is what keeps the read
+// from writing.
 func (b briefTx) read(ctx context.Context, what string, fn func(context.Context, querier) error) error {
 	return b.run(ctx, what, catalogReadPath(), false, func(ctx context.Context, tx pgx.Tx) error {
 		return fn(ctx, tx)
