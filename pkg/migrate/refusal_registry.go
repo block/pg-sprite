@@ -82,6 +82,23 @@ func createCollisionRefusal() verdict.Refusal {
 	return verdict.Environmental(verdict.ReasonCreateCollision)
 }
 
+// attachedIndexDropRefusal: a DROP INDEX names an index attached under a
+// parent index, which PostgreSQL drops only together with that parent, in
+// either form. No engine release or flag changes that; the operator drops
+// the parent index instead.
+func attachedIndexDropRefusal() verdict.Refusal {
+	return verdict.ByDesign(verdict.ReasonUnsupportedStatement)
+}
+
+// constraintIndexDropRefusal: a DROP INDEX of a partitioned or attached
+// index comes down to an index a primary key, unique, or exclusion
+// constraint owns, which PostgreSQL removes only with the constraint, in
+// either form. No engine release or flag changes that; the operator drops
+// the constraint instead.
+func constraintIndexDropRefusal() verdict.Refusal {
+	return verdict.ByDesign(verdict.ReasonUnsupportedStatement)
+}
+
 // planIncoherentRefusal: a planned statement whose disposition this build
 // does not know, a refused planned statement carrying no class, or a plan
 // whose aggregate disposition no statement carries — a report this build
@@ -108,6 +125,8 @@ func siteRefusals() []siteRefusal {
 		{"destructive-change", destructiveChangeRefusal()},
 		{"plan-fingerprint-mismatch", fingerprintMismatchRefusal()},
 		{"create-collision", createCollisionRefusal()},
+		{"attached-index-drop", attachedIndexDropRefusal()},
+		{"constraint-index-drop", constraintIndexDropRefusal()},
 		{"declarative-foreign-key", plan.ForeignKeyChangeRefusal()},
 		{"plan-incoherent", planIncoherentRefusal()},
 		{"copy-and-swap-not-enabled", copySwapNotEnabledRefusal()},

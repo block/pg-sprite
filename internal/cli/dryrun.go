@@ -19,7 +19,9 @@ import (
 // submitted statement feeds the classifier directly. It prints the routed
 // plan and never executes anything. The statement-type gate runs first,
 // exactly as it does on apply, so a gated kind dry-runs to the same refusal
-// verdict (and refusal exit code) the apply would end in; so does the
+// verdict (and refusal exit code) the apply would end in — for a
+// single-index DROP INDEX after the same catalog read of the index's kind
+// the apply makes; so does the
 // destructive-change gate, unless --allow-destructive names the table, and
 // the executor's shape admission of the routed steps, once they are known, when
 // no earlier apply check refuses first. The checks that need the apply's
@@ -34,7 +36,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	logger.Debug("statement parsed", "kind", st.Kind(), "schema", st.Schema(), "table", st.Table())
-	if v, refused := migrate.Gate(st); refused {
+	if v, refused := migrate.Gate(st); refused && !migrate.GateReadsCatalog(st) {
 		return c.emit(out, v)
 	}
 
@@ -43,6 +45,17 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	defer pool.Close()
+
+	// A single-index DROP INDEX is refused on apply too, but which refusal
+	// depends on whether the index is partitioned, so the dry run reads
+	// the same catalog the apply does.
+	gated, gateRefused, err := migrate.GateWithCatalog(ctx, pool, st)
+	if err != nil {
+		return err
+	}
+	if gateRefused {
+		return c.emit(out, gated)
+	}
 
 	facts, err := migrate.LiveFacts(ctx, pool, st)
 	if err != nil {

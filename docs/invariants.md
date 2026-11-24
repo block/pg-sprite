@@ -1662,12 +1662,15 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   foreign key `NOT VALID`. pg-sprite does not run a blocking parent build, and `--force` does not
   bypass that. A `CREATE INDEX` on a partitioned parent is not refused: it runs as that build
   (`CREATE INDEX ON ONLY`, then a concurrent build and attach per partition), each step committing
-  on its own. *Enforced:* preflight (`RefusesPartitionedParent`, with
-  `RoutesToPartitionedIndexBuild` naming the one shape that is routed instead) and
+  on its own. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
+  refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
+  concurrent idiom PostgreSQL rejects for it. *Enforced:* preflight (`RefusesPartitionedParent`,
+  with `RoutesToPartitionedIndexBuild` naming the one shape that is routed instead) and
   sequence-executor admission, which refuses every index-building step on a parent because the
   build is its own executor entry point; the concurrent drop by preflight and plan reporting,
   since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
-  the relation kind. *Source:* PostgreSQL relation-kind and version capabilities.
+  the relation kind, and `GateWithCatalog` in `pkg/migrate` for the imperative `DROP INDEX`.
+  *Source:* PostgreSQL relation-kind and version capabilities.
 - **RF-7** — Every refusal carries exactly one non-zero class from the closed refusal-class
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
