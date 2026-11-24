@@ -189,6 +189,74 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
 }
 
+// A CREATE INDEX on a partitioned parent is routed to the partitioned index
+// build, whatever form the planner carried: the one step is the statement
+// itself, the decision's safer sequence is that statement, and the plan stays
+// executable. A statement of another shape is refused by its cause.
+func TestRoutePartitionedParentRoutesCreateIndexAndRefusesTheRest(t *testing.T) {
+	const sql = "CREATE INDEX i ON s.p (c)"
+	indexStatement := func() plan.Statement {
+		return plan.Statement{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL:          []string{"CREATE INDEX CONCURRENTLY i ON s.p (c)"},
+				SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   []string{"CREATE INDEX CONCURRENTLY i ON s.p (c)"},
+			Execution: planner.ExecutionAutocommit,
+		}
+	}
+
+	t.Run("create index", func(t *testing.T) {
+		r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{indexStatement()}}
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		st := r.Statements[0]
+		assert.Equal(t, router.DispositionExecute, st.Disposition)
+		assert.Equal(t, []string{sql}, st.ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedIndexBuild, st.Execution)
+		assert.Equal(t, []string{sql}, st.Decisions[0].SaferSQL)
+		assert.Equal(t, planner.ExecutionPartitionedIndexBuild, st.Decisions[0].SaferSQLExecution)
+		assert.Equal(t, planner.RouteNative, st.Route)
+		assert.Equal(t, router.BackendNative, st.Backend)
+	})
+
+	t.Run("a decision with no safer sequence gains none", func(t *testing.T) {
+		st := indexStatement()
+		st.Decisions = []planner.Decision{{Route: planner.RouteNative, Reason: planner.ReasonMetadataOnly}}
+		r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{st}}
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Empty(t, r.Statements[0].Decisions[0].SaferSQL)
+		assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
+	})
+
+	t.Run("index adoption stays refused", func(t *testing.T) {
+		adopt := "ALTER TABLE s.p ADD CONSTRAINT p_pk PRIMARY KEY USING INDEX ix"
+		r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{
+			indexStatement(),
+			{SQL: adopt, Route: planner.RouteNative, Backend: router.BackendNative,
+				Disposition: router.DispositionExecute, ExecSQL: []string{adopt}, Execution: planner.ExecutionAutocommit},
+		}}
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+		assert.Equal(t, verdict.ClassByDesign, r.Class)
+		assert.Equal(t, router.DispositionExecute, r.Statements[0].Disposition, "the index statement keeps its route")
+		assert.Equal(t, planner.ExecutionPartitionedIndexBuild, r.Statements[0].Execution)
+		assert.Equal(t, router.DispositionRefuse, r.Statements[1].Disposition)
+		assert.Empty(t, r.Statements[1].ExecSQL)
+	})
+
+	t.Run("a step that does not parse is an error", func(t *testing.T) {
+		r := plan.Report{Statements: []plan.Statement{{ExecSQL: []string{"CREATE INDEX"}}}}
+		require.Error(t, plan.RoutePartitionedParent(&r, 16))
+	})
+}
+
 // The partition refusal's class is a property of the cause: an index-adoption
 // refusal is by-design, a pre-18 NOT VALID foreign key is environmental. A
 // registry keyed on the reason alone could not tell them apart.
@@ -218,6 +286,7 @@ func TestRefusedStatementsReportAcceptedBlockingEligibility(t *testing.T) {
 	}{
 		{"blocking parent index", preflight.PartitionCauseBlockingIndexBuild, true},
 		{"concurrent parent index", preflight.PartitionCauseConcurrentIndexBuild, false},
+		{"concurrent parent index drop", preflight.PartitionCauseConcurrentIndexDrop, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := plan.NewReport(plan.SourceAlter)
@@ -478,7 +547,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 21 against this test.
+// omissions. A consumer pins format_version 23 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -534,7 +603,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 21,
+		"format_version": 23,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -592,7 +661,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 21,
+		"format_version": 23,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -617,7 +686,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 21,
+		"format_version": 23,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -707,6 +776,59 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 		"exec_sql is what runs: identity changes with it")
 }
 
+// A CREATE INDEX on a partitioned table runs as the partition-by-partition
+// build, whose one step is the statement as written. The same text on a plain
+// table runs as a literal CREATE INDEX CONCURRENTLY, so the two are different
+// plans and must not share a fingerprint, or an approver's pin could not tell
+// them apart. A statement with any other execution keeps the identity it has
+// always had, which TestFingerprintPinnedDigest also pins.
+func TestFingerprintCoversPartitionedIndexBuildExecution(t *testing.T) {
+	literal := plan.Statement{
+		SQL:         "CREATE INDEX CONCURRENTLY i ON public.t (c)",
+		ExecSQL:     []string{"CREATE INDEX CONCURRENTLY i ON public.t (c)"},
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+	}
+	partitioned := literal
+	partitioned.Execution = planner.ExecutionPartitionedIndexBuild
+
+	assert.NotEqual(t,
+		plan.Fingerprint([]plan.Statement{literal}),
+		plan.Fingerprint([]plan.Statement{partitioned}),
+		"the partitioned build is not the literal concurrent build")
+
+	autocommit := literal
+	autocommit.Execution = planner.ExecutionAutocommit
+	assert.Equal(t,
+		plan.Fingerprint([]plan.Statement{literal}),
+		plan.Fingerprint([]plan.Statement{autocommit}),
+		"an autocommit execution is not hashed, so dry-run and run fingerprints that differ only in it agree")
+}
+
+// What a drop removes is part of the plan's identity, name and definition
+// and, for a column, what goes with it: a name that now stands for another
+// object is another plan.
+func TestFingerprintCoversWhatADropRemoves(t *testing.T) {
+	drop := plan.Statement{SQL: "ALTER TABLE t DROP COLUMN legacy", Route: planner.RouteNative,
+		Backend: router.BackendNative, Disposition: router.DispositionExecute,
+		Drops: &schemadiff.DroppedObject{Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "attnum 3: text"}}
+	base := plan.Fingerprint([]plan.Statement{drop})
+	require.NotEqual(t, plan.Fingerprint([]plan.Statement{{SQL: drop.SQL, Route: drop.Route,
+		Backend: drop.Backend, Disposition: drop.Disposition}}), base, "a drop with no definition is another plan")
+
+	for name, changed := range map[string]schemadiff.DroppedObject{
+		"kind":       {Kind: schemadiff.DroppedNotNull, Name: "legacy", Definition: "attnum 3: text"},
+		"name":       {Kind: schemadiff.DroppedColumn, Name: "other", Definition: "attnum 3: text"},
+		"definition": {Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "attnum 4: text"},
+		"dependents": {Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "attnum 3: text", Dependents: []string{"index legacy_idx: CREATE INDEX legacy_idx ON t (legacy)"}},
+	} {
+		other := drop
+		other.Drops = &changed
+		assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{other}), "the dropped object's %s is part of identity", name)
+	}
+}
+
 // The extension schemas a plan was derived with are part of its identity:
 // a table that does not exist yet is created from the file's own SQL, whose
 // unqualified names resolve through them. A plan without them hashes as it
@@ -728,7 +850,7 @@ func TestFingerprintCoversExtensionSchemas(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 21.
+// pinned to format_version 23.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

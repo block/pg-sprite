@@ -241,6 +241,17 @@ const (
 	// retrying (a failed CONCURRENTLY build leaves an invalid index,
 	// pg_index.indisvalid = false).
 	ExecutionAutocommit Execution = "autocommit-each-step"
+	// ExecutionPartitionedIndexBuild: the one step is a CREATE INDEX on a
+	// partitioned table, and it runs as the partition-aware index build, not
+	// as the statement: the parent's index is created with ONLY, each
+	// partition's index is built concurrently and attached, and the parent's
+	// index turns valid with the last attach. The partitions are listed when
+	// the build runs, not when the plan is made. The statement must not be
+	// run as written, which would build every partition's index under a lock
+	// that blocks writes to the whole tree. A failed or interrupted run
+	// leaves an invalid parent index and the partition indexes built so far;
+	// running the same statement again resumes from them.
+	ExecutionPartitionedIndexBuild Execution = "partitioned-index-build"
 )
 
 // Executions returns the closed set of Execution values. It is part of the
@@ -248,7 +259,7 @@ const (
 // format_version bump, and a consumer that meets an unrecognized value must
 // treat the sequence as unknown and refuse to run it.
 func Executions() []Execution {
-	return []Execution{ExecutionAutocommit}
+	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild}
 }
 
 // Decision is the classification of one operation.

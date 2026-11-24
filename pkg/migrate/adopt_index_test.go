@@ -7,6 +7,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -19,7 +20,7 @@ func TestExecuteRefusesAForcedAttemptThatAdoptsAnIndex(t *testing.T) {
 	require.NoError(t, err)
 	adopts := &schemadiff.IndexAdoption{Index: "t_email_key", Def: "CREATE UNIQUE INDEX t_email_key ON t USING btree (email)"}
 
-	_, err = execute(t.Context(), nil, st, []string{st.SQL()}, planner.Plan{}, false, true, Options{}, 1, adopts, nil, nil)
+	_, err = execute(t.Context(), nil, st, []string{st.SQL()}, planner.Plan{}, false, true, Options{}, 1, adopts, nil, nil, nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	require.ErrorContains(t, err, "a forced attempt cannot carry the adoption of index t_email_key")
 }
@@ -31,7 +32,22 @@ func TestExecuteRefusesAForcedAttemptThatValidatesAConstraint(t *testing.T) {
 	require.NoError(t, err)
 	validates := &schemadiff.ConstraintValidation{Constraint: "t_qty_check", Def: "CHECK ((qty > 0)) NOT VALID"}
 
-	_, err = execute(t.Context(), nil, st, []string{st.SQL()}, planner.Plan{}, false, true, Options{}, 1, nil, validates, nil)
+	_, err = execute(t.Context(), nil, st, []string{st.SQL()}, planner.Plan{}, false, true, Options{}, 1, nil, validates, nil, nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	require.ErrorContains(t, err, "a forced attempt cannot carry the validation of constraint t_qty_check")
+}
+
+// A reviewed drop runs only on a route that reads the object again right
+// before it drops it, so a statement routed anywhere but native that carries
+// a drop refuses before the statement runs.
+func TestCheckDropRouteRefusesANonNativeRoute(t *testing.T) {
+	dropped := &schemadiff.DroppedObject{Kind: schemadiff.DroppedColumn, Name: "note", Definition: "text"}
+	native := router.Statement{Disposition: router.DispositionExecute, Backend: router.BackendNative}
+	copySwap := router.Statement{Disposition: router.DispositionExecute, Backend: router.BackendCopyAndSwap}
+
+	require.NoError(t, checkDropRoute(native, dropped))
+	require.NoError(t, checkDropRoute(copySwap, nil), "a statement with no drop is not this check's")
+	err := checkDropRoute(copySwap, dropped)
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	require.ErrorContains(t, err, "a copy-and-swap route cannot carry the drop of column note")
 }

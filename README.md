@@ -1,5 +1,7 @@
 # pg-sprite
 
+[![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
+
 > [!WARNING]
 > **Early release — not production-ready.** This project is under active
 > development. Tagged releases exist, but pre-1.0 there are no stability
@@ -108,13 +110,21 @@ refusal — never a silently wrong or incomplete result:
   difference is a typed `diff` refusal; change the declaration with owner
   tooling, then state it in the file. A serial cannot state one, so export
   refuses a serial whose sequence was declared otherwise.
-- **Partitions** support in-place statement changes, but only their
-  partitioned parent can be expressed in or exported to a desired file —
-  partitions and their bounds stay owned outside it — and `migrate` refuses
-  `ATTACH PARTITION` and `DETACH PARTITION` unless `--force` names the table
-  ([limitations](docs/limitations.md)).
+- **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
+  on a partitioned table runs partition by partition, resuming when the same
+  statement is run again. Only a partitioned parent can be expressed in or
+  exported to a desired file — partitions and their bounds stay owned outside
+  it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
+  `--force` names the table ([limitations](docs/limitations.md)).
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+  An index of a partitioned table has no concurrent drop at all: drop it with
+  the plain `DROP INDEX` under `--accept-blocking SCHEMA.TABLE` and
+  `--allow-destructive SCHEMA.TABLE`, naming the parent, which locks the parent and
+  every partition while it runs
+  ([example](docs/lock-budgeted-passthrough.md#dropping-an-index-of-a-partitioned-table)).
+  A partition's index attached under the parent's is refused in either form; drop
+  the parent's index instead.
 - **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
   instant in the catalog but break every running application instance that
   still uses the old name, and no safer sequence can be built from the
@@ -163,9 +173,14 @@ refusal — never a silently wrong or incomplete result:
   and the refusal lists the checks (`idx_scan` on every replica, foreign
   keys, uniqueness) that catch an index the application still uses, with
   the connected server's own scan count for the index in `index_usage`.
-- **Destructive desired-state plans are refused as a whole** — `migrate --desired`
-  creates missing tables and converges supported changes, but never infers permission
-  to discard live structure. A new primary key or unique constraint over a live
+- **Destructive desired-state plans are refused as a whole unless you pin them** —
+  `migrate --desired` creates missing tables and converges supported changes, but never
+  infers permission to discard live structure. Review the plan with `diff --desired`,
+  then run it with `--expect-fingerprint` (the `sha256:...` value `diff` prints) and
+  `--allow-destructive SCHEMA.TABLE`: the run executes only that plan, and each
+  destructive statement is audited and marked `allowed_destructive: true`. A dropped
+  index runs as `DROP INDEX CONCURRENTLY`. Row security policies are separate: a
+  policy drop in a desired file is already atomic and needs no acknowledgement. A new primary key or unique constraint over a live
   unique index of its name is not destructive: it takes the index over with
   `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
   index changed after planning. Nor is a live check constraint left `NOT VALID`
@@ -183,8 +198,8 @@ refusal — never a silently wrong or incomplete result:
   deliberately under the engine's bounded lock and statement budgets, with
   the verdict marked `executed-without-online-safety` (exit 3). A `DROP INDEX`
   also needs `--allow-destructive` naming the same table. Every other
-  refusal — including a blocking index build on a partitioned parent — still
-  exits 2. Design:
+  refusal — including a forced blocking index build on a partitioned parent —
+  still exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,

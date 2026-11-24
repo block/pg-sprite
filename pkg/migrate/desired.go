@@ -52,6 +52,18 @@ type DesiredRequest struct {
 	// had a plan reviewed enforces that the plan the reviewer approved is
 	// the plan that executes; empty skips the check.
 	ExpectedFingerprint string
+	// AllowDestructive lets a plan that drops live structure run: it names
+	// the desired table, schema-qualified. It is valid only with
+	// ExpectedFingerprint, so it covers the destructive statements of the
+	// reviewed plan and no others: without a fingerprint the request fails
+	// with [ErrAllowDestructiveNeedsFingerprint] before any database work,
+	// and another table fails with [ErrAllowDestructiveMismatch] before
+	// anything runs. Each destructive statement then runs through [Run] with
+	// the acknowledgement it needs, so Run's per-statement gate, audit
+	// record, and AllowedDestructive verdict apply unchanged; a dropped index
+	// runs as DROP INDEX CONCURRENTLY. It is separate from
+	// Options.AllowDestructive, which desired-state execution still rejects.
+	AllowDestructive string
 }
 
 // DesiredResult is the aggregate report for one desired-state execution:
@@ -163,10 +175,14 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // against the live catalog rather than assuming the occupant's shape.
 //
 // Plan-time admission is all-or-nothing: a plan that contains a
-// destructive statement, routes any statement away from execution, or
+// destructive statement without the request's destructive acknowledgement,
+// routes any statement away from execution, or
 // does not match the pinned fingerprint is refused before anything runs,
 // and so is a plan that routes a statement through copy-and-swap when that
-// route's preflight refuses the table or the server as they stand now.
+// route's preflight refuses the table or the server as they stand now. A plan
+// that builds an index on a partitioned table stops whole, with
+// [ErrConnectionRequired] or a [PartitionedIndexConnectionMismatchError], when
+// Options.Connection is unset or reaches another database than the pool.
 // Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
 // refuses or fails, and the result's verdicts disclose exactly how far
@@ -190,14 +206,19 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // the operational error. An error with a zero result means the pipeline
 // stopped before planning or executing anything.
 //
-// Every typed acknowledgement — Options.Force, AcceptBlocking,
+// Every typed acknowledgement in the options — Options.Force, AcceptBlocking,
 // AllowDestructive, CopySwap.Restart and CopySwap.BlockWrites — is rejected
 // with its own sentinel, the first set in that order when several are, before
 // the policy is validated: each accepts a loss for one statement the operator
 // wrote, and the declarative front door runs statements the plan derived. A
-// destructive, blocking, force-worthy, restarted or offline change belongs
-// on the imperative front door where the operator states it explicitly.
+// blocking, force-worthy, restarted or offline change belongs on the
+// imperative front door where the operator states it explicitly.
 // [Options.WithoutAcknowledgements] is the policy with all of them cleared.
+//
+// The one acknowledgement desired-state execution takes is
+// [DesiredRequest.AllowDestructive], which is valid only with
+// ExpectedFingerprint; each destructive statement of the pinned plan then
+// runs through [Run] with the acknowledgement it needs.
 //
 // Every planned statement runs back through [Run], so Run's note on the
 // pool's search_path applies to the pool passed here.
@@ -226,11 +247,17 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// The acknowledgements are rejected before the policy is validated, so
 	// a caller that left two set gets the first one's sentinel rather than
 	// the validation error for the pair.
-	// INV: RF-12 — desired-state execution takes no acknowledgement.
+	// INV: RF-12 — desired-state execution takes no acknowledgement in
+	// Options.
 	if err := rejectDesiredAcks(opts); err != nil {
 		return DesiredResult{}, err
 	}
 	if err := opts.validate(); err != nil {
+		return DesiredResult{}, err
+	}
+	// INV: RF-12 — the one acknowledgement desired-state execution takes is
+	// bound to a pinned plan, decided before any database work.
+	if err := checkDesiredAllowDestructive(req.AllowDestructive, req.ExpectedFingerprint); err != nil {
 		return DesiredResult{}, err
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
@@ -238,6 +265,9 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return DesiredResult{}.refused(ref, fmt.Sprintf("%v; nothing was planned or executed", err)), nil
 	}
 	if err != nil {
+		return DesiredResult{}, err
+	}
+	if err := CheckDesiredAllowDestructiveTable(req.AllowDestructive, report); err != nil {
 		return DesiredResult{}, err
 	}
 	opts.logger().Debug("desired plan derived",
@@ -261,7 +291,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if tableMissing && refuseMissing != nil {
 		return refuseMissing(report), nil
 	}
-	if refused, ok := admitPlan(req, report); !ok {
+	if refused, ok := AdmitPlan(req, report); !ok {
 		return refused, nil
 	}
 	if tableMissing {
@@ -279,8 +309,15 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if !admitted {
 		return stopped, nil
 	}
+	stopped, admitted, err = admitPartitionedIndexBuild(ctx, pool, report, opts)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
+	}
 
-	return executePlan(ctx, pool, report, opts, func(ctx context.Context) (plan.Report, error) {
+	return executePlan(ctx, pool, report, opts, req.AllowDestructive, func(ctx context.Context) (plan.Report, error) {
 		return diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	})
 }
@@ -288,7 +325,13 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 // executePlan runs every statement of an admitted plan back through [Run],
 // in order, stopping at the first refusal or failure, and then verifies
 // convergence with replan, the same planner that derived the plan.
-func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options, replan func(context.Context) (plan.Report, error)) (DesiredResult, error) {
+//
+// allowDestructive is the table name an admitted destructive acknowledgement
+// carried, empty when the plan was admitted without one. A statement the
+// plan marks destructive runs only with it, set for that statement alone,
+// and a dropped index runs through its own concurrent path. Any other
+// statement is refused by Run's gate as it would be on its own.
+func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options, allowDestructive string, replan func(context.Context) (plan.Report, error)) (DesiredResult, error) {
 	result := DesiredResult{Plan: report}
 	for i, ps := range report.Statements {
 		st, err := statement.ParseOne(ps.SQL)
@@ -300,7 +343,38 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 			return result, fmt.Errorf("%w: planned statement %d is engine-generated SQL its own parser rejects: %w",
 				executor.ErrInvariantViolation, i+1, err)
 		}
-		v, runErr := run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates)
+		if ps.Destructive && allowDestructive == "" {
+			// Admission refuses a destructive plan that carries no
+			// acknowledgement, so reaching here is a breach of this
+			// package's own contract; nothing about the statement runs.
+			result.Outcome = verdict.OutcomeFailed
+			result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+			return result, fmt.Errorf("%w: planned statement %d is destructive but the plan was admitted without the destructive acknowledgement",
+				executor.ErrInvariantViolation, i+1)
+		}
+		if ps.Destructive && ps.Drops == nil {
+			// The reviewed plan binds a drop to the definition of the
+			// object it removes; a destructive statement that carries
+			// none cannot be re-checked before it runs, so it does not.
+			result.Outcome = verdict.OutcomeFailed
+			result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+			return result, fmt.Errorf("%w: planned statement %d is destructive but carries no definition of what it drops",
+				executor.ErrInvariantViolation, i+1)
+		}
+		var (
+			v      verdict.Verdict
+			runErr error
+		)
+		switch {
+		case ps.Destructive && ps.Kind == schemadiff.ChangeDropIndex:
+			v, runErr = dropPlannedIndex(ctx, pool, report, ps, st, opts, i+1)
+		case ps.Destructive:
+			stmtOpts := opts
+			stmtOpts.AllowDestructive = allowDestructive
+			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+		default:
+			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+		}
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
 			// A zero verdict is Run's "stopped before reaching a verdict"
@@ -530,7 +604,7 @@ func planStatementSQL(report plan.Report, i int) string {
 	return report.Statements[i].SQL
 }
 
-// admitPlan is the all-or-nothing plan-time admission: it refuses the whole
+// AdmitPlan is the all-or-nothing plan-time admission: it refuses the whole
 // plan — before anything runs — when the plan cannot converge the table as
 // a unit. The checks run from the caller's contract outward: the pinned
 // fingerprint first (the caller's approval is void whatever else holds),
@@ -538,39 +612,136 @@ func planStatementSQL(report plan.Report, i int) string {
 // (already-converged) plan never reaches admission:
 // the caller resolves it first, because it carries no plan identity for
 // the pin to verify and nothing would run anyway.
-func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
+//
+// A plan holding destructive statements is admitted only when the request
+// names the desired table in AllowDestructive; the pin check above has
+// already bound that acknowledgement to the reviewed plan. A partitioned
+// parent's index drop and a destructive statement that carries no
+// definition of what it drops are refused even when the run is
+// acknowledged: the first so the operator gets its specific guidance, the
+// second so the refusal comes before any statement runs.
+func AdmitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 	refused := DesiredResult{Plan: report}
-	if req.ExpectedFingerprint != "" && req.ExpectedFingerprint != report.Fingerprint {
-		return refused.refused(fingerprintMismatchRefusal(), fmt.Sprintf(
-			"the plan derived at execution time (fingerprint %s) is not the pinned plan (fingerprint %s); "+
-				"the live table or the desired schema changed since the plan was reviewed — re-review the new plan",
-			report.Fingerprint, req.ExpectedFingerprint)), false
+	if stale, ok := CheckPlanPin(req.ExpectedFingerprint, report); !ok {
+		return stale, false
 	}
+	acknowledged := destructiveAcknowledged(req, report)
 	for i, ps := range report.Statements {
 		if !ps.Destructive {
 			continue
 		}
-		// The deliberate path differs by shape: the imperative front door
-		// runs an ALTER TABLE drop when the operator states it, but it
-		// refuses a plain DROP INDEX in favor of the concurrent idiom — so
-		// an index drop is pointed straight at that idiom instead of at a
-		// door that would bounce it.
-		deliberatePath := "run it deliberately through the imperative front door"
-		if ps.Kind == schemadiff.ChangeDropIndex {
-			deliberatePath = "drop it deliberately with DROP INDEX CONCURRENTLY, then rerun"
+		if isPartitionedIndexDrop(ps) {
+			detail := fmt.Sprintf(
+				"planned statement %d discards live structure (%s); PostgreSQL has no concurrent drop for an index "+
+					"of a partitioned table, so desired-state execution never runs it — drop it deliberately with this "+
+					"plain DROP INDEX through the imperative front door, acknowledging both the blocking lock on the "+
+					"parent and every partition and the destructive drop for the table, then rerun",
+				i+1, ps.SQL)
+			detail += skippedRestDetail(len(report.Statements) - 1)
+			return refused.refused(destructiveChangeRefusal(), detail), false
 		}
-		detail := fmt.Sprintf(
-			"planned statement %d discards live structure (%s); desired-state execution runs no "+
-				"destructive statement — %s",
-			i+1, ps.SQL, deliberatePath)
-		detail += skippedRestDetail(len(report.Statements) - 1)
-		return refused.refused(destructiveChangeRefusal(), detail), false
+		if !acknowledged {
+			detail := unacknowledgedDropDetail(req, report, i, ps) + skippedRestDetail(len(report.Statements)-1)
+			return refused.refused(destructiveChangeRefusal(), detail), false
+		}
+		if ps.Drops == nil {
+			// The reviewed plan binds a drop to the definition of the
+			// object it removes; a destructive statement that carries
+			// none cannot be re-checked before it runs, so the plan is
+			// refused before any of its statements runs.
+			return refused.refused(planIncoherentRefusal(), fmt.Sprintf(
+				"planned statement %d (%s) is destructive but carries no definition of what it drops", i+1, ps.SQL)), false
+		}
+	}
+	if refusal, ok := refuseDestructiveWithCopySwap(report); !ok {
+		return refusal, false
 	}
 	if report.Disposition != router.DispositionExecute {
 		r, detail := planRefusal(report)
 		return refused.refused(r, detail), false
 	}
 	return DesiredResult{}, true
+}
+
+// unacknowledgedDropDetail names the way through for a destructive statement
+// the run did not acknowledge. A run that pinned no fingerprint may come from
+// a caller that cannot set one, so it is also given the deliberate path that
+// needs no pin: the concurrent idiom for an index, since the imperative front
+// door refuses a plain DROP INDEX, and the imperative front door otherwise.
+func unacknowledgedDropDetail(req DesiredRequest, report plan.Report, i int, ps plan.Statement) string {
+	detail := fmt.Sprintf(
+		"planned statement %d discards live structure (%s); desired-state execution runs a destructive "+
+			"statement only when the run pins the reviewed plan's fingerprint and names the table in the "+
+			"destructive acknowledgement — review the plan, then rerun with ExpectedFingerprint %s and AllowDestructive %s in the request "+
+			"(on the command line, --expect-fingerprint %[3]s --allow-destructive %[4]s)",
+		i+1, ps.SQL, report.Fingerprint, desiredTable(report))
+	if req.ExpectedFingerprint != "" {
+		return detail
+	}
+	if ps.Kind == schemadiff.ChangeDropIndex {
+		return detail + ", or drop it deliberately with DROP INDEX CONCURRENTLY, then rerun"
+	}
+	return detail + ", or run it deliberately through the imperative front door"
+}
+
+// isPartitionedIndexDrop reports whether ps drops an index of a partitioned
+// table. PostgreSQL has no concurrent drop for one, so the plan refuses the
+// statement by design and a reviewed run cannot carry it; its deliberate path
+// is the plain drop through the imperative front door.
+func isPartitionedIndexDrop(ps plan.Statement) bool {
+	return ps.Kind == schemadiff.ChangeDropIndex && ps.Reason == verdict.ReasonUnsupportedPartitionedParent
+}
+
+// refuseDestructiveWithCopySwap refuses a plan that both drops something and
+// routes a statement through copy-and-swap. Drops run first, and
+// copy-and-swap is checked against the table as it was before them, so a
+// drop it depends on (the primary key it copies by) would commit and the
+// copy-and-swap step would then refuse, leaving the plan half applied. The
+// two changes are reviewed and run as separate plans instead.
+func refuseDestructiveWithCopySwap(report plan.Report) (DesiredResult, bool) {
+	routed, ok := firstCopySwapStatement(report)
+	if !ok {
+		return DesiredResult{}, true
+	}
+	for i, ps := range report.Statements {
+		if !ps.Destructive {
+			continue
+		}
+		return DesiredResult{Plan: report}.refused(destructiveChangeRefusal(), fmt.Sprintf(
+			"planned statement %d discards live structure (%s) and planned statement %d (%s) routes to copy-and-swap; "+
+				"the drop would commit before the copy-and-swap step is checked against the changed table, so a plan "+
+				"cannot do both: change the desired file to make the drop alone, run that plan, then make the other change%s",
+			i+1, ps.SQL, routed+1, report.Statements[routed].SQL, skippedRestDetail(len(report.Statements)-1))), false
+	}
+	return DesiredResult{}, true
+}
+
+// CheckPlanPin is the pin check every desired-state run makes before
+// anything else: when expected is set, report must be the plan it pins, or
+// it returns the run's refusal and false. An empty plan has no identity to
+// verify and always passes. A dry run calls it to report a stale pin as the
+// run would.
+func CheckPlanPin(expected string, report plan.Report) (DesiredResult, bool) {
+	if expected == "" || len(report.Statements) == 0 || expected == report.Fingerprint {
+		return DesiredResult{}, true
+	}
+	return DesiredResult{Plan: report}.refused(fingerprintMismatchRefusal(), fmt.Sprintf(
+		"the plan derived at execution time (fingerprint %s) is not the pinned plan (fingerprint %s); "+
+			"the live table or the desired schema changed since the plan was reviewed — re-review the new plan",
+		report.Fingerprint, expected)), false
+}
+
+// destructiveAcknowledged reports whether the request names the plan's table
+// and pins a fingerprint, which AdmitPlan has already checked against report.
+func destructiveAcknowledged(req DesiredRequest, report plan.Report) bool {
+	return req.AllowDestructive != "" && req.ExpectedFingerprint != "" &&
+		req.AllowDestructive == desiredTable(report)
+}
+
+// desiredTable is the schema-qualified table the plan converges, spelled the
+// way the destructive acknowledgement must name it.
+func desiredTable(report plan.Report) string {
+	return report.Schema + "." + report.Table
 }
 
 // skippedRestDetail names what else a whole-plan destructive refusal

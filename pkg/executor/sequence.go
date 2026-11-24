@@ -231,7 +231,7 @@ type sequenceStep struct {
 // lock_timeout retries on each owner-gated step, exactly as in
 // ExecuteNative.
 func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy) (SequenceReport, error) {
-	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, nil, 0)
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, nil, nil, 0)
 }
 
 // RunSequenceAdopting is RunSequence for a planned ADD CONSTRAINT ... USING
@@ -241,7 +241,17 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 // is not. A sequence with no step that takes over that index is refused as
 // an invariant violation before anything runs.
 func RunSequenceAdopting(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts schemadiff.IndexAdoption) (SequenceReport, error) {
-	return runSequence(ctx, pool, pt, steps, b, retry, &adopts, nil, nil, 0)
+	return runSequence(ctx, pool, pt, steps, b, retry, &adopts, nil, nil, nil, 0)
+}
+
+// RunSequenceDropping is RunSequence for a planned drop of a column,
+// constraint, or NOT NULL: the step that drops dropped first checks, under
+// the table's lock, that it still has the definition the plan carried, and
+// refuses with ErrDroppedObjectDrift, dropping nothing, when it does not. A
+// sequence with no step that drops it is refused as an invariant violation
+// before anything runs.
+func RunSequenceDropping(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, dropped schemadiff.DroppedObject) (SequenceReport, error) {
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, &dropped, nil, 0)
 }
 
 // RunSequenceValidating is RunSequence for a planned VALIDATE CONSTRAINT:
@@ -251,7 +261,7 @@ func RunSequenceAdopting(ctx context.Context, pool *pgxpool.Pool, pt preflight.P
 // not. A sequence with no step that validates that constraint is refused
 // as an invariant violation before anything runs.
 func RunSequenceValidating(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, validates schemadiff.ConstraintValidation) (SequenceReport, error) {
-	return runSequence(ctx, pool, pt, steps, b, retry, nil, &validates, nil, 0)
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, &validates, nil, nil, 0)
 }
 
 // RunSequenceWithProgress runs a sequence while updating tracker with the
@@ -262,7 +272,7 @@ func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflig
 	}
 	tracker.Start(len(steps), progress.OperationAdmitting)
 	defer func() { tracker.Finish(err) }()
-	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, tracker, 0)
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, nil, tracker, 0)
 }
 
 // elapsedSince reports the time since start on the tracker's injected clock
@@ -279,7 +289,7 @@ func elapsedSince(tracker *progress.Tracker, start time.Time) time.Duration {
 // runSequence runs the admitted steps, reporting each to tracker when one
 // is set: as its own position in the sequence when runStep is zero, or as
 // runStep, the step of a longer run the whole sequence is (RunStep).
-func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, tracker *progress.Tracker, runStep int) (SequenceReport, error) {
+func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject, tracker *progress.Tracker, runStep int) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -327,6 +337,10 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if err != nil {
 		return rep, err
 	}
+	droppedStep, err := droppingStep(admitted, dropped)
+	if err != nil {
+		return rep, err
+	}
 	for i, step := range admitted {
 		start := time.Now()
 		if tracker != nil {
@@ -353,14 +367,18 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 			err = executeNative(ctx, pool, pt, step.st, Budget{
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
-			}, retry, nil, stepValidates, tracker)
+			}, retry, nil, stepValidates, nil, tracker)
 			err = corroborateValidateCancel(ctx, err, b.Validate, elapsedSince(tracker, start))
 		case StepBrief:
 			var stepAdopts *schemadiff.IndexAdoption
 			if i == adoptingStep {
 				stepAdopts = adopts
 			}
-			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, stepAdopts, nil, tracker)
+			var stepDropped *schemadiff.DroppedObject
+			if i == droppedStep {
+				stepDropped = dropped
+			}
+			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, stepAdopts, nil, stepDropped, tracker)
 		default:
 			// Admission produces only the three kinds above; an unknown
 			// kind here is a programming error and aborts fail-closed.

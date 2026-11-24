@@ -1,6 +1,7 @@
 package schemadiff
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -416,10 +417,11 @@ func introspectInheritance(ctx context.Context, tx pgx.Tx, oid uint32) ([]string
 // declaration of the sequence the column owns — its identity sequence, or
 // the owned sequence its serial default calls — rides along, recorded only
 // where it differs from what declaring the column fresh creates.
-func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, error) {
+func introspectColumns(ctx context.Context, tx Querier, oid uint32) ([]Column, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname,
+		       a.attnum,
 		       pg_catalog.format_type(a.atttypid, a.atttypmod),
 		       a.attnotnull,
 		       COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), ''),
@@ -500,7 +502,7 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		var seq SequenceOptions
 		var seqStart, seqIncrement, seqMin, seqMax, seqCache *int64
 		var seqCycle *bool
-		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated,
+		if err := rows.Scan(&c.Name, &c.AttNum, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated,
 			&seqType, &seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle); err != nil {
 			return nil, fmt.Errorf("scan column: %w", err)
 		}
@@ -529,7 +531,106 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read columns: %w", err)
 	}
+	// The columns query is fully read before the next one starts: a pgx
+	// connection runs one query at a time.
+	rows.Close()
+	dependents, err := introspectColumnDependents(ctx, tx, oid)
+	if err != nil {
+		return nil, err
+	}
+	for i := range cols {
+		cols[i].Dependents = dependents[cols[i].AttNum]
+	}
 	return cols, nil
+}
+
+// introspectColumnDependents reads, per attribute number, what depends on
+// each column of the table and so goes with it when the column is dropped:
+// indexes, constraints (including a foreign key of another table that
+// references it), sequences the column owns, and any other object with a
+// dependency on the column, such as a statistics object. Each is rendered
+// by [Dependent] with the definition that tells a replacement from the
+// original. A column's own default and NOT NULL are not listed: the
+// column's definition carries them, and PostgreSQL 18 catalogs a NOT NULL as
+// a constraint where earlier versions do not. Rows are in a stable order.
+func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (map[int16][]Dependent, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	rows, err := tx.Query(ctx, `
+		SELECT d.refobjsubid::pg_catalog.int2, 'index'::pg_catalog.text, c.relname::pg_catalog.text,
+		       pg_catalog.pg_get_indexdef(c.oid)
+		FROM pg_catalog.pg_depend d
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) d.objid
+		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+		  AND c.relkind OPERATOR(pg_catalog.=) ANY (ARRAY['i', 'I']::pg_catalog."char"[])
+		UNION ALL
+		SELECT d.refobjsubid::pg_catalog.int2, 'constraint'::pg_catalog.text,
+		       CASE WHEN con.conrelid OPERATOR(pg_catalog.=) $1 THEN con.conname::pg_catalog.text
+		            ELSE COALESCE(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), '') END,
+		       pg_catalog.pg_get_constraintdef(con.oid)
+		FROM pg_catalog.pg_depend d
+		JOIN pg_catalog.pg_constraint con ON con.oid OPERATOR(pg_catalog.=) d.objid
+		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_constraint'::pg_catalog.regclass
+		  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+		  AND con.contype OPERATOR(pg_catalog.<>) 'n'
+		UNION ALL
+		SELECT d.refobjsubid::pg_catalog.int2,
+		       CASE WHEN d.deptype OPERATOR(pg_catalog.=) 'i' THEN 'identity sequence' ELSE 'owned sequence' END::pg_catalog.text,
+		       pg_catalog.quote_ident(sn.nspname) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident(c.relname),
+		       pg_catalog.format('%s START WITH %s INCREMENT BY %s MINVALUE %s MAXVALUE %s CACHE %s %s',
+		                         pg_catalog.format_type(q.seqtypid, NULL), q.seqstart, q.seqincrement,
+		                         q.seqmin, q.seqmax, q.seqcache,
+		                         CASE WHEN q.seqcycle THEN 'CYCLE' ELSE 'NO CYCLE' END)
+		FROM pg_catalog.pg_depend d
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) d.objid
+		JOIN pg_catalog.pg_namespace sn ON sn.oid OPERATOR(pg_catalog.=) c.relnamespace
+		JOIN pg_catalog.pg_sequence q ON q.seqrelid OPERATOR(pg_catalog.=) c.oid
+		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+		  AND c.relkind OPERATOR(pg_catalog.=) 'S'
+		UNION ALL
+		SELECT d.refobjsubid::pg_catalog.int2, 'other'::pg_catalog.text,
+		       COALESCE(pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid), ''), ''::pg_catalog.text
+		FROM pg_catalog.pg_depend d
+		WHERE d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+		  AND d.classid OPERATOR(pg_catalog.<>) 'pg_catalog.pg_constraint'::pg_catalog.regclass
+		  AND NOT (d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass AND EXISTS (
+		      SELECT 1 FROM pg_catalog.pg_class c
+		      WHERE c.oid OPERATOR(pg_catalog.=) d.objid
+		        AND c.relkind OPERATOR(pg_catalog.=) ANY (ARRAY['i', 'I', 'S']::pg_catalog."char"[])))
+		  AND NOT (d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_attrdef'::pg_catalog.regclass AND EXISTS (
+		      SELECT 1 FROM pg_catalog.pg_attrdef ad
+		      WHERE ad.oid OPERATOR(pg_catalog.=) d.objid AND ad.adnum OPERATOR(pg_catalog.=) d.refobjsubid))`, oid)
+	if err != nil {
+		return nil, fmt.Errorf("query column dependents: %w", err)
+	}
+	defer rows.Close()
+	out := map[int16][]Dependent{}
+	for rows.Next() {
+		var attnum int16
+		var d Dependent
+		if err := rows.Scan(&attnum, &d.Kind, &d.Name, &d.Def); err != nil {
+			return nil, fmt.Errorf("scan column dependent: %w", err)
+		}
+		out[attnum] = append(out[attnum], d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read column dependents: %w", err)
+	}
+	// An object can depend on a column through more than one edge, a CHECK
+	// constraint through both its key and its expression for one, and is
+	// listed once.
+	for attnum, deps := range out {
+		slices.SortFunc(deps, func(a, b Dependent) int {
+			return cmp.Or(strings.Compare(a.Kind, b.Kind), strings.Compare(a.Name, b.Name), strings.Compare(a.Def, b.Def))
+		})
+		out[attnum] = slices.Compact(deps)
+	}
+	return out, nil
 }
 
 // sequenceRowComplete reports whether every pg_sequence column of a matched
@@ -548,7 +649,7 @@ func sequenceRowComplete(start, increment, minValue, maxValue, cache *int64, cyc
 // pg_get_indexdef waits behind any lock that conflicts with ACCESS SHARE on
 // the table, so it is read only for a scratch table, which no other session
 // can hold.
-func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexDefs bool) ([]Constraint, error) {
+func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndexDefs bool) ([]Constraint, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT conname, pg_catalog.pg_get_constraintdef(oid),
@@ -635,7 +736,7 @@ func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]strin
 // the diff can tell a delivered index from an unfinished concurrent build;
 // indisready is deliberately not read — it turns true while a build is
 // still running, so it would report an in-flight index as delivered.
-func introspectIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]Index, error) {
+func introspectIndexes(ctx context.Context, tx Querier, oid uint32) ([]Index, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT c.relname, pg_catalog.pg_get_indexdef(i.indexrelid), NOT i.indisvalid

@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -82,12 +86,27 @@ func shadowName(f reconcileFixture, shadow schemachange.BuiltShadow) string {
 	return pgx.Identifier{f.table.Schema, shadow.ShadowTable()}.Sanitize()
 }
 
+// steppingClock moves forward by step at every reading, so a duration
+// measured between two readings is exactly step.
+type steppingClock struct {
+	now  time.Time
+	step time.Duration
+}
+
+func (c *steppingClock) Now() time.Time {
+	c.now = c.now.Add(c.step)
+	return c.now
+}
+
 // A proof that leaves a key for the swap is finished inside the swap
 // transaction: after the drain, under ACCESS EXCLUSIVE on both tables, the
 // swap reads the key on the source and on the shadow. The drain here
 // stands in for the catch-up's and applies the one change the stream would
 // carry, the source's latest amount for the key, so the two sides are
-// equal, the swap commits, and the live table holds that amount.
+// equal, the swap commits, and the live table holds that amount. The
+// swapped table reports the one key compared and the time the compare
+// took by the cutover's clock, which reads once before the compare and
+// once after it.
 func TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft(t *testing.T) {
 	f := newReconcileFixture(t, 300)
 	shadow := f.buildShadow(t)
@@ -102,10 +121,12 @@ func TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft(t *testing.T) {
 		return err
 	}
 
-	swapped, err := schemachange.Cutover(t.Context(), f.pool, f.lock, ready, drain, schemachange.CutoverOptions{})
+	clock := &steppingClock{step: 3 * time.Millisecond}
+	swapped, err := schemachange.Cutover(t.Context(), f.pool, f.lock, ready, drain, schemachange.CutoverOptions{Clock: clock})
 	require.NoError(t, err)
 
 	assert.Equal(t, f.table.Table, swapped.Table())
+	assert.Equal(t, schemachange.CarriedCompare{Keys: 1, Elapsed: 3 * time.Millisecond}, swapped.CarriedCompare())
 	var live bool
 	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT to_regclass($1)::oid = $2`, f.table.Qualified(), shadow.ShadowOID()).Scan(&live))
 	assert.True(t, live, "the shadow bears the source's name")
@@ -115,6 +136,51 @@ func TestCutoverSwapsWhenTheDrainLevelsTheKeysThePassLeft(t *testing.T) {
 		FROM `+f.table.Qualified()+`
 		WHERE id = $1`, carriedKey).Scan(&got))
 	assert.Equal(t, want, got, "the live table holds the source's latest amount for the key")
+}
+
+// A swap whose COMMIT the client never hears back from is settled by the
+// catalog (LK-4), which records the renames but not what the swap
+// compared. The compare the committed attempt ran under its lock is still
+// the swap's, so the swapped table reports it rather than the zero a swap
+// that compared nothing reports.
+func TestCutoverKeepsTheCarriedCompareWhenTheCatalogSettlesALostCommit(t *testing.T) {
+	f := newReconcileFixture(t, 300)
+	shadow := f.buildShadow(t)
+	ready, _ := leaveKeyForSwap(t, f, shadow)
+
+	pc, err := pgxpool.ParseConfig(f.cfg.URL)
+	require.NoError(t, err)
+	var lose atomic.Bool
+	dialer := &net.Dialer{}
+	pc.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := dialer.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &unreachableConn{Conn: c, lose: &lose, eofOnCommit: true}, nil
+	}
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	drain := func(ctx context.Context, tx pgx.Tx) error {
+		lose.Store(true)
+		_, err := tx.Exec(ctx, `
+			UPDATE `+shadowName(f, shadow)+` AS held
+			SET amount = source.amount
+			FROM `+f.table.Qualified()+` AS source
+			WHERE source.id = held.id
+			  AND held.id = $1`, carriedKey)
+		return err
+	}
+	clock := &steppingClock{step: 3 * time.Millisecond}
+	swapped, err := schemachange.Cutover(t.Context(), pool, f.lock, ready, drain, schemachange.CutoverOptions{Clock: clock})
+	require.NoError(t, err, "the server committed, so the swap is reported as a success")
+
+	var live bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT to_regclass($1)::oid = $2`, f.table.Qualified(), shadow.ShadowOID()).Scan(&live))
+	require.True(t, live, "the shadow bears the source's name")
+	assert.Equal(t, schemachange.CarriedCompare{Keys: 1, Elapsed: 3 * time.Millisecond}, swapped.CarriedCompare())
 }
 
 // With a drain that applies nothing, the key the pass left still differs

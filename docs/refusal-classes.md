@@ -87,6 +87,8 @@ runner (`statement.KindDataChange`). A statement the parse boundary does not nam
 | `unsupported-statement` | A storage parameter or identity sequence difference the diff does not converge (`*schemadiff.UnsupportedChangeError`, causes `storage-parameters` and `identity-sequence`): the owner changes it directly (`ALTER TABLE ... SET`, `ALTER COLUMN ... SET`), then declares it in the file | `no-online-safety-problem` | `direct-operator` |
 | `not-native-safe-rewrite-required` | A persistence (unlogged) or column collation difference (causes `persistence` and `collation-change`): converging it rewrites the table or column, which the planner does not construct | `capability-boundary` | — |
 | `unsupported-statement` | Any other change the diff does not derive (causes `row-security`, `partition-key`, `partition-attachment`, `serial-default`, `added-column-collation`, `identity`, `generated`, `generated-check-name`, an unnamed check whose next generated name the server would truncate, and `enum-type-kind`, a type name that holds a type other than an enum; `unsupportedChangeRefusal`) | `capability-boundary` | — |
+| `unsupported-statement` | A single-index `DROP INDEX`, plain or `CONCURRENTLY`, of an index attached under a parent index (`attachedIndexDropRefusal`): PostgreSQL drops it only together with its parent, so the detail names the root partitioned index to drop instead | `by-design` | — |
+| `unsupported-statement` | A single-index `DROP INDEX`, plain or `CONCURRENTLY`, of a partitioned or attached index that comes down to an index a primary key, unique, or exclusion constraint owns (`constraintIndexDropRefusal`): PostgreSQL removes it only with the constraint, so the detail names the `ALTER TABLE ... DROP CONSTRAINT` to run instead | `by-design` | — |
 | `unsupported-statement` | `planRefusal` in `pkg/migrate/desired.go`: a statement whose disposition this build does not know, or a plan whose aggregate disposition no statement carries | `invariant-violation` | — |
 | `index-statement` | Plain `DROP INDEX` or `REINDEX`, for which the verdict names the concurrent form; also a `DROP INDEX CONCURRENTLY` that PostgreSQL rejects (with `CASCADE`, or naming several indexes) | `by-design` | — |
 | `index-statement` | An already-concurrent maintenance statement that pg-sprite need not wrap and PostgreSQL accepts | `no-online-safety-problem` | `direct-operator` |
@@ -97,25 +99,26 @@ runner (`statement.KindDataChange`). A statement the parse boundary does not nam
 | `not-native-safe-rewrite-required` | A `RENAME COLUMN` or `RENAME TO` (`app-breaking-rename`): no SQL exists to substitute, and the deliberate path is the `guidance` rollout and then the statement under `--force` | `by-design` | — |
 | `backend-unavailable` | The plan routes to copy-and-swap for an operation the engine does not carry yet | `capability-boundary` | — |
 | `copy-and-swap-refused` | Cause `copy-and-swap-not-enabled`: the statement routes to copy-and-swap and the run did not open the route (`--copy-and-swap`, `CopySwapOptions.Enabled`); either front door refuses before the route's preflight runs or anything is written, after its own target resolution and planning have read the catalog (`copySwapNotEnabledRefusal`) | `capability-boundary` | — |
-| `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` — and a `DROP INDEX` under `--accept-blocking` — until `--allow-destructive` names the table (RF-10) | `by-design` | — |
+| `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole unless the run pins the reviewed plan's fingerprint and names the table in its own destructive acknowledgement, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` — and a `DROP INDEX` under `--accept-blocking` — until `--allow-destructive` names the table (RF-10) | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
 | `declarative-foreign-key` | A desired-state plan adds or drops a foreign key, or creates a table that declares one; desired-state execution does not run foreign-key changes yet | `capability-boundary` | — |
 
 ### `unsupported-partitioned-parent`, keyed on `PartitionRefusalCause`
 
-The four causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
-keeps the not-implemented case and the version-gated case apart in one sentence; this table
-agrees with it rather than collapsing them. An importer reads the cause from the `Cause` field of
+The five causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) keeps the
+index-build cases and the version-gated case apart in one sentence; this table agrees with it
+rather than collapsing them. An importer reads the cause from the `Cause` field of
 `*UnsupportedPartitionedParentError` (`errors.As`), and `PartitionRefusalCause.Class()` answers
 the `class` column below as a `refusal.Class`, which converts to `verdict.Class` with a plain
 conversion.
 
 | `PartitionRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
-| `parent-concurrent-index-build` | The `CREATE INDEX ON ONLY` → per-partition `CONCURRENTLY` → `ATTACH PARTITION` flow is not yet implemented | `capability-boundary` | A planned engine capability; the matrix marks it 🟡. |
-| `parent-blocking-index-build` | pg-sprite will not substitute a blocking parent build for the missing partition-aware flow | `capability-boundary` | Same missing flow; the refusal of the blocking substitute is the policy half of the same gap. The eligibility registry marks this cause acceptable, but `migrate --accept-blocking` does not reach it yet: the unforced imperative path refuses the parent build with the concurrent cause, and the flag rejects `--force`. |
+| `parent-concurrent-index-build` | A `CREATE INDEX CONCURRENTLY` step reached a partitioned parent outside the partitioned index build, and PostgreSQL cannot run it on a parent | `capability-boundary` | Only a step list that bypasses the build can reach it, such as a library caller running the steps directly. A `CREATE INDEX` on a partitioned table, with or without `CONCURRENTLY`, is routed to the [partitioned index build](partitioned-index-build-design.md) by both front doors instead of refused, and the matrix marks that capability ✅. |
+| `parent-blocking-index-build` | pg-sprite will not run a blocking index build on a partitioned parent as submitted | `capability-boundary` | The submitted form blocks writes to the whole tree. For a `CREATE INDEX`, the partitioned index build is the online way to run the same statement, so removing `--force` builds the index. A constraint-building statement, such as a forced `ALTER TABLE … ADD UNIQUE`, receives the same refusal, and removing `--force` does not route it to the build: a constraint on a partitioned parent has no online route, so it stays refused. The cause also arises for a step list that bypasses the build. The eligibility registry marks this cause acceptable, but `migrate --accept-blocking` does not reach it: the flag rejects `--force`, and the unforced path builds the index instead of refusing it. |
 | `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
+| `parent-concurrent-index-drop` | PostgreSQL cannot drop an index of a partitioned table concurrently in any supported version, and a partition's own index cannot be dropped alone | `by-design` | No concurrent drop exists to wait for. The drop PostgreSQL accepts is a plain `DROP INDEX`, which takes `ACCESS EXCLUSIVE` on the parent, every partition, and every partition's index; the eligibility registry marks this cause acceptable, and `migrate --alter` runs that plain drop under `--accept-blocking` and `--allow-destructive` naming the table. `migrate --alter` mints this cause too, after reading the index's kind from the catalog, for both the plain and the `CONCURRENTLY` single-index drop; it passes only the plain form through. The cause and `AcceptedBlockingEligible` are the same for both forms, so a host cannot tell from them which form was submitted or whether it runs: the statement's `CONCURRENTLY` flag decides that, and only the plain form runs under `--accept-blocking`. |
 | `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
 ### `copy-and-swap-refused`, keyed on `CopySwapRefusalCause`
@@ -135,17 +138,19 @@ environment refusal also carries the typed `CopySwapSetting` the operator must c
 `max_replication_slots` or `max_wal_senders`; none for disk), so an adapter never parses
 the prose detail to learn which knob to turn.
 
-An adapter that calls `CheckCopySwap`, which folds the privilege, shape, and environment checks
-into one call, sees refusals from all three in that order, and must read each in its own
-vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environment refusals:
+An adapter that calls `schemachange.CheckCopySwap` or `preflight.CheckCopySwap`, which both
+fold the privilege, shape, and environment checks into one call, sees refusals from all three
+in that order, and must read each in its own vocabulary — `CopySwapRefusalCauseOf` answers
+only for the shape and environment refusals:
 
-| Outcome of `CheckCopySwap` | How to read it | What it means |
+| Outcome of `schemachange.CheckCopySwap` or `preflight.CheckCopySwap` | How to read it | What it means |
 | --- | --- | --- |
 | `*PrivilegeError` | `errors.As`; `Grant` is the exact statement to run | The engine role lacks the copy-and-swap tier against this table, or (for a run that decodes WAL) replication access. Raised before any shape or cluster read. |
 | `*UnsupportedCopySwapShapeError` | `CopySwapRefusalCauseOf` → a shape cause from the table below | The table's shape is outside what the route supports. |
 | `*CopySwapEnvironmentError` | `CopySwapRefusalCauseOf` → a cluster or volume cause from the table below, plus `Setting`, and for a measured disk refusal `FreeDiskBytes`, `RequiredShadowBytes` (the space required for the shadow, twice the table), and `SlotLagCeilingBytes` (the effective ceiling for a run that decodes WAL, even when the shadow alone does not fit; zero only for a quiesced run), and for a resumed run `HeldShadowBytes` and `HeldWALBytes` (the shadow already built and the WAL the stopped run's slot already retains, as the server measured them, each capped at the requirement it is taken from and zero for a fresh run; the space refused for is `RequiredShadowBytes − HeldShadowBytes + SlotLagCeilingBytes − HeldWALBytes`) | The cluster or the volume cannot carry the run. |
 | `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
-| any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
+| `schemachange.ErrInvalidOptions` | `errors.Is` | `schemachange.CheckCopySwap` only: the start was neither `CopySwapResume` nor `CopySwapRestart`, or a resume was given no checkpoint store. A defect in the caller; nothing was read. |
+| any other error | wrapped query error | A catalog read failed, or, for `schemachange.CheckCopySwap` on a resume, the read of the table's checkpoint row did; retry or surface it as an engine failure. |
 
 `CopySwapRefusalCause.Class()` answers the `class` column below as a `refusal.Class`, which
 converts to `verdict.Class` with a plain conversion. The imperative front door carries every

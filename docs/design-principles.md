@@ -29,7 +29,7 @@ the phased build plan should be traceable back to one of these.
   one inferred from an absence or granted broadly. When the engine cannot tell intent from
   accident, it refuses. This is why a desired file that no longer lists a column refuses
   rather than drops it, and why the destructive acknowledgement names one table and exists only
-  where the operator wrote the statement. [RF-12](invariants.md#rf-12) makes the rule checkable:
+  where the operator wrote the statement or pinned the reviewed plan that holds it. [RF-12](invariants.md#rf-12) makes the rule checkable:
   every operation an operator lifts with a typed acknowledgement is listed in one registry
   that CI keeps complete, and RF-12 says how to add one.
 - **Decisions, not options.** Prefer sensible defaults over configuration knobs; non-default
@@ -140,7 +140,9 @@ the phased build plan should be traceable back to one of these.
 - **Destructive changes are gated; renames are never guessed.** Dropping a column, a
   constraint, or a `NOT NULL` requires explicit confirmation on both front doors: the
   imperative `migrate --alter` refuses the statement unless `--allow-destructive` names the
-  table, and desired-state execution refuses a destructive plan whole. A missing-plus-new
+  table, and desired-state execution refuses a destructive plan whole unless the run also pins
+  the reviewed plan's fingerprint with `--expect-fingerprint`, so the acknowledgement covers the
+  plan the operator read and no other. A missing-plus-new
   column pair is a drop+add unless a rename is stated explicitly. Intent is required, not
   inferred.
 

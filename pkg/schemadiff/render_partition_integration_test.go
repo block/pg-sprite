@@ -79,7 +79,7 @@ CREATE INDEX events_payload_idx ON events USING gin (payload);
 `, rendered)
 
 	live, desired, changes := roundTrip(t, pool, schema, "events")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a partitioned parent against its own rendering must yield no changes")
 }
 
@@ -121,7 +121,7 @@ CREATE INDEX orders_placed_at_idx ON orders USING btree (placed_at);
 `, rendered)
 
 	live, desired, changes := roundTrip(t, pool, schema, "orders")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a partitioned parent against its own rendering must yield no changes")
 }
 
@@ -187,6 +187,34 @@ func TestRenderRefusesLivePartitionedParentWithUnattachedPrimaryKey(t *testing.T
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableUnattachedIndex)
 }
 
+// A unique constraint added with ALTER TABLE ONLY owns an unattached index
+// the same way a primary key does, so the parent is refused for it too.
+func TestRenderRefusesLivePartitionedParentWithUnattachedUniqueConstraint(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.sp (
+			id bigint NOT NULL,
+			region text NOT NULL
+		) PARTITION BY LIST (region);
+
+		CREATE TABLE %[1]s.sp_eu PARTITION OF %[1]s.sp
+			FOR VALUES IN ('eu');
+
+		ALTER TABLE ONLY %[1]s.sp ADD CONSTRAINT sp_key UNIQUE (region, id);`, schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "sp")
+	require.NoError(t, err)
+	require.Len(t, live.Constraints, 1)
+	require.True(t, live.Constraints[0].IndexInvalid, "the constraint's index is attached on no partition")
+	_, err = schemadiff.Render(live)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableUnattachedIndex)
+}
+
 // The partition key renders as the server prints it, and the scratch build
 // parses that text back. Keys that print more than a bare column — an
 // opclass and collation, an expression, HASH — round-trip to the same model
@@ -220,7 +248,7 @@ func TestRenderRoundTripsPartitionKeyShapes(t *testing.T) {
 			require.NoError(t, err)
 
 			live, desired, changes := roundTrip(t, pool, schema, "k")
-			assert.Equal(t, live, modeltest.Comparable(desired))
+			assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired))
 			assert.Empty(t, changes)
 		})
 	}

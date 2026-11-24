@@ -1,11 +1,5 @@
 package statement
 
-import "errors"
-
-// ErrNotCreateIndex is returned when an index definition is expected and
-// sql is anything other than a single CREATE INDEX.
-var ErrNotCreateIndex = errors.New("statement is not CREATE INDEX")
-
 // IndexOnWholeTable returns a CREATE INDEX definition with ONLY removed
 // from its ON clause, reprinted through the PostgreSQL deparser.
 // pg_get_indexdef prints every index on a partitioned parent as
