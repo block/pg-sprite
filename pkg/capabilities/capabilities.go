@@ -32,6 +32,11 @@ type EnginePath string
 // FrontDoorStatus describes admission through one CLI front door.
 type FrontDoorStatus string
 
+// Maturity says whether a supported capability is generally available or in
+// preview. Only a T1 row carries one: a planned or out-of-scope operation
+// does not run, so it has no maturity.
+type Maturity string
+
 // Closed values used by capability rows.
 const (
 	AreaColumnChanges               Area            = "column_changes"
@@ -57,6 +62,8 @@ const (
 	DoorSupported                   FrontDoorStatus = "supported"
 	DoorRefused                     FrontDoorStatus = "refused"
 	DoorNotApplicable               FrontDoorStatus = "not_applicable"
+	MaturityGA                      Maturity        = "ga"
+	MaturityPreview                 Maturity        = "preview"
 )
 
 // FrontDoors records admission through the imperative and declarative interfaces.
@@ -73,6 +80,7 @@ type Row struct {
 	Tier                Tier           `yaml:"tier" json:"tier"`
 	StatusMark          StatusMark     `yaml:"status_mark" json:"status_mark"`
 	EnginePath          EnginePath     `yaml:"engine_path" json:"engine_path"`
+	Maturity            Maturity       `yaml:"maturity,omitempty" json:"maturity,omitempty"`
 	OnlineSafetyProblem bool           `yaml:"online_safety_problem" json:"online_safety_problem"`
 	OnlineSafetyDetail  string         `yaml:"online_safety_detail,omitempty" json:"online_safety_detail,omitempty"`
 	OwningToolClass     string         `yaml:"owning_tool_class,omitempty" json:"owning_tool_class,omitempty"`
@@ -133,6 +141,9 @@ func Validate(rows []Row) error {
 		if row.EnginePath == PathNone && row.Tier != TierThree {
 			return fmt.Errorf("%s: engine_path none requires T3", prefix)
 		}
+		if err := validateMaturity(row); err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
+		}
 		if !row.OnlineSafetyProblem && row.OwningToolClass == "" {
 			return fmt.Errorf("%s: No row requires owning_tool_class", prefix)
 		}
@@ -152,6 +163,27 @@ func Validate(rows []Row) error {
 		if row.RefusalReason != "" && !slices.Contains(verdict.Reasons(), row.RefusalReason) {
 			return fmt.Errorf("%s: refusal_reason %q is not a verdict.Reason", prefix, row.RefusalReason)
 		}
+	}
+	return nil
+}
+
+// validateMaturity checks that a maturity is present exactly on T1 rows and
+// that no copy-and-swap row claims general availability. The copy-and-swap
+// route is closed unless a run opens it (--copy-and-swap,
+// CopySwapOptions.Enabled), so a row on it is preview until the route opens
+// by default, and this rule goes with that change.
+func validateMaturity(row Row) error {
+	if row.Tier != TierOne {
+		if row.Maturity != "" {
+			return errors.New("only a T1 row carries a maturity")
+		}
+		return nil
+	}
+	if err := checkEnum("maturity", row.Maturity, MaturityGA, MaturityPreview); err != nil {
+		return err
+	}
+	if row.EnginePath == PathCopyAndSwap && row.Maturity != MaturityPreview {
+		return errors.New("a copy-and-swap row is preview while the route is opt-in")
 	}
 	return nil
 }
@@ -226,11 +258,15 @@ func RenderDocument(input []byte, rows []Row) ([]byte, error) {
 	out := append([]byte(nil), input...)
 	counts := map[StatusMark]int{}
 	tiers := map[Tier]int{}
+	preview := 0
 	for _, r := range rows {
 		counts[r.StatusMark]++
 		tiers[r.Tier]++
+		if r.Maturity == MaturityPreview {
+			preview++
+		}
 	}
-	summary := fmt.Sprintf("**%d operations: %d supported today, %d planned behind a typed refusal, %d out of scope\nby design, and %d with no online mechanism for pg-sprite to build on.**", len(rows), tiers[TierOne], tiers[TierTwo], counts[StatusNoSafetyProblem]+counts[StatusOtherTool], counts[StatusNoOnlineMechanism])
+	summary := fmt.Sprintf("**%d operations: %d supported today (%d of them in preview), %d planned behind a typed refusal,\n%d out of scope by design, and %d with no online mechanism for pg-sprite to build on.**", len(rows), tiers[TierOne], preview, tiers[TierTwo], counts[StatusNoSafetyProblem]+counts[StatusOtherTool], counts[StatusNoOnlineMechanism])
 	var err error
 	out, err = replaceRegion(out, "summary", summary)
 	if err != nil {
@@ -249,7 +285,11 @@ func RenderDocument(input []byte, rows []Row) ([]byte, error) {
 			} else if r.OnlineSafetyDetail != "" {
 				answer += " — " + r.OnlineSafetyDetail
 			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", cell(r.Operation), r.StatusMark, pathLabels[r.EnginePath], cell(answer), cell(r.ReasonNotes))
+			status := string(r.StatusMark)
+			if r.Maturity == MaturityPreview {
+				status += " preview"
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", cell(r.Operation), status, pathLabels[r.EnginePath], cell(answer), cell(r.ReasonNotes))
 		}
 		out, err = replaceRegion(out, string(area), strings.TrimSuffix(b.String(), "\n"))
 		if err != nil {

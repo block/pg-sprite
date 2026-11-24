@@ -85,6 +85,11 @@ func TestCapabilitiesTextLayout(t *testing.T) {
 		require.Greater(t, len(runes), markColumn, line)
 		assert.Equal(t, string(row.StatusMark), string(runes[markColumn:]), "status mark is the last column on %q", line)
 		assert.Contains(t, line, " "+string(row.Tier)+" ", "tier is printed on %q", line)
+		if row.Maturity == "" {
+			assert.Contains(t, line, " "+string(row.Tier)+"   — ", "a row without a maturity renders an em dash after the tier on %q", line)
+		} else {
+			assert.Contains(t, line, " "+string(row.Tier)+"   "+string(row.Maturity)+" ", "maturity follows the tier on %q", line)
+		}
 		if row.OwningToolClass == "" {
 			sawEmptyOwner = true
 			assert.Contains(t, line, " — ", "an empty owner renders as an em dash on %q", line)

@@ -129,16 +129,18 @@ Excerpt, the first rows:
 
 ```console
 $ pg-sprite capabilities
-AREA          OPERATION                     TIER BACKEND        FRONT DOORS    OWNER     STATUS
-column_chang… `ADD COLUMN` (no default, a … t1   native_as_is   m:yes d:yes    —         ✅
-column_chang… `ADD COLUMN` with volatile d… t2   copy_and_swap  m:ref d:ref    —         🟡
-column_chang… `DROP COLUMN`                 t1   native_as_is   m:yes d:yes    —         ✅
-column_chang… `ALTER COLUMN TYPE`, general… t1   copy_and_swap  m:yes d:yes    —         ✅
-column_chang… `RENAME COLUMN` / `RENAME TA… t3   none           m:ref d:n/a    —         ❌
+AREA          OPERATION                     TIER MATURITY BACKEND        FRONT DOORS    OWNER     STATUS
+column_chang… `ADD COLUMN` (no default, a … t1   ga       native_as_is   m:yes d:yes    —         ✅
+column_chang… `ADD COLUMN` with volatile d… t2   —        copy_and_swap  m:ref d:ref    —         🟡
+column_chang… `DROP COLUMN`                 t1   ga       native_as_is   m:yes d:yes    —         ✅
+column_chang… `ALTER COLUMN TYPE`, general… t1   preview  copy_and_swap  m:yes d:yes    —         ✅
+column_chang… `RENAME COLUMN` / `RENAME TA… t3   —        none           m:ref d:n/a    —         ❌
 ```
 
 `m:` is `migrate` and `d:` is the declarative `diff`; `yes` runs, `ref` is
-refused today. The full matrix, with the reason for every row, is
+refused today. `MATURITY` is set on supported rows only: `ga` is generally
+available, and `preview` runs only when the run opts in, such as
+`--copy-and-swap`. The full matrix, with the reason for every row, is
 [capabilities.md](capabilities.md); `--json` prints it for automation.
 
 ## Run a schema change

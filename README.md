@@ -52,7 +52,8 @@ is [docs/vision.md](docs/vision.md); the canonical support matrix — is this
 change supported today, planned, or out of scope — is
 [docs/capabilities.md](docs/capabilities.md).
 The same embedded matrix is queryable for automation with
-`pg-sprite capabilities --json`.
+`pg-sprite capabilities --json`; each supported row's `maturity` says whether it is
+generally available (`ga`) or in preview (`preview`, the run must opt in).
 
 ## What pg-sprite does not do yet
 

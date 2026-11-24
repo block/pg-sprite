@@ -97,6 +97,7 @@ spellings.
 | `tier` | enum | yes | `t1`, `t2`, `t3` |
 | `status_mark` | enum | yes | `✅`, `🟡`, `⚪`, `🔵`, `❌` |
 | `engine_path` | enum | yes | `native_as_is`, `native_safer_sequence`, `native_planned_flow`, `copy_and_swap`, `none` |
+| `maturity` | enum | conditionally | Required on T1 rows, absent otherwise: `ga` (generally available) or `preview` (runs only when the run opts in). A `copy_and_swap` row is `preview` while that route is opt-in |
 | `online_safety_problem` | boolean | yes | The matrix's leading Yes/No answer |
 | `online_safety_detail` | string | no | Markdown qualification after Yes/No, without the leading answer |
 | `owning_tool_class` | string | conditionally | Required when `online_safety_problem` is false; absent otherwise; preserves the class named after “No —” |
@@ -179,9 +180,9 @@ does not connect to PostgreSQL.
 
 The contract must support the `jq` recipes in the operator guide's
 [Query the matrix](capabilities.md#query-the-matrix) section: looking a row up by `id`,
-and selecting rows by tier, by engine path, by a front door's disposition, and by owning
-tool class. That section is the one copy of the recipes; this contract only fixes the
-field names they select on.
+and selecting rows by tier, by maturity, by engine path, by a front door's disposition,
+and by owning tool class. That section is the one copy of the recipes; this contract
+only fixes the field names they select on.
 
 Human output may render a compact table, but JSON field names and enum values are the
 automation contract. Stable JSON means deterministic content and closed vocabulary;
