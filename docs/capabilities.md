@@ -316,7 +316,7 @@ or the only online form is a direct statement the operator runs).
 <!-- capabilities:begin data_and_whole_table_operations -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned) |
+| `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it: the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. A whole-schema owner that has reviewed the drop runs it through the Go API, `executor.ExecuteDropTable`, which drops the table only if it still has the reviewed definition; see [Deliberately operator-owned](#deliberately-operator-owned) |
 | Data backfills, `UPDATE`/`DELETE` batches, DML of any kind | 🔵 | — | No — data-change runners, application batch jobs | pg-sprite changes table *shape*, never table *contents*. Versioned-script runners and application jobs own data changes |
 | Column-transform expressions during a copy-and-swap rewrite | ✅ | copy-and-swap | Yes | The one principled exception: when a rewrite is already copying every row, deriving the retyped column's value by expression is part of the shape change, not a data job. `ALTER COLUMN TYPE … USING expr` runs the expression per row during the copy and through the stream |
 | Online table rebuild with no shape change (bloat reclamation) | 🟡 | copy-and-swap | Yes | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned; the planner has no statement form that requests it yet |
@@ -401,7 +401,7 @@ Three related jobs stay with humans on purpose:
   scoped and whole-schema convergence is a planner's job (see the 🔵 row in the matrix), so
   pg-sprite has no view of *which* tables a schema should contain — only of each table's
   shape. Under a declarative model the only convergence for a live table with no desired
-  file is `DROP TABLE`, and pg-sprite never plans or executes one. Whoever owns the whole
+  file is `DROP TABLE`, and pg-sprite never plans one. Whoever owns the whole
   schema — an orchestrator, or an operator running `diff` per file — therefore owns the
   set of tables: decide how far the declared files are authoritative, enumerate the live
   tables, and treat each undeclared one as a destructive divergence to resolve rather than
@@ -443,6 +443,21 @@ Three related jobs stay with humans on purpose:
   tables, and sequences are outside the model and are not undeclared tables. The planner's scratch
   objects live in a schema of their own (`pgsprite_scratch_<random>`) inside a transaction
   that is always rolled back, so a listing scoped to the owner's schema never sees them.
+
+  Once a reviewer has accepted a drop, the owner runs it with `executor.ExecuteDropTable`.
+  At plan time, record the table's definition with `schemadiff.DroppedTableDefinition` on
+  the model `schemadiff.Introspect` returns. At run time the executor locks the table, reads
+  it again, and drops it without `CASCADE` in one transaction. It refuses, dropping nothing:
+
+  | Code | When |
+  |---|---|
+  | `dropped-object-drift` | The table no longer has the reviewed definition, or the name is now a view |
+  | `dropped-object-has-descendants` | The table is partitioned or has inheritance children |
+  | `dropped-table-has-parent` | The table is a partition or an inheritance child |
+  | `dropped-table-has-dependents` | A view, another table's foreign key, or another object depends on it |
+  | `table-not-found` | The table is already gone |
+
+  The drop is not undone: back up the rows first if they may be needed again.
 - **Deciding to recover an invalid index.** A failed `CREATE INDEX CONCURRENTLY` leaves
   an invalid index; an in-flight healthy build looks identical. The build **never drops
   an index itself** — PostgreSQL drops by name, not identity, so a drop on the way in

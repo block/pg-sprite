@@ -12,17 +12,17 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// ErrDroppedObjectDrift means the column, constraint, or NOT NULL a
+// ErrDroppedObjectDrift means the column, constraint, NOT NULL, or table a
 // reviewed plan drops no longer has the definition the plan carried for it,
 // read again under the table's lock: it is gone, or the name now stands
 // for another object (a column dropped and added again, a constraint
-// replaced under its name). Nothing was dropped. The outcome is permanent:
+// replaced under its name, a table whose shape changed). Nothing was dropped. The outcome is permanent:
 // re-plan against the table as it stands and review the new plan.
 var ErrDroppedObjectDrift = errors.New("the object the plan drops changed after planning")
 
-// ErrDroppedObjectHasDescendants means a reviewed column, constraint, or
-// NOT NULL drop names a table that has partitions or inheritance children,
-// read under the table's lock. The drop would reach into those tables too:
+// ErrDroppedObjectHasDescendants means a reviewed column, constraint, NOT
+// NULL, or table drop names a table that has partitions or inheritance
+// children, read under the table's lock. A table drop would drop them too. The drop would reach into those tables too:
 // a column drop removes their copies of the column, a constraint drop
 // removes their copies of the constraint (and, for a partitioned table's
 // key, each partition's index), and a NOT NULL drop clears it on their

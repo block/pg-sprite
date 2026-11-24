@@ -679,7 +679,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned)"
+    reason_notes: "Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it: the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. A whole-schema owner that has reviewed the drop runs it through the Go API, `executor.ExecuteDropTable`, which drops the table only if it still has the reviewed definition; see [Deliberately operator-owned](#deliberately-operator-owned)"
   - id: data-backfills-update-delete-batches-dml-of-any-kind
     area: "data_and_whole_table_operations"
     operation: "Data backfills, `UPDATE`/`DELETE` batches, DML of any kind"
