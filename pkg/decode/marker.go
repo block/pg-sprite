@@ -12,6 +12,15 @@ import (
 // reader of the WAL whose they are.
 const MarkerPrefix = "pgsprite"
 
+// markWALSQL writes the marker and reads the position just past it. It
+// runs in a transaction on the caller's pool, whatever its search_path, so
+// the cast is spelled through pg_catalog as well as the function: a
+// lookalike text type on the path would otherwise reshape the position a
+// caller waits for the stream to pass (CO-9).
+//
+// INV: CO-9
+const markWALSQL = `SELECT pg_catalog.pg_logical_emit_message(false, $1, '')::pg_catalog.text`
+
 // MarkWAL writes a marker into the WAL from inside tx and returns the
 // position just past it. Every transaction visible to tx's snapshot
 // committed before the marker, so a stream confirmed past the marker's
@@ -30,7 +39,7 @@ const MarkerPrefix = "pgsprite"
 // shadow is not written.
 func MarkWAL(ctx context.Context, tx pgx.Tx) (LSN, error) {
 	var text string
-	if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_logical_emit_message(false, $1, '')::text`, MarkerPrefix).Scan(&text); err != nil {
+	if err := tx.QueryRow(ctx, markWALSQL, MarkerPrefix).Scan(&text); err != nil {
 		return 0, fmt.Errorf("mark the WAL position: %w", err)
 	}
 	lsn, err := ParseLSN(text)

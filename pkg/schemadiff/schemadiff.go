@@ -37,6 +37,14 @@ const (
 type Column struct {
 	// Name is the column name.
 	Name string
+	// AttNum is the column's attribute number (pg_attribute.attnum), which
+	// a column dropped and added again under its name never keeps. Only a
+	// live table is read for it; it never reaches a digest.
+	AttNum int16 `json:"-"`
+	// Dependents are the objects that go with the column when it is
+	// dropped, as a live table's introspection reads them (see Dependent).
+	// Only a live table is read for them; they never reach a digest.
+	Dependents []Dependent `json:"-"`
 	// Type is the canonical type text (format_type), e.g. "character
 	// varying(50)" — never an alias like varchar(50).
 	Type string
@@ -180,6 +188,12 @@ type Constraint struct {
 	// " NOT VALID". Only a live table carries one: CREATE TABLE ignores NOT
 	// VALID, so a desired constraint is always validated.
 	NotValid bool `json:"-"`
+	// IndexInvalid reports a primary key, unique, or exclusion constraint
+	// whose index the server has not validated (pg_index.indisvalid is
+	// false). On a partitioned parent that is a key added with ALTER TABLE
+	// ONLY whose index is not attached on every partition, so the key is
+	// enforced on none of them.
+	IndexInvalid bool `json:"-"`
 	// DefReplays are the texts a check constraint's Def prints as after
 	// each further replay through the server, when replaying changes it,
 	// and a live text that prints as Def or one of those; see

@@ -9,6 +9,13 @@ import (
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
+// swapPositionSQL reads the WAL insert position as text. The cast names
+// pg_catalog.text so that a type of that name on the session's path cannot
+// cut the position short.
+//
+// INV: CO-9
+const swapPositionSQL = `SELECT pg_catalog.pg_current_wal_insert_lsn()::pg_catalog.text`
+
 // readSwapPosition reads the server's WAL insert position inside the swap
 // transaction, after the lock and before COMMIT. The ACCESS EXCLUSIVE lock
 // has excluded every other session from the source since it was granted,
@@ -27,8 +34,7 @@ import (
 // Either way the rollback leaves the source live and the run resumable.
 func readSwapPosition(ctx context.Context, tx pgx.Tx) (decode.LSN, error) {
 	var text string
-	// INV: CO-9
-	if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_wal_insert_lsn()::text`).Scan(&text); err != nil {
+	if err := tx.QueryRow(ctx, swapPositionSQL).Scan(&text); err != nil {
 		return 0, fmt.Errorf("read the swap's WAL position: %w", err)
 	}
 	position, err := decode.ParseLSN(text)

@@ -54,6 +54,11 @@ type runState struct {
 // had been none.
 func (r *Runner) dispatch(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
 	cp, err := r.store.Inspect(ctx, target.Schema(), target.Table())
+	if r.startsFresh(cp, err) && target.FinishesCommittedSwap() {
+		// INV: ST-6 — the target was admitted for a run that only finishes
+		// a committed swap; a fresh run was never measured.
+		return runState{}, refuseFinishAdmission(target, "no row this run may resume")
+	}
 	switch {
 	case errors.Is(err, checkpoint.ErrNotFound) && r.opts.Restart:
 		if err := r.discardUnrecorded(ctx, pool, lock, target); err != nil {
@@ -80,6 +85,29 @@ func (r *Runner) dispatch(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 		return r.startFreshLive(ctx, pool, lock, target, st)
 	}
 	return r.startFresh(ctx, pool, lock, target, st)
+}
+
+// startsFresh reports whether dispatch, given the row Inspect returned
+// (or its error), starts the run fresh rather than resuming a row: there
+// is no row, or there is one it replaces or discards first. A failed read
+// starts nothing; dispatch returns it.
+func (r *Runner) startsFresh(cp checkpoint.Checkpoint, inspectErr error) bool {
+	switch {
+	case errors.Is(inspectErr, checkpoint.ErrNotFound):
+		return true
+	case inspectErr != nil:
+		return false
+	case cp.Phase == checkpoint.PhaseDone:
+		return r.opts.ReplaceDone
+	default:
+		return r.opts.Restart
+	}
+}
+
+// refuseFinishAdmission refuses a run on a target admitted only to finish
+// a committed swap whose row, read under the run's lock, asks for more.
+func refuseFinishAdmission(target preflight.CopySwapTarget, found string) error {
+	return refuse(CauseFinishAdmissionStale, nil, "the environment check for %s.%s admitted only finishing a committed swap and asked for no disk space, but the run found %s; check the environment again before running", target.Schema(), target.Table(), found)
 }
 
 // replaceDoneRow deletes the done row cp, under this run's lock session,
@@ -263,6 +291,11 @@ func (r *Runner) resumeOnRow(ctx context.Context, pool *pgxpool.Pool, lock *dbco
 		default:
 			return runState{}, err
 		}
+	}
+	if target.FinishesCommittedSwap() {
+		// INV: ST-6 — a row that is not past its swap still copies or
+		// verifies, which the finish-only admission never measured.
+		return runState{}, refuseFinishAdmission(target, fmt.Sprintf("a row in phase %s whose swap has not committed", cp.Phase))
 	}
 	built, err := InspectShadow(ctx, pool, lock, target, st, r.opts.Shadow)
 	if errors.Is(err, ErrShadowNotFound) {

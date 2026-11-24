@@ -75,7 +75,7 @@ func TestExecuteRowSecurityRefusesPartitionedParent(t *testing.T) {
  ) PARTITION BY RANGE (id);
  ALTER TABLE %s.documents ENABLE ROW LEVEL SECURITY;`, schema, schema, schema))
 	require.NoError(t, err)
-	requireRLSShapeRefusal(t, pool, schema, schemadiff.ErrUnrenderablePartition)
+	requireRLSShapeRefusal(t, pool, schema, schemadiff.ErrUnrenderablePartitionedRowSecurity)
 }
 
 func TestExecuteRowSecurityRefusesNonOwnerBeforeLock(t *testing.T) {

@@ -34,6 +34,10 @@ const (
 	// CodeCommitOutcomeUnknown requires catalog inspection before retry: a
 	// bounded attempt's COMMIT did not return success and may have landed.
 	CodeCommitOutcomeUnknown Code = "commit-outcome-unknown"
+	// CodeDropOutcomeUnknown requires catalog inspection before retry: a
+	// reviewed index drop completed, but the check of which index it
+	// dropped failed.
+	CodeDropOutcomeUnknown Code = "drop-outcome-unknown"
 	// CodeInvalidBlockingBudget identifies an unrepresentable or disabled bound.
 	CodeInvalidBlockingBudget Code = "invalid-blocking-budget"
 	// CodeUnsupportedAcceptedBlocking identifies a statement outside this narrow path.
@@ -46,7 +50,8 @@ const (
 	CodeCancelledExternally Code = "cancelled-externally"
 	// CodeInvalidIndexOwnLeftover: the failed build's own invalid index
 	// remains and is proven this run's leftover; the recovery runbook
-	// applies.
+	// applies. A build that failed on its rows reports CodeDataFault
+	// instead, with the leftover still on its Cleanup.
 	CodeInvalidIndexOwnLeftover Code = "invalid-index-own-leftover"
 	// CodeInvalidIndexBuildInFlight: the invalid index under the requested
 	// name is another backend's concurrent build still in progress; wait.
@@ -87,15 +92,22 @@ const (
 	// CodeForeignTablePartition: the partition tree holds a foreign table,
 	// which cannot carry an index; nothing was created.
 	CodeForeignTablePartition Code = "foreign-table-partition"
+	// CodeUniqueIndexPartitionKey: a unique index does not contain the
+	// partition key of every partitioned table in the tree; nothing was
+	// created.
+	CodeUniqueIndexPartitionKey Code = "unique-index-partition-key"
+	// CodeTableLockUnconfirmed: the pool's role cannot see when the session
+	// holding the build's table lock started, so the build cannot confirm
+	// the lock is its own; nothing was created.
+	CodeTableLockUnconfirmed Code = "table-lock-unconfirmed"
+	// CodePartitionDetachPending: the partition tree holds a partition
+	// whose concurrent detach did not finish, so no index can be attached
+	// for it.
+	CodePartitionDetachPending Code = "partition-detach-pending"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
 	CodePartitionedIndexTablespace Code = "partitioned-index-tablespace"
-	// CodeUniqueIndexMissingPartitionKey: a unique index on a partitioned
-	// table does not include every partition key column of every
-	// partitioned table in the tree, which PostgreSQL requires; nothing was
-	// created.
-	CodeUniqueIndexMissingPartitionKey Code = "unique-index-missing-partition-key"
 	// CodePartitionedIndexUnsettled: partitions kept appearing without an
 	// index until the build ran out of passes; a rerun resumes.
 	CodePartitionedIndexUnsettled Code = "partitioned-index-unsettled"
@@ -171,6 +183,27 @@ const (
 	// planning, read again under the table's lock; nothing was attached.
 	// Re-plan against the index as it stands.
 	CodeAdoptedIndexDrift Code = "adopted-index-drift"
+	// CodeDroppedIndexDrift: the index a reviewed plan drops is no longer
+	// the plain, valid index of the plan's table that the plan named, read
+	// again on the session that drops it; nothing was dropped. Re-plan
+	// against the catalog as it stands and review the new plan.
+	CodeDroppedIndexDrift Code = "dropped-index-drift"
+	// CodeDroppedIndexReplaced: a drop that passed its pre-drop read removed
+	// an index the plan did not review, because another session gave the
+	// name to a different index in the round trip between the read and the
+	// drop. Unlike the drift codes, something was dropped: inspect the
+	// table's indexes and recreate the dropped one if it should stay.
+	CodeDroppedIndexReplaced Code = "dropped-index-replaced"
+	// CodeDroppedObjectDrift: the column, constraint, or NOT NULL a
+	// reviewed plan drops no longer has the definition the plan carried,
+	// read again under the table's lock; nothing was dropped. Re-plan
+	// against the table as it stands and review the new plan.
+	CodeDroppedObjectDrift Code = "dropped-object-drift"
+	// CodeDroppedObjectHasDescendants: a reviewed column, constraint, or
+	// NOT NULL drop names a table with partitions or inheritance children,
+	// and the drop would reach their copies too, which the plan did not
+	// review; nothing was dropped.
+	CodeDroppedObjectHasDescendants Code = "dropped-object-has-descendants"
 	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
 	// CONSTRAINT validates was dropped or replaced after planning, read
 	// again under the table's lock; nothing was validated. Re-plan against
@@ -187,19 +220,34 @@ const (
 	// the name to a different type; nothing was added. Plan again against
 	// the catalog as it stands.
 	CodeEnumTypeDrift Code = "enum-type-drift"
+	// CodeEnumLabelExists: the enum type the engine checked already
+	// carries the label an ALTER TYPE ... ADD VALUE without IF NOT EXISTS
+	// adds, because another change added it after planning; nothing was
+	// added. Plan again against the catalog as it stands.
+	CodeEnumLabelExists Code = "enum-label-exists"
+	// CodeEnumNeighborMissing: the enum type the engine checked no longer
+	// carries the label an ALTER TYPE ... ADD VALUE places its value
+	// BEFORE or AFTER, because another change renamed or removed it after
+	// planning; nothing was added. Plan again against the catalog as it
+	// stands.
+	CodeEnumNeighborMissing Code = "enum-neighbor-missing"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
 	// CodeDataFault: the server rejected the table's rows as the statement
-	// would shape them (SQLSTATE class 22, a value the new type will not
-	// hold; class 23, a constraint the rows break). The code names the
-	// fault, not what was left behind: any rerun meets the same rows, so
-	// the copy-and-swap run tries to abandon itself — shadow, hold on the
-	// source, and checkpoint row discarded — and returns
-	// *schemachange.AbandonedError only when that finished, which the
-	// verdict reports as Abandoned. Correct the data or the statement,
-	// then run it again from the beginning; when the abandon did not
+	// would shape them (SQLSTATE class 22, a value the new type or an index
+	// expression will not take; class 23, a constraint the rows break, such
+	// as duplicate values under a unique index). The code names the fault,
+	// not what was left behind: any rerun meets the same rows until the data
+	// or the statement is corrected. A copy-and-swap run tries to abandon
+	// itself — shadow, hold on the source, and checkpoint row discarded —
+	// and returns *schemachange.AbandonedError only when that finished,
+	// which the verdict reports as Abandoned; when the abandon did not
 	// finish, start it over with the restart acknowledgement, as the
-	// verdict's detail says.
+	// verdict's detail says. A concurrent index build returns an
+	// *InvalidIndexError whose Recoverable is false and whose Cleanup
+	// still says what it left: its own invalid index occupies the name,
+	// so correct the rows, drop the leftover concurrently, and run the
+	// change again.
 	CodeDataFault Code = "data-fault"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
 	// retry candidate.
@@ -221,6 +269,7 @@ func Codes() []Code {
 		CodeBudgetStatementExceeded,
 		CodeBlockingOutcomeUnknown,
 		CodeCommitOutcomeUnknown,
+		CodeDropOutcomeUnknown,
 		CodeRowSecurityPlanChanged,
 		CodeRowSecurityRefused,
 		CodeRowSecurityOutcomeUnknown,
@@ -239,8 +288,10 @@ func Codes() []Code {
 		CodeNotPartitionedTable,
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
+		CodeUniqueIndexPartitionKey,
+		CodeTableLockUnconfirmed,
+		CodePartitionDetachPending,
 		CodePartitionedIndexTablespace,
-		CodeUniqueIndexMissingPartitionKey,
 		CodePartitionedIndexUnsettled,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
@@ -260,9 +311,15 @@ func Codes() []Code {
 		CodePoolTooSmall,
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
+		CodeDroppedIndexDrift,
+		CodeDroppedIndexReplaced,
+		CodeDroppedObjectDrift,
+		CodeDroppedObjectHasDescendants,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
+		CodeEnumLabelExists,
+		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation,
@@ -292,8 +349,10 @@ func (c Code) Permanent() bool {
 		CodeNotPartitionedTable,
 		CodePartitionedIndexNameTaken,
 		CodeForeignTablePartition,
+		CodeUniqueIndexPartitionKey,
+		CodeTableLockUnconfirmed,
+		CodePartitionDetachPending,
 		CodePartitionedIndexTablespace,
-		CodeUniqueIndexMissingPartitionKey,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -310,9 +369,15 @@ func (c Code) Permanent() bool {
 		CodePoolTooSmall,
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
+		CodeDroppedIndexDrift,
+		CodeDroppedIndexReplaced,
+		CodeDroppedObjectDrift,
+		CodeDroppedObjectHasDescendants,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
+		CodeEnumLabelExists,
+		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
 		CodeInvariantViolation:
@@ -327,6 +392,11 @@ func (c Code) Permanent() bool {
 // that underlying code — the step position and committed prefix ride on
 // the struct itself, not the vocabulary. An error outside the typed set
 // maps to CodeExecutionFailed.
+//
+// An error that carries ErrInvariantViolation maps to
+// CodeInvariantViolation whichever typed failure wraps it, so the
+// fail-closed code outranks every other one. Each typed error's own Code
+// method applies the same rule, so the two never disagree.
 func OutcomeCode(err error) Code {
 	if err == nil {
 		return ""
@@ -353,6 +423,9 @@ func OutcomeCode(err error) Code {
 	}
 	if _, ok := errors.AsType[*CommitOutcomeUnknownError](err); ok {
 		return CodeCommitOutcomeUnknown
+	}
+	if _, ok := errors.AsType[*DropOutcomeUnknownError](err); ok {
+		return CodeDropOutcomeUnknown
 	}
 	return sentinelCode(err)
 }
@@ -390,10 +463,14 @@ func sentinelCode(err error) Code {
 		return CodePartitionedIndexNameTaken
 	case errors.Is(err, ErrForeignTablePartition):
 		return CodeForeignTablePartition
+	case errors.Is(err, ErrUniqueIndexPartitionKey):
+		return CodeUniqueIndexPartitionKey
+	case errors.Is(err, ErrTableLockUnconfirmed):
+		return CodeTableLockUnconfirmed
+	case errors.Is(err, ErrPartitionDetachPending):
+		return CodePartitionDetachPending
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
-	case errors.Is(err, ErrUniqueIndexMissingPartitionKey):
-		return CodeUniqueIndexMissingPartitionKey
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
 		return CodePartitionedIndexUnsettled
 	case errors.Is(err, ErrEmptySequence):
@@ -432,12 +509,24 @@ func sentinelCode(err error) Code {
 		return CodeReplicaIdentityDrop
 	case errors.Is(err, ErrAdoptedIndexDrift):
 		return CodeAdoptedIndexDrift
+	case errors.Is(err, ErrDroppedIndexDrift):
+		return CodeDroppedIndexDrift
+	case errors.Is(err, ErrDroppedIndexReplaced):
+		return CodeDroppedIndexReplaced
+	case errors.Is(err, ErrDroppedObjectDrift):
+		return CodeDroppedObjectDrift
+	case errors.Is(err, ErrDroppedObjectHasDescendants):
+		return CodeDroppedObjectHasDescendants
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
 		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrEnumTypeDrift):
 		return CodeEnumTypeDrift
+	case errors.Is(err, ErrEnumLabelExists):
+		return CodeEnumLabelExists
+	case errors.Is(err, ErrEnumNeighborMissing):
+		return CodeEnumNeighborMissing
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:
@@ -445,8 +534,12 @@ func sentinelCode(err error) Code {
 	}
 }
 
-// Code returns the budget outcome's stable code.
+// Code returns the budget outcome's stable code. A budget error whose
+// cause carries an invariant breach reports the breach, as OutcomeCode does.
 func (e *BudgetError) Code() Code {
+	if errors.Is(e, ErrInvariantViolation) {
+		return CodeInvariantViolation
+	}
 	switch e.Cause {
 	case CauseLock:
 		return CodeBudgetLockExceeded
@@ -460,12 +553,20 @@ func (e *BudgetError) Code() Code {
 }
 
 // Code returns the invalid-index outcome's stable code, derived from the
-// same cleanup state the error's rendering distinguishes: proven own
-// leftover, another backend's build in flight, abandoned on the target
-// table, on another table, not droppable, builder unobservable, or
-// unproven.
+// same state the error's rendering distinguishes: a build that failed on a
+// data fault, then the cleanup state — proven own leftover, another
+// backend's build in flight, abandoned on the target table, on another
+// table, not droppable, builder unobservable, or unproven. The data fault
+// outranks the cleanup state because it names what the operator corrects:
+// no handling of the leftover gets a rerun past the same rows. An invariant
+// breach in either the build or the cleanup outranks both, as it does in
+// OutcomeCode. The cleanup sentinel stays in the chain for errors.Is.
 func (e *InvalidIndexError) Code() Code {
 	switch {
+	case errors.Is(e, ErrInvariantViolation):
+		return CodeInvariantViolation
+	case e.buildDataFault():
+		return CodeDataFault
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
 		return CodeInvalidIndexOwnLeftover
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuildInFlight):

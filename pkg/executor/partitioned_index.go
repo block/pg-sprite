@@ -109,7 +109,9 @@ type PartitionedIndexReport struct {
 // lock's dedicated session dials, the same Config the pool was made from. Under
 // the lock it:
 //
-//  1. refuses a tree that holds a foreign table (ErrForeignTablePartition);
+//  1. refuses a tree that holds a foreign table (ErrForeignTablePartition),
+//     and a unique index that does not contain the partition key of every
+//     partitioned table in the tree (ErrUniqueIndexPartitionKey);
 //  2. creates the parent's index with ON ONLY, or resumes one an earlier run
 //     left when it is a partitioned index of the requested definition
 //     (ErrPartitionedIndexNameTaken otherwise);
@@ -220,6 +222,11 @@ type partitionedIndexRequest struct {
 	schema string
 	table  string
 	index  string
+	// unique and keyColumns are what the partition key check needs: a
+	// unique index must contain every partitioned table's partition key
+	// among its plain key columns.
+	unique     bool
+	keyColumns []string
 }
 
 // admitPartitionedIndex is the executor's own admission check: exactly one
@@ -228,7 +235,7 @@ type partitionedIndexRequest struct {
 // nothing is executed on one.
 func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partitionedIndexRequest, error) {
 	var req partitionedIndexRequest
-	st, index, err := admitPartitionedIndexShape(sql)
+	st, op, err := admitPartitionedIndexShape(sql)
 	if err != nil {
 		return req, err
 	}
@@ -241,7 +248,13 @@ func admitPartitionedIndex(sql string, pt preflight.PreflightedTable) (partition
 	if !pt.Partitioned() {
 		return req, fmt.Errorf("%w: %s", ErrNotPartitionedTable, qualifiedName(pt.Schema(), pt.Table()))
 	}
-	return partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: index}, nil
+	req = partitionedIndexRequest{schema: st.Schema(), table: st.Table(), index: op.Name, unique: op.Unique}
+	if req.unique {
+		if req.keyColumns, err = statement.IndexKeyColumns(sql); err != nil {
+			return req, fmt.Errorf("read the key columns of index %s: %w", qualifiedName(req.schema, req.index), err)
+		}
+	}
+	return req, nil
 }
 
 // AdmitPartitionedIndexShape is the statement-shape half of the partitioned
@@ -254,34 +267,34 @@ func AdmitPartitionedIndexShape(sql string) error {
 	return err
 }
 
-// admitPartitionedIndexShape returns the parsed statement and the name of the
-// index it creates.
-func admitPartitionedIndexShape(sql string) (statement.Statement, string, error) {
+// admitPartitionedIndexShape returns the parsed statement and the index
+// operation it holds.
+func admitPartitionedIndexShape(sql string) (statement.Statement, statement.Op, error) {
 	st, err := statement.ParseOne(sql)
 	if err != nil {
-		return statement.Statement{}, "", err
+		return statement.Statement{}, statement.Op{}, err
 	}
 	if st.Kind() != statement.KindCreateIndex {
-		return statement.Statement{}, "", fmt.Errorf("%w: got %s", ErrNotCreateIndex, st.Kind())
+		return statement.Statement{}, statement.Op{}, fmt.Errorf("%w: got %s", ErrNotCreateIndex, st.Kind())
 	}
 	ops, err := statement.ParseOps(sql)
 	if err != nil {
-		return statement.Statement{}, "", err
+		return statement.Statement{}, statement.Op{}, err
 	}
 	// A CREATE INDEX yields exactly one operation; anything else is
 	// parse-boundary version skew and is refused rather than guessed.
 	if len(ops) != 1 || ops[0].Kind != statement.OpCreateIndex {
-		return statement.Statement{}, "", ErrNotCreateIndex
+		return statement.Statement{}, statement.Op{}, ErrNotCreateIndex
 	}
 	switch {
 	case ops[0].Name == "":
-		return statement.Statement{}, "", ErrUnnamedIndex
+		return statement.Statement{}, statement.Op{}, ErrUnnamedIndex
 	case ops[0].IfNotExists:
-		return statement.Statement{}, "", ErrIfNotExistsUnsupported
+		return statement.Statement{}, statement.Op{}, ErrIfNotExistsUnsupported
 	case ops[0].Tablespace != "":
-		return statement.Statement{}, "", fmt.Errorf("%w: TABLESPACE %q", ErrPartitionedIndexTablespace, ops[0].Tablespace)
+		return statement.Statement{}, statement.Op{}, fmt.Errorf("%w: TABLESPACE %q", ErrPartitionedIndexTablespace, ops[0].Tablespace)
 	case st.Schema() == "":
-		return statement.Statement{}, "", ErrUnqualifiedTable
+		return statement.Statement{}, statement.Op{}, ErrUnqualifiedTable
 	}
-	return st, ops[0].Name, nil
+	return st, ops[0], nil
 }

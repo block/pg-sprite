@@ -95,10 +95,11 @@ type CopySwapEnvironment struct {
 
 // CopySwapHeld is the space a stopped copy-and-swap run already occupies on
 // the volume when the run being checked resumes it: the shadow it built so
-// far and the WAL its replication slot retains. Both figures must be read
-// from the server, never from a checkpoint row, and a figure that could
-// not be read is zero, so the check discounts no more than the volume
-// truly holds. A negative figure is refused.
+// far and the WAL its replication slot retains, or that its swap has
+// already committed. Every field must be read from the server, never from
+// a checkpoint row, and a figure that could not be read is zero, so the
+// check discounts no more than the volume truly holds. A negative figure
+// is refused.
 type CopySwapHeld struct {
 	// ShadowBytes is the shadow table's total size (heap, indexes, TOAST)
 	// as the server reports it.
@@ -107,6 +108,17 @@ type CopySwapHeld struct {
 	// restart position to the server's write position. It is counted only
 	// for a run that decodes WAL; a quiesced run holds no slot.
 	RetainedWALBytes int64
+	// SwapCommitted reports that the catalog shows the stopped run's swap
+	// committed: the shadow already bears the table's name, so the run
+	// being checked only finishes it — drops the slot, drops the retained
+	// source or (under KeepOld) takes the write fence off it, and records
+	// the change done. That run builds no shadow and decodes no WAL, so
+	// the disk check removes the whole requirement: neither the copy's
+	// headroom nor the slot lag ceiling is asked. Only MeasureResumeHeld
+	// in package schemachange should set it. The target it admits reports
+	// FinishesCommittedSwap, and a run on it that would do anything but
+	// finish that swap is refused before it writes.
+	SwapCommitted bool
 }
 
 // DefaultSlotLagCeiling is the slot lag ceiling, in bytes, a catch-up
@@ -200,7 +212,7 @@ func CheckCopySwapEnvironment(ctx context.Context, pool *pgxpool.Pool, shape Cop
 	if refusal := refuseCopySwapEnvironment(facts, env); refusal != nil {
 		return CopySwapTarget{}, refusal
 	}
-	return CopySwapTarget{copySwapShape: shape.copySwapShape, decodesWAL: env.LogicalDecoding}, nil
+	return CopySwapTarget{copySwapShape: shape.copySwapShape, decodesWAL: env.LogicalDecoding, finishOnly: env.Held.SwapCommitted}, nil
 }
 
 // refuseCopySwapEnvironment decides the first cause that puts the facts

@@ -383,7 +383,7 @@ func TestReportJSONShape(t *testing.T) {
 	recommended, err := json.Marshal(report.Suggestions[0].Recommended)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 5,
+		"format_version": 6,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -414,7 +414,7 @@ func TestReportJSONGuidanceShape(t *testing.T) {
 	operation, err := json.Marshal(report.Suggestions[0].Operation)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 5,
+		"format_version": 6,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -435,7 +435,7 @@ func TestReportJSONCleanSuggestionsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 5,
+		"format_version": 6,
 		"suggestions": []
 	}`, string(raw))
 }
@@ -447,4 +447,24 @@ func TestManualPathStatesStepsForEveryGuidance(t *testing.T) {
 		assert.NotEqual(t, string(g), suggest.ManualPath(g), "guidance %q has no steps", g)
 	}
 	assert.Equal(t, "not-a-guidance", suggest.ManualPath("not-a-guidance"))
+}
+
+// The guidance vocabulary is a closed set a consumer validates against, and
+// the tests that range over Guidances() cover only what it lists, so the
+// list is pinned: a code dropped from it, or added without a format_version
+// bump, fails here.
+func TestGuidancesIsTheClosedSet(t *testing.T) {
+	assert.Equal(t, []suggest.Guidance{
+		suggest.GuidanceSplitStatement,
+		suggest.GuidanceAddColumnThenConstraint,
+		suggest.GuidancePrevalidatedCheck,
+		suggest.GuidanceNotNullScaffold,
+		suggest.GuidanceNameConstraintThenValidate,
+		suggest.GuidanceUniqueIndexThenConstraint,
+		suggest.GuidanceExpandContractColumn,
+		suggest.GuidanceCoordinatedTableRename,
+		suggest.GuidanceCoordinatedConstraintRename,
+		suggest.GuidanceAlterColumnTypeInPlace,
+		suggest.GuidanceAddIntegerPrimaryKey,
+	}, suggest.Guidances())
 }
