@@ -317,8 +317,10 @@ copy-and-swap run's four copy workers, and two more so its catch-up's flushes
 and its checkpoint saves do not wait behind the copy. A
 `pool_max_conns` in the URL is kept as given, and a copy-and-swap run refuses a
 pool below six before it creates anything (`code: pool-too-small`). Only
-`migrate` without `--dry-run` ever commits a change — every other command is
-read-only or fully offline.
+`migrate` without `--dry-run` ever commits a schema change. The one other
+command that writes to the database is `reap` without `--dry-run`, which drops
+only the engine's orphan replication slots and their publications, never table
+data. Every other command is read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
@@ -327,6 +329,7 @@ read-only or fully offline.
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |
 | `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
+| `reap` | required | Drop the orphan `pgsprite_` replication slots, publications included, that stopped copy-and-swap runs left in the connected database: slots no checkpoint row in a non-terminal phase names and no process holds. Slots a live row names, slots a process holds, and prefix-wearing slots of another name shape or output plugin are reported and kept; other databases' slots are never read. `--dry-run` reports the same sorting and drops nothing; a database where no schema change has run has no checkpoint table, which is reported, not an error |
 | `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone; `--desired` runs the desired-file admission `diff` and `migrate --desired` share and prints the refusal verdict for a file it refuses; planning can still refuse what admission does not inspect |

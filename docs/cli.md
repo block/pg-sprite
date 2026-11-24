@@ -622,13 +622,71 @@ it verifies and swaps. A slot with `active` false belongs to a stopped run: it
 keeps WAL on the server until you resume the run or start it over, as
 [copy-and-swap.md](copy-and-swap.md#stop-resume-and-start-over) describes.
 
+### Drop orphan slots
+
+A slot no checkpoint row in a non-terminal phase names is an orphan: a run
+that ended before its row landed, or one whose cleanup did not finish. It
+keeps WAL like any other slot. `reap` drops the orphans of the connected
+database, publications included; `--dry-run` shows what it would drop first:
+
+```console
+$ pg-sprite reap --dry-run
+would drop (orphans, with their publications): 1
+  pgsprite_deadbeef
+live (kept: a checkpoint row in a non-terminal phase names it): 1
+  pgsprite_cafebabe
+active (kept: a process holds it): 0
+foreign (kept: wears the pgsprite_ prefix without the engine's name shape or output plugin): 1
+  pgsprite_backup
+dry run: nothing was dropped
+```
+
+A slot a live row names, a slot a process holds, and a `pgsprite_` slot the
+engine did not make (another name shape, or an output plugin other than
+`pgoutput`) are kept; slots of other databases are never read. The pass is
+safe while a schema change runs: it reads each orphan's row again right
+before the drop, under the lock a run takes to claim its slot. A dry run that
+would drop opens one replication connection, as each drop does, so a role
+without the `REPLICATION` attribute or a URL that cannot open one fails the
+dry run with exit 1, after the report.
+
+A database without the checkpoint table has no row that can show a slot is
+an orphan, so `reap` examines no slot there, drops nothing, and exits 0. A
+`pgsprite_` slot in such a database still keeps WAL; check
+`pg_replication_slots` for one.
+
+`--json` prints the [reap report](#reap-report).
+
+#### Reap report
+
+`reap --json` prints one object, `format_version` 1. A consumer must reject a
+version it does not know; the version is bumped whenever a field is added,
+removed, or changes meaning.
+
+| Field | Meaning |
+|---|---|
+| `format_version` | The report's shape, 1 |
+| `dry_run` | True for `--dry-run` |
+| `checkpoint_table_exists` | False when the database has no checkpoint table: no slot was examined and every list is empty |
+| `stopped` | True when the pass failed at a slot; the lists hold what was sorted before it, and the command exits 1 |
+| `failed` | The slot the pass stopped at, `""` when it did not stop. Its slot may already be gone: the drop removes the slot before its publication |
+| `dropped` | Orphans the run dropped, publications included; empty in a dry run |
+| `would_drop` | Orphans a real run would drop now; empty in a real run |
+| `live` | Kept: a checkpoint row in a non-terminal phase names each |
+| `active` | Kept: a process holds each |
+| `foreign` | Kept: wears the `pgsprite_` prefix without the engine's name shape or output plugin |
+
+Every list is always an array, never `null`. stdout is empty, with exit 1,
+only when the pass failed before it reached any slot, such as a connection
+or catalog read failure.
+
 A program that embeds pg-sprite as a Go library can poll a run's phase, step,
 and row, checksum, and catch-up counters directly; that snapshot is the
 [progress report contract](progress-report.md).
 
 ## Use the CLI from scripts and agents
 
-`migrate`, `diff`, `status`, `lint`, `suggest`, and `capabilities` take
+`migrate`, `diff`, `status`, `reap`, `lint`, `suggest`, and `capabilities` take
 `--json`. stdout carries only the report; diagnostics go to stderr, and
 `--debug` adds statement-level tracing there.
 
@@ -657,6 +715,7 @@ Each JSON shape is versioned:
 - [plan-report.md](plan-report.md) for `migrate --dry-run` and `diff`
 - [lint-report.md](lint-report.md) and [suggest-report.md](suggest-report.md)
 - [capabilities-contract.md](capabilities-contract.md) for `capabilities`
+- [Reap report](#reap-report) above for `reap`
 
 [cli-output-examples.md](cli-output-examples.md) has one captured example of
 every output, and an orchestrator that embeds the engine as a Go library should

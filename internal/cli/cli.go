@@ -1,7 +1,8 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
 // status (the optimistic front door), pull, diff, and fmt (the declarative
-// front door), lint and suggest (the offline checker and advisor), and
-// capabilities (the embedded support matrix).
+// front door), lint and suggest (the offline checker and advisor),
+// capabilities (the embedded support matrix), and reap (the orphan-slot
+// reaper).
 package cli
 
 import (
@@ -32,6 +33,7 @@ type CLI struct {
 	Suggest      SuggestCmd      `cmd:"" help:"Recommend safer native forms for risky DDL."`
 	Capabilities CapabilitiesCmd `cmd:"" help:"Print the embedded support matrix."`
 	Status       StatusCmd       `cmd:"" help:"Report the status of a running schema change."`
+	Reap         ReapCmd         `cmd:"" help:"Drop the orphan replication slots and publications that stopped copy-and-swap runs left in the connected database."`
 }
 
 // New returns a command tree for kong.Parse. The version is the same
@@ -330,3 +332,17 @@ type StatusCmd struct {
 
 // Run implements the status subcommand.
 func (c *StatusCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
+
+// ReapCmd drops the engine's orphan replication slots, publications
+// included, in the connected database: pgsprite_ slots of the engine's name
+// shape that no checkpoint row in a non-terminal phase names and no process
+// holds. Slots of other databases are never read.
+type ReapCmd struct {
+	DBFlags `embed:""`
+
+	DryRun bool `help:"Report which slots a run would drop and which it would keep, and drop nothing. A slot can change hands before a later run: a run then keeps a slot a schema change has claimed or a process holds since."`
+	JSON   bool `help:"Emit the report as JSON."`
+}
+
+// Run implements the reap subcommand.
+func (c *ReapCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
