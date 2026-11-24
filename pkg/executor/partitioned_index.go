@@ -13,7 +13,6 @@ package executor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -202,89 +201,20 @@ func buildPartitionedIndexAt(ctx context.Context, cfg dbconn.Config, pool *pgxpo
 	if tracker != nil {
 		start = tracker.Now()
 	}
-	// INV: LK-1 — the parent's advisory lock excludes a second run on the same
-	// parent for the whole build.
-	lock, err := dbconn.AcquireTableLock(ctx, cfg, req.schema, req.table)
-	if err != nil {
-		return rep, fmt.Errorf("lock %s for the partitioned index build: %w", qualifiedName(req.schema, req.table), err)
-	}
-	// INV: LK-1 — an advisory lock excludes only inside its own database, and
-	// the steps run on the pool, so the lock must be held in the pool's
-	// database before any step runs.
-	if err := confirmLockInPoolDatabase(ctx, pool, lock, req); err != nil {
-		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCleanupTimeout)
-		defer cancel()
-		if releaseErr := lock.Release(releaseCtx); releaseErr != nil {
-			err = errors.Join(err, fmt.Errorf("release the table lock for %s: %w", qualifiedName(req.schema, req.table), releaseErr))
-		}
+	ran := false
+	err = runUnderParentLock(ctx, cfg, pool, req.schema, req.table, "the partitioned index build", func(lockedCtx context.Context) error {
+		ran = true
+		var runErr error
+		rep, runErr = runPartitionedIndex(lockedCtx, pool, req, sql, b, tracker, runStep)
+		return runErr
+	})
+	// A build refused before it held the lock ran nothing and reports no
+	// duration.
+	if !ran {
 		return rep, err
-	}
-	// Everything the lock protects runs under a context that ends when the
-	// lock is lost, so no statement outlives the exclusion it relied on.
-	lockedCtx, stop := lock.Bind(ctx)
-	rep, err = runPartitionedIndex(lockedCtx, pool, req, sql, b, tracker, runStep)
-	stop()
-	// INV: LK-1 — a lock lost while the build ran voids what it did under the
-	// exclusion, whatever else it reported.
-	if lost := lock.Err(); lost != nil {
-		err = lockLostError(lost, err)
-	}
-	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCleanupTimeout)
-	defer cancel()
-	if releaseErr := lock.Release(releaseCtx); releaseErr != nil {
-		err = errors.Join(err, fmt.Errorf("release the table lock for %s: %w", qualifiedName(req.schema, req.table), releaseErr))
 	}
 	rep.Duration = elapsedSince(tracker, start)
 	return rep, err
-}
-
-// lockLostError is the error of a build whose table lock was lost. The step
-// that was running when the lock went usually failed too, because the lost
-// lock cancels its context, and its typed error (an invalid index its
-// cancelled build left, an expired budget) would decide the outcome code
-// ahead of the invariant violation. The step's error is therefore kept as
-// text for the operator and not as a cause, so the code is always
-// invariant-violation and errors.Is finds dbconn.ErrTableLockLost.
-func lockLostError(lost, stepErr error) error {
-	lockErr := fmt.Errorf("%w (LK-1): %w: %w", ErrInvariantViolation, dbconn.ErrTableLockLost, lost)
-	if stepErr == nil {
-		return lockErr
-	}
-	return fmt.Errorf("%w; the step that was running then failed: %s", lockErr, stepErr.Error())
-}
-
-// confirmLockInPoolDatabase proves, from a pool session, that the backend
-// holding the build's table lock holds it in the database the pool is
-// connected to. The lock is taken on a session dialed from cfg and every step
-// runs on the pool, so a cfg and a pool that reach different databases would
-// give the build no exclusion while both looked healthy.
-func confirmLockInPoolDatabase(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, req partitionedIndexRequest) error {
-	name := qualifiedName(req.schema, req.table)
-	holder, found, err := dbconn.LookupTableLockHolder(ctx, pool, req.schema, req.table)
-	if err != nil {
-		return fmt.Errorf("confirm the table lock for %s from the pool: %w", name, err)
-	}
-	if !found {
-		return fmt.Errorf("%w: LK-1: no session holds the table lock for %s in the database the pool is connected to; the connection target and the pool must reach the same database",
-			ErrInvariantViolation, name)
-	}
-	if holder.PID != lock.BackendPID() {
-		return fmt.Errorf("%w: LK-1: backend %d holds the table lock for %s in the pool's database, not the build's lock session (backend %d); the connection target and the pool must reach the same database",
-			ErrInvariantViolation, holder.PID, name, lock.BackendPID())
-	}
-	// A PID is unique only within one server, so the holder's backend start
-	// must match too: the pair is what identifies the lock's own session.
-	// pg_stat_activity hides another role's backend start, and without it
-	// the pair cannot be compared, so the build refuses rather than assume.
-	if holder.BackendStart.IsZero() {
-		return fmt.Errorf("%w: the pool's role cannot read when the session holding the table lock for %s started, so it cannot tell that session from one on another server; connect the pool as the role the connection target uses, or grant the pool's role pg_read_all_stats",
-			ErrTableLockUnconfirmed, name)
-	}
-	if !holder.BackendStart.Equal(lock.BackendStart()) {
-		return fmt.Errorf("%w: LK-1: backend %d in the pool's database holds the table lock for %s but started at %s, and the build's lock session started at %s; the connection target and the pool must reach the same server",
-			ErrInvariantViolation, holder.PID, name, holder.BackendStart.Format(time.RFC3339Nano), lock.BackendStart().Format(time.RFC3339Nano))
-	}
-	return nil
 }
 
 // partitionedIndexRequest is the admitted statement's identity facts.

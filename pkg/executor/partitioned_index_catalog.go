@@ -14,62 +14,6 @@ import (
 // server prints names every schema its objects live in, and every relation and
 // operator is pg_catalog-qualified (CO-9).
 
-// partitionNode is one partition in the tree under the target, as the catalog
-// lists it. relkind is 'r' for a leaf, 'p' for a sub-partitioned partition, and
-// 'f' for a foreign table.
-type partitionNode struct {
-	oid       uint32
-	parentOID uint32
-	schema    string
-	name      string
-	relkind   string
-	// detachPending is true while a DETACH PARTITION CONCURRENTLY that did
-	// not finish leaves the partition in pg_inherits. The server leaves such
-	// a partition out when it attaches an index, so no index can be attached
-	// for it.
-	detachPending bool
-}
-
-func (n partitionNode) subPartitioned() bool { return n.relkind == "p" }
-func (n partitionNode) foreign() bool        { return n.relkind == "f" }
-func (n partitionNode) qualified() string    { return qualifiedName(n.schema, n.name) }
-
-// listPartitionTree returns every partition under the table with the given
-// OID, at every depth, parents before their children.
-func listPartitionTree(ctx context.Context, q querier, tableOID uint32) ([]partitionNode, error) {
-	rows, err := q.Query(ctx, listPartitionTreeSQL, tableOID)
-	if err != nil {
-		return nil, fmt.Errorf("list partitions of table %d: %w", tableOID, err)
-	}
-	defer rows.Close()
-	var nodes []partitionNode
-	for rows.Next() {
-		var n partitionNode
-		if err := rows.Scan(&n.oid, &n.parentOID, &n.schema, &n.name, &n.relkind, &n.detachPending); err != nil {
-			return nil, fmt.Errorf("scan partitions of table %d: %w", tableOID, err)
-		}
-		nodes = append(nodes, n)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list partitions of table %d: %w", tableOID, err)
-	}
-	return nodes, nil
-}
-
-const listPartitionTreeSQL = `WITH RECURSIVE tree AS (
-		        SELECT h.inhrelid AS oid, h.inhparent AS parent, 1 AS depth, h.inhdetachpending AS detach_pending
-		          FROM pg_catalog.pg_inherits h
-		         WHERE h.inhparent OPERATOR(pg_catalog.=) $1
-		        UNION ALL
-		        SELECT h.inhrelid, h.inhparent, tree.depth OPERATOR(pg_catalog.+) 1, h.inhdetachpending
-		          FROM pg_catalog.pg_inherits h
-		          JOIN tree ON h.inhparent OPERATOR(pg_catalog.=) tree.oid)
-		 SELECT tree.oid, tree.parent, n.nspname, c.relname, c.relkind::pg_catalog.text, tree.detach_pending
-		   FROM tree
-		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.oid
-		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
-		  ORDER BY tree.depth, tree.oid`
-
 // partitionKeyColumns returns each partitioned table's partition key columns
 // by name, in key order, for the tables with the given OIDs. An expression in
 // the key is listed as the empty string.
@@ -101,40 +45,6 @@ const partitionKeyColumnsSQL = `SELECT pt.partrelid, a.attname::pg_catalog.text
 		     ON a.attrelid OPERATOR(pg_catalog.=) pt.partrelid AND a.attnum OPERATOR(pg_catalog.=) k.attnum
 		  WHERE pt.partrelid OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.oid[])
 		  ORDER BY pt.partrelid, k.ord`
-
-// childrenOf returns the direct partitions of parentOID from a tree listing.
-func childrenOf(tree []partitionNode, parentOID uint32) []partitionNode {
-	var children []partitionNode
-	for _, n := range tree {
-		if n.parentOID == parentOID {
-			children = append(children, n)
-		}
-	}
-	return children
-}
-
-// foreignPartitions names every foreign table in the tree.
-func foreignPartitions(tree []partitionNode) []string {
-	var names []string
-	for _, n := range tree {
-		if n.foreign() {
-			names = append(names, n.qualified())
-		}
-	}
-	return names
-}
-
-// detachPendingPartitions names the partitions whose detach has not
-// finished.
-func detachPendingPartitions(tree []partitionNode) []string {
-	var names []string
-	for _, n := range tree {
-		if n.detachPending {
-			names = append(names, n.qualified())
-		}
-	}
-	return names
-}
 
 // relationFacts is what one catalog read says about a relation found by name
 // or by identity: its kind and, for an index, the facts every decision on it
