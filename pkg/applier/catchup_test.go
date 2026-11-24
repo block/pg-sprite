@@ -144,6 +144,21 @@ func TestSlotLagGraceEndsABusySourceWhoseCeilingHoldsLessThanOneGraceOfWrites(t 
 	assert.Greater(t, exceeded.Retained, ceiling)
 }
 
+// The Interval credited to the grace is bounded: the longest one accepted
+// is the server's release interval, so the grace is at most twice it, and
+// a nanosecond more is refused rather than let stretch the grace.
+func TestCatchupOptionsBoundTheIntervalCreditedToTheGrace(t *testing.T) {
+	longest := CatchupOptions{Interval: MaxCatchupInterval}.withDefaults()
+	require.NoError(t, longest.validate())
+	assert.Equal(t, 30*time.Second, slotLagGrace(longest))
+
+	over := CatchupOptions{Interval: MaxCatchupInterval + time.Nanosecond}.withDefaults()
+	require.ErrorIs(t, over.validate(), ErrInvalidCatchupOptions)
+
+	_, err := NewCatchup(&decode.Stream{}, &Flusher{}, positionStub{}, CatchupOptions{Interval: time.Hour})
+	require.ErrorIs(t, err, ErrInvalidCatchupOptions)
+}
+
 func TestCatchupOptionsDefaults(t *testing.T) {
 	opts := CatchupOptions{}.withDefaults()
 	assert.Equal(t, DefaultCatchupInterval, opts.Interval)
@@ -166,7 +181,8 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 	assert.Equal(t, time.Minute, given.DeadlockBackoff)
 }
 
-// An interval the clock cannot time, a change bound that would never let
+// An interval the clock cannot time or one that would stretch the slot
+// lag grace past its bound, a change bound that would never let
 // a cycle end, a slot lag ceiling that would abort every slot, or a
 // deadlock bound below one, which counts no flushes at all, or a negative
 // deadlock backoff, which would retry before the deadlock, is refused
@@ -175,6 +191,7 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
 	cases := map[string]CatchupOptions{
 		"interval below a millisecond": {Interval: 500 * time.Microsecond},
+		"interval above the maximum":   {Interval: MaxCatchupInterval + time.Millisecond},
 		"negative max changes":         {MaxChanges: -1},
 		"negative slot lag ceiling":    {SlotLagCeiling: -1},
 		"negative deadlock attempts":   {DeadlockAttempts: -1},

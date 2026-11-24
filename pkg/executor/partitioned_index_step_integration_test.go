@@ -37,7 +37,7 @@ func TestBuildPartitionedIndexAsStepReportsEveryPartitionAsTheCallersStep(t *tes
 		assert.Equal(t, progress.PhaseRunning, snapshot.Phase, "the caller finishes its run, not the build")
 		assert.Equal(t, 3, snapshot.Step, "the last partition reports as the caller's step, not as step 4")
 		assert.Equal(t, 5, snapshot.TotalSteps, "the partitions add no steps to the caller's run")
-		assert.NotEmpty(t, snapshot.Detail.Statement, "the step's detail names the statement the build last ran")
+		assert.Contains(t, snapshot.Detail.Statement, "ATTACH PARTITION", "the step's detail names the last partition's attach")
 
 		tracker.Finish(nil)
 		snapshot, err = tracker.Progress(t.Context())

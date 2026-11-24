@@ -506,6 +506,42 @@ func TestBuildIndexConcurrentlyFailedBuildReportsItsLeftover(t *testing.T) {
 	assert.True(t, valid)
 }
 
+// A unique build over duplicate rows fails on the data, not on anything
+// the leftover's recovery can fix: a rebuild meets the same rows and fails
+// the same way. The outcome is a data fault the rebuild is not offered
+// for, and the build's own invalid index is still reported and left in
+// place, because it occupies the name until an operator drops it.
+func TestBuildIndexConcurrentlyUniqueBuildOverDuplicatesIsDataFault(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.accounts (
+			id    int PRIMARY KEY,
+			email text NOT NULL
+		);
+		INSERT INTO %[1]s.accounts (id, email) VALUES
+			(1, 'a@example.com'),
+			(2, 'a@example.com')`, schema))
+	require.NoError(t, err)
+
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, fmt.Sprintf(`
+		CREATE UNIQUE INDEX CONCURRENTLY accounts_email_key
+			ON %s.accounts (email)`, schema), buildBudget)
+
+	assert.Equal(t, executor.CodeDataFault, executor.OutcomeCode(err))
+	require.ErrorIs(t, err, executor.ErrBuildLeftInvalidIndex, "the leftover is still reported")
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, err, &invalidErr)
+	assert.Equal(t, "accounts_email_key", invalidErr.Index)
+	assert.Equal(t, "accounts", invalidErr.Table)
+	assert.False(t, invalidErr.Recoverable(), "a rebuild would meet the same duplicate rows")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the server error stays in the chain")
+	assert.Equal(t, sqlstateUniqueViolation, pgErr.Code)
+	exists, valid := indexState(t, pool, schema, "accounts_email_key")
+	assert.True(t, exists, "the executor must not have dropped the leftover")
+	assert.False(t, valid, "the leftover must be invalid")
+}
+
 func TestBuildIndexConcurrentlyFailsClosedOnAbandonedInvalidLeftover(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(

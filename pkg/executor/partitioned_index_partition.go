@@ -118,8 +118,12 @@ func (f *partitionedIndexFlow) findLeafIndex(ctx context.Context, node partition
 	)
 	err = f.tx.read(ctx, "inspect the index of partition "+node.qualified(), func(ctx context.Context, q querier) error {
 		var err error
-		if occupant, occupied, err = relationByName(ctx, q, node.schema, name); err != nil || occupied {
+		if occupant, occupied, err = relationByName(ctx, q, node.schema, name); err != nil {
 			return err
+		}
+		if occupied {
+			// The derived name decides; the occupant is judged below.
+			return nil
 		}
 		if reusable, err = reusableIndexes(ctx, q, node.oid); err != nil {
 			return err
@@ -158,18 +162,28 @@ func (f *partitionedIndexFlow) findLeafIndex(ctx context.Context, node partition
 	return relationFacts{}, len(quarantine) > 0, nil
 }
 
-// readBuiltIndex reads the index a build just verified valid, by identity.
+// readBuiltIndex reads the index a build just verified valid, by identity,
+// and refuses it unless it is on the partition the tree listed. The build
+// names its table, so a partition dropped and created again under the same
+// name while the build ran leaves the index on a table the walk never read.
 func (f *partitionedIndexFlow) readBuiltIndex(ctx context.Context, node partitionNode, name string, oid uint32) (relationFacts, error) {
 	var idx relationFacts
 	err := f.tx.read(ctx, "read the index built on partition "+node.qualified(), func(ctx context.Context, q querier) error {
 		var found bool
 		var err error
 		idx, found, err = relationByOID(ctx, q, oid)
-		if err == nil && !found {
-			err = fmt.Errorf("%w: index %s built on partition %s is not in the catalog",
+		switch {
+		case err != nil:
+			return err
+		case !found:
+			return fmt.Errorf("%w: index %s built on partition %s is not in the catalog",
 				ErrInvariantViolation, qualifiedName(node.schema, name), node.qualified())
+		case idx.tableOID != node.oid:
+			return fmt.Errorf("%w: index %s was built on table oid %d, not on partition %s (oid %d) that the build listed, "+
+				"so the partition was replaced while the build ran", ErrInvariantViolation,
+				qualifiedName(node.schema, name), idx.tableOID, node.qualified(), node.oid)
 		}
-		return err
+		return nil
 	})
 	return idx, err
 }
@@ -273,6 +287,10 @@ func (f *partitionedIndexFlow) ensureSubPartitionIndex(ctx context.Context, node
 			// The partition is locked and proved by identity before the
 			// statement names it, and the index is checked to be on it
 			// before the step commits (INV: ST-7).
+			// createOnlyIndex locks and proves the partition again. This
+			// first lock is what keeps proveNodeIn's read of the tree under
+			// the lock; taking a lock the transaction already holds again
+			// costs one catalog check.
 			if err := lockAndProveTable(ctx, tx, onlyIndexTable{oid: node.oid, schema: node.schema, name: node.name}); err != nil {
 				return err
 			}
@@ -387,7 +405,8 @@ const proveNodeSQL = `SELECT EXISTS (
 		    WHERE c.oid OPERATOR(pg_catalog.=) $1
 		      AND n.nspname OPERATOR(pg_catalog.=) $2
 		      AND c.relname OPERATOR(pg_catalog.=) $3
-		      AND h.inhparent OPERATOR(pg_catalog.=) $4)`
+		      AND h.inhparent OPERATOR(pg_catalog.=) $4
+		      AND NOT h.inhdetachpending)`
 
 func proveNodeIn(ctx context.Context, q querier, node partitionNode) error {
 	present, err := nodeInTree(ctx, q, node)

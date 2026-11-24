@@ -758,7 +758,8 @@ alongside the routing decision as a warning so destructive intent is always
 visible in review. `migrate --alter` runs such a statement only when
 `--allow-destructive SCHEMA.TABLE` names the table; without it the apply and the
 dry run end in a `destructive-change` refusal verdict instead of a plan, and
-`migrate --desired` refuses a destructive plan whole.
+`migrate --desired` refuses a destructive plan whole unless `--expect-fingerprint` pins the
+reviewed plan and `--allow-destructive` names the table.
 
 ### `concurrent-in-transaction`
 

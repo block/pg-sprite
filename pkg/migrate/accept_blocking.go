@@ -46,7 +46,9 @@ var (
 // not validate, which this build's gate cannot produce — stand exactly as
 // they would without the acknowledgement. [Run] makes this decision itself;
 // it is exported so a front door that refuses gated statements before
-// dialing can tell the one gate refusal that needs the database.
+// dialing can tell a gate refusal that needs the database ([GateReadsCatalog]
+// names the other). Run does not accept a concurrent form even when this
+// reports true: the passthrough's transaction cannot run it.
 func AcceptedRefusal(ack string, v verdict.Verdict) (verdict.Refusal, bool) {
 	if ack == "" {
 		return verdict.Refusal{}, false
@@ -159,9 +161,20 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	v.Table = table
 	v.AllowedDestructive = dropsIndex
 	v.Detail = fmt.Sprintf("the operator accepted the blocking form: it ran as-is under budgets (lock %s, statement %s) "+
-		"with no online-safety guarantee; %s was locked for the statement's duration",
-		budget.LockTimeout, budget.StatementTimeout, table)
+		"with no online-safety guarantee; %s locked for the statement's duration",
+		budget.LockTimeout, budget.StatementTimeout, lockedScope(table, locked, dropsIndex))
 	return v, nil
+}
+
+// lockedScope names what an accepted statement held its lock on. A drop of
+// a partitioned parent's index takes ACCESS EXCLUSIVE on the parent, every
+// partition, and every partition's index, so the verdict says so rather
+// than naming the parent alone.
+func lockedScope(table string, locked acceptedTable, dropsIndex bool) string {
+	if dropsIndex && locked.relkind == relkindPartitionedTable {
+		return table + ", every partition of it, and every partition's index were"
+	}
+	return table + " was"
 }
 
 // acceptedTable is the table an accepted statement locks, as the catalog
@@ -186,7 +199,10 @@ func (t acceptedTable) preLock() pgx.Identifier {
 	return pgx.Identifier{t.schema, t.name}
 }
 
-const relkindMaterializedView = "m"
+const (
+	relkindMaterializedView = "m"
+	relkindPartitionedTable = "p"
+)
 
 // lockedTable resolves the table an accepted single-relation index statement
 // locks: the owning table of a named index (DROP INDEX, REINDEX INDEX),

@@ -33,7 +33,7 @@ func TestRowSecurityRoundTripWithSupabaseAuth(t *testing.T) {
 	require.NoError(t, err)
 	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, "public", desired)
 	require.NoError(t, err)
-	assert.Equal(t, live, modeltest.Comparable(model))
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(model))
 	require.Len(t, model.RowSecurity.Policies, 2)
 	assert.Equal(t, []string{"authenticated"}, model.RowSecurity.Policies[0].Roles)
 	assert.Nil(t, model.RowSecurity.Policies[0].WithCheck)
