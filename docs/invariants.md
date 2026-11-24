@@ -828,6 +828,14 @@ statements on the partition, and `statement_timeout` bounds each statement of th
 transaction, so new statements on that partition are held back for at most the transaction's
 statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
+The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported)
+takes `ACCESS EXCLUSIVE` on one leaf only for `ADD CONSTRAINT ... USING INDEX` on an index already
+built concurrently, in a brief transaction under both bounds. A primary key over a column the leaf
+allows to be NULL would make that statement set `NOT NULL` and scan the leaf under the lock, so the
+step refuses it before it builds anything and checks the columns again under the leaf's lock
+before the statement (`partitioned-key-nullable-column`;
+`TestEnsureLeafKeyRefusals/primary_key_over_a_nullable_column`,
+`TestEnsureLeafKeyWritersKeepCommitting`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 

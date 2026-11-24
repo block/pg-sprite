@@ -99,6 +99,16 @@ const (
 	// CodePartitionedIndexUnsettled: partitions kept appearing without an
 	// index until the build ran out of passes; a rerun resumes.
 	CodePartitionedIndexUnsettled Code = "partitioned-index-unsettled"
+	// CodePartitionedKeyNameTaken: the name a partitioned key constraint
+	// needs on a partition is held by something that is not the requested
+	// key; the occupant is left for an operator.
+	CodePartitionedKeyNameTaken Code = "partitioned-key-name-taken"
+	// CodePartitionedKeyConflict: a partition already has a key constraint
+	// that conflicts with the requested one; nothing was added to it.
+	CodePartitionedKeyConflict Code = "partitioned-key-conflict"
+	// CodePartitionedKeyNullableColumn: a primary key was requested over a
+	// column a partition allows to be NULL; nothing was built.
+	CodePartitionedKeyNullableColumn Code = "partitioned-key-nullable-column"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -242,6 +252,9 @@ func Codes() []Code {
 		CodePartitionedIndexTablespace,
 		CodeUniqueIndexMissingPartitionKey,
 		CodePartitionedIndexUnsettled,
+		CodePartitionedKeyNameTaken,
+		CodePartitionedKeyConflict,
+		CodePartitionedKeyNullableColumn,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -294,6 +307,9 @@ func (c Code) Permanent() bool {
 		CodeForeignTablePartition,
 		CodePartitionedIndexTablespace,
 		CodeUniqueIndexMissingPartitionKey,
+		CodePartitionedKeyNameTaken,
+		CodePartitionedKeyConflict,
+		CodePartitionedKeyNullableColumn,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -396,6 +412,12 @@ func sentinelCode(err error) Code {
 		return CodeUniqueIndexMissingPartitionKey
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
 		return CodePartitionedIndexUnsettled
+	case errors.Is(err, ErrPartitionedKeyNameTaken):
+		return CodePartitionedKeyNameTaken
+	case errors.Is(err, ErrPartitionedKeyConflict):
+		return CodePartitionedKeyConflict
+	case errors.Is(err, ErrPartitionedKeyNullableColumn):
+		return CodePartitionedKeyNullableColumn
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):
