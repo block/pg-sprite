@@ -9,7 +9,6 @@ import (
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
-	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -104,14 +103,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		report.Statements = append(report.Statements, ps)
 	}
 	if facts.Target.Partitioned() {
-		causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
-		for i := range report.Statements {
-			causes[i], err = preflight.RefusesPartitionedParent(facts.Target.ServerMajor(), report.Statements[i].ExecSQL)
-			if err != nil {
-				return err
-			}
-		}
-		if err = plan.RefuseUnsupportedPartitionedParent(&report, causes); err != nil {
+		if err = plan.RoutePartitionedParent(&report, facts.Target.ServerMajor()); err != nil {
 			return err
 		}
 	}
@@ -134,7 +126,11 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			if ps.Route != planner.RouteNative {
 				continue
 			}
-			v, refused, admitErr := migrate.AdmitRoutedSteps(st, report.Schema, ps.ExecSQL)
+			admit := migrate.AdmitRoutedSteps
+			if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+				admit = migrate.AdmitPartitionedIndexRequest
+			}
+			v, refused, admitErr := admit(st, report.Schema, ps.ExecSQL)
 			if admitErr != nil {
 				return admitErr
 			}

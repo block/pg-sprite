@@ -95,9 +95,10 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 			Concurrent: executor.ConcurrentBudget{Overall: c.IndexBuildTimeout},
 			Validate:   executor.ValidateBudget{LockTimeout: c.LockTimeout, Overall: c.ValidateTimeout},
 		},
-		Retry:  c.retryPolicy(),
-		Logger: logger,
-		Audit:  c.audit(),
+		Retry:      c.retryPolicy(),
+		Logger:     logger,
+		Audit:      c.audit(),
+		Connection: c.Config(),
 		CopySwap: migrate.CopySwapOptions{
 			Enabled:             c.CopyAndSwap,
 			Connection:          c.Config(),

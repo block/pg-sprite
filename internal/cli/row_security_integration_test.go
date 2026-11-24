@@ -298,7 +298,7 @@ func verifyPulledRowSecurity(t *testing.T, securitySQL string) {
 	require.NoError(t, err)
 	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
-	assert.Equal(t, live, modeltest.Comparable(model))
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(model))
 	out.Reset()
 	diff := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, JSON: true}
 	require.NoError(t, diff.run(t.Context(), &out))

@@ -3,6 +3,7 @@ package diffplan_test
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -94,7 +95,11 @@ func TestPlanDerivesOrderedRoutedPlan(t *testing.T) {
 		"the same desired state against the same live table plans deterministically")
 }
 
-func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
+// A desired index on a partitioned parent plans as the partition-aware index
+// build: the one step is the CREATE INDEX itself, carried with the
+// partitioned-index-build execution, not a concurrent build the parent cannot
+// run and not a refusal. The partitions are listed when the build runs.
+func TestPlanRoutesPartitionedParentIndexToThePartitionedBuild(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -109,15 +114,45 @@ func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
 			"CREATE INDEX events_name_idx ON events (name);")
 	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
 	require.NoError(t, err)
-	assert.Equal(t, router.DispositionRefuse, report.Disposition)
-	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
-	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Statements[0].Reason)
-	assert.Empty(t, report.Statements[0].ExecSQL)
-	for _, decision := range report.Statements[0].Decisions {
-		assert.Empty(t, decision.SaferSQL)
-		assert.Empty(t, decision.SaferSQLExecution)
+	st := report.Statements[0]
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, planner.ExecutionPartitionedIndexBuild, st.Execution)
+	assert.Equal(t, []string{st.SQL}, st.ExecSQL)
+	assert.Contains(t, st.SQL, "events_name_idx")
+	assert.NotContains(t, strings.ToUpper(st.SQL), "CONCURRENTLY")
+	for _, decision := range st.Decisions {
+		if len(decision.SaferSQL) > 0 {
+			assert.Equal(t, []string{st.SQL}, decision.SaferSQL)
+			assert.Equal(t, planner.ExecutionPartitionedIndexBuild, decision.SaferSQLExecution)
+		}
 	}
+}
+
+// A desired index with an invalid live entry of the same definition on the
+// parent, the leftover of a partition-by-partition build that did not finish,
+// plans the same CREATE INDEX again, which the build resumes.
+func TestPlanResumesAnUnfinishedPartitionedParentIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %[1]s.events (id bigint, name text) PARTITION BY RANGE (id); "+
+			"CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100); "+
+			"CREATE INDEX events_name_idx ON ONLY %[1]s.events (name)", schema))
+	require.NoError(t, err)
+	ds := parseDesired(t,
+		"CREATE TABLE events (id bigint, name text) PARTITION BY RANGE (id);\n"+
+			"CREATE INDEX events_name_idx ON events (name);")
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+	require.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, planner.ExecutionPartitionedIndexBuild, report.Statements[0].Execution)
+	assert.Contains(t, report.Statements[0].SQL, "events_name_idx")
 }
 
 // Dropping an index of a partitioned parent plans the plain DROP INDEX as

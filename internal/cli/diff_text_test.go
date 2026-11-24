@@ -222,6 +222,48 @@ b')`
 	}
 }
 
+// diff --sql never prints a partitioned index build as runnable SQL. The
+// engine builds and attaches each partition's index in turn; the statement
+// run by hand would leave the partitions unindexed, or fail on the name of
+// the unfinished build it resumes. Both a new build and a resumed one are
+// commented out and point the reader at migrate.
+func TestPlanTextCommentsOutAPartitionedIndexBuild(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "app", "events", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	for _, sql := range []string{
+		`CREATE INDEX events_name_idx ON ONLY app.events USING btree (name)`,
+		`CREATE INDEX events_at_idx ON ONLY app.events USING btree (at)`,
+	} {
+		report.Statements = append(report.Statements, plan.Statement{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			ExecSQL:     []string{sql},
+			Execution:   planner.ExecutionPartitionedIndexBuild,
+			Decisions: []planner.Decision{{
+				Operation: "create index",
+				Route:     planner.RouteNative,
+				Reason:    planner.ReasonMetadataOnly,
+			}},
+		})
+	}
+
+	var out strings.Builder
+	require.NoError(t, writePlanText(&out, report))
+	text := out.String()
+	for _, ps := range report.Statements {
+		assert.Contains(t, text, "-- only the engine runs this build, one partition at a time: use pg-sprite migrate --desired or pg-sprite migrate --alter\n"+
+			"-- "+ps.SQL+";\n")
+	}
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		assert.True(t, line == "" || strings.HasPrefix(line, "--"), "no build is runnable as written: %q", line)
+	}
+}
+
 // A greenfield index build renders as the metadata-only note the planner
 // already gives the CREATE TABLE — never as the safer-idiom warning that
 // would tell the reader a table nobody reads yet is about to be locked.

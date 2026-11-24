@@ -450,12 +450,21 @@ func TestRowSecurityRefusalRegistry(t *testing.T) {
 
 // A desired file that declares one index constraint twice is a mistake in
 // the file, so it is refused by design; a CREATE TABLE that names a live
-// parent is a capability boundary. Both front doors that build a desired
+// parent, or a TABLESPACE the partitioned index build would not honor, is
+// a capability boundary. Both front doors that build a desired
 // file, RunDesired and the row-security executor, classify them the same
 // way, however deeply the error is wrapped.
 func TestDesiredShapeRefusalClasses(t *testing.T) {
 	merged := fmt.Errorf("inspect desired row security for public.t: %w",
 		fmt.Errorf("%w: table %q, constraint %q", schemadiff.ErrDesiredConstraintMerged, "t", "c2"))
+	// The planner reads a desired TABLESPACE only after the server has
+	// loaded the file into the scratch schema, and the server rejects the
+	// built-in tablespaces on a partitioned table, so only a tablespace the
+	// operator created reaches this refusal. Tests cannot create one on a
+	// server they do not run, so the classification is pinned here.
+	tablespace := fmt.Errorf("plan desired schema: %w",
+		fmt.Errorf("planned statement 2 builds index events_note_idx on a partitioned table, and its desired statement declares TABLESPACE %q: %w",
+			"fast", executor.ErrPartitionedIndexTablespace))
 	tests := []struct {
 		name string
 		err  error
@@ -464,6 +473,7 @@ func TestDesiredShapeRefusalClasses(t *testing.T) {
 		{"a constraint declared twice", merged, verdict.ByDesign(verdict.ReasonUnsupportedStatement)},
 		{"a partition of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredPartitionOf), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
 		{"an inheritance child of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredInherits), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
+		{"a TABLESPACE on a partitioned table's index", tablespace, verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -692,6 +692,67 @@ not permanent, yet belong in neither group. The change may have committed, so a 
 can replay it onto its own result or resume a sequence from a step that already ran; route
 them to catalog inspection before any retry.
 
+## Outcomes of a partitioned index build
+
+`executor.BuildPartitionedIndex` builds one index on a partitioned table, partition by
+partition, under the table's advisory lock. It stops at the first error and keeps what it
+finished: every partition index already attached stays attached, and the parent's index stays
+invalid until every partition has one. **Running the same statement again resumes from there**,
+so "what persists" below is also what the rerun builds on. Route each outcome by its code
+(`executor.OutcomeCode`), never by error text:
+
+| Outcome | Persists | Retry | Orchestrator action |
+| --- | --- | --- | --- |
+| `not-create-index` | nothing | no, permanent | The statement is not a `CREATE INDEX`; fix the caller, not the database |
+| `unnamed-index`, `if-not-exists-unsupported`, `unqualified-table` | nothing | no, permanent | The `CREATE INDEX` does not name its index, uses `IF NOT EXISTS`, or does not schema-qualify its table. The build needs all three to prove what it creates; fix the statement in the desired file, then re-plan |
+| `pool-too-small` | nothing | no, permanent | The pool cannot hold a partition's build session and the reserved verdict session at once; give the pool more connections, then rerun |
+| `not-partitioned-table` | nothing | no, permanent | The target is not a partitioned table (it changed since the plan, or it was never one); re-plan so the change routes to the concurrent build instead |
+| `foreign-table-partition` | nothing when the tree is first read; whatever was finished when a later pass finds it | no, permanent | A foreign table in the tree cannot carry an index, so the parent's index could never become valid. The build reads the tree again on every pass, so a foreign table attached mid-run is refused after the parent's index and some partitions' indexes have committed. Surface to an operator to detach or replace that partition, then re-plan |
+| `partitioned-index-tablespace` | nothing | no, permanent | The statement has a `TABLESPACE` clause, which would reach the parent's index and not the partitions' indexes; remove the clause from the desired file (a partition's tablespace is chosen when the partition is created), then re-plan |
+| `unique-index-partition-key` | nothing | no, permanent | The unique index does not contain the partition key of the parent and of every sub-partitioned partition among its plain key columns; add the missing columns to the index in the desired file, then re-plan |
+| `partition-detach-pending` | nothing when the tree is first read; whatever was finished when a later pass finds it | no, permanent | A partition's `DETACH PARTITION ... CONCURRENTLY` did not finish, and the server leaves that partition out when it attaches an index. Surface to an operator to finish the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`, then rerun |
+| `table-lock-unconfirmed` | nothing | no, permanent | The pool's role cannot see when the session holding the table lock started, so the build cannot confirm the lock is its own. Connect the pool as the role the `dbconn.Config` uses, or grant the pool's role `pg_read_all_stats`, then rerun |
+| `partitioned-index-name-taken` | whatever was finished | no, permanent | A relation that is not the requested index holds a name the build needs. The build never renames or drops it; an operator removes or renames the occupant, then the same statement resumes |
+| `partitioned-index-unsettled` | everything finished | yes, after a wait | Partitions kept appearing faster than the build covered them. Retry the same statement; if it repeats, involve an operator to stop whatever is creating partitions |
+| `invariant-violation` | whatever was finished; nothing on a table that was swapped in | no | The build refused to act on what it could not prove, and an adapter treats every case the same way: stop and surface the error to an operator, who reads its text (the text is for the operator, not for routing). The cases are: a table, partition, or index changed under the build while it ran (ST-7); a concurrent build landed on a replacement table, and its index is left in place and named, because the build cannot prove the index is its own; a partition was detached, renamed, or replaced after its index was built, and the error gives the last-known names of the index and the partition; the `dbconn.Config` and the pool reach different databases or servers, caught before any step (LK-1); the lock session dropped mid-run (LK-1), which also matches `errors.Is(err, dbconn.ErrTableLockLost)`, and the interrupted step can leave an invalid index or a commit whose outcome is unknown, which the rerun removes or reads under its own proof; or the catalog holds what the build does not recognize, such as an invalid attached partition index. The operator inspects the catalog (the parent's index and its partitions), repairs or fixes the wiring, re-plans, and reruns |
+| `invalid-index-*` | the invalid index | per the [invalid-index table](#invalid-index-outcomes-of-a-concurrent-index-build) | A partition's concurrent build left an invalid index. A rerun removes a leftover it proves abandoned and builds again, so there is no separate recovery call; the codes that say no (`invalid-index-build-in-flight`, `invalid-index-other-table`, `invalid-index-not-droppable`, `invalid-index-unproven`) route as in that table |
+| `commit-outcome-unknown` | unknown for the last step | no, inspect first | A step's `COMMIT` did not return success. Read the catalog (the parent's index and its partitions) before rerunning |
+| `budget-lock-exceeded`, `budget-statement-exceeded` | whatever was finished | yes | A step's lock or statement bound ran out. Retry the same statement later; the finished partitions are not redone |
+| `execution-failed` | unknown for the last step | no, inspect first | A failure outside the typed set: the statement text holds more than one statement (`statement.ErrNotOneStatement`), a step was cancelled as one side of a deadlock (SQLSTATE 40P01, for example against a concurrent `DETACH PARTITION`), or the server returned another error. Surface to an operator; a deadlock commits nothing of its step, so a rerun resumes |
+| `*dbconn.TableLockHeldError` (no code) | nothing | yes, after a wait | Another session holds the table's lock; the error names the backend. Wait and retry |
+
+### Wiring the build through `migrate.Run` and `migrate.RunDesired`
+
+A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
+as this build; the plan statement carries `execution: partitioned-index-build`. The build takes
+the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
+sets `migrate.Options.Connection` to the `dbconn.Config` the pool was dialed with. It must
+reach the pool's database: the lock is an advisory lock, and an advisory lock excludes only
+sessions of the database it was taken in. The CLI sets it; a library caller that builds
+`Options` by hand does it itself. A statement that needs no dedicated session never reads it.
+
+Two wiring errors stop the run with no verdict and nothing executed. Both are mistakes no retry
+corrects, so fix the wiring rather than routing either as an outcome:
+
+| Error | How to recognize it | Cause and fix |
+| --- | --- | --- |
+| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset. Set it to the config the pool was dialed with |
+| `*migrate.PartitionedIndexConnectionMismatchError` | `errors.AsType[*migrate.PartitionedIndexConnectionMismatchError](err)` | `Options.Connection` reaches another database than the pool, whether another database of the cluster or one of the same name on another cluster. Point it at the pool's database |
+
+The mismatch error names `Options.Connection` and carries the database name and the cluster's
+system identifier on both sides: `PoolDatabase` and `PoolCluster` for the pool,
+`ConnectionDatabase` and `ConnectionCluster` for the connection. A connection that could not be
+opened or identified is an ordinary error, not either of these.
+
+`migrate.RunDesired` checks the wiring for the whole plan before its first statement, so a
+native statement planned ahead of the index, such as an `ADD COLUMN`, never commits first. The stop is a failed result that carries the plan and no verdicts, with the
+error returned alongside. `migrate.Run` checks it before the statement's first step. The build
+checks again when it runs.
+
+An adapter that enumerates `executor.Codes()` exhaustively must map every row above; the set
+is the contract, and [execution-model](execution-model.md#outcome-codes) is its canonical
+list. The design is in [partitioned-index-build-design](partitioned-index-build-design.md).
+
 ## Execution-mode verdicts and direct execution
 
 SchemaBot records a per-statement **execution-mode verdict** on each planned `TableChange`:
@@ -756,9 +817,9 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   operator before asking for that consent. If that read fails, `Run` returns the error with a
   zero verdict and nothing executed rather than the refusal: route it as a retryable
   failure, like a connection fault, not as a refusal.
-  `RunDesired` rejects it ([below](#rundesired-takes-no-acknowledgement)) and keeps
-  refusing a destructive plan whole, so a declarative drop the operator approves runs as its
-  own imperative statement.
+  `RunDesired` rejects it ([below](#rundesired-takes-no-acknowledgement)); a declarative
+  drop the operator approves runs through `DesiredRequest.AllowDestructive`, which needs the
+  fingerprint of the plan the operator reviewed ([below](#reviewed-desired-drop)).
 - **A wrong-table acknowledgement is never retried as is.** Each acknowledgement `Run`
   takes must name a schema-qualified table — the resolved target, or for `AcceptBlocking` the
   table the statement locks — and one that names any other table is
@@ -786,7 +847,7 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `AllowDestructive`, in that order, before anything runs; `AcceptBlocking` is checked later,
   once the statement has been refused and the table it locks has been read, and
   `AllowDestructive` again against that table.
-- <a id="rundesired-takes-no-acknowledgement"></a>**`RunDesired` takes no acknowledgement.** Each of `Force`, `AcceptBlocking`,
+- <a id="rundesired-takes-no-acknowledgement"></a>**`RunDesired` takes no acknowledgement in `Options`.** Each of `Force`, `AcceptBlocking`,
   `AllowDestructive`, `CopySwap.Restart`, and `CopySwap.BlockWrites` accepts a loss for one
   statement the operator wrote, and a desired-state run executes statements the plan derived.
   Setting one returns its own sentinel before any database work, and setting several returns
@@ -811,6 +872,34 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   writes as `null`. The
   desired-state door's own refusals still apply to the view, so a destructive plan is still
   refused whole.
+- <a id="reviewed-desired-drop"></a>**A reviewed desired drop is a pinned plan and a named
+  table.** A desired plan that drops a column, a constraint, an index, or a `NOT NULL` is
+  refused whole with `destructive-change`, class `by-design`, and nothing runs, unless the
+  request carries both `DesiredRequest.ExpectedFingerprint`, the `plan.Report` fingerprint of
+  the plan the operator reviewed, and `DesiredRequest.AllowDestructive`, the desired file's
+  resolved schema-qualified table. A preview that has been through `plan.RefuseDestructive`,
+  as the CLI's dry-run JSON has, carries a `Fingerprint` that covers the refused plan and
+  cannot be pinned: pin its `PinnableFingerprint` (`pinnable_fingerprint`) instead. The acknowledgement is not the `Options` field, which
+  `RunDesired` still rejects. `AllowDestructive` without `ExpectedFingerprint` is
+  `migrate.ErrAllowDestructiveNeedsFingerprint` before any database work, and one naming
+  another table is `migrate.ErrAllowDestructiveMismatch` before any statement runs, even
+  when the plan drops nothing. A plan whose fingerprint differs from the pin is refused as
+  `plan-fingerprint-mismatch` with nothing executed. A pinned plan that drops something and
+  also routes a statement to copy-and-swap is refused whole with `destructive-change`, since
+  the drop would commit before copy-and-swap is checked against the changed table; make the
+  drop and the other change in two plans. Each destructive statement then runs
+  under the acknowledgement as it does through `Run` (RF-10), so its verdict carries
+  `allowed_destructive: true`, and a desired index drop runs as `DROP INDEX CONCURRENTLY`
+  and never holds the table's lock, refusing, dropping nothing, if the index no longer has
+  the definition the plan carried. A column, constraint, or `NOT NULL` drop is held to the
+  definition its plan carried the same way (`dropped-object-drift`), and a column drop is also
+  refused when the column has an index, constraint, or sequence the plan did not list as
+  dropped with it; the fingerprint covers each of those definitions and dependents. The plan runs in its order, which drops before adds, and statements that
+  already committed stay committed if a later one fails. Map SchemaBot's unsafe
+  acknowledgement to `AllowDestructive` only together with the fingerprint of the plan it
+  showed. `RunDesiredWithRowSecurity` takes the same two fields for a change to the table
+  definition; a policy a row security file no longer lists is dropped by the atomic row
+  security change without them.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
@@ -824,15 +913,23 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   (`plan.Statement`, carried over from `schemadiff.Change`) with `Adopts` set runs through
   `executor.ExecuteNativeAdoptingWithProgress` with that `IndexAdoption`, one with `Validates`
   set through `executor.ExecuteNativeValidatingWithProgress` with that `ConstraintValidation`,
-  and a statement whose `statement.Kind` is `KindRenameIndex` through
-  `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index.
-  Each re-reads the index or constraint under the
-  lock it runs with and refuses with `adopted-index-drift`, `validated-constraint-drift`, or
-  `renamed-index-drift` when it changed after planning. `ExecuteNativeWithProgress` carries no
-  planned definition and runs an adoption or validation unchecked, and refuses an index
+  a statement whose `statement.Kind` is `KindRenameIndex` through
+  `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index,
+  and a statement with `Drops` set and a column, constraint, or NOT NULL kind through
+  `executor.ExecuteNativeDroppingWithProgress` with that `DroppedObject`; a `Drops` of kind
+  `index` is a `DROP INDEX` that runs through `executor.ExecuteDropIndexConcurrently` with the
+  definition. Each re-reads the index, constraint, column, or NOT NULL under the
+  lock it runs with (the dropping session, for an index) and refuses with `adopted-index-drift`,
+  `validated-constraint-drift`, `renamed-index-drift`, `dropped-object-drift`, or
+  `dropped-index-drift` when it changed after planning. An index drop whose name was taken by a
+  different index between its check and the drop reports `dropped-index-replaced` (permanent):
+  unlike the drift refusals, an unreviewed index was dropped, and the error names it so the
+  operator can check and recreate it. `ExecuteNativeWithProgress` carries no
+  planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
   rename under ST-7, since the statement names no table. `Adopts` and `Validates` stay out of
   the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
-  or derives the plan again at apply time.
+  or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
+  fingerprint, so a stored plan carries it.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
   all direct-routed statements run first, then all engine-driven ones, regardless of their
   relative order in the plan — and a statement in one partition that depends on one in the

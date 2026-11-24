@@ -364,6 +364,11 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpCreateIndex, Name: "i", IfNotExists: true},
 		},
 		{
+			name: "create index with a tablespace",
+			sql:  "CREATE INDEX i ON t (a) TABLESPACE fast",
+			want: statement.Op{Kind: statement.OpCreateIndex, Name: "i", Tablespace: "fast"},
+		},
+		{
 			name: "drop index",
 			sql:  "DROP INDEX i",
 			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Indexes: []string{"i"}},

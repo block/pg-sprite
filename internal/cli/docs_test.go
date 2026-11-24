@@ -17,7 +17,6 @@ import (
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
-	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -77,7 +76,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 18, "the doc publishes eighteen captured --json outputs")
+	require.Len(t, blocks, 21, "the doc publishes twenty-one captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -157,15 +156,25 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	backendUnavailable := alterReport(t, "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()",
 		"public", "users", volatileDefaultFacts)
 
-	partitioned := alterReport(t, "CREATE INDEX events_created_idx ON events (created)",
+	// A CREATE INDEX on the partitioned events table is routed to the
+	// partitioned index build; the executed verdict is captured from a run,
+	// and its detail is the migrate package's rendering of the build.
+	partitionedBuild := alterReport(t, "CREATE INDEX events_created_idx ON events (created)",
 		"public", "events", eventsFacts())
-	causes := make([]preflight.PartitionRefusalCause, len(partitioned.Statements))
-	for i := range partitioned.Statements {
-		cause, err := preflight.RefusesPartitionedParent(16, partitioned.Statements[i].ExecSQL)
-		require.NoError(t, err)
-		causes[i] = cause
+	require.NoError(t, plan.RoutePartitionedParent(&partitionedBuild, 16))
+	partitionedBuild.Fingerprint = plan.Fingerprint(partitionedBuild.Statements)
+	partitionedBuilt := verdict.Verdict{
+		Outcome:   verdict.OutcomeExecuted,
+		Statement: "CREATE INDEX events_created_idx ON public.events USING btree (created)",
+		Table:     "public.events",
+		Detail: "the table is partitioned, so pg-sprite built index events_created_idx partition by partition " +
+			"and attached each one: 2 partitions, 2 given an index by this run; the index is valid",
 	}
-	require.NoError(t, plan.RefuseUnsupportedPartitionedParent(&partitioned, causes))
+
+	// Adopting an index as a constraint stays refused on a partitioned parent.
+	partitioned := alterReport(t, "ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx",
+		"public", "events", eventsFacts())
+	require.NoError(t, plan.RoutePartitionedParent(&partitioned, 16))
 	partitioned.Fingerprint = plan.Fingerprint(partitioned.Statements)
 
 	destructive := alterReport(t, "ALTER TABLE users DROP COLUMN email",
@@ -182,6 +191,21 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		router.Route([]planner.Plan{dropEmailClassified}).Statements[0], "")
 	require.NoError(t, err)
 	require.True(t, refused)
+
+	// A desired file that no longer has the note column: the dry run ends in
+	// the refused plan, whose fingerprint cannot be pinned, and carries the
+	// one a run pins.
+	ordersFacts := planner.Facts{ColumnTypes: map[string]string{"id": "bigint", "user_id": "bigint", "note": "text"}}
+	dropNote := alterReport(t, "ALTER TABLE public.orders DROP note", "public", "orders", ordersFacts)
+	dropNote.Source = plan.SourceDiff
+	for i := range dropNote.Statements {
+		dropNote.Statements[i].Kind = schemadiff.ChangeDropColumn
+		dropNote.Statements[i].Drops = &schemadiff.DroppedObject{
+			Kind: schemadiff.DroppedColumn, Name: "note", Definition: "attnum 3: text",
+		}
+	}
+	dropNote.Fingerprint = plan.Fingerprint(dropNote.Statements)
+	plan.RefuseDestructive(&dropNote)
 
 	lintReport, err := lint.Check("CREATE INDEX users_email_idx ON users (email);\n" +
 		"ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);\n")
@@ -226,8 +250,8 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	require.True(t, ok, "a storage parameter difference is a desired-file refusal: %v", tunedErr)
 
 	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, rewriteRequired,
-		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
-		lintReport, partitionsRefused, diff, typeFileRefused, tunedRefused}
+		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitionedBuild, partitionedBuilt, partitioned,
+		destructiveRefused, destructive, dropNote, lintReport, partitionsRefused, diff, typeFileRefused, tunedRefused}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
 		require.NoError(t, err)

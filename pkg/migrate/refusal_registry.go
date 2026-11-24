@@ -177,8 +177,10 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 	}
 }
 
-// admissionSentinels is the closed set of the sequence executor's static
-// admission refusals the imperative front door maps to a refusal verdict.
+// admissionSentinels is the closed set of the sequence executor's and the
+// partitioned index build's static admission refusals, decided from the
+// statement's text before anything runs, that the imperative front door maps
+// to a refusal verdict.
 // admissionRefusal walks this set for membership before it classifies, so
 // the predicate and the classification cannot disagree.
 func admissionSentinels() []error {
@@ -186,6 +188,7 @@ func admissionSentinels() []error {
 		executor.ErrUnsupportedSequenceStep,
 		executor.ErrUnnamedIndex,
 		executor.ErrIfNotExistsUnsupported,
+		executor.ErrPartitionedIndexTablespace,
 	}
 }
 
@@ -212,15 +215,17 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 // planner refuses while it builds the desired table on the scratch
 // schema: a CREATE TABLE that names a live parent, refused before the
 // build runs; one that declares a constraint twice, which the build shows
-// the server kept only once; and an expression whose printed text never
-// settles. RunDesired maps them to a refusal, since nothing was planned or
-// executed.
+// the server kept only once; an expression whose printed text never
+// settles; and a TABLESPACE on an index the partitioned index build would
+// create, which that build does not honor. RunDesired maps them to a
+// refusal, since nothing was planned or executed.
 func desiredShapeSentinels() []error {
 	return []error{
 		schemadiff.ErrDesiredPartitionOf,
 		schemadiff.ErrDesiredInherits,
 		schemadiff.ErrDesiredConstraintMerged,
 		schemadiff.ErrExpressionUnsettled,
+		executor.ErrPartitionedIndexTablespace,
 	}
 }
 

@@ -27,7 +27,10 @@ gate green — as defined with the
 CI can gate on the exit code without parsing JSON. A destructive change (`DROP
 COLUMN`, `DROP CONSTRAINT`, `DROP NOT NULL`) is one of those refusals until
 `--allow-destructive` names the table; the acknowledged plan still marks it
-`.statements[].destructive` in the JSON report.
+`.statements[].destructive` in the JSON report. A desired-state plan that drops
+anything is refused whole in the same way, and runs only with `--allow-destructive`
+and `--expect-fingerprint` together (see [Apply a reviewed
+drop](cli.md#apply-a-reviewed-drop)).
 Exit 2 covers every refusal cause; the exit code answers *should this
 proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
@@ -61,6 +64,7 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
   - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
   - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
   - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
+  - [Routed to the partitioned index build (`partitioned-index-build`) — exit 0](#routed-to-the-partitioned-index-build-partitioned-index-build--exit-0)
   - [Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2](#refused-target-facts-forbid-the-plan-unsupported-partitioned-parent--exit-2)
   - [Refused until acknowledged: a destructive change (`destructive-change`) — exit 2](#refused-until-acknowledged-a-destructive-change-destructive-change--exit-2)
 - [Lint](#lint)
@@ -112,7 +116,7 @@ is a one-line summary; the linked reference entry is authoritative.
 | [`type-rewrite`](postgres-online-ddl-reference.md#type-rewrite) | The column type change is not binary-coercible, so PostgreSQL rewrites the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend, which builds the changed shape as a shadow table, fills and verifies it, and swaps it in under the source's name. Executes. |
 | [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. The statement's `guidance` field names the typed manual path ([Guidance vocabulary](suggest-report.md#guidance-guidance)), and a refused verdict carries the same `guidance`. |
 | [`backend-unavailable`](postgres-online-ddl-reference.md#backend-unavailable) | The plan routes to the copy-and-swap backend for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation). Refused; nothing executes. |
-| [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
+| [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The target is a partitioned parent and the statement is a shape PostgreSQL cannot run online there, such as adopting an index as a constraint. Refused. |
 | [`unsupported-statement`](postgres-online-ddl-reference.md#unsupported-statement) | The planner knows no safe path for the statement (for example `SET UNLOGGED`, `CLUSTER ON`). Refused — the same typed reason the run path's refusal verdict carries. |
 | [`table-not-found`](postgres-online-ddl-reference.md#table-not-found) | The target table does not exist, so classification fell back to zero facts; running without `--dry-run` would fail. The dry run exits 2 and the report carries `table_exists: false`. |
 | [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL` (dropping a `DEFAULT` is not destructive). A warning alongside the routing decision on a plan `--allow-destructive` acknowledged; without it `migrate` refuses the statement as `destructive-change`; `DROP TABLE` never reaches classification, it refuses as `unsupported-statement`. |
@@ -130,11 +134,11 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `index-statement` | Index maintenance (`DROP INDEX`, `REINDEX`) has a native safe idiom (`CONCURRENTLY`) and is never attempted; the verdict's `safer_idiom` names it. |
 | `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not provably metadata-only. |
 | `insufficient-privileges` | The connected role lacks the access the change needs; `detail` names the missing grant for preflight checks (see [engine-role.md](engine-role.md)). RLS admission names the required table ownership or database CREATE privilege and its remedy; permission errors reported by PostgreSQL retain the server diagnostic, which may not identify an exact GRANT. |
-| `unsupported-partitioned-parent` | The routed plan builds an index on a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. |
+| `unsupported-partitioned-parent` | The statement is a shape PostgreSQL cannot run online on a partitioned parent: adopting an index as a constraint, a `NOT VALID` foreign key before PostgreSQL 18, or a blocking index build. |
 | `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. The same `cause` field carries the partitioned-parent shape under `unsupported-partitioned-parent`; both are refusal causes, unrelated to the plan statement's create-shape `cause`. |
 | `not-native-safe-rewrite-required` | The submitted form blocks and must run as a safer native sequence, but none could be constructed. |
 | `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation, an added column whose type rewrites); a type rewrite of an existing column (`ALTER COLUMN TYPE`) executes through the route instead. |
-| `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; desired-state execution runs no destructive statement, so run the drop deliberately through `migrate --alter` instead ([execution model](execution-model.md)). |
+| `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; a desired-state plan that drops anything is refused whole until the run pins the reviewed plan with `--expect-fingerprint` and names its table with `--allow-destructive` ([Apply a reviewed drop](cli.md#apply-a-reviewed-drop), [execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
 | `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. A table refused with `copy-and-swap-pk-unsupported` because it has no primary key also carries `"guidance": "add-integer-primary-key"`, and its `detail` links the [steps to add one online](primary-keys.md#add-a-primary-key-online). |
@@ -163,7 +167,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 21,
+  "format_version": 23,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -204,7 +208,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 21,
+  "format_version": 23,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -397,7 +401,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 21,
+  "format_version": 23,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -439,7 +443,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 21,
+  "format_version": 23,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -513,7 +517,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 21,
+  "format_version": 23,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -541,16 +545,114 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEF
 }
 ```
 
-### Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2
+### Routed to the partitioned index build (`partitioned-index-build`) — exit 0
 
-The routed plan builds an index concurrently, but the target is a
-partitioned parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` there.
-The refusal cause is the report-level `reason`.
+PostgreSQL cannot build an index concurrently on a partitioned table, so a
+`CREATE INDEX` on one is not substituted with a concurrent build. The one step
+is the statement itself, and its `execution` says the run builds the index
+partition by partition. The partitions are not in the plan: the run lists them
+when it starts.
 
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 21,
+  "format_version": 23,
+  "source": "alter",
+  "schema": "public",
+  "table": "events",
+  "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
+  "disposition": "execute",
+  "fingerprint": "sha256:03e7dbb585c7fbbc683daf2ecc6bce704b6a83f95755e04b38f2128ee9831219",
+  "statements": [
+    {
+      "sql": "CREATE INDEX events_created_idx ON events USING btree (created)",
+      "destructive": false,
+      "route": "native",
+      "backend": "native",
+      "disposition": "execute",
+      "decisions": [
+        {
+          "operation": "CREATE INDEX events_created_idx",
+          "destructive": false,
+          "route": "native",
+          "reason": "safer-idiom",
+          "safer_sql": [
+            "CREATE INDEX events_created_idx ON events USING btree (created)"
+          ],
+          "safer_sql_execution": "partitioned-index-build"
+        }
+      ],
+      "exec_sql": [
+        "CREATE INDEX events_created_idx ON events USING btree (created)"
+      ],
+      "execution": "partitioned-index-build"
+    }
+  ]
+}
+```
+
+The text dry-run says the same in words:
+
+```console
+$ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run
+statement 1:
+  CREATE INDEX events_created_idx ON events USING btree (created);
+
+warning[safer-idiom]:
+  CREATE INDEX events_created_idx — holds a blocking lock on the table for
+  the whole operation — writes (and for some forms reads) wait until it
+  finishes
+
+note:
+  pg-sprite will build the index partition by partition instead of running
+  the statement: create the parent's index with ON ONLY, build each
+  partition's index concurrently and attach it, and the parent's index
+  turns valid with the last attach
+
+note:
+  the partitions are listed when the run starts, each step commits on its
+  own, and an interrupted run is resumed by running the same statement
+  again
+
+docs:
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#safer-idiom
+
+plan:
+  public.events (PostgreSQL 16.14) — 1 statement, 1 step to run, 0 refused
+
+dry-run:
+  nothing was executed
+
+apply:
+  re-run without --dry-run
+```
+
+Without `--dry-run` the run builds the index. The verdict names how many of
+the table's partitions the run gave an index; running the same statement again
+after an interruption adopts the indexes already built and gives an index only
+to the partitions still missing one (exit 0):
+
+```console
+$ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --json
+{
+  "outcome": "executed-natively",
+  "statement": "CREATE INDEX events_created_idx ON public.events USING btree (created)",
+  "table": "public.events",
+  "detail": "the table is partitioned, so pg-sprite built index events_created_idx partition by partition and attached each one: 2 partitions, 2 given an index by this run; the index is valid"
+}
+```
+
+### Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2
+
+PostgreSQL does not support adopting an existing index as a constraint on a
+partitioned parent, so the plan is refused before anything runs. The refusal
+cause is the report-level `reason`.
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx' --dry-run --json
+{
+  "format_version": 23,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -558,23 +660,23 @@ $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)
   "table_exists": true,
   "disposition": "refuse",
   "reason": "unsupported-partitioned-parent",
-  "class": "capability-boundary",
-  "fingerprint": "sha256:e0cebea56d6c5577722d17be16442b06303a817af0c009913d746fd3d1c379e0",
+  "class": "by-design",
+  "fingerprint": "sha256:1fa77b44b9b9180b6dbc54391c3d3c32d93deddba6399a51a58f1cc4c289dd6e",
   "statements": [
     {
-      "sql": "CREATE INDEX events_created_idx ON events USING btree (created)",
+      "sql": "ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx",
       "destructive": false,
       "route": "native",
       "disposition": "refuse",
       "reason": "unsupported-partitioned-parent",
-      "class": "capability-boundary",
+      "class": "by-design",
       "blocking_passthrough_eligible": false,
       "decisions": [
         {
-          "operation": "CREATE INDEX events_created_idx",
+          "operation": "ADD CONSTRAINT events_pkey",
           "destructive": false,
           "route": "native",
-          "reason": "safer-idiom"
+          "reason": "online-idiom"
         }
       ]
     }
@@ -615,7 +717,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 21,
+  "format_version": 23,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -644,6 +746,73 @@ $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --al
       "execution": "autocommit-each-step"
     }
   ]
+}
+```
+
+### Refused until acknowledged: a desired file that drops structure (`destructive-change`) — exit 2
+
+A desired file that no longer has the `note` column makes a destructive plan.
+`migrate --desired --dry-run --json` ends in the refusal, and its `fingerprint`
+covers the refused plan, which cannot be pinned. `pinnable_fingerprint` is the
+plan the run executes once the table is acknowledged: pass it to
+`--expect-fingerprint`. Each destructive statement carries `drops`, the live
+object it removes, and the fingerprint covers it.
+
+```console
+$ pg-sprite migrate --desired orders.sql --dry-run --json
+{
+  "format_version": 23,
+  "source": "diff",
+  "schema": "public",
+  "table": "orders",
+  "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
+  "disposition": "refuse",
+  "reason": "destructive-change",
+  "class": "by-design",
+  "fingerprint": "sha256:c13fbf2570e6fe10022386a4067d84e479865db6401d3c51933b6989de44f156",
+  "pinnable_fingerprint": "sha256:95c0640054358fac2b09dd0e73fd530e09ec2c13f1e0d39823d53d441e09933e",
+  "statements": [
+    {
+      "sql": "ALTER TABLE public.orders DROP note",
+      "kind": "drop-column",
+      "drops": {
+        "kind": "column",
+        "name": "note",
+        "definition": "attnum 3: text"
+      },
+      "destructive": true,
+      "route": "native",
+      "disposition": "refuse",
+      "reason": "destructive-change",
+      "class": "by-design",
+      "blocking_passthrough_eligible": false,
+      "decisions": [
+        {
+          "operation": "DROP COLUMN note",
+          "destructive": true,
+          "route": "native",
+          "reason": "metadata-only"
+        }
+      ]
+    }
+  ]
+}
+```
+
+A dry run compares `--expect-fingerprint` as the run does. A pin that is not the
+plan the run would execute ends in `plan-fingerprint-mismatch`, with the
+previewed plan in `plan` (shortened here):
+
+```console
+$ pg-sprite migrate --desired orders.sql --dry-run --allow-destructive public.orders \
+    --expect-fingerprint sha256:0000000000000000000000000000000000000000000000000000000000000000 --json
+{
+  "plan": { "…": "the plan the run would execute" },
+  "outcome": "refused",
+  "reason": "plan-fingerprint-mismatch",
+  "class": "environmental",
+  "detail": "the plan derived at execution time (fingerprint sha256:95c0640054358fac2b09dd0e73fd530e09ec2c13f1e0d39823d53d441e09933e) is not the pinned plan (fingerprint sha256:0000000000000000000000000000000000000000000000000000000000000000); the live table or the desired schema changed since the plan was reviewed — re-review the new plan"
 }
 ```
 
@@ -769,7 +938,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 21,
+  "format_version": 23,
   "source": "diff",
   "schema": "public",
   "table": "users",

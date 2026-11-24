@@ -26,13 +26,13 @@
 0002 20-26 refuse:unsupported-statement:no-online-safety-problem:declarative-front-door
 0002 29-29 execute
 0003 12-12 execute
-0004 21-21 refuse:unsupported-partitioned-parent:capability-boundary
+0004 21-21 execute
 # A drop discards data, so migrate refuses it until --allow-destructive names
 # the table (RF-10); the replay never acknowledges, so every drop pins the
 # by-design destructive-change refusal and advances through psql.
 0005 25-25 refuse:destructive-change:by-design
 0005 26-30 refuse:backend-unavailable:capability-boundary
-0005 33-33 refuse:unsupported-partitioned-parent:capability-boundary
+0005 33-33 execute
 0006 15-50 refuse:unsupported-statement:no-online-safety-problem:declarative-front-door
 0006 53-54 execute
 0006 56-58 execute

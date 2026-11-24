@@ -39,7 +39,6 @@ func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
 		}
 	}
 	assert.ElementsMatch(t, []string{
-		"index-build-on-a-partitioned-parent",
 		"add-constraint-using-index-on-a-partitioned-parent",
 	}, got)
 	for _, r := range rows {
