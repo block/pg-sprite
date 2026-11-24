@@ -487,8 +487,8 @@ learned of the commit from the catalog after losing its connection, has no
 position from inside the swap and leaves `swap_lsn` out. The field is for
 programs that line the run up with other WAL positions, so only `--json`
 carries it; the text verdict does not print it. `verification` is the
-verification pass's figures, the ones `detail` states in prose, for a
-program to read without parsing it: `rows` hashed, `chunks` compared,
+verification pass's figures, for a program to read without parsing
+`detail`, which states only the rows, chunks, and settled chunks: `rows` hashed, `chunks` compared,
 `settled` (chunks a live pass found differing and settled key by key
 against the stream), `unsettled` (chunks it could settle neither way), and
 `carried` (how many keys of those unsettled chunks it left for the swap to
@@ -496,7 +496,11 @@ compare under its lock — the count, never the keys). Every figure is
 present, zero included. The object is absent when the pass compared no
 chunk — a run resumed after its swap had committed makes no pass, and an
 empty table gives it nothing to compare — and on every other outcome; the
-text verdict does not print it either:
+text verdict does not print it either. A non-zero `unsettled` or `carried`
+is a record, not a warning: the swap compared those keys under its lock and
+would have refused had any differed. A pg-sprite build older than the
+object never writes it, so a program that must tell "no pass" from "not
+reported" records the binary's version beside the verdict:
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy-and-swap --free-disk 20GiB --json

@@ -577,7 +577,8 @@ type Verdict struct {
 	SwapLSN string `json:"swap_lsn,omitempty"`
 	// Verification is set on an executed-via-copy-and-swap verdict whose
 	// run verified the shadow before its swap: the figures of that
-	// verification pass, the same ones Detail states in prose. Nil when
+	// verification pass. Detail states the rows, chunks, and settled
+	// chunks too; Unsettled and Carried are only here. Nil when
 	// the pass compared no chunk — a run resumed after its swap had
 	// committed makes no pass, and an empty table has nothing to compare —
 	// and for every other verdict.

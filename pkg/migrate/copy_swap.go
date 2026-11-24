@@ -338,7 +338,8 @@ func copySwapOutcome(st statement.Statement, hold sourceHold, result schemachang
 // copySwapVerification renders the run's verification pass for the
 // verdict, or nil when the pass compared no chunk: a run resumed after its
 // swap had committed made none, and an empty table gives it nothing to
-// compare.
+// compare. It is keyed on Chunks, not Rows: a compared chunk is a pass
+// that ran, whatever number of rows it hashed.
 func copySwapVerification(report checksum.Report) *verdict.Verification {
 	if report.Chunks == 0 {
 		return nil

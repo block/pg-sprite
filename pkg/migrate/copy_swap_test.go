@@ -311,7 +311,7 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 	t.Run("a done row with a release error is executed", func(t *testing.T) {
 		done := schemachange.Result{
 			Checkpoint:      checkpoint.Checkpoint{Phase: checkpoint.PhaseDone},
-			Verification:    checksum.Report{Rows: 7, Chunks: 1},
+			Verification:    checksum.Report{Rows: 7, Chunks: 1, Unsettled: 1, Carried: 2},
 			OldTableDropped: true,
 		}
 		v, err := copySwapOutcome(st, holdSlot, done, releaseErr)
@@ -320,6 +320,8 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		assert.Empty(t, v.Code)
 		assert.Contains(t, v.Detail, "verified 7 rows in 1 chunks")
 		assert.Contains(t, v.Detail, "the run then returned: release table lock: connection closed")
+		assert.Equal(t, &verdict.Verification{Rows: 7, Chunks: 1, Unsettled: 1, Carried: 2}, v.Verification,
+			"the pass's figures ride the verdict whatever failed after the done row")
 	})
 
 	t.Run("a done row without an error carries no release wording", func(t *testing.T) {
@@ -348,6 +350,17 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		v, err := copySwapOutcome(st, holdSlot, done, nil)
 		require.NoError(t, err)
 		assert.Nil(t, v.Verification, "a run resumed after its swap made no pass to report")
+	})
+
+	t.Run("a pass that compared a chunk of no rows still reports its figures", func(t *testing.T) {
+		done := schemachange.Result{
+			Checkpoint:   checkpoint.Checkpoint{Phase: checkpoint.PhaseDone},
+			Verification: checksum.Report{Chunks: 1},
+		}
+		v, err := copySwapOutcome(st, holdSlot, done, nil)
+		require.NoError(t, err)
+		assert.Equal(t, &verdict.Verification{Chunks: 1}, v.Verification,
+			"whether a pass ran is keyed on the chunks it compared, not the rows it hashed")
 	})
 
 	t.Run("a block-writes done row is marked writes-blocked", func(t *testing.T) {
