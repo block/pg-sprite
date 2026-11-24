@@ -367,8 +367,8 @@ The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences,
 executes them through `pkg/executor`'s sequence executor under the autocommit-each-step
 contract (brief steps bounded like an optimistic attempt, the validation scan and concurrent
 builds under their own budgets). The one-step `CONCURRENTLY` rewrites the classifier also
-emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: `migrate`'s statement gate
-refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
+emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: the imperative statement gate of
+`migrate --alter` refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
 whole-sequence admission refuses a substituted `DETACH PARTITION CONCURRENTLY` typed before
 anything executes — a cancelled wait leaves recovery states it does not yet own — which
 `migrate` reports as a refusal verdict, not an operational error. When the
