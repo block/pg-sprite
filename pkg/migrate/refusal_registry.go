@@ -179,7 +179,9 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 
 // admissionSentinels is the closed set of the sequence executor's and the
 // partitioned index build's static admission refusals, decided from the
-// statement's text before anything runs, that the imperative front door maps
+// statement's text before anything runs, and the build's refusal of a unique
+// index that misses a partition key, decided from the catalog before the
+// build creates anything, that the imperative front door maps
 // to a refusal verdict.
 // admissionRefusal walks this set for membership before it classifies, so
 // the predicate and the classification cannot disagree.
@@ -189,11 +191,13 @@ func admissionSentinels() []error {
 		executor.ErrUnnamedIndex,
 		executor.ErrIfNotExistsUnsupported,
 		executor.ErrPartitionedIndexTablespace,
+		executor.ErrUniqueIndexPartitionKey,
 	}
 }
 
 // admissionRefusal classifies an imperative admission refusal: decided from
-// the statement's shape before anything executes, so it maps to a refusal
+// the statement's shape, or for a unique index on a partitioned table from the
+// tree's partition keys, before anything executes, so it maps to a refusal
 // verdict, not an operational error. ok is false for an error outside
 // admissionSentinels(), and for a *SequenceStepError wrapper — execution
 // started, which is never an admission refusal.
@@ -206,6 +210,11 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 	}
 	if errors.Is(err, executor.ErrIfNotExistsUnsupported) {
 		// The sentinel form of the if-not-exists create-shape cause.
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
+	if errors.Is(err, executor.ErrUniqueIndexPartitionKey) {
+		// PostgreSQL itself rejects the index in every supported version, so
+		// no engine release runs it; the statement has to change.
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true

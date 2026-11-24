@@ -2,6 +2,7 @@ package executor_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -96,12 +97,22 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 		t.Run("a unique index that misses a partition key below the parent", func(t *testing.T) {
 			for name, c := range map[string]struct {
 				subKey string
+				// missing is what the refusal names for events_2024; its Schema is
+				// the fixture's, filled in below.
+				missing executor.MissingPartitionKey
 				// covering is a unique key that contains every level's
 				// partition key; empty when no key can.
 				covering string
 			}{
-				"a column":      {subKey: "LIST (region)", covering: "(id, ts, region)"},
-				"an expression": {subKey: "LIST (lower(region))"},
+				"a column": {
+					subKey:   "LIST (region)",
+					missing:  executor.MissingPartitionKey{Table: "events_2024", Columns: []string{"region"}},
+					covering: "(id, ts, region)",
+				},
+				"an expression": {
+					subKey:  "LIST (lower(region))",
+					missing: executor.MissingPartitionKey{Table: "events_2024", Expression: true},
+				},
 			} {
 				t.Run(name, func(t *testing.T) {
 					f := newFixture(t)
@@ -122,6 +133,14 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 					_, err := f.buildErr(t, "events", fmt.Sprintf("CREATE UNIQUE INDEX idx_events_id ON %s.events (id, ts)", f.schema))
 
 					require.ErrorIs(t, err, executor.ErrUniqueIndexPartitionKey)
+					keyErr, ok := errors.AsType[*executor.UniqueIndexPartitionKeyError](err)
+					require.True(t, ok, "got %v", err)
+					c.missing.Schema = f.schema
+					assert.Equal(t, &executor.UniqueIndexPartitionKeyError{
+						Schema:  f.schema,
+						Index:   "idx_events_id",
+						Missing: []executor.MissingPartitionKey{c.missing},
+					}, keyErr, "only the sub-partitioned partition's key is missing; the parent's ts is in the index")
 					f.requireNothingBuilt(t, "events", partitions...)
 					if c.covering == "" {
 						return
@@ -131,6 +150,29 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 					f.requireCovered(t, "events_2024", f.derived(t, "idx_events_id", "events_2024"), "events_2024_eu")
 				})
 			}
+		})
+
+		// A multi-column partition key is read from the catalog in key order,
+		// so the refusal names the columns the index lacks in that order,
+		// not by name or column number.
+		t.Run("a unique index that misses two columns of a multi-column key", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `CREATE TABLE %s.readings (
+	id bigint NOT NULL,
+	region text NOT NULL,
+	ts date NOT NULL
+) PARTITION BY RANGE (ts, region)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.readings_2024 PARTITION OF %[1]s.readings
+	FOR VALUES FROM ('2024-01-01', 'a') TO ('2025-01-01', 'a')`, f.schema)
+
+			_, err := f.buildErr(t, "readings", fmt.Sprintf("CREATE UNIQUE INDEX idx_readings_id ON %s.readings (id)", f.schema))
+
+			keyErr, ok := errors.AsType[*executor.UniqueIndexPartitionKeyError](err)
+			require.True(t, ok, "got %v", err)
+			assert.Equal(t, []executor.MissingPartitionKey{
+				{Schema: f.schema, Table: "readings", Columns: []string{"ts", "region"}},
+			}, keyErr.Missing)
+			f.requireNothingBuilt(t, "readings", "readings_2024")
 		})
 
 		// Each of these holds a name the build needs. None is renamed,

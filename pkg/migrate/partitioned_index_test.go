@@ -33,7 +33,6 @@ func TestPartitionedIndexFailureVerdictClaimsOnlyWhatTheErrorProves(t *testing.T
 		{"a foreign-table partition", executor.ErrForeignTablePartition, true},
 		{"a table that is not partitioned", executor.ErrNotPartitionedTable, true},
 		{"a pool that is too small", executor.ErrPoolTooSmall, true},
-		{"a unique index that misses a partition key", executor.ErrUniqueIndexPartitionKey, true},
 		{"a lock session the pool cannot see", executor.ErrTableLockUnconfirmed, true},
 		{"a budget that ran out", &executor.BudgetError{Cause: executor.CauseLock}, false},
 		{"a wrapped database error", fmt.Errorf("read the partitions: %w", errors.New("connection reset")), false},

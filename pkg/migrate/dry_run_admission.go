@@ -1,8 +1,11 @@
 package migrate
 
 import (
+	"context"
 	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -49,6 +52,24 @@ func AdmitPartitionedIndexRequest(st statement.Statement, schema string, steps [
 			return fmt.Errorf("%w: the partitioned index build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
 		}
 		return executor.AdmitPartitionedIndexShape(steps[0])
+	})
+}
+
+// AdmitPartitionedUniqueIndex is the catalog half of the partitioned index
+// build's admission, for a statement [AdmitPartitionedIndexRequest] admitted:
+// a unique index whose plain key columns do not contain the partition key of
+// the target and of every sub-partitioned partition is refused, read from the
+// live catalog on pool, as the build refuses it under its table lock before
+// it creates anything. A host that plans through the library calls it with a
+// pool from pkg/dbconn to learn that refusal without running the build. The
+// verdict, the boolean, and the error mean what they mean for
+// [AdmitRoutedSteps].
+func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRouted(st, schema, steps, func(steps []string) error {
+		if len(steps) != 1 {
+			return fmt.Errorf("%w: the partitioned index build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
+		}
+		return executor.AdmitPartitionedUniqueIndex(ctx, pool, steps[0])
 	})
 }
 
