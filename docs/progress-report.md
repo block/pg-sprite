@@ -88,7 +88,7 @@ licenses a consumer to intervene in the change itself.
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
 | `current_locker_pid` | int | while waiting on a locker | PostgreSQL backend PID currently blocking the concurrent build; omitted when none is published. |
-| `percent` | number | running `copy`, `checksum` or `concurrent-index-build` step with a known total | The current step's completion, `0` to `99.9`, one decimal place, derived at the poll from `work` — see [Percent and ETA](#percent-and-eta). Never `100`: the step ending is completion. Omitted when the total is unknown, so an absent `percent` means unknown and `0` means nothing done yet. |
+| `percent` | number | running `copy`, `checksum` or `concurrent-index-build` step with a known total | The current step's completion, `0` to `99.99`, two decimal places, derived at the poll from `work` — see [Percent and ETA](#percent-and-eta). Never `100`: the step ending is completion. Omitted when the total is unknown, so an absent `percent` means unknown and `0` means nothing done yet. |
 | `eta_ns` | int | with `percent`, once the step has enough signal | Nanoseconds the current step is projected to take still, whole seconds, from its rate so far on the tracker's clock. Omitted whenever `percent` is, until the step has run 5 s and done 1% of its work, and once a counter has reached the estimate it is measured against. |
 | `work` | object | measured work only | Present exactly when something measured the step's work — the server published a progress row for a concurrent build, or the engine reported the copy, checksum or catch-up step's counters; then **every** counter below is present, so a fresh build or an empty copy reports honest zeros rather than an empty object. Which counters mean anything is decided by `operation`, not by `work` being present — see [Work counters](#work-counters). |
 
@@ -216,7 +216,7 @@ is known; every other snapshot omits them — a terminal one included, since it 
 | `catch-up`, and every other operation | — | always |
 
 Both row totals are the catalog's estimate, so a counter can reach or pass its total while work
-remains. `percent` therefore never reaches `100` while the step runs — it stops at `99.9` — and
+remains. `percent` therefore never reaches `100` while the step runs — it stops at `99.99` — and
 `eta_ns` is withdrawn once a counter has reached its total, because the total is then known to be
 short and the work left is unknown. On a resumed copy `rows_copied` counts only this run's rows,
 so the percent is this run's share of the source and ends short.
@@ -392,7 +392,7 @@ under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
     "active": true,
     "attempt": 2,
     "current_locker_pid": 31337,
-    "percent": 13.8,
+    "percent": 13.75,
     "work": {
       "rows_copied": 0,
       "rows_total": 0,

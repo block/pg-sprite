@@ -124,10 +124,10 @@ type Detail struct {
 	Attempt          int    `json:"attempt,omitempty"`
 	Work             *Work  `json:"work,omitempty"`
 	CurrentLockerPID uint32 `json:"current_locker_pid,omitempty"`
-	// Percent is the running step's completion in [0, 99.9], derived at the
-	// poll from Work: rows against the catalog's row estimate for a copy or
-	// a checksum pass, the server's phase and counters for a concurrent
-	// index build. It is never 100 — the step ending is completion — and
+	// Percent is the running step's completion in [0, 99.99], to two
+	// decimal places, derived at the poll from Work: rows against the
+	// catalog's row estimate for a copy or a checksum pass, the server's
+	// phase and counters for a concurrent index build. It is never 100 — the step ending is completion — and
 	// nil when the operation has no measurable total or its total is not
 	// known, so unknown is never reported as zero.
 	Percent *float64 `json:"percent,omitempty"`
