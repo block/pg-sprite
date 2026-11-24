@@ -55,6 +55,11 @@ version 6 added the `catch-up` operation and its engine-measured counter family
 derived `detail.percent` and `detail.eta_ns` (see [Percent and ETA](#percent-and-eta)); version
 8 added `work.settle_rows_read` and changed nothing else, so a consumer of version 7 reads version 8 unchanged once it accepts the number; every operation's `work` carries the counter, `0` where it does not apply.
 
+The precision of `detail.percent` is not part of the version contract. Within version 8 it
+went from one decimal place to two, and the running ceiling from 99.9 to 99.99, with no
+version bump. A consumer reads `detail.percent` as a number below 100 and must not depend on
+how many decimal places it carries.
+
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
 all version independently.
@@ -374,7 +379,7 @@ context ended reports `cancelled-by-caller`.
 ## Example
 
 A poll during step 2 of a 3-step sequence, mid concurrent index build — an access method that
-reports no sub-phase, 11 of 40 blocks into the 0–50 build band, so 13.8%; the step has run
+reports no sub-phase, 11 of 40 blocks into the 0–50 build band, so 13.75%; the step has run
 under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
 
 ```json
