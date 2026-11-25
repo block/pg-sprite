@@ -173,7 +173,10 @@ implementation time):
   SchemaBot's MySQL path. It records the table's definition at plan time with
   `schemadiff.DroppedTableDefinition` and runs the acknowledged drop with
   `executor.ExecuteDropTable`, which refuses if the table changed since the review.
-  `verdict.ReasonDestructiveChange` is not reused for the row: that reason is scoped to a
+  Store the rendered string, not the model: the model's JSON leaves out
+  `IncomingForeignKeys` and `TableDependents`, so it does not render back to the same
+  definition. Never render it again just before the drop, which would compare the table
+  with itself. `verdict.ReasonDestructiveChange` is not reused for the row: that reason is scoped to a
   plan pg-sprite produced.
 
   Onboarding follows from the rule: an existing database is entirely undeclared tables, so
