@@ -714,6 +714,7 @@ func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndex
 		           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
 		                           WHERE k.conrelid OPERATOR(pg_catalog.=) con.conrelid
 		                             AND k.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
+		                             AND NOT k.condeferrable
 		                             AND k.conkey OPERATOR(pg_catalog.@>) con.confkey
 		                             AND k.conkey OPERATOR(pg_catalog.<@) con.confkey)
 		FROM pg_catalog.pg_constraint AS con

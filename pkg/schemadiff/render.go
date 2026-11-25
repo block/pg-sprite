@@ -358,7 +358,7 @@ func unrenderableForeignKey(m Model) error {
 		case con.ReferencesOtherSchema:
 			return fmt.Errorf("foreign key %q references a table in another schema: %w", con.Name, statement.ErrQualifiedName)
 		case con.SelfReferencesStandaloneIndex:
-			return fmt.Errorf("foreign key %q references the table's own columns through a standalone unique index; declare the index as a UNIQUE constraint first: %w", con.Name, ErrUnrenderableForeignKey)
+			return fmt.Errorf("foreign key %q references the table's own columns through a standalone unique index; declare the index as an immediate UNIQUE constraint first: %w", con.Name, ErrUnrenderableForeignKey)
 		}
 	}
 	return nil
