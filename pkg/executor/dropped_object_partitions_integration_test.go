@@ -265,3 +265,118 @@ func TestRunSequenceDroppingRefusesANotNullOrOnlyDropOnAPartitionedTable(t *test
 		})
 	}
 }
+
+// Objects the parent holds on the dropped column are the parent's reviewed
+// objects, and so are their copies on the partitions: a default, NOT NULL,
+// an inherited CHECK, a UNIQUE constraint and a foreign key. With all of
+// them on legacy,
+//
+//	ALTER TABLE events DROP COLUMN legacy
+//
+// runs, and no table of the tree keeps the column.
+func TestRunSequenceDroppingDropsAColumnCarryingTheParentsOwnObjects(t *testing.T) {
+	pool, schema := partitionedEventsPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.legacy_codes (
+			code text PRIMARY KEY
+		);
+		INSERT INTO %[1]s.legacy_codes VALUES ('x'), ('y'), ('z'), ('w');
+		ALTER TABLE %[1]s.events ALTER COLUMN legacy SET DEFAULT 'x';
+		ALTER TABLE %[1]s.events ALTER COLUMN legacy SET NOT NULL;
+		ALTER TABLE %[1]s.events ADD CONSTRAINT events_legacy_nonempty CHECK (legacy <> '');
+		ALTER TABLE %[1]s.events ADD CONSTRAINT events_uq UNIQUE (created_at, region, legacy);
+		ALTER TABLE %[1]s.events ADD CONSTRAINT events_legacy_fk FOREIGN KEY (legacy) REFERENCES %[1]s.legacy_codes;`, schema))
+	require.NoError(t, err)
+	d := modeltest.PlannedDrop(t, pool, schema, "events", schemadiff.DroppedColumn, "legacy")
+
+	require.NoError(t, runDroppingEvents(t, pool, schema, d, fmt.Sprintf("ALTER TABLE %s.events DROP COLUMN legacy", schema)))
+	for _, table := range eventsTree {
+		assert.False(t, columnExists(t, pool, schema, table, "legacy"), "%s keeps no copy of the column", table)
+	}
+}
+
+// A partition created with its own NOT NULL and default on the column,
+//
+//	CREATE TABLE events_2027 PARTITION OF events (legacy WITH OPTIONS NOT NULL DEFAULT 'q') ...
+//
+// holds options on the parent's column, not objects of its own built on
+// it, so the reviewed drop runs and events_2027 loses the column too. On
+// PostgreSQL 18 the NOT NULL is a catalogued constraint, which the check
+// leaves out like the parent's.
+func TestRunSequenceDroppingDropsAColumnOfAPartitionWithItsOwnNotNullAndDefault(t *testing.T) {
+	pool, schema := partitionedEventsPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events_2027 PARTITION OF %[1]s.events (
+			legacy WITH OPTIONS NOT NULL DEFAULT 'q'
+		) FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')`, schema))
+	require.NoError(t, err)
+	d := modeltest.PlannedDrop(t, pool, schema, "events", schemadiff.DroppedColumn, "legacy")
+
+	require.NoError(t, runDroppingEvents(t, pool, schema, d, fmt.Sprintf("ALTER TABLE %s.events DROP COLUMN legacy", schema)))
+	for _, table := range append(eventsTree, "events_2027") {
+		assert.False(t, columnExists(t, pool, schema, table, "legacy"), "%s keeps no copy of the column", table)
+	}
+}
+
+// A partitioned table with no partitions still has a partition key, so
+//
+//	ALTER TABLE events DROP COLUMN created_at
+//
+// is refused with the same typed outcome as on a table with partitions,
+// not with PostgreSQL's own error, and the column stays.
+func TestRunSequenceDroppingRefusesAKeyColumnOfAPartitionedTableWithNoPartitions(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint NOT NULL,
+			created_at timestamptz NOT NULL,
+			note text
+		) PARTITION BY RANGE (created_at)`, schema))
+	require.NoError(t, err)
+	d := modeltest.PlannedDrop(t, pool, schema, "events", schemadiff.DroppedColumn, "created_at")
+
+	err = runDroppingEvents(t, pool, schema, d, fmt.Sprintf("ALTER TABLE %s.events DROP COLUMN created_at", schema))
+	require.ErrorIs(t, err, executor.ErrDroppedColumnPartitionKey)
+	assert.Equal(t, executor.CodeDroppedColumnPartitionKey, executor.OutcomeCode(err))
+	assert.True(t, columnExists(t, pool, schema, "events", "created_at"))
+}
+
+// A partition whose DETACH PARTITION ... CONCURRENTLY was cancelled is left
+// detach-pending, and PostgreSQL leaves it out of a parent's column drop,
+// so it would keep its copy while the reviewed plan describes the whole
+// tree. Here events_2025's detach is cancelled while another session reads
+// the parent; the reviewed drop of legacy is then refused with
+// partition-detach-pending, and every table keeps the column.
+func TestRunSequenceDroppingRefusesAColumnDropOverADetachPendingPartition(t *testing.T) {
+	pool, schema := partitionedEventsPool(t)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.events", schema))
+	require.NoError(t, err)
+	conn, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	_, err = conn.Exec(t.Context(), "SET statement_timeout = '700ms'")
+	require.NoError(t, err)
+	_, err = conn.Exec(t.Context(), fmt.Sprintf(`
+		ALTER TABLE %[1]s.events
+			DETACH PARTITION %[1]s.events_2025 CONCURRENTLY`, schema))
+	require.Error(t, err, "the detach waits on the reader and is cancelled")
+	_, err = conn.Exec(t.Context(), "RESET statement_timeout")
+	require.NoError(t, err)
+	conn.Release()
+	require.NoError(t, holder.Rollback(t.Context()))
+	var pending bool
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT inhdetachpending
+		FROM pg_catalog.pg_inherits
+		WHERE inhrelid = $1::regclass`, schema+".events_2025").Scan(&pending))
+	require.True(t, pending, "the cancelled detach left the partition detach-pending")
+
+	d := modeltest.PlannedDrop(t, pool, schema, "events", schemadiff.DroppedColumn, "legacy")
+	err = runDroppingEvents(t, pool, schema, d, fmt.Sprintf("ALTER TABLE %s.events DROP COLUMN legacy", schema))
+	require.ErrorIs(t, err, executor.ErrPartitionDetachPending)
+	assert.Equal(t, executor.CodePartitionDetachPending, executor.OutcomeCode(err))
+	for _, table := range eventsTree {
+		assert.True(t, columnExists(t, pool, schema, table, "legacy"), "%s keeps the column: nothing was dropped", table)
+	}
+}

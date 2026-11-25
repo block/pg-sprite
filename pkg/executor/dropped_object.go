@@ -132,7 +132,7 @@ func refuseDropBelow(ctx context.Context, tx pgx.Tx, st statement.Statement, d s
 		return fmt.Errorf("read the tables below %s before dropping %s %s: %w", target, d.Kind, d.Name, err)
 	}
 	if len(below) == 0 {
-		return nil
+		return refuseEmptyPartitionedColumnDrop(ctx, tx, st, d, target, partitioned)
 	}
 	if !declarativePartitionTree(partitioned, below) {
 		return fmt.Errorf("%w: %s has inheritance children (%s), and dropping %s %s would reach their copies "+
@@ -140,6 +140,18 @@ func refuseDropBelow(ctx context.Context, tx pgx.Tx, st statement.Statement, d s
 			strings.Join(inheritanceChildren(below), ", "), d.Kind, d.Name)
 	}
 	return refusePartitionedDrop(ctx, tx, st, d, target)
+}
+
+// refuseEmptyPartitionedColumnDrop checks a reviewed column drop on a
+// table with nothing below it. A partitioned table with no partitions
+// still has a partition key, which PostgreSQL refuses to drop, so its
+// column drop meets the same check as one with partitions and a key column
+// is refused with the same typed outcome; a plain table's drop passes.
+func refuseEmptyPartitionedColumnDrop(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string, partitioned bool) error {
+	if !partitioned || d.Kind != schemadiff.DroppedColumn {
+		return nil
+	}
+	return refusePartitionedColumnDrop(ctx, tx, st, d, target)
 }
 
 // refusePartitionedDrop decides a reviewed drop on a partitioned table that

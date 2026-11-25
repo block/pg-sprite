@@ -147,13 +147,25 @@ func dropSaysOnly(st statement.Statement) (bool, error) {
 // like the drop's own. It then refuses when the column is in a partition
 // key at any level of the tree, and when a partition carries an object of
 // its own that the drop would remove with the partition's copy of the
-// column.
+// column. A partition whose DETACH PARTITION ... CONCURRENTLY did not
+// finish refuses the drop too: PostgreSQL leaves such a partition out of
+// the parent's drop, so it would keep its copy of the column while the
+// reviewed plan describes the whole tree.
 func refusePartitionedColumnDrop(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
 	// INV: RF-10 — the tree is locked before its catalog is read, so the
 	// objects read are the objects the drop removes, and a reviewed drop
 	// removes nothing from a partition that the plan did not review.
 	if _, err := tx.Exec(ctx, "LOCK TABLE "+target+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		return fmt.Errorf("lock the partitions of %s to check what dropping column %s removes from them: %w", target, d.Name, err)
+	}
+	pending, err := detachPendingBelow(ctx, tx, st.Schema(), st.Table())
+	if err != nil {
+		return fmt.Errorf("read the partitions of %s whose detach has not finished before dropping column %s: %w", target, d.Name, err)
+	}
+	if len(pending) > 0 {
+		return fmt.Errorf("%w: %s under %s; PostgreSQL leaves it out of the drop of column %s, so it would keep its copy; "+
+			"finish the detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then re-plan",
+			ErrPartitionDetachPending, boundedNames(pending), target, d.Name)
 	}
 	keyed, err := partitionKeysWithColumn(ctx, tx, st.Schema(), st.Table(), d.Name)
 	if err != nil {
@@ -169,9 +181,47 @@ func refusePartitionedColumnDrop(ctx context.Context, tx pgx.Tx, st statement.St
 	}
 	if len(local) > 0 {
 		return fmt.Errorf("%w: dropping column %s of %s would also remove %s, which a partition carries of its own and the plan did not review; "+
-			"drop or change it first, then re-plan", ErrDroppedColumnPartitionDependent, d.Name, target, strings.Join(local, "; "))
+			"drop or change it first, then re-plan", ErrDroppedColumnPartitionDependent, d.Name, target, boundedNames(local))
 	}
 	return nil
+}
+
+// maxNamedObjects is how many objects a refusal names before it counts the
+// rest, so its text stays short however many partitions the tree holds.
+const maxNamedObjects = 5
+
+// boundedNames joins names with "; ", naming at most maxNamedObjects of
+// them and counting the rest.
+func boundedNames(names []string) string {
+	const sep = "; "
+	if len(names) <= maxNamedObjects {
+		return strings.Join(names, sep)
+	}
+	return fmt.Sprintf("%s%sand %d more", strings.Join(names[:maxNamedObjects], sep), sep, len(names)-maxNamedObjects)
+}
+
+// detachPendingBelow names the partitions at any depth below the target
+// whose detach has not finished (pg_inherits.inhdetachpending), each
+// rendered schema.table.
+func detachPendingBelow(ctx context.Context, tx pgx.Tx, schema, table string) ([]string, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	return queryNames(ctx, tx, `
+		WITH RECURSIVE tree AS (
+		        SELECT i.inhrelid AS oid, i.inhdetachpending AS pending
+		          FROM pg_catalog.pg_inherits i
+		          JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.inhparent
+		          JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		         WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2
+		        UNION
+		        SELECT i.inhrelid, i.inhdetachpending
+		          FROM pg_catalog.pg_inherits i
+		          JOIN tree ON i.inhparent OPERATOR(pg_catalog.=) tree.oid)
+		SELECT pg_catalog.quote_ident(n.nspname) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident(c.relname)
+		  FROM tree
+		  JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) tree.oid
+		  JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		 WHERE tree.pending
+		 ORDER BY 1`, schema, table)
 }
 
 // partitionKeysWithColumn names the partitioned tables, the target and any
