@@ -126,7 +126,27 @@ func TestQualifyQualifiesCreateTableForeignKeyReferences(t *testing.T) {
 
 	got, err = Qualify("CREATE TABLE s1.orders (user_id int REFERENCES users (id))", "")
 	require.NoError(t, err)
-	assert.Equal(t, "CREATE TABLE orders (user_id int REFERENCES users (id))", got, "stripping leaves references as written")
+	assert.Equal(t, "CREATE TABLE orders (user_id int REFERENCES users (id))", got, "an unqualified reference stays unqualified")
+}
+
+// Stripping is the inverse of qualifying: a planned CREATE TABLE goes back to
+// the desired form ParseDesired accepts, while a reference to another schema
+// keeps its schema so ParseDesired still refuses it.
+func TestQualifyStripsReferencesInTheTargetsOwnSchema(t *testing.T) {
+	desired := "CREATE TABLE orders (id int PRIMARY KEY, user_id int REFERENCES users (id))"
+	planned, err := Qualify(desired, "s1")
+	require.NoError(t, err)
+	got, err := Qualify(planned, "")
+	require.NoError(t, err)
+	assert.Equal(t, desired, got)
+	_, err = ParseDesired(got)
+	require.NoError(t, err)
+
+	got, err = Qualify("CREATE TABLE s1.orders (user_id int REFERENCES s2.users (id))", "")
+	require.NoError(t, err)
+	assert.Equal(t, "CREATE TABLE orders (user_id int REFERENCES s2.users (id))", got)
+	_, err = ParseDesired(got)
+	require.ErrorIs(t, err, ErrQualifiedName)
 }
 
 func TestQualifyEmptySchemaStripsQualification(t *testing.T) {

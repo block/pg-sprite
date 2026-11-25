@@ -334,8 +334,10 @@ func isPartition(create *pganalyze.CreateStmt) bool {
 // unqualified foreign-key references are qualified by schema too, because a
 // desired file's referenced tables live in the target schema: left
 // unqualified, a reference would resolve through the session's search_path
-// and could bind a same-named table in another schema. Stripping leaves
-// references as written. This touches qualification only — no semantics are
+// and could bind a same-named table in another schema. Stripping is the
+// inverse: it also strips a reference qualified by the target's own schema,
+// so a planned CREATE TABLE round-trips back to its desired form, and leaves a
+// reference to any other schema as written. This touches qualification only — no semantics are
 // ever derived or transformed at the AST level (that is
 // execute-and-introspect's job).
 func Qualify(sql, schema string) (string, error) {
@@ -351,11 +353,19 @@ func Qualify(sql, schema string) (string, error) {
 	switch {
 	case node.GetCreateStmt() != nil:
 		rel = node.GetCreateStmt().GetRelation()
-		if schema != "" {
-			for _, con := range foreignKeyConstraints(node.GetCreateStmt()) {
-				if ref := con.GetPktable(); ref != nil && ref.GetSchemaname() == "" {
-					ref.Schemaname = schema
-				}
+		// A reference written without a schema lives in the target's schema,
+		// whichever qualification the target ends up with.
+		own := rel.GetSchemaname()
+		for _, con := range foreignKeyConstraints(node.GetCreateStmt()) {
+			ref := con.GetPktable()
+			if ref == nil {
+				continue
+			}
+			switch {
+			case schema != "" && ref.GetSchemaname() == "":
+				ref.Schemaname = schema
+			case schema == "" && own != "" && ref.GetSchemaname() == own:
+				ref.Schemaname = ""
 			}
 		}
 	case node.GetIndexStmt() != nil:
