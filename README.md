@@ -7,12 +7,15 @@
 [![PostgreSQL 14 | 15 | 16 | 17 | 18](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](docs/postgresql-version-support.md)
 [![Maturity: preview](https://img.shields.io/badge/maturity-preview-orange)](docs/capabilities.md)
 
-> [!WARNING]
-> **Early release — not production-ready.** This project is under active
-> development. Tagged releases exist, but pre-1.0 there are no stability
-> guarantees and no support. Interfaces, behavior, on-disk/database artifacts,
-> and the CLI surface may all change between releases. Do **not** run this
-> against any database you care about.
+> [!IMPORTANT]
+> **Preview: ready to try.** pg-sprite handles everyday changes
+> today, like adding a column, an index, or a constraint, and keeps locks short
+> so your app keeps running. Rewriting a whole table, like changing a column's
+> type, is still in preview and only runs if you pass `--copy-and-swap`.
+> `pg-sprite capabilities --json` lists which changes are generally available
+> (`maturity: ga`) and which are in preview.
+> We're not at 1.0 yet, so commands and output may change between releases,
+> and there's no support guarantee. Read the release notes before you upgrade.
 
 An online schema-change engine for **PostgreSQL** (community, RDS, and
 Aurora; 14+): a decoupled **planner → router → executor** design where the
@@ -57,7 +60,8 @@ is [docs/vision.md](docs/vision.md); the canonical support matrix — is this
 change supported today, planned, or out of scope — is
 [docs/capabilities.md](docs/capabilities.md).
 The same embedded matrix is queryable for automation with
-`pg-sprite capabilities --json`.
+`pg-sprite capabilities --json`; each supported row's `maturity` says whether it is
+generally available (`ga`) or in preview (`preview`, the run must opt in).
 
 ## What pg-sprite does not do yet
 
@@ -121,7 +125,13 @@ refusal — never a silently wrong or incomplete result:
   refused, as PostgreSQL rejects it. Only a partitioned parent can be expressed in or
   exported to a desired file — partitions and their bounds stay owned outside
   it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
-  `--force` names the table ([limitations](docs/limitations.md)).
+  `--force` names the table ([limitations](docs/limitations.md)). A reviewed
+  `migrate --desired` column or constraint drop on a partitioned parent removes it
+  from every partition; the column drop is refused, dropping nothing, when the column
+  is in a partition key at any level or a partition carries an index, constraint, or
+  statistics object of its own on it. A reviewed `NOT NULL` drop on a partitioned
+  parent is refused, and so is a reviewed column, constraint, or `NOT NULL` drop on
+  a table with inheritance children.
 - **Index maintenance** is not driven by `migrate --alter`: it refuses `DROP INDEX`
   and `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
   `migrate --desired` does run a planned index drop, as `DROP INDEX CONCURRENTLY`
