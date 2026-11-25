@@ -162,28 +162,26 @@ implementation time):
   close it), but each table costs one scratch transaction per plan, and cross-table ordering
   is the adapter's responsibility.
 - **So is the set of tables.** A live table with no desired file is invisible to a per-table
-  diff, and under a declarative model its only convergence is `DROP TABLE` — which pg-sprite
-  refuses at both front doors and never executes. There is no `verdict.Verdict` to map: pg-sprite
-  never saw the table. The adapter enumerates the namespace's live tables itself —
-  `schemadiff.ListManagedTables` is the exported catalog query `pull` uses, and its
-  exclusions (partitions and extension-owned tables) are explained under
-  [Deliberately operator-owned](capabilities.md#deliberately-operator-owned) — and
-  *synthesizes* an `engine.TableChange` per undeclared table: `ExecutionMode =
-  ExecutionModeBlocked`, `IsUnsafe` with a data-loss `UnsafeReason`, and a `ModeReason` that
-  names the table and the two remedies (restore or write its file; drop it through a reviewed
-  process). The row's `DDL` may carry the canonical `DROP TABLE <ns>.<table>` so the operator
-  sees what convergence would mean — the row is blocked, and pg-sprite neither emitted nor
-  will run that text. `verdict.ReasonDestructiveChange` is not reused for it: that reason is
-  scoped to a plan pg-sprite produced. The point of the synthesized row is the fail-closed
-  direction — the divergence shows on the plan and the apply is refused rather than the table
-  lingering unreported. This is a deliberate divergence from SchemaBot's MySQL path, which
-  plans the drop and, behind its unsafe acknowledgment, quarantines the table through
-  pending drops instead of blocking: PostgreSQL gets the block because pg-sprite offers no
-  whole-schema convergence and the drop is outside its statement set, so the orchestrator
-  holds the only view of the table set. A PostgreSQL quarantine (`ALTER TABLE … SET SCHEMA`)
-  would be the orchestrator's mechanism to add, not an engine gap. Onboarding follows from
-  the rule: an existing database is entirely undeclared tables, so the adapter declares them
-  first (`pull` — one desired file per table) or scopes which namespaces it owns.
+  diff, and under a declarative model its only convergence is `DROP TABLE`. pg-sprite never
+  plans one, so there is no `verdict.Verdict` to map. The adapter enumerates the namespace's
+  live tables itself with `schemadiff.ListManagedTables`, the catalog query `pull` uses. Its
+  exclusions are explained under
+  [Deliberately operator-owned](capabilities.md#deliberately-operator-owned).
+
+  For each undeclared table the adapter synthesizes an `engine.TableChange` that drops it:
+  `IsUnsafe`, with a data-loss `UnsafeReason`, behind the same unsafe acknowledgment as
+  SchemaBot's MySQL path. It records the table's definition at plan time with
+  `schemadiff.DroppedTableDefinition` and runs the acknowledged drop with
+  `executor.ExecuteDropTable`, which refuses if the table changed since the review.
+  Store the rendered string, not the model: the model's JSON leaves out
+  `IncomingForeignKeys` and `TableDependents`, so it does not render back to the same
+  definition. Never render it again just before the drop, which would compare the table
+  with itself. `verdict.ReasonDestructiveChange` is not reused for the row: that reason is scoped to a
+  plan pg-sprite produced.
+
+  Onboarding follows from the rule: an existing database is entirely undeclared tables, so
+  the adapter declares them first (`pull` writes one desired file per table) or scopes
+  which namespaces it owns.
 - **Store the whole `plan.Report`, not just its statements.** Engine-specific fields
   (`ServerVersion`, `Fingerprint`, `TableExists`, `Disposition`) ride in
   `SchemaChange.Metadata`. `plan.Fingerprint` is deterministic across front doors, so it is

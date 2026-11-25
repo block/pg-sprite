@@ -1769,7 +1769,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   (`ErrDroppedColumnPartitionDependent`), and `refuseDropBelow`, which refuses a reviewed
   column, constraint, or `NOT NULL` drop that reaches an inheritance child (`ErrDroppedObjectHasDescendants`);
   `TestRunSequenceDroppingRefusesAColumnAPartitionUsesOnItsOwn`; `ErrDroppedIndexDrift` for a refused index drop and
-  `ErrDroppedIndexReplaced` for one that dropped an unreviewed index),
+  `ErrDroppedIndexReplaced` for one that dropped an unreviewed index; `ExecuteDropTable`,
+  the Go API for a table drop no front door runs, which takes the reviewed definition and
+  re-reads the table under its lock, `TestExecuteDropTableRefusesATableThatChanged`),
   `pkg/migrate` (`executePlan`, which runs no destructive statement that carries no dropped
   definition), `pkg/schemadiff` (`ReadDroppedObject`, `UnlistedDependents`; `Diff` plans every `NOT NULL`
   drop ahead of any statement that can rebuild the table), `pkg/plan` (`Fingerprint`, which

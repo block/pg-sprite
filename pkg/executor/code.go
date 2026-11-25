@@ -194,7 +194,7 @@ const (
 	// drop. Unlike the drift codes, something was dropped: inspect the
 	// table's indexes and recreate the dropped one if it should stay.
 	CodeDroppedIndexReplaced Code = "dropped-index-replaced"
-	// CodeDroppedObjectDrift: the column, constraint, or NOT NULL a
+	// CodeDroppedObjectDrift: the column, constraint, NOT NULL, or table a
 	// reviewed plan drops no longer has the definition the plan carried,
 	// read again under the table's lock; nothing was dropped. Re-plan
 	// against the table as it stands and review the new plan.
@@ -202,8 +202,10 @@ const (
 	// CodeDroppedObjectHasDescendants: a reviewed column, constraint, or
 	// NOT NULL drop names a table with inheritance children, or a NOT NULL
 	// drop (or any drop with ONLY) names a partitioned table with
-	// partitions, and the drop would reach their copies too, which the plan
-	// did not review; nothing was dropped.
+	// partitions, and the drop would reach their copies too; or a reviewed
+	// table drop names a partitioned table or an inheritance parent, which
+	// would drop the tables below it. The plan did not review that, so
+	// nothing was dropped.
 	CodeDroppedObjectHasDescendants Code = "dropped-object-has-descendants"
 	// CodeDroppedColumnPartitionKey: a reviewed column drop names a column
 	// in the partition key of the partitioned table or of a
@@ -217,6 +219,14 @@ const (
 	// review; nothing was dropped. Drop or change that object first, then
 	// re-plan.
 	CodeDroppedColumnPartitionDependent Code = "dropped-column-partition-dependent"
+	// CodeDroppedTableHasParent: a reviewed table drop names a partition or
+	// an inheritance child, whose rows the table above it also holds;
+	// nothing was dropped.
+	CodeDroppedTableHasParent Code = "dropped-table-has-parent"
+	// CodeDroppedTableHasDependents: the server refused a reviewed table
+	// drop because a view, another table's foreign key, or another object
+	// depends on the table; nothing was dropped.
+	CodeDroppedTableHasDependents Code = "dropped-table-has-dependents"
 	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
 	// CONSTRAINT validates was dropped or replaced after planning, read
 	// again under the table's lock; nothing was validated. Re-plan against
@@ -328,6 +338,8 @@ func Codes() []Code {
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
+		CodeDroppedTableHasParent,
+		CodeDroppedTableHasDependents,
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
@@ -388,6 +400,8 @@ func (c Code) Permanent() bool {
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
+		CodeDroppedTableHasParent,
+		CodeDroppedTableHasDependents,
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
@@ -534,6 +548,10 @@ func sentinelCode(err error) Code {
 		return CodeDroppedObjectDrift
 	case errors.Is(err, ErrDroppedObjectHasDescendants):
 		return CodeDroppedObjectHasDescendants
+	case errors.Is(err, ErrDroppedTableHasParent):
+		return CodeDroppedTableHasParent
+	case errors.Is(err, ErrDroppedTableHasDependents):
+		return CodeDroppedTableHasDependents
 	case errors.Is(err, ErrDroppedColumnPartitionKey):
 		return CodeDroppedColumnPartitionKey
 	case errors.Is(err, ErrDroppedColumnPartitionDependent):

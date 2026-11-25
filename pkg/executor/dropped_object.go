@@ -12,25 +12,27 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// ErrDroppedObjectDrift means the column, constraint, or NOT NULL a
+// ErrDroppedObjectDrift means the column, constraint, NOT NULL, or table a
 // reviewed plan drops no longer has the definition the plan carried for it,
 // read again under the table's lock: it is gone, or the name now stands
 // for another object (a column dropped and added again, a constraint
-// replaced under its name). Nothing was dropped. The outcome is permanent:
-// re-plan against the table as it stands and review the new plan.
+// replaced under its name, a table whose shape changed). Nothing was
+// dropped. The outcome is permanent: re-plan against the table as it
+// stands and review the new plan.
 var ErrDroppedObjectDrift = errors.New("the object the plan drops changed after planning")
 
-// ErrDroppedObjectHasDescendants means a reviewed column, constraint, or
-// NOT NULL drop names a table that has inheritance children, or a NOT NULL
-// drop names a partitioned table that has partitions, read under the
-// table's lock. The drop would reach into those tables too: a column drop
-// removes the children's copies of the column and anything on them, a
-// constraint drop removes their copies of the constraint, and a NOT NULL
-// drop clears it on their copies. The plan reviewed only the named table's
-// object and its dependents, so nothing was dropped. A column or
-// constraint drop on a partitioned table whose every descendant is a
-// declarative partition is not refused here: see refusePartitionedDrop.
-// The outcome is permanent.
+// ErrDroppedObjectHasDescendants means a reviewed drop would reach tables
+// below the named one, read under the table's lock. A column, constraint,
+// or NOT NULL drop is refused on a table that has inheritance children,
+// and a NOT NULL drop on a partitioned table that has partitions: a column
+// drop would remove the children's copies of the column and anything on
+// them, a constraint drop their copies of the constraint, and a NOT NULL
+// drop would clear it on their copies. A column or constraint drop on a
+// partitioned table whose every descendant is a declarative partition is
+// not refused here: see refusePartitionedDrop. A table drop is refused on
+// a partitioned table or an inheritance parent, since it would drop the
+// tables below. The plan reviewed only the named table's object and its
+// dependents, so nothing was dropped. The outcome is permanent.
 var ErrDroppedObjectHasDescendants = errors.New("the object the plan drops also reaches tables below it")
 
 // opDrops reports whether op drops the column, constraint, or NOT NULL
