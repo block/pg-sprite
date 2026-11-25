@@ -104,6 +104,37 @@ non-zero status as failure is fail-closed for all three non-zero codes; a caller
 that deliberately permits the passthrough allows 3 explicitly. The rationale is in
 [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md#exit-codes).
 
+`lint --desired` refuses with exit 2 as well. The offline `lint` exits 1 when a
+script has error-severity findings (warnings alone exit 0), and `suggest` exits 0
+on any script it can parse — its findings never gate; only an unreadable or
+unparsable script exits 1.
+
+Two more cases a caller must handle:
+
+- **A lost `COMMIT` is exit 1, not 0, 2, or 3.** When the connection drops or
+  the caller's context ends while a bounded attempt's `COMMIT` is in flight,
+  the change may or may not have landed. Exit 0 and 3 would claim it did and
+  exit 2 would claim it did not; the failed exit says only that the engine
+  cannot vouch for the run, and the verdict's `code` (`commit-outcome-unknown`)
+  and detail tell the operator to inspect the catalog.
+- **Library callers get the same facts typed, not as a status.** An
+  orchestrator that imports `pkg/executor` branches on the verdict's
+  `outcome`, `errors.As` to the executor's typed errors, and
+  `executor.OutcomeCode` — the exit code is the CLI's rendering of those
+  facts, not a surface the library exposes. Check
+  `errors.As(err, new(*executor.CommitOutcomeUnknownError))` or `OutcomeCode`
+  before testing for context errors: a context cancelled during `COMMIT`
+  stays in the error chain, but the outcome is unknown, not a cancellation. The typed contract is in
+  [execution-model.md](execution-model.md#how-a-failure-is-reported).
+
+Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking
+SCHEMA.TABLE --statement-timeout …` on a refused plain `DROP INDEX`,
+`REINDEX INDEX`, or `REINDEX TABLE`, where the value names the table whose
+lock you accept. Why the code is non-zero, and why a
+statement-budget cancellation on that path is exit 1 rather than 2, is in
+[lock-budgeted-passthrough.md](lock-budgeted-passthrough.md#exit-codes);
+every code's JSON shape is below.
+
 ## Codes used in these examples
 
 Every diagnostic in the examples below carries one of these typed codes. Each
