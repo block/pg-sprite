@@ -215,9 +215,10 @@ func TestRenderRefusesLiveClassicInheritanceOnBothSides(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableInheritance)
 }
 
-// A live table with a foreign key cannot be rendered: desired-state
-// execution refuses every foreign-key change, so a baseline carrying one
-// could never be applied.
+// By default a table with a foreign key in either direction is refused:
+// one table's model cannot show whether the tables that reference it are
+// rendered too, so only a caller that renders them opts in
+// (RenderOptions.ForeignKeys).
 func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
