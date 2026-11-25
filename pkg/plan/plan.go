@@ -59,8 +59,9 @@ import (
 // drops field and its part in the fingerprint, and the report-level
 // pinnable_fingerprint field.
 // Version 23 added the partitioned-index-build execution contract and its
-// part in the fingerprint.
-const FormatVersion = 23
+// part in the fingerprint. Version 24 added the proven_catalog_only
+// decision field.
+const FormatVersion = 24
 
 // Source identifies which front door derived the plan.
 type Source string

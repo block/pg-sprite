@@ -1075,13 +1075,15 @@ func TestMigrateSizeGuardSkipsAttempt(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 	schema := testutil.NewSchema(t, pool)
-	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v varchar(10))", schema))
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(
 		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
 	require.NoError(t, err)
 
-	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	// Widening a varchar is classified binary-coercible, but no probe
+	// proves it, so it runs as a blind attempt and stays size-guarded.
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v TYPE varchar(20)", schema))
 	cmd.MaxTableSize = 1 // guarantees the guard fires without a big fixture
 	cmd.JSON = true
 	var out strings.Builder
@@ -1092,13 +1094,68 @@ func TestMigrateSizeGuardSkipsAttempt(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.ReasonTableTooLarge, v.Reason)
 
-	// The attempt was skipped, so the (instant-eligible) change must not
-	// have been applied.
-	var n int
+	// The attempt was skipped, so the column keeps its old type.
+	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'age'`, schema).Scan(&n))
-	assert.Zero(t, n, "the size guard must skip the attempt entirely")
+		`SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+		 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&typ))
+	assert.Equal(t, "character varying(10)", typ, "the size guard must skip the attempt entirely")
+}
+
+// Changes PostgreSQL runs on the catalog alone, such as adding a nullable
+// column or dropping one, run on a table above the size limit: what
+// executes cannot rewrite or read the table, so its size cannot make the
+// lock last longer.
+func TestMigrateSizeGuardExemptsCatalogOnlyChanges(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text DEFAULT 'x')", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name, sql   string
+		destructive bool
+	}{
+		{name: "add a nullable column", sql: "ALTER TABLE %s.t ADD COLUMN age int"},
+		{name: "add a column with a constant default", sql: "ALTER TABLE %s.t ADD COLUMN score int DEFAULT 0"},
+		{name: "drop a default", sql: "ALTER TABLE %s.t ALTER COLUMN v DROP DEFAULT"},
+		{name: "drop a column", sql: "ALTER TABLE %s.t DROP COLUMN age", destructive: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newMigrateCmd(url, fmt.Sprintf(tc.sql, schema))
+			cmd.MaxTableSize = 1
+			if tc.destructive {
+				cmd.AllowDestructive = schema + ".t"
+			}
+			cmd.JSON = true
+			var out strings.Builder
+			require.NoError(t, cmd.run(t.Context(), &out), out.String())
+
+			var v verdict.Verdict
+			require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+			assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, out.String())
+		})
+	}
+
+	var cols []string
+	rows, err := pool.Query(t.Context(),
+		`SELECT column_name FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' ORDER BY ordinal_position`, schema)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var c string
+		require.NoError(t, rows.Scan(&c))
+		cols = append(cols, c)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"id", "v", "score"}, cols)
 }
 
 // A connected role without membership in the owning role is refused up
