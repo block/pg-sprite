@@ -1,0 +1,25 @@
+package executor
+
+import "errors"
+
+// Typed refusals for giving a leaf partition the foreign key a partitioned
+// parent's FOREIGN KEY adopts. Each says what the catalog decided, so a
+// caller branches on the cause, not on text. The step never drops or renames
+// a constraint it did not create, so each one leaves the leaf as it found it.
+var (
+	// ErrPartitionedForeignKeyNameTaken is returned when the name the step
+	// derives for a leaf's foreign key is held by a constraint of the leaf
+	// that is not the requested foreign key.
+	ErrPartitionedForeignKeyNameTaken = errors.New("the name the foreign key needs on a partition is held by a constraint that is not the requested foreign key")
+	// ErrPartitionedForeignKeyConflict is returned when the leaf already
+	// carries foreign keys of the requested definition that the parent's
+	// foreign key could not adopt as the one the step proved: two or more of
+	// them, so which one the parent adopts would be left to the server, or
+	// one already attached to a parent table's foreign key.
+	ErrPartitionedForeignKeyConflict = errors.New("the partition already has a foreign key of the requested definition that the parent's could not adopt as the only one")
+	// ErrPartitionedForeignKeyReferencedTable is returned when the foreign
+	// key references a table the build does not take: anything but a plain
+	// table, such as a partitioned table, a foreign table, or a view, or a
+	// partition of the table the foreign key is added to.
+	ErrPartitionedForeignKeyReferencedTable = errors.New("the foreign key references a table the partitioned foreign key build does not take")
+)

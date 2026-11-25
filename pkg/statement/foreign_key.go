@@ -51,6 +51,58 @@ func referencedTables(create *pganalyze.CreateStmt) ([]string, error) {
 	return names, nil
 }
 
+// ForeignKeyClause is what an ADD CONSTRAINT ... FOREIGN KEY declares, as
+// the statement spells it. Match, OnUpdate, and OnDelete hold the one-letter
+// codes the grammar and pg_constraint share, with the grammar's defaults
+// filled in when the statement says nothing: Match is "s" (SIMPLE), "f"
+// (FULL), or "p" (PARTIAL); an action is "a" (NO ACTION), "r" (RESTRICT),
+// "c" (CASCADE), "n" (SET NULL), or "d" (SET DEFAULT).
+type ForeignKeyClause struct {
+	// Columns are the referencing columns, in order.
+	Columns []string
+	// RefSchema and RefTable name the referenced table; RefSchema is empty
+	// when the statement does not qualify it.
+	RefSchema string
+	RefTable  string
+	// RefColumns are the referenced columns, in order; empty when the
+	// statement leaves them to the referenced table's primary key.
+	RefColumns []string
+	Match      string
+	OnUpdate   string
+	OnDelete   string
+	// DeleteSetColumns are the columns of an ON DELETE SET NULL (...) or
+	// SET DEFAULT (...) column list; empty when there is none.
+	DeleteSetColumns []string
+	// Deferrable and InitiallyDeferred are the constraint's DEFERRABLE and
+	// INITIALLY DEFERRED.
+	Deferrable        bool
+	InitiallyDeferred bool
+}
+
+// foreignKeyClause reads the FOREIGN KEY's columns, referenced side,
+// actions, and deferrability.
+func foreignKeyClause(con *pganalyze.Constraint) *ForeignKeyClause {
+	fk := &ForeignKeyClause{
+		RefSchema:         con.GetPktable().GetSchemaname(),
+		RefTable:          con.GetPktable().GetRelname(),
+		Match:             con.GetFkMatchtype(),
+		OnUpdate:          con.GetFkUpdAction(),
+		OnDelete:          con.GetFkDelAction(),
+		Deferrable:        con.GetDeferrable(),
+		InitiallyDeferred: con.GetInitdeferred(),
+	}
+	for _, n := range con.GetFkAttrs() {
+		fk.Columns = append(fk.Columns, n.GetString_().GetSval())
+	}
+	for _, n := range con.GetPkAttrs() {
+		fk.RefColumns = append(fk.RefColumns, n.GetString_().GetSval())
+	}
+	for _, n := range con.GetFkDelSetCols() {
+		fk.DeleteSetColumns = append(fk.DeleteSetColumns, n.GetString_().GetSval())
+	}
+	return fk
+}
+
 // QualifyForeignKeyReferences returns an ALTER TABLE statement with every
 // unqualified table its added foreign keys reference qualified by schema. A
 // planned foreign-key add names its referenced table as the desired file

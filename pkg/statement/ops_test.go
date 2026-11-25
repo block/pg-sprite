@@ -316,7 +316,26 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "add foreign key",
 			sql:  "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id)",
-			want: statement.Op{Kind: statement.OpAddConstraint, Name: "fk", Constraint: statement.ConstraintForeignKey},
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "fk", Constraint: statement.ConstraintForeignKey,
+				AddedForeignKey: &statement.ForeignKeyClause{
+					Columns: []string{"pid"}, RefTable: "p", RefColumns: []string{"id"},
+					Match: "s", OnUpdate: "a", OnDelete: "a",
+				}},
+		},
+		{
+			// Every clause the grammar lets a foreign key carry, each
+			// read into its own field with the codes pg_constraint uses.
+			name: "add foreign key with every clause",
+			sql: `ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (a, b)
+				REFERENCES s.p (x, y) MATCH FULL
+				ON UPDATE CASCADE ON DELETE SET NULL (b)
+				DEFERRABLE INITIALLY DEFERRED NOT VALID`,
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "fk", Constraint: statement.ConstraintForeignKey, NotValid: true,
+				AddedForeignKey: &statement.ForeignKeyClause{
+					Columns: []string{"a", "b"}, RefSchema: "s", RefTable: "p", RefColumns: []string{"x", "y"},
+					Match: "f", OnUpdate: "c", OnDelete: "n", DeleteSetColumns: []string{"b"},
+					Deferrable: true, InitiallyDeferred: true,
+				}},
 		},
 		{
 			name: "validate constraint",
