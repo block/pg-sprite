@@ -1,6 +1,11 @@
 # pg-sprite
 
+[![CI](https://github.com/block/pg-sprite/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/block/pg-sprite/actions/workflows/ci.yml?query=branch%3Amain)
 [![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
+[![Vulnerability Scan](https://github.com/block/pg-sprite/actions/workflows/vulncheck.yml/badge.svg?branch=main)](https://github.com/block/pg-sprite/actions/workflows/vulncheck.yml?query=branch%3Amain)
+[![Release](https://img.shields.io/github/v/release/block/pg-sprite)](https://github.com/block/pg-sprite/releases/latest)
+[![PostgreSQL 14 | 15 | 16 | 17 | 18](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](docs/postgresql-version-support.md)
+[![Maturity: preview](https://img.shields.io/badge/maturity-preview-orange)](docs/capabilities.md)
 
 > [!WARNING]
 > **Early release — not production-ready.** This project is under active
