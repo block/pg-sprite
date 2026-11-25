@@ -1,10 +1,10 @@
 # pg-sprite
 
-[![CI](https://github.com/block/pg-sprite/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/block/pg-sprite/actions/workflows/ci.yml?query=branch%3Amain)
+[![CI](https://github.com/block/pg-sprite/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/block/pg-sprite/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
 [![Vulnerability Scan](https://github.com/block/pg-sprite/actions/workflows/vulncheck.yml/badge.svg?branch=main)](https://github.com/block/pg-sprite/actions/workflows/vulncheck.yml?query=branch%3Amain)
 [![Release](https://img.shields.io/github/v/release/block/pg-sprite)](https://github.com/block/pg-sprite/releases/latest)
-[![PostgreSQL 14 | 15 | 16 | 17 | 18](https://img.shields.io/badge/PostgreSQL-14%20%7C%2015%20%7C%2016%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](docs/postgresql-version-support.md)
+[![PostgreSQL tested: 14 | 15 | 16 | 17 | 18](https://img.shields.io/badge/PostgreSQL%20tested-14%20%7C%2015%20%7C%2016%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](docs/postgresql-version-support.md)
 [![Maturity: preview](https://img.shields.io/badge/maturity-preview-orange)](docs/capabilities.md)
 
 > [!IMPORTANT]
@@ -18,7 +18,7 @@
 > and there's no support guarantee. Read the release notes before you upgrade.
 
 An online schema-change engine for **PostgreSQL** (community, RDS, and
-Aurora; 14+): a decoupled **planner → router → executor** design where the
+Aurora; tested on 14 through 18): a decoupled **planner → router → executor** design where the
 planner classifies each change, the router picks a strategy, and
 interchangeable executors carry it out — the cheap native PostgreSQL idiom
 when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
@@ -42,7 +42,7 @@ and every refusal carries a routing class (and an owner when there is no online-
 problem for the engine to solve); [docs/capabilities.md](docs/capabilities.md) names the tool class that
 owns each job.
 
-**Status: Phases 1, 2.1–2.5, and 3, with copy-and-swap in preview.** The parse boundary, declarative diff,
+**Status: Phases 1, 2.1–2.5, and 3, with copy-and-swap in preview.** The maturity badge above is this project-level status; each capability row carries its own `ga` or `preview` maturity. The parse boundary, declarative diff,
 classifier, router seam, versioned dry-run plan report, offline linter, and
 advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` classifies and
 routes the statement, then executes the routed SQL — the planner's safer native sequence by
