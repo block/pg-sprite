@@ -100,6 +100,7 @@ runner (`statement.KindDataChange`). A statement the parse boundary does not nam
 | `not-native-safe-rewrite-required` | A `RENAME COLUMN` or `RENAME TO` (`app-breaking-rename`): no SQL exists to substitute, and the deliberate path is the `guidance` rollout and then the statement under `--force` | `by-design` | — |
 | `backend-unavailable` | The plan routes to copy-and-swap for an operation the engine does not carry yet | `capability-boundary` | — |
 | `copy-and-swap-refused` | Cause `copy-and-swap-not-enabled`: the statement routes to copy-and-swap and the run did not open the route (`--copy-and-swap`, `CopySwapOptions.Enabled`); either front door refuses before the route's preflight runs or anything is written, after its own target resolution and planning have read the catalog (`copySwapNotEnabledRefusal`) | `capability-boundary` | — |
+| `copy-and-swap-refused` | Cause `copy-and-swap-run-stopped`: the table has a copy-and-swap run stopped short of done (a non-terminal checkpoint row), and `migrate --alter` was given a statement other than the one the row records, compared as parsed, with no `--restart` naming the table, an index rename or blocking index statement under `--accept-blocking` included; or desired-state execution derived an empty plan for the table while the row stands. A row this engine cannot judge (another format or phase, a store an older engine created, a store the role cannot read) holds the table the same way while the run's shadow or retained source stands in the catalog; `--restart` lifts that only for a statement that routes to copy-and-swap, whose route judges the row itself. Running anything else would change the table under the stopped run, so nothing executes; the detail names the stopped statement and its phase. Finish the run by running its statement again, which resumes it through copy-and-swap whatever it would route to against the table's shape by then; before the swap, a statement that itself routes to copy-and-swap can instead start over under `--restart`, which discards the stopped run first (`copySwapRunStoppedRefusal`) | `environmental` | The server's state has to change — the stopped run finished or discarded — not the statement or the engine. |
 | `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole unless the run pins the reviewed plan's fingerprint and names the table in its own destructive acknowledgement, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` — and a `DROP INDEX` under `--accept-blocking` — until `--allow-destructive` names the table (RF-10) | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
@@ -124,9 +125,11 @@ conversion.
 
 ### `copy-and-swap-refused`, keyed on `CopySwapRefusalCause`
 
-One cause under this reason is not a preflight cause: `copy-and-swap-not-enabled` is minted by
+Two causes under this reason are not preflight causes: `copy-and-swap-not-enabled` is minted by
 the front doors themselves (the site-keyed row above) when the run has not opened the route,
-and is raised before the preflight is reached. The preflight causes follow.
+and is raised before the preflight is reached, and `copy-and-swap-run-stopped` is minted by
+the front doors when a stopped run's checkpoint row keeps another statement from running. The
+preflight causes follow.
 
 The closed set is `preflight.CopySwapRefusalCauses()`, raised before the copy-and-swap route
 writes anything ([ST-6](invariants.md#st-6--preflight-before-the-first-write),

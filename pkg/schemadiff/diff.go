@@ -198,6 +198,10 @@ type Dependent struct {
 	// Def is the object's definition as the server prints it, which tells
 	// an object from another that took its name; empty for "other".
 	Def string
+	// Referencing reports a foreign key of another table that references
+	// the column. Dropping the column takes it along; dropping the table
+	// does not, and the server refuses the drop while it exists.
+	Referencing bool
 }
 
 // String renders the dependent as it appears in [DroppedObject.Dependents].

@@ -248,7 +248,13 @@ func (o Options) retry() executor.RetryPolicy {
 // statement the router assigns to the copy-and-swap backend runs through
 // the shadow table under Options.CopySwap and commits as
 // [verdict.OutcomeExecutedViaCopyAndSwap]; a failure on that path leaves a
-// checkpoint row the next Run over the same statement resumes from.
+// checkpoint row the next Run over the same statement resumes from. That
+// rerun goes back through copy-and-swap whatever it would route to
+// against the table's shape by then, since a run stopped after its swap
+// committed has already put the statement's shape live; it still meets
+// the destructive gate below. While such a row stands, any other
+// statement on the table is refused with cause copy-and-swap-run-stopped
+// and nothing runs, unless Options.CopySwap.Restart names the table.
 //
 // A statement that discards live data or structure — a dropped column,
 // constraint, NOT NULL, or (on the accepted blocking path) index — is
@@ -365,10 +371,22 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	logger.Debug("statement routed",
 		"route", string(classified.Route), "disposition", string(rs.Disposition))
 
+	// A stopped copy-and-swap run on the table decides what runs next, not
+	// the route: its own statement resumes it through copy-and-swap however
+	// it routes against the shape the run may already have swapped in, and
+	// any other statement is refused before it changes the table under it.
+	stopped, err := findStoppedRun(ctx, pool, st.Schema(), st.Table())
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	if stopped.blocks(st, opts) {
+		return copySwapRunStoppedVerdict(st, qualified(st), stopped), nil
+	}
+	resumes := stopped.resumedBy(st)
 	if err := checkDropRoute(rs, dropped); err != nil {
 		return verdict.Verdict{}, err
 	}
-	if opts.CopySwap.Restart != "" {
+	if opts.CopySwap.Restart != "" && !resumes {
 		if err := checkRestartRoute(st, rs); err != nil {
 			return verdict.Verdict{}, err
 		}
@@ -391,11 +409,24 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	if routesToClosedCopySwap(rs, opts) {
 		return copySwapNotEnabledVerdict(st), nil
 	}
+	if resumes && !opts.CopySwap.Enabled {
+		return copySwapNotEnabledVerdict(st), nil
+	}
 	if opts.CopySwap.Restart != "" {
 		auditRestart(opts.audit(), st)
 	}
 
-	v, err := dispatch(ctx, pool, st, canonical, rs, opts, step, adopts, validates, dropped, logger)
+	var v verdict.Verdict
+	if resumes {
+		// The stopped run's statement goes back to the route that started
+		// it, Options.Force included: the override chooses a native attempt
+		// over a shadow table, and this change already has one.
+		logger.Debug("stopped copy-and-swap run found; resuming it",
+			"phase", string(stopped.cp.Phase), "route", string(classified.Route))
+		v, err = copyAndSwap(ctx, pool, st, opts, step, logger)
+	} else {
+		v, err = dispatch(ctx, pool, st, canonical, rs, opts, step, adopts, validates, dropped, logger)
+	}
 	if allowedDestructive && v.Outcome != "" {
 		v.AllowedDestructive = true
 	}
