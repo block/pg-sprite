@@ -120,7 +120,13 @@ refusal — never a silently wrong or incomplete result:
   refused, as PostgreSQL rejects it. Only a partitioned parent can be expressed in or
   exported to a desired file — partitions and their bounds stay owned outside
   it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
-  `--force` names the table ([limitations](docs/limitations.md)).
+  `--force` names the table ([limitations](docs/limitations.md)). A reviewed
+  `migrate --desired` column or constraint drop on a partitioned parent removes it
+  from every partition; the column drop is refused, dropping nothing, when the column
+  is in a partition key at any level or a partition carries an index, constraint, or
+  statistics object of its own on it. A reviewed `NOT NULL` drop on a partitioned
+  parent is refused, and so is a reviewed column, constraint, or `NOT NULL` drop on
+  a table with inheritance children.
 - **Index maintenance** is not driven by `migrate --alter`: it refuses `DROP INDEX`
   and `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
   `migrate --desired` does run a planned index drop, as `DROP INDEX CONCURRENTLY`

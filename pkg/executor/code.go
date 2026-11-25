@@ -200,10 +200,23 @@ const (
 	// against the table as it stands and review the new plan.
 	CodeDroppedObjectDrift Code = "dropped-object-drift"
 	// CodeDroppedObjectHasDescendants: a reviewed column, constraint, or
-	// NOT NULL drop names a table with partitions or inheritance children,
-	// and the drop would reach their copies too, which the plan did not
-	// review; nothing was dropped.
+	// NOT NULL drop names a table with inheritance children, or a NOT NULL
+	// drop (or any drop with ONLY) names a partitioned table with
+	// partitions, and the drop would reach their copies too, which the plan
+	// did not review; nothing was dropped.
 	CodeDroppedObjectHasDescendants Code = "dropped-object-has-descendants"
+	// CodeDroppedColumnPartitionKey: a reviewed column drop names a column
+	// in the partition key of the partitioned table or of a
+	// sub-partitioned partition below it, which PostgreSQL never drops;
+	// nothing was dropped.
+	CodeDroppedColumnPartitionKey Code = "dropped-column-partition-key"
+	// CodeDroppedColumnPartitionDependent: a reviewed column drop on a
+	// partitioned table would also remove an object a partition carries of
+	// its own on the column (an index, constraint, statistics object, or
+	// sequence that is not a copy of the parent's), which the plan did not
+	// review; nothing was dropped. Drop or change that object first, then
+	// re-plan.
+	CodeDroppedColumnPartitionDependent Code = "dropped-column-partition-dependent"
 	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
 	// CONSTRAINT validates was dropped or replaced after planning, read
 	// again under the table's lock; nothing was validated. Re-plan against
@@ -315,6 +328,8 @@ func Codes() []Code {
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
+		CodeDroppedColumnPartitionKey,
+		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -373,6 +388,8 @@ func (c Code) Permanent() bool {
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
+		CodeDroppedColumnPartitionKey,
+		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
@@ -517,6 +534,10 @@ func sentinelCode(err error) Code {
 		return CodeDroppedObjectDrift
 	case errors.Is(err, ErrDroppedObjectHasDescendants):
 		return CodeDroppedObjectHasDescendants
+	case errors.Is(err, ErrDroppedColumnPartitionKey):
+		return CodeDroppedColumnPartitionKey
+	case errors.Is(err, ErrDroppedColumnPartitionDependent):
+		return CodeDroppedColumnPartitionDependent
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrRenamedIndexDrift):

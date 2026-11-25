@@ -1763,7 +1763,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   (`ExecuteDropIndexConcurrently`, which re-reads the index on the session that drops it;
   `TestExecuteDropIndexConcurrentlyNeverBlocksTheTable`; `refuseDroppedObjectDrift`, which
   re-reads a dropped column, constraint, or `NOT NULL`, and a column's dependents, under the
-  statement's lock; `ErrDroppedIndexDrift` for a refused index drop and
+  statement's lock; `refusePartitionedColumnDrop`, which locks a partitioned table's whole tree
+  and refuses a reviewed column drop that would remove a partition key column
+  (`ErrDroppedColumnPartitionKey`) or an object a partition carries of its own on the column
+  (`ErrDroppedColumnPartitionDependent`), and `refuseDropBelow`, which refuses a reviewed
+  column, constraint, or `NOT NULL` drop that reaches an inheritance child (`ErrDroppedObjectHasDescendants`);
+  `TestRunSequenceDroppingRefusesAColumnAPartitionUsesOnItsOwn`; `ErrDroppedIndexDrift` for a refused index drop and
   `ErrDroppedIndexReplaced` for one that dropped an unreviewed index),
   `pkg/migrate` (`executePlan`, which runs no destructive statement that carries no dropped
   definition), `pkg/schemadiff` (`ReadDroppedObject`, `UnlistedDependents`; `Diff` plans every `NOT NULL`
