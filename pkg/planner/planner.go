@@ -296,7 +296,10 @@ type Decision struct {
 	// DROP COLUMN, SET DEFAULT, DROP DEFAULT, DROP NOT NULL, and DROP
 	// CONSTRAINT, which PostgreSQL defines that way, and for an ADD COLUMN
 	// the server's probe proved adds in place without a scan. Absent means
-	// not established, not that the operation reads rows.
+	// not established, not that the operation reads rows. An event trigger
+	// is outside the proof: its code runs under the statement's lock
+	// whatever the table's size, bounded by the attempt's budget like any
+	// other statement.
 	ProvenCatalogOnly bool `json:"proven_catalog_only,omitempty"`
 	// SaferSQL is the ordered safer native sequence, present only for
 	// safer-idiom decisions where the planner could construct it. It is a

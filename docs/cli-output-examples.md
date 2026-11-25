@@ -187,7 +187,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run -
           "operation": "ADD COLUMN note",
           "destructive": false,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [

@@ -466,7 +466,8 @@ A desired state that drops an index and adds a column with a constant default:
           "operation": "ADD COLUMN region",
           "destructive": false,
           "route": "native",
-          "reason": "fast-default"
+          "reason": "fast-default",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
