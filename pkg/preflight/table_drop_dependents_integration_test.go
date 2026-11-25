@@ -1,8 +1,10 @@
 package preflight_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -79,4 +81,32 @@ func TestReadTableDropDependentsOfAMissingTable(t *testing.T) {
 	dependents, err := preflight.ReadTableDropDependents(t.Context(), pool, testutil.NewSchema(t, pool), "absent")
 	require.NoError(t, err)
 	assert.Empty(t, dependents)
+}
+
+// Whether the read finishes or its context ends first, it ends its
+// transaction and hands its connection back to the pool.
+func TestReadTableDropDependentsReleasesItsConnection(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (id bigint PRIMARY KEY);
+		CREATE VIEW %[1]s.contacts AS SELECT id FROM %[1]s.users`, schema))
+	require.NoError(t, err)
+
+	for _, budget := range []time.Duration{0, time.Millisecond, 5 * time.Millisecond, 50 * time.Millisecond, 5 * time.Second} {
+		t.Run(budget.String(), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), budget)
+			defer cancel()
+			dependents, err := preflight.ReadTableDropDependents(ctx, pool, schema, "users")
+			if err != nil {
+				assert.ErrorIs(t, err, context.DeadlineExceeded, "only the context's end may stop the read")
+			} else {
+				assert.Equal(t, []string{fmt.Sprintf("view %s.contacts", schema)}, dependents)
+			}
+			assert.Eventually(t, func() bool { return pool.Stat().AcquiredConns() == 0 }, 5*time.Second, 10*time.Millisecond,
+				"the read's connection is back in the pool")
+		})
+	}
 }

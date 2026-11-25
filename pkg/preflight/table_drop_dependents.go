@@ -3,6 +3,7 @@ package preflight
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,8 +35,12 @@ func ReadTableDropDependents(ctx context.Context, pool *pgxpool.Pool, schema, ta
 	defer func() {
 		// A read-only transaction holds nothing worth keeping: the rollback
 		// only returns the session, and the read's result does not depend
-		// on it.
-		_ = tx.Rollback(context.WithoutCancel(ctx))
+		// on it. It runs detached, so a cancelled read still ends its
+		// transaction, and bounded, so a connection that stops answering
+		// cannot hold the caller.
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
 	}()
 	// The server leaves the schema out of an object's description when the
 	// schema is on the search_path. Clearing it names every object with its
