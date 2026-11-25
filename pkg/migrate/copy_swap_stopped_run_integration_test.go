@@ -8,7 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -243,6 +246,20 @@ func TestRunDesiredRefusesAnEmptyPlanOverAStoppedCopySwapRun(t *testing.T) {
 	assert.Equal(t, checkpoint.PhaseDone, f.inspectRow(t).Phase)
 }
 
+// newCopySwapFixtureOwnStore is newCopySwapFixture on a database of its
+// own. The checkpoint store is one table per database, shared by every test
+// on the same server, so a test that changes the store's shape or rewrites
+// its rows gets a store no other test reads.
+func newCopySwapFixtureOwnStore(t *testing.T) copySwapFixture {
+	t.Helper()
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
+	cfg := dbconn.Config{URL: url, MaxConnsFloor: CopySwapMinConns(copier.Options{})}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return copySwapFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
+}
+
 // stopRetypeAtVerifying runs
 //
 //	ALTER TABLE orders ALTER COLUMN qty TYPE bigint
@@ -330,7 +347,7 @@ func TestRunRefusesAnAcceptedDropIndexWhileACopySwapRunIsStopped(t *testing.T) {
 // reads no row of its own, so the front door refuses it rather than drop
 // the column under the run, and the shadow and the column stay.
 func TestRunRefusesAStatementWhileTheStoppedRunsRowIsOfAnotherFormat(t *testing.T) {
-	f := newCopySwapFixture(t)
+	f := newCopySwapFixtureOwnStore(t)
 	f.createOrders(t)
 	f.stopRetypeAtVerifying(t)
 	f.exec(t, `UPDATE pgsprite.pgsprite_checkpoint SET format_version = format_version + 1`)
@@ -357,7 +374,7 @@ func TestRunRefusesAStatementWhileTheStoppedRunsRowIsOfAnotherFormat(t *testing.
 //
 // returns the read's error, and note keeps no default.
 func TestRunStopsWhenTheStoppedRunRowCannotBeRead(t *testing.T) {
-	f := newCopySwapFixture(t)
+	f := newCopySwapFixtureOwnStore(t)
 	f.createOrders(t)
 	f.stopRetypeAtVerifying(t)
 	f.exec(t, `
@@ -457,7 +474,7 @@ func TestRunRestartOfTheStoppedStatementAfterItsSwapIsRefused(t *testing.T) {
 //
 // is refused, not run over the stopped retype.
 func TestRunRefusesAStatementWhileTheCheckpointStoreIsBehind(t *testing.T) {
-	f := newCopySwapFixture(t)
+	f := newCopySwapFixtureOwnStore(t)
 	f.createOrders(t)
 	f.stopRetypeAtVerifying(t)
 	f.exec(t, `
