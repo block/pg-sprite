@@ -690,7 +690,20 @@ func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
 // rewriting the table, whether or not it then scans it to check a NOT
 // NULL.
 func addsInPlace(proof statement.AddColumnProof) bool {
-	return proof == statement.AddColumnInPlace || proof == statement.AddColumnInPlaceScans
+	return proof == statement.AddColumnInPlace || proof == statement.AddColumnInPlaceScans ||
+		proof == statement.AddColumnInPlaceRunsUserCode
+}
+
+// addsOnCatalogAlone reports whether adding op's column is proven to cost
+// the same on a table of any size. The probe must prove it adds in place,
+// evaluating nothing a user defined (statement.AddColumnInPlace), and the
+// default, if any, must be a literal. A default expression is evaluated
+// once under the table's lock, and its value can depend on the session,
+// such as a setting the probe ran with and the statement does not, so
+// what the probe saw is not proof of what the statement will do.
+func addsOnCatalogAlone(op statement.Op, facts Facts) bool {
+	literalOrNone := op.Default == statement.DefaultNone || op.Default == statement.DefaultConstant
+	return literalOrNone && addColumnProof(op, facts) == statement.AddColumnInPlace
 }
 
 // ProvenCatalogOnly reports whether every decision is an operation
@@ -944,10 +957,10 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			// A constant, or an expression the server proved it stores
 			// in the catalog.
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
-			d.ProvenCatalogOnly = addColumnProof(op, facts) == statement.AddColumnInPlace
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		default:
 			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
-			d.ProvenCatalogOnly = addColumnProof(op, facts) == statement.AddColumnInPlace
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		}
 
 	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,

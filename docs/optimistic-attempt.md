@@ -315,9 +315,17 @@ it — unless every operation in it is proven catalog-only (`sizeGuardApplies` i
 
 An operation is proven catalog-only when PostgreSQL has no path that touches the
 table's rows: `DROP COLUMN`, `SET DEFAULT`, `DROP DEFAULT`, `DROP NOT NULL`,
-`DROP CONSTRAINT`, and an `ADD COLUMN` whose probe proved it adds in place without
-checking a `NOT NULL` against every row. The [plan report](plan-report.md) shows
-the mark per decision.
+`DROP CONSTRAINT`, and an `ADD COLUMN` that meets both of these:
+
+- It has no default, or a literal one such as `0` or `'free'`.
+- Its probe proved it adds in place, checks no `NOT NULL` against every row, and
+  evaluates nothing a user defined: no domain, and no function, cast, or operator
+  outside the built-in catalog. An enum type counts as built in.
+
+An expression default such as `now()` stays guarded. PostgreSQL evaluates it once
+under the lock, with the session's settings, and a function it calls can read any
+table, so the probe's answer does not bound its cost. The
+[plan report](plan-report.md) shows the mark per decision.
 
 The axis is not proof-versus-bet — `metadata-only` is a proof-shaped word on a
 guarded route. The guard hedges against the classifier being *wrong*, not against the
