@@ -23,6 +23,14 @@ var ErrReferencedTableNotFound = errors.New("foreign key references a table that
 // allows only to a role that can read the source table.
 var ErrReferencedTableNotReadable = errors.New("planning role lacks SELECT on a table a foreign key references")
 
+// ErrReferencedTableNotReferenceable is returned when the planning role
+// lacks REFERENCES on a table a desired file's foreign key references.
+// Creating the key on the live table needs that privilege, and the scratch
+// build never proves it because its key references a stand-in the role
+// owns, so planning checks it directly instead of leaving the first step of
+// the run to fail.
+var ErrReferencedTableNotReferenceable = errors.New("planning role lacks REFERENCES on a table a foreign key references")
+
 // LIKE raises undefined_table when its source table does not exist, and
 // insufficient_privilege when the role cannot read it.
 const (
@@ -65,11 +73,31 @@ func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema st
 			}
 			return fmt.Errorf("create scratch stand-in for referenced table %s.%s: %w", schema, table, err)
 		}
+		if err := requireReferencesPrivilege(ctx, tx, schema, table); err != nil {
+			return err
+		}
 		n, err := renameStandInIndexes(ctx, tx, scratch, table, renamed)
 		if err != nil {
 			return err
 		}
 		renamed += n
+	}
+	return nil
+}
+
+// requireReferencesPrivilege fails with ErrReferencedTableNotReferenceable
+// unless the current role holds REFERENCES on the live referenced table.
+func requireReferencesPrivilege(ctx context.Context, tx pgx.Tx, schema, table string) error {
+	var granted bool
+	// INV: CO-9 — the read runs under the scratch build's path, which lists
+	// the target schema, so the function and the table are qualified.
+	err := tx.QueryRow(ctx, "SELECT pg_catalog.has_table_privilege($1, 'REFERENCES')",
+		pgx.Identifier{schema, table}.Sanitize()).Scan(&granted)
+	if err != nil {
+		return fmt.Errorf("check REFERENCES on referenced table %s.%s: %w", schema, table, err)
+	}
+	if !granted {
+		return fmt.Errorf("%w: %s.%s", ErrReferencedTableNotReferenceable, schema, table)
 	}
 	return nil
 }

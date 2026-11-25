@@ -260,6 +260,26 @@ CREATE TABLE orders (
 // foreign key: the scratch build copies the table's shape with LIKE, which
 // needs SELECT on it. The plan fails with a typed error naming the table.
 func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
+	schema, err := planOrdersForeignKeyAsRole(t, "")
+	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReadable)
+	assert.ErrorContains(t, err, schema+".users")
+}
+
+// A planning role that can read a referenced table but lacks REFERENCES on
+// it cannot plan its foreign key either: the run would fail creating the key
+// on the live table, so the plan refuses with a typed error naming the table
+// instead of reporting a plan the role cannot execute.
+func TestPlanForeignKeyWithoutReferencesGrantFails(t *testing.T) {
+	schema, err := planOrdersForeignKeyAsRole(t, "SELECT")
+	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReferenceable)
+	assert.ErrorContains(t, err, schema+".users")
+}
+
+// planOrdersForeignKeyAsRole plans a foreign key from orders to users as a
+// throwaway role that holds the given privileges on users ("" for none) and
+// returns the test schema and the plan's error.
+func planOrdersForeignKeyAsRole(t *testing.T, usersGrant string) (string, error) {
+	t.Helper()
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -277,6 +297,11 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 		GRANT USAGE, CREATE ON SCHEMA %[1]s TO %[2]s;
 		GRANT SELECT ON %[1]s.orders TO %[2]s`, schema, pgx.Identifier{role}.Sanitize()))
 	require.NoError(t, err)
+	if usersGrant != "" {
+		_, err = pool.Exec(t.Context(), fmt.Sprintf("GRANT %s ON %s.users TO %s",
+			usersGrant, schema, pgx.Identifier{role}.Sanitize()))
+		require.NoError(t, err)
+	}
 	var db string
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT current_database()").Scan(&db))
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("GRANT CREATE ON DATABASE %s TO %s",
@@ -286,6 +311,7 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 		// Revoke every grant so the role's own cleanup can drop it.
 		_, err := pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(`
 			REVOKE ALL ON %[1]s.orders FROM %[2]s;
+			REVOKE ALL ON %[1]s.users FROM %[2]s;
 			REVOKE ALL ON SCHEMA %[1]s FROM %[2]s;
 			REVOKE CREATE ON DATABASE %[3]s FROM %[2]s`,
 			schema, pgx.Identifier{role}.Sanitize(), pgx.Identifier{db}.Sanitize()))
@@ -301,8 +327,7 @@ CREATE TABLE orders (
     id bigint PRIMARY KEY,
     user_id bigint NOT NULL REFERENCES users (id)
 );`)})
-	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReadable)
-	assert.ErrorContains(t, err, schema+".users")
+	return schema, err
 }
 
 // plannerPassword is the password the throwaway planning role logs in with.

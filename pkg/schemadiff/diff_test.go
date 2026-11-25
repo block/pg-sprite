@@ -340,7 +340,7 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 		assert.Equal(t, `ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`, changes[0].SQL)
 		assert.Equal(t, ChangeValidateForeignKey, changes[0].Kind)
 		assert.False(t, changes[0].Destructive)
-		assert.True(t, changes[0].Kind.IsForeignKey(), "desired-state execution refuses it with every foreign-key change")
+		assert.True(t, changes[0].Kind.IsForeignKey(), "validating a foreign key is a foreign-key change")
 		assert.Equal(t, &ConstraintValidation{Constraint: fk.Name, Def: fk.Def + " NOT VALID"}, changes[0].Validates)
 	})
 
