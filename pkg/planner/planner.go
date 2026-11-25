@@ -293,9 +293,11 @@ type Decision struct {
 	// alone, never rewriting or reading the table's rows, so its cost does
 	// not grow with the table. Unlike Reason metadata-only, which is the
 	// planner's classification, it is set only where that is certain: for
-	// DROP COLUMN, SET DEFAULT, DROP DEFAULT, DROP NOT NULL, and DROP
-	// CONSTRAINT, which PostgreSQL defines that way, and for an ADD COLUMN
-	// the server's probe proved adds in place without a scan. Absent means
+	// DROP COLUMN, DROP DEFAULT, DROP NOT NULL, and DROP CONSTRAINT, which
+	// PostgreSQL defines that way, and for an ADD COLUMN the server's probe
+	// proved adds in place without a scan. SET DEFAULT is not marked: the
+	// server coerces the new default to the column's type under the lock,
+	// and for a user-defined type that runs the type's input function. Absent means
 	// not established, not that the operation reads rows. An event trigger
 	// is outside the proof: its code runs under the statement's lock
 	// whatever the table's size, bounded by the attempt's budget like any
@@ -966,15 +968,24 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		}
 
-	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,
+	case statement.OpDropColumn, statement.OpDropDefault,
 		statement.OpDropNotNull, statement.OpDropConstraint:
-		// PostgreSQL never touches the table's rows for these: a dropped
-		// column is only marked dropped, a default applies to rows
-		// written later, and dropping a NOT NULL or a constraint has
-		// nothing to check. An index the drop takes with it is removed
-		// as a file, not read.
+		// PostgreSQL never touches the table's rows for these and runs no
+		// user code: a dropped column is only marked dropped, a dropped
+		// default applies to rows written later, and dropping a NOT NULL
+		// or a constraint has nothing to check. An index the drop takes
+		// with it is removed as a file, not read.
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 		d.ProvenCatalogOnly = true
+
+	case statement.OpSetDefault:
+		// The new default applies to rows written later, so no row is
+		// read. It is still not proven catalog-only: the server coerces
+		// the expression to the column's type under the lock, and for a
+		// user-defined base type that runs the type's input function,
+		// which can read any table. The planner has no fact that rules
+		// that out, so the statement stays size-guarded.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 
 	case statement.OpSetColumnOptions, statement.OpSetRelOptions,
 		statement.OpSetSchema:
