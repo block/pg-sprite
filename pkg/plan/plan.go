@@ -108,8 +108,11 @@ type Statement struct {
 	Adopts *schemadiff.IndexAdoption `json:"-"`
 	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
 	// validates and the definition it must still have when execution
-	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
-	// out of the JSON for the same reason.
+	// validates it (see schemadiff.Change.Validates). A diff-derived ADD
+	// CONSTRAINT that runs as ADD ... NOT VALID and then VALIDATE
+	// CONSTRAINT carries the definition its add leaves
+	// (schemadiff.Change.AddsNotValid), which its validation step checks.
+	// Nil otherwise, and out of the JSON for the same reason.
 	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Drops is the live object a diff-derived DROP INDEX, DROP CONSTRAINT,
 	// DROP COLUMN, or DROP NOT NULL removes, with the definition the diff

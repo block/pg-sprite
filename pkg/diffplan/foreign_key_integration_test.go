@@ -134,6 +134,10 @@ func TestPlanAddForeignKeyRunsAsNotValidThenValidate(t *testing.T) {
 		fmt.Sprintf("ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) NOT VALID", schema),
 		fmt.Sprintf(`ALTER TABLE "%s"."orders" VALIDATE CONSTRAINT "orders_user_id_fkey"`, schema),
 	}, st.ExecSQL)
+	assert.Equal(t, &schemadiff.ConstraintValidation{
+		Constraint: "orders_user_id_fkey",
+		Def:        "FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID",
+	}, st.Validates, "the validation step checks the key its add left, so it never validates a key put in its place")
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 

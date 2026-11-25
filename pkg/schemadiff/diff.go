@@ -138,6 +138,13 @@ type Change struct {
 	// statement names only the constraint, so execution checks the
 	// definition again under the table's lock before validating it.
 	Validates *ConstraintValidation `json:"-"`
+	// AddsNotValid is set on an ADD CONSTRAINT of a CHECK or FOREIGN KEY:
+	// the constraint it adds, and the definition introspection reads for it
+	// once it is added NOT VALID. A plan that runs the add as ADD ... NOT VALID and then VALIDATE
+	// CONSTRAINT checks that definition before the validation, as it does
+	// for Validates, so a validation that runs apart from its add never
+	// validates a constraint someone put under the same name in between.
+	AddsNotValid *ConstraintValidation `json:"-"`
 	// Drops is set on a DROP INDEX, DROP CONSTRAINT, DROP COLUMN, or
 	// DROP NOT NULL: the live object the statement removes, with the
 	// definition the diff read. A reviewer approves what the name stood for,
@@ -489,10 +496,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 					return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
 				}
 				sql = qualified
-				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con)})
+				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})
 				continue
 			}
-			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con)})
+			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})
 		}
 	}
 
@@ -829,6 +836,17 @@ func validateConstraintKind(con Constraint) ChangeKind {
 // constraint the server has not validated, and the only difference from the
 // definition of the same constraint validated.
 const notValidSuffix = " NOT VALID"
+
+// addedNotValid is the record an added CHECK or FOREIGN KEY carries of the
+// definition it has once added NOT VALID: its desired definition with the
+// suffix the server prints for an unvalidated constraint. Nil for every other
+// constraint, which the server cannot add NOT VALID.
+func addedNotValid(con Constraint) *ConstraintValidation {
+	if !con.ForeignKey && !strings.HasPrefix(con.Def, "CHECK ") {
+		return nil
+	}
+	return &ConstraintValidation{Constraint: con.Name, Def: con.Def + notValidSuffix}
+}
 
 // validatesInPlace reports whether live is the desired constraint left NOT
 // VALID, so validating it converges the two: the drop and re-add the

@@ -322,10 +322,35 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 		ps.Kind = ch.Kind
 		ps.Adopts = ch.Adopts
 		ps.Validates = ch.Validates
+		if ch.AddsNotValid != nil {
+			validates, err := validatesInSequence(ps.ExecSQL, ch.AddsNotValid.Constraint)
+			if err != nil {
+				return nil, "", fmt.Errorf("plan derived statement %q: %w", routed.Statements[i].Statement, err)
+			}
+			if validates {
+				ps.Validates = ch.AddsNotValid
+			}
+		}
 		ps.Drops = ch.Drops
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil
+}
+
+// validatesInSequence reports whether a step of execSQL validates the named
+// constraint: an add of a CHECK or FOREIGN KEY the planner runs as ADD ...
+// NOT VALID and then VALIDATE CONSTRAINT.
+func validatesInSequence(execSQL []string, constraint string) (bool, error) {
+	for _, sql := range execSQL {
+		ops, err := statement.ParseOps(sql)
+		if err != nil {
+			return false, fmt.Errorf("read the operations of %q: %w", sql, err)
+		}
+		if len(ops) == 1 && ops[0].Kind == statement.OpValidateConstraint && ops[0].Name == constraint {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // qualifiedDesired renders the desired statements as the plan for a table
