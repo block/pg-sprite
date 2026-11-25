@@ -1001,7 +1001,10 @@ rerun as written; `code: data-fault` without it is rerun with `--restart`. A `da
 verdict that carries `failed_step` is not a copy-and-swap run at all but a native concurrent
 index build that failed on the rows (duplicate values under a unique index): there is no run
 to restart, and the build's own invalid index is the leftover to drop once the rows are
-corrected ([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)). On `RunDesired` the
+corrected ([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)). A
+`data-fault` verdict from a partitioned table's index build names the partition whose rows
+broke the index and the invalid index the build left on it; once the rows are corrected, the
+same statement run again drops that index itself and resumes. On `RunDesired` the
 field is on the failed entry of `DesiredResult.Verdicts`, not on the aggregate. An engine from
 before the field existed abandons the same way but never writes it, so an adapter that reads
 CLI output from binaries of mixed age keeps reading the detail for those.

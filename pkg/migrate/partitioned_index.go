@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
@@ -181,6 +182,10 @@ func partitionedIndexFailureVerdict(st statement.Statement, err error) verdict.V
 			"cannot be established from the client; inspect the indexes of %s and its partitions, then run the same statement again to resume", v.Table)
 		return v
 	}
+	if detail, dataFault := partitionedIndexDataFaultDetail(v.Table, err); dataFault {
+		v.Detail = detail
+		return v
+	}
 	if executor.Code(v.Code).Permanent() {
 		// A permanent cause fails a rerun the same way until it is fixed.
 		v.Detail = fmt.Sprintf("the partitioned index build stopped on a cause that a rerun does not clear (%s); steps before the stop may have committed, "+
@@ -190,4 +195,30 @@ func partitionedIndexFailureVerdict(st statement.Statement, err error) verdict.V
 	v.Detail = fmt.Sprintf("the partitioned index build stopped before it finished; steps before the stop may have committed, "+
 		"so inspect the indexes of %s and its partitions, then run the same statement again to resume from whatever it had built", v.Table)
 	return v
+}
+
+// partitionedIndexDataFaultDetail says what a partitioned index build that
+// stopped on one partition's rows left, for the failed verdict's detail. Its
+// code is data-fault, and a rerun meets the same rows until they are
+// corrected, so the detail names the partition and its index, and says what
+// remains: the parent's invalid index with the partition indexes built so
+// far, and the failed build's own invalid index on that partition, which a
+// rerun once the rows are corrected proves abandoned, drops, and builds
+// again. An invalid index the run could not prove its own is not placed on
+// any table; it gets the investigation steps the plain build gives. It
+// reports false for every other failure.
+func partitionedIndexDataFaultDetail(table string, err error) (string, bool) {
+	invalidErr, ok := errors.AsType[*executor.InvalidIndexError](err)
+	if !ok || invalidErr.Code() != executor.CodeDataFault {
+		return "", false
+	}
+	index := pgx.Identifier{invalidErr.Schema, invalidErr.Index}.Sanitize()
+	if !errors.Is(invalidErr.Cleanup, executor.ErrBuildLeftInvalidIndex) {
+		return fmt.Sprintf("%s; the partitioned index build stopped there, leaving the index of %s invalid with the partition indexes built so far attached; %s",
+			rowsViolateIndex("the rows of a partition", index), table, unprovenInvalidIndexLeftover), true
+	}
+	partition := pgx.Identifier{invalidErr.Schema, invalidErr.Table}.Sanitize()
+	return fmt.Sprintf("%s; the partitioned index build stopped there, leaving the index of %s invalid with the partition indexes built so far attached "+
+		"and %s invalid on %s — correct the rows, then run the same statement again: it drops that invalid index, builds it again, and resumes from what it had built",
+		rowsViolateIndex("the rows of partition "+partition, index), table, index, partition), true
 }

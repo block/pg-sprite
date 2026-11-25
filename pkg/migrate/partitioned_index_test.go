@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -59,5 +60,39 @@ func TestPartitionedIndexFailureVerdictClaimsOnlyWhatTheErrorProves(t *testing.T
 		v := partitionedIndexFailureVerdict(st, &executor.CommitOutcomeUnknownError{})
 		assert.Contains(t, v.Detail, "outcome unknown: a COMMIT did not return success")
 		assert.Contains(t, v.Detail, "inspect the indexes of billing.orders and its partitions")
+	})
+}
+
+// A partition whose rows break a unique index stops the build with a
+// data-fault verdict that names the partition and the invalid index the
+// failed build left on it, and that a rerun meets the same rows until they
+// are corrected. An invalid index the run could not prove its own is placed
+// on no table and gets the investigation steps the plain build gives.
+func TestPartitionedIndexFailureVerdictNamesThePartitionOfADataFault(t *testing.T) {
+	st, err := statement.ParseOne("CREATE UNIQUE INDEX orders_id_uq ON billing.orders (id, placed_on)")
+	require.NoError(t, err)
+	build := &pgconn.PgError{Code: "23505", Message: `could not create unique index "orders_id_uq_p16397"`}
+	failed := func(cleanup error) error {
+		return fmt.Errorf("build the index of partition billing.orders_2026_02: %w", &executor.InvalidIndexError{
+			Schema: "billing", Index: "orders_id_uq_p16397", Table: "orders_2026_02", Build: build, Cleanup: cleanup,
+		})
+	}
+
+	t.Run("own leftover", func(t *testing.T) {
+		v := partitionedIndexFailureVerdict(st, failed(executor.ErrBuildLeftInvalidIndex))
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Contains(t, v.Detail, `the rows of partition "billing"."orders_2026_02" violate index "billing"."orders_id_uq_p16397"`)
+		assert.Contains(t, v.Detail, "every rerun meets the same rows until they are corrected")
+		assert.Contains(t, v.Detail, "correct the rows, then run the same statement again")
+		assert.NotContains(t, v.Detail, "fix the cause the error names")
+	})
+	t.Run("a leftover not proven this run's own", func(t *testing.T) {
+		v := partitionedIndexFailureVerdict(st, failed(executor.ErrAbandonmentUnproven))
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Contains(t, v.Detail, `violate index "billing"."orders_id_uq_p16397"`)
+		assert.Contains(t, v.Detail, "inspect it before any removal")
+		assert.NotContains(t, v.Detail, "orders_2026_02", "the leftover is not placed on a table the run did not prove")
+		assert.NotContains(t, v.Detail, "run the same statement again")
 	})
 }
