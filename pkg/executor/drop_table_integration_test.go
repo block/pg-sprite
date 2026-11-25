@@ -139,6 +139,34 @@ func TestExecuteDropTableRefusesATableThatChanged(t *testing.T) {
 	}
 }
 
+// A view that replaced the reviewed table is refused before the drop locks
+// the name. Locking a view locks every table it reads, so locking first
+// would queue ACCESS EXCLUSIVE on the table under the view, behind a
+// reader another session holds, before refusing.
+func TestExecuteDropTableRefusesAReplacementViewWithoutLockingWhatItReads(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
+		CREATE TABLE %[1]s.t (id int PRIMARY KEY)`, schema))
+	require.NoError(t, err)
+	definition := plannedTableDefinition(t, pool, schema, "t")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		DROP TABLE %[1]s.t;
+		CREATE VIEW %[1]s.t AS SELECT id FROM %[1]s.orders`, schema))
+	require.NoError(t, err)
+
+	reader, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = reader.Rollback(t.Context()) }()
+	_, err = reader.Exec(t.Context(), fmt.Sprintf(`LOCK TABLE %s.orders IN ACCESS SHARE MODE`, schema))
+	require.NoError(t, err)
+
+	err = dropTable(t, pool, schema, "t", definition)
+	require.ErrorIs(t, err, executor.ErrDroppedObjectDrift, "refused as drift, not after waiting out the lock budget on orders")
+	assert.Equal(t, executor.CodeDroppedObjectDrift, executor.OutcomeCode(err))
+	assert.True(t, relationExists(t, pool, schema, "t"))
+}
+
 // A table that is already gone, or whose schema is, reports table-not-found
 // so the caller can tell it from a drop that failed.
 func TestExecuteDropTableReportsAMissingTable(t *testing.T) {

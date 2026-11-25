@@ -105,6 +105,9 @@ func dropTableAttempt(ctx context.Context, pool *pgxpool.Pool, schema, table, de
 	if _, err := tx.Exec(ctx, setBudgets); err != nil {
 		return fmt.Errorf("set the budgets of the drop of %s: %w", target, err)
 	}
+	if err := refuseNonTableBeforeLock(ctx, tx, schema, table, target, b); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+target+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateWrongObjectType {
 			// The name now stands for a relation LOCK TABLE refuses, such
@@ -127,6 +130,32 @@ func dropTableAttempt(ctx context.Context, pool *pgxpool.Pool, schema, table, de
 	return nil
 }
 
+// refuseNonTableBeforeLock refuses a name that now stands for a relation
+// other than a table, before the attempt locks it. LOCK TABLE on a view
+// also locks every relation the view reads, in the same mode, so locking a
+// view that replaced the reviewed table would queue ACCESS EXCLUSIVE on the
+// tables under it. A name that is missing is left to the lock, which
+// reports it. The check under the lock still runs: the name can be
+// replaced between this read and the lock.
+func refuseNonTableBeforeLock(ctx context.Context, tx pgx.Tx, schema, table, target string, b Budget) error {
+	var kind string
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	err := tx.QueryRow(ctx, `
+		SELECT c.relkind::pg_catalog.text
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, table).Scan(&kind)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return dropTableError(err, b, "read the kind of "+target+" before locking it")
+	case kind == "r" || kind == "p":
+		return nil
+	}
+	return fmt.Errorf("%w: %s is no longer a table (relkind %q), read before locking it; re-plan", ErrDroppedObjectDrift, target, kind)
+}
+
 // refuseDroppedTableDrift reads schema.table under the lock the caller
 // holds and refuses unless it still has the reviewed definition and is a
 // table whose drop removes nothing beyond it and changes no table above it.
@@ -144,8 +173,12 @@ func refuseDroppedTableDrift(ctx context.Context, tx pgx.Tx, schema, table, defi
 		return fmt.Errorf("%w: %s is now\n%s\nnot the\n%s\nthe plan reviewed; re-plan",
 			ErrDroppedObjectDrift, target, live, definition)
 	}
-	if hasDescendants(m) {
-		return fmt.Errorf("%w: %s has partitions or inheritance children, and dropping it would drop them too, "+
+	if m.PartitionKey != "" {
+		return fmt.Errorf("%w: %s is partitioned, and dropping a partitioned table drops its partitions, "+
+			"which the plan did not review", ErrDroppedObjectHasDescendants, target)
+	}
+	if len(m.InheritanceChildren) != 0 {
+		return fmt.Errorf("%w: %s has inheritance children, and dropping it would drop them too, "+
 			"which the plan did not review", ErrDroppedObjectHasDescendants, target)
 	}
 	if hasParent(m) {
@@ -153,12 +186,6 @@ func refuseDroppedTableDrift(ctx context.Context, tx pgx.Tx, schema, table, defi
 			ErrDroppedTableHasParent, target)
 	}
 	return nil
-}
-
-// hasDescendants reports whether dropping the table would drop other tables
-// with it: its partitions, or its inheritance children.
-func hasDescendants(m schemadiff.Model) bool {
-	return m.PartitionKey != "" || len(m.InheritanceChildren) != 0
 }
 
 // hasParent reports whether the table's rows are also rows of a table above
