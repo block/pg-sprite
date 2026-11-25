@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/suggest"
@@ -119,6 +120,54 @@ func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 		`SELECT data_type FROM information_schema.columns
 		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
 	assert.Equal(t, "integer", typ, "dry-run must not execute the change")
+}
+
+// A column retype that rewrites the table routes to copy-and-swap, whose
+// preflight refuses a partitioned parent before it builds anything: the
+// shadow table would be a plain table and the rename swap would strand the
+// partitions. The dry run must end in that same refusal, with the apply's
+// whole verdict, instead of an executable plan. The apply opens the route
+// and gives it free disk, so the partition shape is what refuses it.
+func TestMigrateDryRunRefusesCopySwapOnPartitionedParentLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint NOT NULL,
+			created date NOT NULL,
+			note text,
+			PRIMARY KEY (id, created)
+		) PARTITION BY RANGE (created);
+		CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`, schema))
+	require.NoError(t, err)
+	alter := fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN note TYPE varchar(10)", schema)
+
+	run := func(cmd *MigrateCmd) verdict.Verdict {
+		cmd.JSON = true
+		var out strings.Builder
+		require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused,
+			"the refusal exit code must not depend on --dry-run")
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		return v
+	}
+	dry := newMigrateCmd(url, alter)
+	dry.DryRun = true
+	dryRun := run(dry)
+	apply := newMigrateCmd(url, alter)
+	apply.CopyAndSwap = true
+	apply.FreeDisk = byteSize(testutil.UnlimitedDisk)
+	applied := run(apply)
+
+	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, dryRun.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, dryRun.Class)
+	assert.Equal(t, verdict.Cause(preflight.CopySwapCausePartitioned), dryRun.Cause)
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
 }
 
 // A plain CREATE INDEX on a partitioned parent plans as the partitioned

@@ -268,6 +268,29 @@ func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table s
 	}, nil
 }
 
+// CheckCopySwapPartitioning returns the refusal CheckCopySwapShape gives
+// schema.table when the first shape fact that puts the table outside v1
+// scope is its place in a partition or inheritance tree: an
+// *UnsupportedCopySwapShapeError carrying CopySwapCausePartitioned. It
+// returns nil for every other shape, supported or not, and mints no proof.
+// It is for a caller that previews the route without running it — a dry
+// run, which proves no privilege and reads no environment — so the preview
+// claims the partition refusal the route's preflight decides, read from the
+// same catalog facts and decided by the same rule, and leaves every other
+// shape fact to that preflight, which reads them again when the route runs.
+// The pool should come from dbconn.NewPool.
+func CheckCopySwapPartitioning(ctx context.Context, pool *pgxpool.Pool, schema, table string) error {
+	facts, err := gatherCopySwapShapeFacts(ctx, pool, schema, table)
+	if err != nil {
+		return err
+	}
+	shapeErr := copySwapShapeError(facts)
+	if CopySwapRefusalCauseOf(shapeErr) != CopySwapCausePartitioned {
+		return nil
+	}
+	return shapeErr
+}
+
 // RecheckCopySwapShape verifies inside the build transaction that the proven
 // relation still has the admitted shape and identity.
 func RecheckCopySwapShape(ctx context.Context, tx pgx.Tx, target CopySwapTarget) error {

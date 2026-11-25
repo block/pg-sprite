@@ -11,14 +11,19 @@ the examples at the end of this page.
 `migrate --dry-run --json` emits a refusal verdict instead of a report when the apply would
 refuse the statement before planning it, or refuse its routed steps from their shape alone:
 an unsupported statement kind, an unnamed or `IF NOT EXISTS` index build, a `DETACH
-PARTITION`. `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
+PARTITION`, or a statement routed to copy-and-swap on a partitioned parent, a partition, or a
+member of an inheritance tree (cause `copy-and-swap-partitioned`). `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
 file itself is refused before a plan exists: a statement the file may not hold (a type, a data
 change), a second table, partitions of a table, a table shape the planner cannot build, or a
 difference the diff does not converge (storage parameters, persistence, a collation, an identity,
 a generated column, a serial column). That verdict exits 2 and carries no `format_version`, `fingerprint`, or `exec_sql`; a consumer
 branches on the exit code and on whether `format_version` is present before reading the output
 as a report. ([CLI output examples](cli-output-examples.md) shows
-both shapes.)
+both shapes.) `migrate --desired --dry-run --json` also ends, exit 2, in the run's whole-plan
+refusal result instead of a report when a planned statement routes to copy-and-swap on a
+partitioned parent, a partition, or a member of an inheritance tree (cause
+`copy-and-swap-partitioned`); that result embeds this report under `plan`, while `diff --json`
+prints the report with the statement's `execute` disposition.
 
 ## Versioning: `format_version`
 
@@ -198,7 +203,7 @@ and privilege checks because it needs no connection.
 
 | Value | Meaning |
 |---|---|
-| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. Nor does it say whether the run has opened the route: copy-and-swap is in preview, and a run without `--copy-and-swap` (`CopySwapOptions.Enabled`) refuses the plan the same way with cause `copy-and-swap-not-enabled`. |
+| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. (A `migrate` dry run reads one shape fact of that preflight, a table in a partition or inheritance tree, and ends in the refusal instead of a report; see the top of this page.) Nor does it say whether the run has opened the route: copy-and-swap is in preview, and a run without `--copy-and-swap` (`CopySwapOptions.Enabled`) refuses the plan the same way with cause `copy-and-swap-not-enabled`. |
 | `rewrite-required` | Native but not executable as submitted — it blocks the table, or it is a rename that breaks every running application instance still using the old name — and no safer sequence could be constructed; `guidance` names the manual path. `migrate` runs it as written only when `--force` names the table. |
 | `unavailable` | Routed to copy-and-swap for an operation the engine does not carry yet; nothing executes. |
 | `refuse` | The planner refused the statement; no backend is assigned. |

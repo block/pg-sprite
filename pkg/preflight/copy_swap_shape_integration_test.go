@@ -354,6 +354,51 @@ func TestCheckCopySwapShapeRefusesPartitioningAndInheritance(t *testing.T) {
 	requireCopySwapCause(t, err, preflight.CopySwapCausePartitioned)
 }
 
+// The proof-free partition check a dry run calls returns the shape check's
+// own refusal for every member of a partition or inheritance tree, and
+// nothing for a table outside one: a keyless table, which the shape check
+// refuses for its key, and a supported table alike, since the rest of the
+// shape is the route's preflight to decide.
+func TestCheckCopySwapPartitioningClaimsOnlyThePartitionRefusal(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.measurements (
+			id bigint NOT NULL,
+			taken_at date NOT NULL,
+			PRIMARY KEY (id, taken_at)
+		) PARTITION BY RANGE (taken_at)`)
+	f.exec(t, `CREATE TABLE %s.measurements_2026 PARTITION OF %[1]s.measurements FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`)
+	f.exec(t, `
+		CREATE TABLE %s.base (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.derived (
+			extra text
+		) INHERITS (%[1]s.base)`)
+	f.exec(t, `
+		CREATE TABLE %s.keyless (
+			note text
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			note text
+		)`)
+
+	for _, table := range []string{"measurements", "measurements_2026", "base", "derived"} {
+		_, shapeErr := f.check(t, table)
+		err := preflight.CheckCopySwapPartitioning(t.Context(), f.pool, f.schema, table)
+		requireCopySwapCause(t, err, preflight.CopySwapCausePartitioned)
+		assert.Equal(t, shapeErr, err, "%s: the partition check must give the shape check's refusal", table)
+	}
+	_, err := f.check(t, "keyless")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
+	for _, table := range []string{"keyless", "orders"} {
+		assert.NoError(t, preflight.CheckCopySwapPartitioning(t.Context(), f.pool, f.schema, table), table)
+	}
+}
+
 // A view or materialized view selecting from the table is an OID-bound
 // dependent: its rewrite rule would keep reading the retained old table
 // after the swap. A view over an unrelated table does not count against it.
