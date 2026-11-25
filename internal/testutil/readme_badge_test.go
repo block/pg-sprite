@@ -87,7 +87,8 @@ func TestReadmeMaturityBadgeMatchesTheCapabilityMatrix(t *testing.T) {
 		}
 	}
 
-	badge := regexp.MustCompile(`img\.shields\.io/badge/maturity-([a-z]+)-`).FindStringSubmatch(readRepoFile(t, "README.md"))
-	require.Len(t, badge, 2, "the README has a maturity badge")
-	assert.Equal(t, string(want), badge[1])
+	badge := regexp.MustCompile(`\[!\[Maturity: ([a-z]+)\]\(https://img\.shields\.io/badge/maturity-([a-z]+)-`).FindStringSubmatch(readRepoFile(t, "README.md"))
+	require.Len(t, badge, 3, "the README has a maturity badge")
+	assert.Equal(t, string(want), badge[2], "the badge image")
+	assert.Equal(t, string(want), badge[1], "the badge alt text")
 }
