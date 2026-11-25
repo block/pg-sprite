@@ -15,7 +15,8 @@ import (
 )
 
 // ReadTableDropDependents names every object outside the table that makes
-// a DROP TABLE without CASCADE fail, except other tables' foreign keys.
+// a DROP TABLE without CASCADE fail, except other tables' foreign keys,
+// including another table's default that draws from the table's sequence.
 // The table's own trigger, rule, policy, index, owned sequence, and
 // foreign key to itself go with the drop and are not named: once the named
 // objects and the referencing table are gone, the plain drop succeeds.
@@ -41,6 +42,7 @@ func TestReadTableDropDependents(t *testing.T) {
 		CREATE FUNCTION %[1]s.first_user() RETURNS bigint LANGUAGE sql BEGIN ATOMIC SELECT min(id) FROM %[1]s.users; END;
 		CREATE FUNCTION %[1]s.user_email(u %[1]s.users) RETURNS text LANGUAGE sql AS 'SELECT u.email';
 		CREATE TABLE %[1]s.snapshots (id bigint PRIMARY KEY, rows %[1]s.users[]);
+		CREATE TABLE %[1]s.imports (id bigint DEFAULT nextval('%[1]s.users_id_seq') PRIMARY KEY);
 		ALTER TABLE %[1]s.teams ENABLE ROW LEVEL SECURITY;
 		CREATE POLICY teams_with_users ON %[1]s.teams USING (EXISTS (SELECT FROM %[1]s.users));`, schema, other))
 	require.NoError(t, err)
@@ -49,6 +51,7 @@ func TestReadTableDropDependents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{
 		fmt.Sprintf("column rows of table %s.snapshots", schema),
+		fmt.Sprintf("default value for column id of table %s.imports", schema),
 		fmt.Sprintf("function %s.first_user()", schema),
 		fmt.Sprintf("function %[1]s.user_email(%[1]s.users)", schema),
 		fmt.Sprintf("materialized view %s.user_count", other),
@@ -58,6 +61,7 @@ func TestReadTableDropDependents(t *testing.T) {
 
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
 		DROP TABLE %[1]s.snapshots;
+		DROP TABLE %[1]s.imports;
 		DROP FUNCTION %[1]s.first_user();
 		DROP FUNCTION %[1]s.user_email(%[1]s.users);
 		DROP MATERIALIZED VIEW %[2]s.user_count;

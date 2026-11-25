@@ -15,10 +15,12 @@ import (
 // DROP TABLE of schema.table without CASCADE, other than the foreign keys
 // of other tables, which the table's model lists as IncomingForeignKeys.
 // They are the objects with a normal dependency on the table, on one of
-// its columns, or on its row type or that type's array type: views and
-// materialized views that read it, rules and policies of other tables that
-// read it, functions whose body or signature names it, and columns of
-// other tables typed by its row type. Each is named by the server's
+// its columns, on a sequence it owns, or on its row type or that type's
+// array type: views and materialized views that read it, rules and
+// policies of other tables that read it, functions whose body or signature
+// names it, columns of other tables typed by its row type, and defaults of
+// other tables that draw from its serial or identity sequence, which the
+// drop takes with it. Each is named by the server's
 // description of it with its schema, a view by the view rather than its
 // rewrite rule, in a stable order. Objects that belong to the table, such as its own
 // constraints, indexes, triggers, rules, and policies, go with the drop
@@ -56,13 +58,25 @@ func ReadTableDropDependents(ctx context.Context, pool *pgxpool.Pool, schema, ta
 			JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 			JOIN pg_catalog.pg_type t ON t.oid OPERATOR(pg_catalog.=) c.reltype
 			WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2
+		), owned AS (
+			SELECT target.oid FROM target
+			UNION
+			SELECT d.objid
+			FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_class s ON s.oid OPERATOR(pg_catalog.=) d.objid
+			CROSS JOIN target
+			WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refobjid OPERATOR(pg_catalog.=) target.oid
+			  AND d.deptype OPERATOR(pg_catalog.=) ANY (ARRAY['a', 'i']::pg_catalog.char[])
+			  AND s.relkind OPERATOR(pg_catalog.=) 'S'
 		), dependents AS (
 			SELECT DISTINCT d.classid, d.objid, d.objsubid
 			FROM pg_catalog.pg_depend d, target
 			WHERE d.deptype OPERATOR(pg_catalog.=) 'n'
 			  AND d.classid OPERATOR(pg_catalog.<>) 'pg_catalog.pg_constraint'::pg_catalog.regclass
 			  AND ((d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
-			        AND d.refobjid OPERATOR(pg_catalog.=) target.oid)
+			        AND d.refobjid OPERATOR(pg_catalog.=) ANY (ARRAY(SELECT oid FROM owned)))
 			    OR (d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_type'::pg_catalog.regclass
 			        AND d.refobjid OPERATOR(pg_catalog.=) ANY (ARRAY[target.reltype, target.typarray])))
 		)
