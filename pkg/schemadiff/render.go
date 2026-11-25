@@ -33,12 +33,11 @@ var ErrUnrenderablePartition = errors.New("partitions cannot be rendered as a de
 var ErrUnrenderableInheritance = errors.New("table inheritance cannot be rendered as a desired schema")
 
 // ErrUnrenderableForeignKey is returned when the table owns foreign keys or
-// other tables reference it with foreign keys. The single-table model carries
-// no incoming foreign-key topology, so a rendered baseline would look
-// complete while silently dropping the table's relationships. Desired files
-// may declare outgoing foreign keys for planning, but desired-state
-// execution refuses every foreign-key change, so a baseline carrying one
-// could never be applied; the renderer refuses both directions instead.
+// other tables reference it with foreign keys, unless the caller opts in
+// with RenderOptions.ForeignKeys. A foreign key belongs to the file of the
+// table that holds it, so a rendered baseline of a referenced table is
+// complete only when the referencing tables are rendered with it, which one
+// table's model cannot show.
 var ErrUnrenderableForeignKey = errors.New("tables that own or are referenced by foreign keys cannot be rendered as a desired schema")
 
 // ErrUnrenderableUnlogged is returned for an unlogged table. The
@@ -102,6 +101,40 @@ var ErrUnrenderableMergedConstraints = errors.New("constraints that repeat each 
 // declared on the whole table; its partitions are not rendered, and one
 // with an index some partition lacks is refused.
 func Render(m Model) (string, error) {
+	return renderTable(m, RenderOptions{})
+}
+
+// RenderOptions widens what RenderWith writes beyond Render's default.
+type RenderOptions struct {
+	// ForeignKeys writes the table's own foreign keys, each as its
+	// constraint in the CREATE TABLE, and renders a table other tables
+	// reference instead of refusing it. A foreign key whose referenced
+	// table is in another schema is still refused, because a desired file
+	// names tables only in its own schema (statement.ErrQualifiedName), and
+	// so is one on a table rendered with RowSecurity
+	// (statement.ErrRowSecurityForeignKey).
+	//
+	// The caller takes on what one table's model cannot show: it renders
+	// every table in Model.IncomingForeignKeys too, so each relationship is
+	// written in the file of the table that holds it. A baseline that
+	// leaves a referencing table out drops that table's foreign key.
+	ForeignKeys bool
+	// RowSecurity writes the table's row security settings and policies
+	// after it, as RenderWithRowSecurity does.
+	RowSecurity bool
+}
+
+// RenderWith renders the model as Render does, widened by opts.
+func RenderWith(m Model, opts RenderOptions) (string, error) {
+	if opts.RowSecurity {
+		return renderWithRowSecurity(m, opts)
+	}
+	return renderTable(m, opts)
+}
+
+// renderTable renders the table without its row security, which it
+// refuses when the model carries any.
+func renderTable(m Model, opts RenderOptions) (string, error) {
 	if m.RowSecurity.present() {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableRowSecurity)
 	}
@@ -122,10 +155,10 @@ func Render(m Model) (string, error) {
 	if len(m.InheritanceChildren) != 0 {
 		return "", fmt.Errorf("render table %q: has inheritance children %s: %w", m.Table, strings.Join(m.InheritanceChildren, ", "), ErrUnrenderableInheritance)
 	}
-	if fks := ownForeignKeys(m); len(fks) != 0 {
+	if fks := ownForeignKeys(m); len(fks) != 0 && !opts.ForeignKeys {
 		return "", fmt.Errorf("render table %q: owns foreign keys (%s): %w", m.Table, strings.Join(fks, ", "), ErrUnrenderableForeignKey)
 	}
-	if len(m.ReferencedBy) != 0 {
+	if len(m.ReferencedBy) != 0 && !opts.ForeignKeys {
 		return "", fmt.Errorf("render table %q: referenced by foreign keys (%s): %w", m.Table, strings.Join(m.ReferencedBy, ", "), ErrUnrenderableForeignKey)
 	}
 	if m.Unlogged {

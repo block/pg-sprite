@@ -47,12 +47,16 @@ func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, schema s
 // ParseDesiredWithRowSecurity and cannot be passed to the live create executor.
 // A partitioned parent is refused (ErrUnrenderablePartitionedRowSecurity).
 func RenderWithRowSecurity(m Model) (string, error) {
+	return renderWithRowSecurity(m, RenderOptions{RowSecurity: true})
+}
+
+func renderWithRowSecurity(m Model, opts RenderOptions) (string, error) {
 	if m.PartitionKey != "" {
 		return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, ErrUnrenderablePartitionedRowSecurity)
 	}
 	table := m
 	table.RowSecurity = RowSecurity{}
-	base, err := Render(table)
+	base, err := renderTable(table, opts)
 	if err != nil {
 		return "", err
 	}
