@@ -145,6 +145,10 @@ type Change struct {
 	// for Validates, so a validation that runs apart from its add never
 	// validates a constraint someone put under the same name in between.
 	AddsNotValid *ConstraintValidation `json:"-"`
+	// References is set on an ADD CONSTRAINT of a FOREIGN KEY: the table
+	// and columns the key references, on which the role that runs the plan
+	// needs REFERENCES.
+	References *ForeignKeyReference `json:"-"`
 	// Drops is set on a DROP INDEX, DROP CONSTRAINT, DROP COLUMN, or
 	// DROP NOT NULL: the live object the statement removes, with the
 	// definition the diff read. A reviewer approves what the name stood for,
@@ -496,7 +500,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 					return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
 				}
 				sql = qualified
-				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})
+				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), References: con.References})
 				continue
 			}
 			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})

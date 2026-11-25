@@ -333,6 +333,7 @@ func TestIntrospectReferencedByExcludesSelfReference(t *testing.T) {
 		Name:       "emp_parent_id_fkey",
 		Def:        "FOREIGN KEY (parent_id) REFERENCES emp(id)",
 		ForeignKey: true,
+		References: &schemadiff.ForeignKeyReference{Table: "emp", Columns: []string{"id"}},
 	})
 	_, err = schemadiff.Render(emp)
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)

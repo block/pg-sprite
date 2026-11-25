@@ -159,6 +159,13 @@ func (c Column) IsGenerated() bool {
 	return c.Generated || c.Virtual
 }
 
+// ForeignKeyReference is the table a foreign key references, by name in the
+// key's own schema, and the referenced columns in key order.
+type ForeignKeyReference struct {
+	Table   string
+	Columns []string
+}
+
 // Constraint is one table constraint: its name plus the server-decompiled
 // definition (pg_get_constraintdef), e.g. "PRIMARY KEY (id)".
 type Constraint struct {
@@ -200,6 +207,11 @@ type Constraint struct {
 	// declares the key before any CREATE INDEX after it runs, so a file that
 	// renders both cannot create the table.
 	SelfReferencesStandaloneIndex bool `json:"-"`
+	// References names, for a foreign key, the table and the columns it
+	// references, in key order. Planning checks the role's REFERENCES
+	// privilege on them for a key the plan adds. Nil for every other
+	// constraint.
+	References *ForeignKeyReference `json:"-"`
 	// IndexInvalid reports a primary key, unique, or exclusion constraint
 	// whose index the server has not validated (pg_index.indisvalid is
 	// false). On a partitioned parent that is a key added with ALTER TABLE

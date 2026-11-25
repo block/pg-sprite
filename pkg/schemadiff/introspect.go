@@ -716,7 +716,13 @@ func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndex
 		                             AND k.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
 		                             AND NOT k.condeferrable
 		                             AND k.conkey OPERATOR(pg_catalog.@>) con.confkey
-		                             AND k.conkey OPERATOR(pg_catalog.<@) con.confkey)
+		                             AND k.conkey OPERATOR(pg_catalog.<@) con.confkey),
+		       CASE WHEN con.contype OPERATOR(pg_catalog.=) 'f' THEN ref.relname::pg_catalog.text ELSE '' END,
+		       ARRAY(SELECT a.attname::pg_catalog.text
+		             FROM pg_catalog.unnest(con.confkey) WITH ORDINALITY AS k(attnum, n)
+		             JOIN pg_catalog.pg_attribute AS a
+		               ON a.attrelid OPERATOR(pg_catalog.=) con.confrelid AND a.attnum OPERATOR(pg_catalog.=) k.attnum
+		             ORDER BY k.n)
 		FROM pg_catalog.pg_constraint AS con
 		JOIN pg_catalog.pg_class AS own ON own.oid OPERATOR(pg_catalog.=) con.conrelid
 		LEFT JOIN pg_catalog.pg_class AS ref ON ref.oid OPERATOR(pg_catalog.=) con.confrelid
@@ -731,8 +737,13 @@ func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndex
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid, &c.IndexInvalid, &c.ReferencesOtherSchema, &c.SelfReferencesStandaloneIndex); err != nil {
+		var refTable string
+		var refColumns []string
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid, &c.IndexInvalid, &c.ReferencesOtherSchema, &c.SelfReferencesStandaloneIndex, &refTable, &refColumns); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
+		}
+		if c.ForeignKey {
+			c.References = &ForeignKeyReference{Table: refTable, Columns: refColumns}
 		}
 		if c.IndexDef != "" {
 			if c.IndexDef, err = statement.Qualify(c.IndexDef, ""); err != nil {

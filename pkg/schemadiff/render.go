@@ -101,6 +101,7 @@ func renderRefusals() []error {
 		ErrUnrenderableUnattachedIndex,
 		ErrUnrenderablePartitionedRowSecurity,
 		ErrUnrenderableRowSecurity,
+		statement.ErrRowSecurityForeignKey,
 	}
 }
 

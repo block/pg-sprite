@@ -272,13 +272,57 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 func TestPlanForeignKeyWithoutReferencesGrantFails(t *testing.T) {
 	schema, err := planOrdersForeignKeyAsRole(t, "SELECT")
 	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReferenceable)
-	assert.ErrorContains(t, err, schema+".users")
+	assert.ErrorContains(t, err, schema+".users(id)")
 }
+
+// PostgreSQL lets a role add a foreign key when it holds REFERENCES on each
+// referenced column, without the privilege on the whole table, so planning
+// accepts a column grant too.
+func TestPlanForeignKeyWithColumnReferencesGrantPlans(t *testing.T) {
+	_, report, err := planOrdersAsRole(t, "SELECT, REFERENCES (id)", false, ordersReferencingUsers)
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, report.Statements[0].Kind)
+}
+
+// A plan that leaves a live foreign key alone needs no REFERENCES on the
+// table it references: a role that can only read users plans a new column on
+// orders, whose key to users the file keeps unchanged.
+func TestPlanUnchangedForeignKeyNeedsNoReferencesGrant(t *testing.T) {
+	_, report, err := planOrdersAsRole(t, "SELECT", true, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id),
+    note text
+);`)
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, schemadiff.ChangeAddColumn, report.Statements[0].Kind)
+	assert.Contains(t, report.Statements[0].SQL, "note")
+}
+
+// ordersReferencingUsers is a desired orders file whose key to users the
+// live orders table does not have.
+const ordersReferencingUsers = `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id)
+);`
 
 // planOrdersForeignKeyAsRole plans a foreign key from orders to users as a
 // throwaway role that holds the given privileges on users ("" for none) and
 // returns the test schema and the plan's error.
 func planOrdersForeignKeyAsRole(t *testing.T, usersGrant string) (string, error) {
+	t.Helper()
+	schema, _, err := planOrdersAsRole(t, usersGrant, false, ordersReferencingUsers)
+	return schema, err
+}
+
+// planOrdersAsRole plans the desired orders file as a throwaway role that
+// can read orders and holds the given privileges on users ("" for none). The
+// live orders table carries a key to users when liveKey is set. It returns
+// the test schema, the plan, and the plan's error.
+func planOrdersAsRole(t *testing.T, usersGrant string, liveKey bool, desired string) (string, plan.Report, error) {
 	t.Helper()
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -297,6 +341,11 @@ func planOrdersForeignKeyAsRole(t *testing.T, usersGrant string) (string, error)
 		GRANT USAGE, CREATE ON SCHEMA %[1]s TO %[2]s;
 		GRANT SELECT ON %[1]s.orders TO %[2]s`, schema, pgx.Identifier{role}.Sanitize()))
 	require.NoError(t, err)
+	if liveKey {
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id)", schema))
+		require.NoError(t, err)
+	}
 	if usersGrant != "" {
 		_, err = pool.Exec(t.Context(), fmt.Sprintf("GRANT %s ON %s.users TO %s",
 			usersGrant, schema, pgx.Identifier{role}.Sanitize()))
@@ -322,12 +371,8 @@ func planOrdersForeignKeyAsRole(t *testing.T, usersGrant string) (string, error)
 	require.NoError(t, err)
 	t.Cleanup(planner.Close)
 
-	_, err = diffplan.Plan(t.Context(), planner, diffplan.Request{Schema: schema, Desired: parseDesired(t, `
-CREATE TABLE orders (
-    id bigint PRIMARY KEY,
-    user_id bigint NOT NULL REFERENCES users (id)
-);`)})
-	return schema, err
+	report, err := diffplan.Plan(t.Context(), planner, diffplan.Request{Schema: schema, Desired: parseDesired(t, desired)})
+	return schema, report, err
 }
 
 // plannerPassword is the password the throwaway planning role logs in with.

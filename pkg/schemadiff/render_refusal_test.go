@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // RenderRefusal names the verdict inside a wrapped Render error, and reports
@@ -21,6 +23,10 @@ func TestRenderRefusalNamesTheVerdict(t *testing.T) {
 	verdict, ok := RenderRefusal(err)
 	require.True(t, ok)
 	assert.Equal(t, ErrUnrenderableUnlogged, verdict)
+
+	verdict, ok = RenderRefusal(fmt.Errorf("table %q: %w", "orders", statement.ErrRowSecurityForeignKey))
+	require.True(t, ok, "a foreign key on a table rendered with row security is a table-shape refusal")
+	assert.Equal(t, statement.ErrRowSecurityForeignKey, verdict)
 
 	verdict, ok = RenderRefusal(errors.New("connection refused"))
 	assert.False(t, ok)
