@@ -708,16 +708,17 @@ func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndex
 		           AND EXISTS (SELECT 1 FROM pg_catalog.pg_index ix
 		                       WHERE ix.indexrelid OPERATOR(pg_catalog.=) con.conindid AND NOT ix.indisvalid),
 		       con.contype OPERATOR(pg_catalog.=) 'f'
-		           AND (SELECT r.relnamespace FROM pg_catalog.pg_class r WHERE r.oid OPERATOR(pg_catalog.=) con.confrelid)
-		               OPERATOR(pg_catalog.<>)
-		               (SELECT t.relnamespace FROM pg_catalog.pg_class t WHERE t.oid OPERATOR(pg_catalog.=) con.conrelid),
+		           AND ref.relnamespace OPERATOR(pg_catalog.<>) own.relnamespace,
 		       con.contype OPERATOR(pg_catalog.=) 'f'
 		           AND con.confrelid OPERATOR(pg_catalog.=) con.conrelid
 		           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
-		                           WHERE k.conrelid OPERATOR(pg_catalog.=) con.confrelid
-		                             AND k.conindid OPERATOR(pg_catalog.=) con.conindid
-		                             AND k.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[]))
+		                           WHERE k.conrelid OPERATOR(pg_catalog.=) con.conrelid
+		                             AND k.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
+		                             AND k.conkey OPERATOR(pg_catalog.@>) con.confkey
+		                             AND k.conkey OPERATOR(pg_catalog.<@) con.confkey)
 		FROM pg_catalog.pg_constraint AS con
+		JOIN pg_catalog.pg_class AS own ON own.oid OPERATOR(pg_catalog.=) con.conrelid
+		LEFT JOIN pg_catalog.pg_class AS ref ON ref.oid OPERATOR(pg_catalog.=) con.confrelid
 		WHERE con.conrelid OPERATOR(pg_catalog.=) $1
 		  AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'c', 'f', 'x']::pg_catalog."char"[])
 		  AND con.conislocal

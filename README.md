@@ -102,7 +102,9 @@ refusal — never a silently wrong or incomplete result:
   file may declare them, `diff` shows an added or dropped foreign key with
   the `declarative-foreign-key` refusal, and `migrate --desired` refuses
   the plan. Export refuses both a table that carries foreign keys and a
-  table that other tables reference. FK DDL still works through
+  table that other tables reference, unless the caller opts in with
+  `RenderOptions.ForeignKeys`, which writes each table's own foreign keys.
+  FK DDL still works through
   `migrate --alter` (`NOT VALID` + `VALIDATE`).
 - **Changed stored generated expressions** are planned but not executed:
   `diff` shows one `SET EXPRESSION` statement (PostgreSQL 17+) refused with

@@ -131,16 +131,22 @@ func TestRenderWithForeignKeysRefusesACrossSchemaReference(t *testing.T) {
 
 // A foreign key from a table to itself is refused when the columns it
 // references are unique only through a standalone unique index: the file's
-// CREATE TABLE would declare the key before the index after it exists, so the
-// file could not create the table. Declared as a UNIQUE constraint instead,
-// the same relationship renders and round-trips.
+// CREATE TABLE would declare the key before the index exists, so the file
+// could not create the table. Declared as a UNIQUE constraint instead, the
+// same relationship renders and round-trips, even when a standalone unique
+// index on the same columns was created first and the server bound the key
+// to it.
 func TestRenderWithForeignKeysRefusesASelfReferenceThroughAStandaloneIndex(t *testing.T) {
 	pool, schema := foreignKeyPool(t,
 		`CREATE TABLE %[1]s.accounts (id bigint PRIMARY KEY, code text NOT NULL, parent_code text)`,
 		`CREATE UNIQUE INDEX accounts_code_key ON %[1]s.accounts (code)`,
 		`ALTER TABLE %[1]s.accounts ADD CONSTRAINT accounts_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.accounts (code)`,
 		`CREATE TABLE %[1]s.ledgers (id bigint PRIMARY KEY, code text NOT NULL CONSTRAINT ledgers_code_key UNIQUE, parent_code text)`,
-		`ALTER TABLE %[1]s.ledgers ADD CONSTRAINT ledgers_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.ledgers (code)`)
+		`ALTER TABLE %[1]s.ledgers ADD CONSTRAINT ledgers_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.ledgers (code)`,
+		`CREATE TABLE %[1]s.journals (id bigint PRIMARY KEY, code text NOT NULL, parent_code text)`,
+		`CREATE UNIQUE INDEX journals_code_idx ON %[1]s.journals (code)`,
+		`ALTER TABLE %[1]s.journals ADD CONSTRAINT journals_code_key UNIQUE (code)`,
+		`ALTER TABLE %[1]s.journals ADD CONSTRAINT journals_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.journals (code)`)
 
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
 	require.NoError(t, err)
@@ -150,6 +156,10 @@ func TestRenderWithForeignKeysRefusesASelfReferenceThroughAStandaloneIndex(t *te
 
 	rendered, changes := roundTripWithForeignKeys(t, pool, schema, "ledgers")
 	assert.Contains(t, rendered, `CONSTRAINT "ledgers_parent_fk" FOREIGN KEY (parent_code) REFERENCES ledgers(code)`)
+	assert.Empty(t, changes)
+
+	rendered, changes = roundTripWithForeignKeys(t, pool, schema, "journals")
+	assert.Contains(t, rendered, `CONSTRAINT "journals_parent_fk" FOREIGN KEY (parent_code) REFERENCES journals(code)`)
 	assert.Empty(t, changes)
 }
 

@@ -346,8 +346,6 @@ func serialType(table string, c Column) (string, bool) {
 	return base, true
 }
 
-// ownForeignKeys returns the names of the foreign keys the table itself
-// carries, in model order.
 // unrenderableForeignKey refuses a foreign key of the table that a desired
 // file cannot declare faithfully: one into another schema, which a file
 // cannot name, and one from the table to itself whose referenced columns are
@@ -366,6 +364,8 @@ func unrenderableForeignKey(m Model) error {
 	return nil
 }
 
+// ownForeignKeys returns the names of the foreign keys the table itself
+// carries, in model order.
 func ownForeignKeys(m Model) []string {
 	var names []string
 	for _, con := range m.Constraints {
