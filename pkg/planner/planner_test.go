@@ -1203,18 +1203,20 @@ func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 	}
 }
 
-// Dropping a column, a default, a NOT NULL, or a constraint, and setting a
-// default, change only the catalog: PostgreSQL never rewrites or reads the
-// table for them, so each is marked catalog-only. Changing a column's
-// storage options or a table's options is metadata-only too but is not
-// marked, and a cascading drop is refused before any mark.
+// Dropping a column, a default, a NOT NULL, or a constraint changes only
+// the catalog: PostgreSQL never rewrites or reads the table and runs no user
+// code for them, so each is marked catalog-only. Setting a default is not
+// marked, since coercing it to a user-defined column type runs that type's
+// input function under the lock. Changing a column's storage options or a
+// table's options is metadata-only too but is not marked, and a cascading
+// drop is refused before any mark.
 func TestClassifyMarksCatalogOnlyKinds(t *testing.T) {
 	cases := []struct {
 		sql     string
 		catalog bool
 	}{
 		{"ALTER TABLE t DROP COLUMN note", true},
-		{"ALTER TABLE t ALTER COLUMN note SET DEFAULT 'x'", true},
+		{"ALTER TABLE t ALTER COLUMN note SET DEFAULT 'x'", false},
 		{"ALTER TABLE t ALTER COLUMN note DROP DEFAULT", true},
 		{"ALTER TABLE t ALTER COLUMN note DROP NOT NULL", true},
 		{"ALTER TABLE t DROP CONSTRAINT t_note_check", true},

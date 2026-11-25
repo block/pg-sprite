@@ -314,13 +314,17 @@ it — unless every operation in it is proven catalog-only (`sizeGuardApplies` i
 | **Forced** run (operator acknowledged override) | **Yes** | A forced run bypasses shape admission but not the size guard — it is still one blind bounded attempt |
 
 An operation is proven catalog-only when PostgreSQL has no path that touches the
-table's rows: `DROP COLUMN`, `SET DEFAULT`, `DROP DEFAULT`, `DROP NOT NULL`,
+table's rows or run user code: `DROP COLUMN`, `DROP DEFAULT`, `DROP NOT NULL`,
 `DROP CONSTRAINT`, and an `ADD COLUMN` that meets both of these:
 
 - It has no default, or a literal one such as `0` or `'free'`.
 - Its probe proved it adds in place, checks no `NOT NULL` against every row, and
   evaluates nothing a user defined: no domain, and no function, cast, or operator
   outside the built-in catalog. An enum type counts as built in.
+
+`SET DEFAULT` stays guarded. PostgreSQL coerces the new default to the
+column's type under the lock, and for a user-defined type that runs the
+type's input function, which can read any table.
 
 An expression default such as `now()` stays guarded. PostgreSQL evaluates it once
 under the lock, with the session's settings, and a function it calls can read any
