@@ -29,7 +29,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **24**: version 24 added the `proven_catalog_only` decision field, which marks an operation PostgreSQL runs on the catalog alone and which the fingerprint does not cover; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **25**: version 25 runs the `add-foreign-key` and `validate-foreign-key` kinds instead of refusing them, so `declarative-foreign-key` now refuses only `drop-foreign-key`, and retires the `foreign-key` cause, since the create path creates a table with its foreign keys; version 24 added the `proven_catalog_only` decision field, which marks an operation PostgreSQL runs on the catalog alone and which the fingerprint does not cover; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -93,8 +93,8 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `route` | string | always | The planner's aggregate route for the statement (see Routes). |
 | `backend` | string | except refusals | The assigned execution strategy (see Backends); absent for refusals. |
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
-| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `declarative-foreign-key` for a foreign-key change; `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
-| `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`, plus a `CREATE TABLE` that declares a foreign key (`reason` `declarative-foreign-key`, `cause` `foreign-key`). Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
+| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `declarative-foreign-key` for a foreign-key drop; `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
+| `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`. Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
 | `class` | string | refusals only | This statement's refusal class (see Classes): how a consumer routes it — wait for a capability, hand to an owner, use a safer idiom, fix the environment, or report a bug. Present exactly when `disposition` is `refuse`. Explanatory: excluded from the fingerprint. |
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the work (see Owners). Present exactly when `class` is `no-online-safety-problem`. Explanatory: excluded from the fingerprint. |
 | `blocking_passthrough_eligible` | bool | refusals only | Whether this typed refusal is in the closed accepted-blocking registry. Independent of flags and catalog lookups; explanatory and excluded from the fingerprint. |
@@ -174,7 +174,7 @@ treat the statement and report as refused.
 |---|---|
 | `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
 | `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. The report carries no partition cause: a `drop-index` statement with this reason is a drop PostgreSQL cannot run concurrently, whose plain form `migrate --alter` runs under `--accept-blocking` and `--allow-destructive` (`blocking_passthrough_eligible` is true), and any other `kind` is an index build or a constraint the parent cannot take online. |
-| `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs `ADD FOREIGN KEY` online. |
+| `declarative-foreign-key` | The statement drops a foreign key, and desired-state execution does not drop foreign keys yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs the drop. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
 support, then privileges.
@@ -240,7 +240,6 @@ detail and the text diff both read this field.
 | `inherits` | `INHERITS` binds to an existing parent the absence proof does not cover. |
 | `like` | `LIKE` reads an existing source table the absence proof does not cover. |
 | `of-type` | `OF` binds to an existing composite type the absence proof does not cover. |
-| `foreign-key` | A foreign key locks each referenced table, and desired-state execution does not run foreign-key changes yet. |
 | `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid. |
 | `concurrently` | A table born this run needs no concurrent index build. |
 | `duplicate-name` | The desired set claims the same relation name twice. |
@@ -296,9 +295,9 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `set-not-null` | Adds the NOT NULL attribute. |
 | `drop-not-null` | Removes the NOT NULL attribute. |
 | `add-constraint` | Adds a table constraint other than a foreign key. |
-| `add-foreign-key` | Adds a foreign-key constraint. Always refused for execution (`declarative-foreign-key`). |
+| `add-foreign-key` | Adds a foreign-key constraint. Runs as `ADD CONSTRAINT ... NOT VALID`, then `VALIDATE CONSTRAINT`, which checks the existing rows while reads and writes continue. |
 | `validate-constraint` | Validates a live check constraint left `NOT VALID` whose definition otherwise matches the desired one, the state an interrupted online add leaves behind. Not destructive. |
-| `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Always refused for execution (`declarative-foreign-key`). |
+| `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Runs as written; the scan takes `SHARE UPDATE EXCLUSIVE`, so reads and writes continue. |
 | `create-index` | Creates an index. |
 | `add-enum-value` | Adds a label to an enum type (`ALTER TYPE ... ADD VALUE`), placed `BEFORE` the next label the type already carries when the file lists it ahead of one. The only kind a desired enum type file plans. Not destructive. |
 
@@ -377,7 +376,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -421,7 +420,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -489,7 +488,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

@@ -868,14 +868,15 @@ cannot route.
 |---|---|---|---|
 | refused — never executed | — | — | 2 |
 
-The desired file adds or drops a foreign key, or creates a table that
-declares one. `diff` shows the statement so the change is reviewable, but
-desired-state execution (`migrate --desired`) does not apply foreign-key
-changes yet. To apply one, run the statement with `pg-sprite migrate --alter`:
-an `ADD FOREIGN KEY` runs as `NOT VALID` followed by `VALIDATE CONSTRAINT`, so
-writes keep flowing during the scan. For a new table, create it without the
-foreign key first, and name the referenced table with its schema in the
-`ADD FOREIGN KEY`, since `migrate --alter` qualifies only the altered table.
+The desired file no longer declares a live foreign key. `diff` shows the
+drop so the change is reviewable, but desired-state execution
+(`migrate --desired`) does not drop foreign keys yet. To drop one, run the
+statement with `pg-sprite migrate --alter --allow-destructive SCHEMA.TABLE`.
+
+A foreign key the desired file adds is not refused: it runs as
+`ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT`, so writes
+keep flowing during the scan, and a new table is created with its foreign
+keys.
 
 ### `table-not-found`
 

@@ -44,7 +44,7 @@ const (
 	// key.
 	ChangeDropConstraint ChangeKind = "drop-constraint"
 	// ChangeDropForeignKey drops a foreign-key constraint. Desired-state
-	// execution refuses it: foreign-key changes are planned, not run.
+	// execution refuses it: a foreign-key drop is planned, not run.
 	ChangeDropForeignKey ChangeKind = "drop-foreign-key"
 	// ChangeDropColumn drops a column.
 	ChangeDropColumn ChangeKind = "drop-column"
@@ -67,14 +67,13 @@ const (
 	ChangeDropNotNull ChangeKind = "drop-not-null"
 	// ChangeAddConstraint adds a table constraint other than a foreign key.
 	ChangeAddConstraint ChangeKind = "add-constraint"
-	// ChangeAddForeignKey adds a foreign-key constraint. Desired-state
-	// execution refuses it: foreign-key changes are planned, not run.
+	// ChangeAddForeignKey adds a foreign-key constraint. The planner runs it
+	// as ADD ... NOT VALID followed by VALIDATE CONSTRAINT.
 	ChangeAddForeignKey ChangeKind = "add-foreign-key"
 	// ChangeValidateConstraint validates a live check constraint left NOT
 	// VALID, the state an interrupted online add leaves behind.
 	ChangeValidateConstraint ChangeKind = "validate-constraint"
 	// ChangeValidateForeignKey validates a live foreign key left NOT VALID.
-	// Desired-state execution refuses it like every foreign-key change.
 	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"

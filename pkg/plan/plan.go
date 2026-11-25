@@ -60,8 +60,11 @@ import (
 // pinnable_fingerprint field.
 // Version 23 added the partitioned-index-build execution contract and its
 // part in the fingerprint. Version 24 added the proven_catalog_only
-// decision field.
-const FormatVersion = 24
+// decision field. Version 25 runs the add-foreign-key and
+// validate-foreign-key kinds instead of refusing them, and retires the
+// foreign-key create-shape cause: a new table is created with its foreign
+// keys.
+const FormatVersion = 25
 
 // Source identifies which front door derived the plan.
 type Source string

@@ -389,7 +389,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "The model carries each constraint's validity (`pg_constraint.convalidated`). A live constraint left `NOT VALID` with the desired definition, which an interrupted online add leaves behind, plans as one `VALIDATE CONSTRAINT` statement (`validate-constraint`), which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing, instead of a destructive drop and re-add. The statement names only the constraint, so execution reads the constraint again under that same lock and refuses with the permanent `validated-constraint-drift` code, validating nothing, if it was dropped or replaced under the same name since planning. A foreign key plans as `validate-foreign-key`, refused with `declarative-foreign-key` like every declarative foreign-key change. `CREATE TABLE` ignores `NOT VALID`, so a desired file cannot declare it: for a check constraint, `pull` renders the validated definition, and the baseline re-diffs to that one validation rather than to zero. `pull` refuses a table that owns a foreign key, validated or not, with `ErrUnrenderableForeignKey`"
+    reason_notes: "The model carries each constraint's validity (`pg_constraint.convalidated`). A live constraint left `NOT VALID` with the desired definition, which an interrupted online add leaves behind, plans as one `VALIDATE CONSTRAINT` statement (`validate-constraint`), which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing, instead of a destructive drop and re-add. The statement names only the constraint, so execution reads the constraint again under that same lock and refuses with the permanent `validated-constraint-drift` code, validating nothing, if it was dropped or replaced under the same name since planning. A foreign key plans as `validate-foreign-key` and runs the same way. `CREATE TABLE` ignores `NOT VALID`, so a desired file cannot declare it: for a check constraint, `pull` renders the validated definition, and the baseline re-diffs to that one validation rather than to zero. for a foreign key, a caller that renders foreign keys (`RenderOptions.ForeignKeys`) gets the validated definition the same way"
   - id: declarative-unnamed-check-numbering
     area: "declarative_model"
     operation: "Unnamed check constraints whose generated names differ from the live table's"
@@ -414,9 +414,21 @@ rows:
       diff: refused
     refusal_reason: unsupported-statement
     reason_notes: "Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline. A desired file that declares `INHERITS` is refused before planning builds anything, since the scratch build would lock the live parent and add an inheritance edge to it"
-  - id: tables-that-own-or-are-referenced-by-foreign-keys
+  - id: declarative-foreign-key-add
     area: "declarative_model"
-    operation: "Tables that own **or are referenced by** foreign keys"
+    operation: "Foreign keys a desired file adds, on a live table or a new one"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    maturity: "ga"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "A desired file may declare a foreign key to an unqualified table that exists in the target schema, or to its own table. `diff` shows a matching foreign key as no change. A key the file adds to a live table plans as `add-foreign-key` and runs as two autocommitted steps: `ADD CONSTRAINT ... NOT VALID`, a brief `SHARE ROW EXCLUSIVE` lock on both tables that checks no existing row, then `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing. A row that breaks the key fails the validation with the key left `NOT VALID`, still enforced for new writes; once the rows are fixed, the next plan is that one validation. A `CREATE TABLE` that declares a foreign key runs as written, since the new table is empty, under the same brief lock budget as every create. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table. Export refuses both sides by default. A caller that opts in with `RenderOptions.ForeignKeys` gets each table's own foreign keys written out, and must render the referencing tables too, because an incoming FK lives in the referencing table's file. Export still refuses an FK into another schema, an FK from a table to itself whose referenced columns have no primary key or `UNIQUE` constraint (only a standalone unique index), and an FK on a table rendered with `RenderOptions.RowSecurity` (`statement.ErrRowSecurityForeignKey`)"
+  - id: declarative-foreign-key-drop
+    area: "declarative_model"
+    operation: "Foreign keys a desired file no longer declares"
     tier: "t2"
     status_mark: "🟡"
     engine_path: "native_planned_flow"
@@ -425,7 +437,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: declarative-foreign-key
-    reason_notes: "Planned but not executed. A desired file may declare a foreign key to an unqualified table that exists in the target schema; `diff` shows a matching foreign key as no change and an added or dropped one as an `add-foreign-key` or `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table, the lock a plain `SELECT` takes, and never blocks its writes. Export refuses both sides by default. A caller that opts in with `RenderOptions.ForeignKeys` gets each table's own foreign keys written out, and must render the referencing tables too, because an incoming FK lives in the referencing table's file, not the referenced one's. Export still refuses an FK into another schema, an FK from a table to itself whose referenced columns have no primary key or `UNIQUE` constraint (only a standalone unique index), and an FK on a table rendered with `RenderOptions.RowSecurity` (`statement.ErrRowSecurityForeignKey`). Declarative FK execution (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned"
+    reason_notes: "Planned but not executed. `diff` shows a live foreign key the desired file leaves out as a `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan; a drop is also destructive, so it needs `--allow-destructive`. To drop a key now, run the statement through the imperative front door (`migrate --alter`). A changed key plans as a drop and an add, so it is refused the same way"
   - id: unlogged-tables
     area: "declarative_model"
     operation: "Unlogged tables"
@@ -508,11 +520,11 @@ rows:
     engine_path: "native_as_is"
     maturity: "ga"
     online_safety_problem: true
-    online_safety_detail: "a `REFERENCES` clause would take a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, but the create path refuses a `CREATE TABLE` that declares one, so no live table is locked"
+    online_safety_detail: "a `REFERENCES` clause takes a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, under the same lock budget as the `CREATE TABLE`, so a busy referenced table makes the step time out and retry rather than queue writes behind it"
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `REFERENCES`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `CONCURRENTLY` is refused upstream at desired-file parse and re-checked at admission as defense in depth"
+    reason_notes: "Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `CONCURRENTLY` is refused upstream at desired-file parse and re-checked at admission as defense in depth"
   - id: extension-objects-named-unqualified-in-a-desired-file
     area: "declarative_model"
     operation: "Extension types, functions, and operators named unqualified in a desired file (such as `citext` installed in an `extensions` schema)"

@@ -98,14 +98,11 @@ refusal — never a silently wrong or incomplete result:
   SQL review, and only for an existing table. A table change in a file whose row security already
   matches runs as an ordinary desired run; a change to both remains unsupported. See the workflow and roadmap in
   [declarative-row-security.md](docs/declarative-row-security.md).
-- **Foreign keys** are planned but not executed declaratively: a desired
-  file may declare them, `diff` shows an added or dropped foreign key with
-  the `declarative-foreign-key` refusal, and `migrate --desired` refuses
-  the plan. Export refuses both a table that carries foreign keys and a
-  table that other tables reference, unless the caller opts in with
-  `RenderOptions.ForeignKeys`, which writes each table's own foreign keys.
-  FK DDL still works through
-  `migrate --alter` (`NOT VALID` + `VALIDATE`).
+- **Foreign keys** a desired file adds run online, as `NOT VALID` then
+  `VALIDATE`, and a new table is created with its foreign keys. A foreign
+  key the file no longer declares is shown with the `declarative-foreign-key`
+  refusal and not dropped; drop it with `migrate --alter`. Export refuses
+  foreign keys unless the caller opts in with `RenderOptions.ForeignKeys`.
 - **Changed stored generated expressions** are planned but not executed:
   `diff` shows one `SET EXPRESSION` statement (PostgreSQL 17+) refused with
   `unsupported-statement`, since it recomputes every row under an exclusive

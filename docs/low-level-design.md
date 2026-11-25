@@ -285,12 +285,12 @@ live schema (introspected)  ─┘                          │
   flagged in the plan output either way.
 - **Unsupported constructs are refused, never guessed.** The desired file admits one
   unqualified `CREATE TABLE` plus `CREATE INDEX` statements on it; each rule is a typed error.
-  Foreign keys are planned but never executed: the scratch build first creates an empty
+  For a foreign key, the scratch build first creates an empty
   `LIKE ... INCLUDING INDEXES` copy of each referenced table, so an unqualified reference
   binds to the copy rather than resolving through the search_path to a live table it would
-  lock, and every foreign-key change in the plan is refused with `declarative-foreign-key`.
-  A schema-qualified reference is refused at admission. Executing foreign-key changes needs
-  its own design. Changes
+  lock. An added foreign key runs as `NOT VALID` then `VALIDATE CONSTRAINT`, a new table is
+  created with its foreign keys, and a dropped foreign key is refused with
+  `declarative-foreign-key`. A schema-qualified reference is refused at admission. Changes
   the plan cannot express — identity or generation changes on an existing column, adopting a
   sequence-backed (serial) default whose sequence only existed in the rolled-back scratch
   transaction — are refused as unsupported rather than emitted as an unexecutable plan.

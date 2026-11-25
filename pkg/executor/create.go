@@ -582,9 +582,6 @@ func createTableShapeRefusal(op statement.Op) error {
 	if op.OfType {
 		return &CreateShapeError{Cause: CreateShapeOfType}
 	}
-	if op.ForeignKey {
-		return &CreateShapeError{Cause: CreateShapeForeignKey}
-	}
 	if op.IfNotExists {
 		return &CreateShapeError{Cause: CreateShapeIfNotExists}
 	}
