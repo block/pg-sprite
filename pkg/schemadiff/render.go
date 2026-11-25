@@ -108,11 +108,13 @@ func Render(m Model) (string, error) {
 type RenderOptions struct {
 	// ForeignKeys writes the table's own foreign keys, each as its
 	// constraint in the CREATE TABLE, and renders a table other tables
-	// reference instead of refusing it. A foreign key whose referenced
-	// table is in another schema is still refused, because a desired file
-	// names tables only in its own schema (statement.ErrQualifiedName), and
-	// so is one on a table rendered with RowSecurity
-	// (statement.ErrRowSecurityForeignKey).
+	// reference instead of refusing it. Still refused: a foreign key whose
+	// referenced table is in another schema, because a desired file names
+	// tables only in its own schema (statement.ErrQualifiedName); one from
+	// the table to itself whose referenced columns are unique only through
+	// a standalone index, which the CREATE TABLE would declare before the
+	// index exists (ErrUnrenderableForeignKey); and one on a table rendered
+	// with RowSecurity (statement.ErrRowSecurityForeignKey).
 	//
 	// The caller takes on what one table's model cannot show: it renders
 	// every table in Model.IncomingForeignKeys too, so each relationship is
@@ -160,6 +162,9 @@ func renderTable(m Model, opts RenderOptions) (string, error) {
 	}
 	if len(m.ReferencedBy) != 0 && !opts.ForeignKeys {
 		return "", fmt.Errorf("render table %q: referenced by foreign keys (%s): %w", m.Table, strings.Join(m.ReferencedBy, ", "), ErrUnrenderableForeignKey)
+	}
+	if err := unrenderableForeignKey(m); err != nil {
+		return "", fmt.Errorf("render table %q: %w", m.Table, err)
 	}
 	if m.Unlogged {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableUnlogged)
@@ -343,6 +348,24 @@ func serialType(table string, c Column) (string, bool) {
 
 // ownForeignKeys returns the names of the foreign keys the table itself
 // carries, in model order.
+// unrenderableForeignKey refuses a foreign key of the table that a desired
+// file cannot declare faithfully: one into another schema, which a file
+// cannot name, and one from the table to itself whose referenced columns are
+// unique only through a standalone index, which the file's CREATE TABLE
+// would declare before the index exists.
+func unrenderableForeignKey(m Model) error {
+	for _, con := range m.Constraints {
+		switch {
+		case !con.ForeignKey:
+		case con.ReferencesOtherSchema:
+			return fmt.Errorf("foreign key %q references a table in another schema: %w", con.Name, statement.ErrQualifiedName)
+		case con.SelfReferencesStandaloneIndex:
+			return fmt.Errorf("foreign key %q references the table's own columns through a standalone unique index; declare the index as a UNIQUE constraint first: %w", con.Name, ErrUnrenderableForeignKey)
+		}
+	}
+	return nil
+}
+
 func ownForeignKeys(m Model) []string {
 	var names []string
 	for _, con := range m.Constraints {

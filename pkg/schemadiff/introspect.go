@@ -699,19 +699,29 @@ func sequenceRowComplete(start, increment, minValue, maxValue, cache *int64, cyc
 func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndexDefs bool) ([]Constraint, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT conname, pg_catalog.pg_get_constraintdef(oid),
-		       contype OPERATOR(pg_catalog.=) 'f', contype OPERATOR(pg_catalog.=) 'p',
-		       CASE WHEN $2 AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
-		            THEN pg_catalog.pg_get_indexdef(conindid) ELSE '' END,
-		       condeferrable, condeferred, NOT convalidated,
-		       contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
+		SELECT con.conname, pg_catalog.pg_get_constraintdef(con.oid),
+		       con.contype OPERATOR(pg_catalog.=) 'f', con.contype OPERATOR(pg_catalog.=) 'p',
+		       CASE WHEN $2 AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
+		            THEN pg_catalog.pg_get_indexdef(con.conindid) ELSE '' END,
+		       con.condeferrable, con.condeferred, NOT con.convalidated,
+		       con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
 		           AND EXISTS (SELECT 1 FROM pg_catalog.pg_index ix
-		                       WHERE ix.indexrelid OPERATOR(pg_catalog.=) conindid AND NOT ix.indisvalid)
-		FROM pg_catalog.pg_constraint
-		WHERE conrelid OPERATOR(pg_catalog.=) $1
-		  AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'c', 'f', 'x']::pg_catalog."char"[])
-		  AND conislocal
-		ORDER BY conname`, oid, keyIndexDefs)
+		                       WHERE ix.indexrelid OPERATOR(pg_catalog.=) con.conindid AND NOT ix.indisvalid),
+		       con.contype OPERATOR(pg_catalog.=) 'f'
+		           AND (SELECT r.relnamespace FROM pg_catalog.pg_class r WHERE r.oid OPERATOR(pg_catalog.=) con.confrelid)
+		               OPERATOR(pg_catalog.<>)
+		               (SELECT t.relnamespace FROM pg_catalog.pg_class t WHERE t.oid OPERATOR(pg_catalog.=) con.conrelid),
+		       con.contype OPERATOR(pg_catalog.=) 'f'
+		           AND con.confrelid OPERATOR(pg_catalog.=) con.conrelid
+		           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+		                           WHERE k.conrelid OPERATOR(pg_catalog.=) con.confrelid
+		                             AND k.conindid OPERATOR(pg_catalog.=) con.conindid
+		                             AND k.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[]))
+		FROM pg_catalog.pg_constraint AS con
+		WHERE con.conrelid OPERATOR(pg_catalog.=) $1
+		  AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'c', 'f', 'x']::pg_catalog."char"[])
+		  AND con.conislocal
+		ORDER BY con.conname`, oid, keyIndexDefs)
 	if err != nil {
 		return nil, fmt.Errorf("query constraints: %w", err)
 	}
@@ -719,7 +729,7 @@ func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndex
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid, &c.IndexInvalid); err != nil {
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid, &c.IndexInvalid, &c.ReferencesOtherSchema, &c.SelfReferencesStandaloneIndex); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
 		}
 		if c.IndexDef != "" {
