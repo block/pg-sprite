@@ -84,6 +84,39 @@ var ErrUnrenderableSequenceOptions = errors.New("sequence options cannot be rend
 // no other way to declare the second (see ErrDesiredConstraintMerged).
 var ErrUnrenderableMergedConstraints = errors.New("constraints that repeat each other on the same columns cannot be rendered as a desired schema")
 
+// renderRefusals returns every verdict the renderer refuses a table with.
+func renderRefusals() []error {
+	return []error{
+		ErrUnrenderableDefault,
+		ErrUnrenderablePartition,
+		ErrUnrenderableInheritance,
+		ErrUnrenderableForeignKey,
+		ErrUnrenderableUnlogged,
+		ErrUnrenderableCollation,
+		ErrUnrenderableVirtual,
+		ErrUnrenderableToastOptions,
+		ErrMultipleOwnedSequences,
+		ErrUnrenderableSequenceOptions,
+		ErrUnrenderableMergedConstraints,
+		ErrUnrenderableUnattachedIndex,
+		ErrUnrenderablePartitionedRowSecurity,
+		ErrUnrenderableRowSecurity,
+	}
+}
+
+// RenderRefusal returns the verdict a Render error carries, such as
+// ErrUnrenderableUnlogged, so a caller can say what the table holds without
+// the schema and table names the full error repeats. It reports false for an
+// error that carries none of the renderer's verdicts.
+func RenderRefusal(err error) (error, bool) {
+	for _, verdict := range renderRefusals() {
+		if errors.Is(err, verdict) {
+			return verdict, true
+		}
+	}
+	return nil, false
+}
+
 // Render renders the canonical model into a desired-state schema file: one
 // CREATE TABLE, with a WITH clause carrying the table's storage parameters,
 // followed by the model's CREATE INDEX statements. The output
