@@ -910,7 +910,15 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the definition the plan carried. A column, constraint, or `NOT NULL` drop is held to the
   definition its plan carried the same way (`dropped-object-drift`), and a column drop is also
   refused when the column has an index, constraint, or sequence the plan did not list as
-  dropped with it; the fingerprint covers each of those definitions and dependents. The plan runs in its order, which drops before adds, and statements that
+  dropped with it; the fingerprint covers each of those definitions and dependents. On a
+  partitioned table a column or constraint drop runs and removes it from every partition; a
+  column drop fails with `dropped-column-partition-key` when the column is in a partition key
+  at any level, and with `dropped-column-partition-dependent` when a partition carries an
+  object of its own on the column that the plan, which lists only the parent's dependents,
+  did not review. A `NOT NULL` drop on a partitioned table, and any column, constraint, or
+  `NOT NULL` drop on a table with inheritance children, fails with
+  `dropped-object-has-descendants`. All three are permanent: nothing was dropped, and the
+  operator changes the table before re-planning. The plan runs in its order, which drops before adds, and statements that
   already committed stay committed if a later one fails. Map SchemaBot's unsafe
   acknowledgement to `AllowDestructive` only together with the fingerprint of the plan it
   showed. `RunDesiredWithRowSecurity` takes the same two fields for a change to the table
