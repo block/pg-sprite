@@ -18,14 +18,18 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// Gate is the statement-type gate: ALTER TABLE, CREATE INDEX, and ALTER
+// Gate is the statement-type gate without the catalog; for a single-index
+// DROP INDEX its verdict is provisional, and the final one comes from
+// [GateWithCatalog]. ALTER TABLE, CREATE INDEX, and ALTER
 // INDEX ... RENAME TO proceed to classification (a blocking CREATE INDEX
 // is substituted with its concurrent build, a submitted concurrent build
 // is driven directly); the
 // index-maintenance forms the executor cannot drive yet are pointed at
 // their concurrent idiom, everything else is unsupported. Refused
 // statements are never executed. Gate needs no database, so a caller can
-// refuse before dialing; [Run] re-checks it regardless.
+// refuse before dialing — except for the statements [GateReadsCatalog]
+// names, whose refusal [GateWithCatalog] completes from the catalog; [Run]
+// re-checks it regardless.
 func Gate(st statement.Statement) (verdict.Verdict, bool) {
 	r, refused := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 	if !refused {

@@ -9,7 +9,6 @@ import (
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
-	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -20,10 +19,13 @@ import (
 // submitted statement feeds the classifier directly. It prints the routed
 // plan and never executes anything. The statement-type gate runs first,
 // exactly as it does on apply, so a gated kind dry-runs to the same refusal
-// verdict (and refusal exit code) the apply would end in; so does the
+// verdict (and refusal exit code) the apply would end in — for a
+// single-index DROP INDEX after the same catalog read of the index's kind
+// the apply makes; so does the
 // destructive-change gate, unless --allow-destructive names the table, and
 // the executor's shape admission of the routed steps, once they are known, when
-// no earlier apply check refuses first. The checks that need the apply's
+// no earlier apply check refuses first, and the partitioned index build's
+// check of a unique index against the tree's partition keys. The checks that need the apply's
 // live facts — the size guard and the privilege preflight, which the apply
 // runs before admission — are not run. Introspecting the
 // target table sharpens type-change classification; a missing table means
@@ -35,7 +37,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	logger.Debug("statement parsed", "kind", st.Kind(), "schema", st.Schema(), "table", st.Table())
-	if v, refused := migrate.Gate(st); refused {
+	if v, refused := migrate.Gate(st); refused && !migrate.GateReadsCatalog(st) {
 		return c.emit(out, v)
 	}
 
@@ -44,6 +46,17 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	defer pool.Close()
+
+	// A single-index DROP INDEX is refused on apply too, but which refusal
+	// depends on whether the index is partitioned, so the dry run reads
+	// the same catalog the apply does.
+	gated, gateRefused, err := migrate.GateWithCatalog(ctx, pool, st)
+	if err != nil {
+		return err
+	}
+	if gateRefused {
+		return c.emit(out, gated)
+	}
 
 	facts, err := migrate.LiveFacts(ctx, pool, st)
 	if err != nil {
@@ -91,14 +104,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		report.Statements = append(report.Statements, ps)
 	}
 	if facts.Target.Partitioned() {
-		causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
-		for i := range report.Statements {
-			causes[i], err = preflight.RefusesPartitionedParent(facts.Target.ServerMajor(), report.Statements[i].ExecSQL)
-			if err != nil {
-				return err
-			}
-		}
-		if err = plan.RefuseUnsupportedPartitionedParent(&report, causes); err != nil {
+		if err = plan.RoutePartitionedParent(&report, facts.Target.ServerMajor()); err != nil {
 			return err
 		}
 	}
@@ -121,12 +127,28 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			if ps.Route != planner.RouteNative {
 				continue
 			}
-			v, refused, admitErr := migrate.AdmitRoutedSteps(st, report.Schema, ps.ExecSQL)
+			admit := migrate.AdmitRoutedSteps
+			if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+				admit = migrate.AdmitPartitionedIndexRequest
+			}
+			v, refused, admitErr := admit(st, report.Schema, ps.ExecSQL)
 			if admitErr != nil {
 				return admitErr
 			}
 			if refused {
 				return c.emit(out, v)
+			}
+			// A unique index must contain the tree's partition keys, which
+			// only the live catalog knows; the build refuses one that does
+			// not before it creates anything, and so does the dry run.
+			if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+				v, refused, admitErr = migrate.AdmitPartitionedUniqueIndex(ctx, pool, st, report.Schema, ps.ExecSQL)
+				if admitErr != nil {
+					return admitErr
+				}
+				if refused {
+					return c.emit(out, v)
+				}
 			}
 		}
 	}

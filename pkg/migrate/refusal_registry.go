@@ -82,6 +82,23 @@ func createCollisionRefusal() verdict.Refusal {
 	return verdict.Environmental(verdict.ReasonCreateCollision)
 }
 
+// attachedIndexDropRefusal: a DROP INDEX names an index attached under a
+// parent index, which PostgreSQL drops only together with that parent, in
+// either form. No engine release or flag changes that; the operator drops
+// the parent index instead.
+func attachedIndexDropRefusal() verdict.Refusal {
+	return verdict.ByDesign(verdict.ReasonUnsupportedStatement)
+}
+
+// constraintIndexDropRefusal: a DROP INDEX of a partitioned or attached
+// index comes down to an index a primary key, unique, or exclusion
+// constraint owns, which PostgreSQL removes only with the constraint, in
+// either form. No engine release or flag changes that; the operator drops
+// the constraint instead.
+func constraintIndexDropRefusal() verdict.Refusal {
+	return verdict.ByDesign(verdict.ReasonUnsupportedStatement)
+}
+
 // planIncoherentRefusal: a planned statement whose disposition this build
 // does not know, a refused planned statement carrying no class, or a plan
 // whose aggregate disposition no statement carries — a report this build
@@ -108,6 +125,8 @@ func siteRefusals() []siteRefusal {
 		{"destructive-change", destructiveChangeRefusal()},
 		{"plan-fingerprint-mismatch", fingerprintMismatchRefusal()},
 		{"create-collision", createCollisionRefusal()},
+		{"attached-index-drop", attachedIndexDropRefusal()},
+		{"constraint-index-drop", constraintIndexDropRefusal()},
 		{"declarative-foreign-key", plan.ForeignKeyChangeRefusal()},
 		{"plan-incoherent", planIncoherentRefusal()},
 		{"copy-and-swap-not-enabled", copySwapNotEnabledRefusal()},
@@ -159,8 +178,12 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 	}
 }
 
-// admissionSentinels is the closed set of the sequence executor's static
-// admission refusals the imperative front door maps to a refusal verdict.
+// admissionSentinels is the closed set of the sequence executor's and the
+// partitioned index build's static admission refusals, decided from the
+// statement's text before anything runs, and the build's refusal of a unique
+// index that misses a partition key, decided from the catalog before the
+// build creates anything, that the imperative front door maps
+// to a refusal verdict.
 // admissionRefusal walks this set for membership before it classifies, so
 // the predicate and the classification cannot disagree.
 func admissionSentinels() []error {
@@ -168,11 +191,14 @@ func admissionSentinels() []error {
 		executor.ErrUnsupportedSequenceStep,
 		executor.ErrUnnamedIndex,
 		executor.ErrIfNotExistsUnsupported,
+		executor.ErrPartitionedIndexTablespace,
+		executor.ErrUniqueIndexPartitionKey,
 	}
 }
 
 // admissionRefusal classifies an imperative admission refusal: decided from
-// the statement's shape before anything executes, so it maps to a refusal
+// the statement's shape, or for a unique index on a partitioned table from the
+// tree's partition keys, before anything executes, so it maps to a refusal
 // verdict, not an operational error. ok is false for an error outside
 // admissionSentinels(), and for a *SequenceStepError wrapper — execution
 // started, which is never an admission refusal.
@@ -187,6 +213,11 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 		// The sentinel form of the if-not-exists create-shape cause.
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
+	if errors.Is(err, executor.ErrUniqueIndexPartitionKey) {
+		// PostgreSQL itself rejects the index in every supported version, so
+		// no engine release runs it; the statement has to change.
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 }
 
@@ -194,15 +225,17 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 // planner refuses while it builds the desired table on the scratch
 // schema: a CREATE TABLE that names a live parent, refused before the
 // build runs; one that declares a constraint twice, which the build shows
-// the server kept only once; and an expression whose printed text never
-// settles. RunDesired maps them to a refusal, since nothing was planned or
-// executed.
+// the server kept only once; an expression whose printed text never
+// settles; and a TABLESPACE on an index the partitioned index build would
+// create, which that build does not honor. RunDesired maps them to a
+// refusal, since nothing was planned or executed.
 func desiredShapeSentinels() []error {
 	return []error{
 		schemadiff.ErrDesiredPartitionOf,
 		schemadiff.ErrDesiredInherits,
 		schemadiff.ErrDesiredConstraintMerged,
 		schemadiff.ErrExpressionUnsettled,
+		executor.ErrPartitionedIndexTablespace,
 	}
 }
 

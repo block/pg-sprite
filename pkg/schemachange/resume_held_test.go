@@ -1,9 +1,12 @@
 package schemachange
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/decode"
 )
@@ -41,4 +44,31 @@ func TestCountsRetainedWAL(t *testing.T) {
 	extended := own
 	extended.WALStatus = decode.WALStatusExtended
 	assert.True(t, countsRetainedWAL(extended, true), "a slot past max_wal_size still holds its WAL")
+}
+
+// Only a swap the catalog shows committed is reported as one: the source
+// still live and a refusal — a swap still deciding, or relations the
+// proof does not describe — leave the row measured as a resume that still
+// copies, so the discount cannot reach a run that will copy again. A read
+// that did not finish is returned.
+func TestSwapOutcome(t *testing.T) {
+	committed, err := swapOutcome(nil)
+	require.NoError(t, err)
+	assert.True(t, committed, "a minted swap proof")
+
+	committed, err = swapOutcome(fmt.Errorf("wrapped: %w", ErrOldTableNotFound))
+	require.NoError(t, err)
+	assert.True(t, committed, "the retained source already dropped")
+
+	committed, err = swapOutcome(fmt.Errorf("wrapped: %w", ErrNotSwapped))
+	require.NoError(t, err)
+	assert.False(t, committed, "the source still live")
+
+	committed, err = swapOutcome(refuse(CauseOutcomeAmbiguous, nil, "a swap still deciding"))
+	require.NoError(t, err)
+	assert.False(t, committed, "a refusal proves nothing")
+
+	failed := errors.New("connection reset")
+	_, err = swapOutcome(failed)
+	assert.ErrorIs(t, err, failed, "a read that did not finish is returned")
 }

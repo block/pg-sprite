@@ -22,6 +22,14 @@ import (
 // derives for the table, and their sizes are read from the catalog, never
 // from the row.
 //
+// A cutover row whose swap the catalog shows committed is reported as
+// such (CopySwapHeld.SwapCommitted), and nothing else is measured: the
+// shadow already bears the table's name, and the run that resumes it only
+// finishes the swap. The catalog read is the one InspectSwapped makes, so
+// the preflight and the run answer the row alike; a cutover row whose
+// swap did not commit, or whose outcome that read refuses to call, is
+// measured as any other resume.
+//
 // Every reading that does not prove space held counts nothing, so the
 // check falls back to a fresh run's requirement: no row, no checkpoint
 // table, a row this engine cannot read (the run itself refuses it), a
@@ -38,12 +46,19 @@ func MeasureResumeHeld(ctx context.Context, pool *pgxpool.Pool, store *checkpoin
 	if shape.Table() == "" {
 		return preflight.CopySwapHeld{}, fmt.Errorf("%w: zero copy-and-swap shape", preflight.ErrCopySwapProofMismatch)
 	}
-	cp, resumable, err := ResumableRow(ctx, store, shape.Schema(), shape.Table())
+	cp, resumable, err := resumableRow(ctx, store, shape.Schema(), shape.Table())
 	if err != nil {
 		return preflight.CopySwapHeld{}, err
 	}
 	if !resumable {
 		return preflight.CopySwapHeld{}, nil
+	}
+	committed, err := swapCommitted(ctx, pool, cp)
+	if err != nil {
+		return preflight.CopySwapHeld{}, err
+	}
+	if committed {
+		return preflight.CopySwapHeld{SwapCommitted: true}, nil
 	}
 	var held preflight.CopySwapHeld
 	if held.ShadowBytes, err = shadowBytes(ctx, pool, shape); err != nil {
@@ -58,15 +73,13 @@ func MeasureResumeHeld(ctx context.Context, pool *pgxpool.Pool, store *checkpoin
 	return held, nil
 }
 
-// ResumableRow reads the table's checkpoint row and reports whether it
+// resumableRow reads the table's checkpoint row and reports whether it
 // records a run the next run resumes: a row in a phase this engine knows
 // that is not terminal. The row-level outcomes Inspect reports — no row,
 // no table, a table an older engine shaped, a row in another format or an
 // unknown phase — are not resumes here; the run decides those itself under
-// its lock. Any other error is returned. The read takes no lock, so it is
-// a forecast for a caller deciding where to send a statement: a Runner
-// reads the row again under the table's lock and decides from that.
-func ResumableRow(ctx context.Context, store *checkpoint.Store, schema, table string) (checkpoint.Checkpoint, bool, error) {
+// its lock. Any other error is returned.
+func resumableRow(ctx context.Context, store *checkpoint.Store, schema, table string) (checkpoint.Checkpoint, bool, error) {
 	cp, err := store.Inspect(ctx, schema, table)
 	switch {
 	case err == nil:
@@ -81,6 +94,72 @@ func ResumableRow(ctx context.Context, store *checkpoint.Store, schema, table st
 		}
 		return checkpoint.Checkpoint{}, false, fmt.Errorf("read checkpoint row for %s.%s: %w", schema, table, err)
 	}
+}
+
+// swapCommitted reports whether cp is a cutover row whose swap the catalog
+// shows committed, retained source dropped or not, by the read
+// InspectSwapped makes, in one bounded read-only transaction on the pool.
+// It takes no table lock: the run that follows reads the same catalog
+// again under its lock before it acts. Every answer that does not prove
+// the commit is false, so the row is measured as a resume that still
+// copies: a row in another phase; a row whose proof does not decode,
+// which the run refuses; the source still live (ErrNotSwapped); and a
+// catalog the read refuses to call — a swap still deciding, or relations
+// the proof does not describe. A read that fails is returned.
+func swapCommitted(ctx context.Context, pool *pgxpool.Pool, cp checkpoint.Checkpoint) (bool, error) {
+	if cp.Phase != checkpoint.PhaseCutover {
+		return false, nil
+	}
+	proof, err := rowProof(cp)
+	if err != nil {
+		_, err := swapOutcome(err)
+		return false, err
+	}
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return false, fmt.Errorf("begin swap outcome read for %s.%s: %w", cp.Schema, cp.Table, err)
+	}
+	defer func() {
+		// Redundant safety closer: after a successful Commit this returns
+		// the guaranteed ErrTxClosed; on a failure path the server aborts
+		// the transaction with its session either way.
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	if err := setBudgets(ctx, tx, Options{}); err != nil {
+		return false, err
+	}
+	if err := setSearchPath(ctx, tx, proof.Schema); err != nil {
+		return false, err
+	}
+	// INV: LK-4 — the commit is read from the catalog, never assumed from
+	// the row's phase.
+	_, readErr := readSwappedTable(ctx, tx, proof)
+	committed, err := swapOutcome(readErr)
+	if err != nil {
+		return false, fmt.Errorf("read swap outcome for %s.%s: %w", cp.Schema, cp.Table, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit swap outcome read for %s.%s: %w", cp.Schema, cp.Table, err)
+	}
+	return committed, nil
+}
+
+// swapOutcome reads what readSwappedTable, or rowProof before it,
+// returned as whether the swap committed: a minted proof and a retained
+// source already dropped prove it; the source still live and a refusal —
+// which leaves the outcome for the run to answer under its lock — do not.
+// Any other error is returned: the read did not finish.
+func swapOutcome(err error) (bool, error) {
+	switch {
+	case err == nil, errors.Is(err, ErrOldTableNotFound):
+		return true, nil
+	case errors.Is(err, ErrNotSwapped):
+		return false, nil
+	}
+	if _, ok := errors.AsType[*RefusalError](err); ok {
+		return false, nil
+	}
+	return false, err
 }
 
 // shadowBytesSQL reads the total size of the ordinary table that wears the

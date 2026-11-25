@@ -331,7 +331,26 @@ func copySwapOutcome(st statement.Statement, hold sourceHold, result schemachang
 		Detail:        detail,
 		WritesBlocked: hold == holdFence,
 		SwapLSN:       swapLSN(result),
+		Verification:  copySwapVerification(result.Verification),
 	}, nil
+}
+
+// copySwapVerification renders the run's verification pass for the
+// verdict, or nil when the pass compared no chunk: a run resumed after its
+// swap had committed made none, and an empty table gives it nothing to
+// compare. It is keyed on Chunks, not Rows: a compared chunk is a pass
+// that ran, whatever number of rows it hashed.
+func copySwapVerification(report checksum.Report) *verdict.Verification {
+	if report.Chunks == 0 {
+		return nil
+	}
+	return &verdict.Verification{
+		Rows:      report.Rows,
+		Chunks:    report.Chunks,
+		Settled:   report.Settled,
+		Unsettled: report.Unsettled,
+		Carried:   report.Carried,
+	}
 }
 
 // swapLSN renders the WAL position the run's own swap transaction read, or
@@ -556,6 +575,9 @@ func refusedVerdict(st statement.Statement, r verdict.Refusal, detail string) ve
 // a quiesced run fenced the source's writes for its length.
 func copySwapDetail(result schemachange.Result, quiesced bool) string {
 	s := fmt.Sprintf("verified %d rows in %d chunks", result.Verification.Rows, result.Verification.Chunks)
+	if result.FinishedEarlierSwap {
+		s = "finished the swap an earlier run committed; nothing was copied or verified by this run"
+	}
 	if result.Verification.Settled > 0 {
 		s += fmt.Sprintf(" (%d settled against the stream)", result.Verification.Settled)
 	}

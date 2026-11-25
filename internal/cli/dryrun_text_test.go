@@ -106,6 +106,33 @@ func TestDryRunTextRunAsWritten(t *testing.T) {
 	assert.NotContains(t, text, "safer online sequence")
 }
 
+// A CREATE INDEX on a partitioned parent renders as one step that names the
+// partition-by-partition build: the statement does not run as written, and
+// the note says how an interrupted run continues.
+func TestDryRunTextPartitionedIndexBuild(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "events", "16.10"
+	report.Disposition = router.DispositionExecute
+	sql := `CREATE INDEX "events_created_idx" ON "public"."events" ("created")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionPartitionedIndexBuild,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	flat := strings.Join(strings.Fields(text), " ")
+	assert.Contains(t, flat, "will build the index partition by partition instead of running the statement")
+	assert.Contains(t, flat, "an interrupted run is resumed by running the same statement again")
+	assert.Contains(t, text, "plan:\n  public.events (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	assert.NotContains(t, text, "runs as written")
+}
+
 // A copy-and-swap route the engine carries renders as one step: no literal
 // SQL is listed, the note says what the run does, and the apply footer
 // invites the real run.

@@ -210,6 +210,19 @@ var migrateClaims = map[string]migrateClaim{
 		},
 		minMajor: 18,
 	},
+	"index-build-on-a-partitioned-parent": {
+		setup: `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				name text,
+				PRIMARY KEY (id)
+			) PARTITION BY RANGE (id);
+			CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100);
+			CREATE TABLE %[1]s.events_2 PARTITION OF %[1]s.events FOR VALUES FROM (100) TO (200)`,
+		statements: []string{
+			`CREATE INDEX events_name_idx ON %[1]s.events (name)`,
+		},
+	},
 	"drop-constraint": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (
@@ -239,6 +252,7 @@ var migrateClaims = map[string]migrateClaim{
 // pkg/schemadiff, and internal/cli.
 var declarativeOnlyClaims = []string{
 	"plain-tables-their-indexes",
+	"partitioned-parents-in-the-declarative-model",
 	"greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one",
 	"declarative-row-security-library",
 	"declarative-not-valid-constraint",
@@ -287,6 +301,7 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 			require.NoError(t, err)
 
 			opts := migrate.DefaultOptions()
+			opts.Connection = dbconn.Config{URL: url}
 			if claim.destructive {
 				opts.AllowDestructive = schema + ".accounts"
 			}

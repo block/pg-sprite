@@ -32,7 +32,7 @@ func renderProgress(s progress.Snapshot) string {
 		fields = append(fields, d.ServerPhase)
 	}
 	if d.Percent != nil {
-		fields = append(fields, fmt.Sprintf("%.1f%%", *d.Percent))
+		fields = append(fields, fmt.Sprintf("%.2f%%", *d.Percent))
 	}
 	if counter := workCounter(d); counter != "" {
 		fields = append(fields, counter)

@@ -144,15 +144,10 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, checkErr
 		}
 		if targetFacts.Partitioned() {
-			causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
-			for i := range report.Statements {
-				cause, causeErr := preflight.RefusesPartitionedParent(targetFacts.ServerMajor(), report.Statements[i].ExecSQL)
-				if causeErr != nil {
-					return plan.Report{}, causeErr
-				}
-				causes[i] = cause
+			if err := plan.RoutePartitionedParent(&report, targetFacts.ServerMajor()); err != nil {
+				return plan.Report{}, err
 			}
-			if err := plan.RefuseUnsupportedPartitionedParent(&report, causes); err != nil {
+			if err := refuseDesiredPartitionedIndexTablespace(ds, report); err != nil {
 				return plan.Report{}, err
 			}
 		}
@@ -160,6 +155,58 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	report.ExtensionSchemas = ds.ExtensionSchemas()
 	report.Fingerprint = report.ComputeFingerprint()
 	return report, nil
+}
+
+// refuseDesiredPartitionedIndexTablespace stops a plan that would build an
+// index on a partitioned table when the desired statement for that index
+// places it in a tablespace. The partitioned index build does not honor
+// TABLESPACE, and the desired index's introspected definition no longer
+// carries the clause, so the check reads the statements as written. A named
+// index is matched by name. An unnamed one cannot be matched to the
+// statement planned for it, so its TABLESPACE stops any plan that builds an
+// index on the table.
+func refuseDesiredPartitionedIndexTablespace(ds statement.DesiredSchema, report plan.Report) error {
+	placed := map[string]string{}
+	for _, st := range ds.Statements() {
+		if st.Kind() != statement.KindCreateIndex {
+			continue
+		}
+		ops, err := statement.ParseOps(st.SQL())
+		if err != nil {
+			return fmt.Errorf("read the TABLESPACE of desired index %q: %w", st.SQL(), err)
+		}
+		for _, op := range ops {
+			if op.Kind == statement.OpCreateIndex && op.Tablespace != "" {
+				placed[op.Name] = op.Tablespace
+			}
+		}
+	}
+	if len(placed) == 0 {
+		return nil
+	}
+	for i, ps := range report.Statements {
+		if ps.Execution != planner.ExecutionPartitionedIndexBuild {
+			continue
+		}
+		ops, err := statement.ParseOps(ps.SQL)
+		if err != nil {
+			return fmt.Errorf("read planned statement %d %q: %w", i+1, ps.SQL, err)
+		}
+		for _, op := range ops {
+			if op.Kind != statement.OpCreateIndex {
+				continue
+			}
+			tablespace, named := placed[op.Name]
+			if !named {
+				tablespace, named = placed[""]
+			}
+			if named {
+				return fmt.Errorf("planned statement %d builds index %s on a partitioned table, and its desired statement declares TABLESPACE %q: %w",
+					i+1, op.Name, tablespace, executor.ErrPartitionedIndexTablespace)
+			}
+		}
+	}
+	return nil
 }
 
 // addColumnProofs has the server prove, for every column the changes add
@@ -266,6 +313,7 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 		ps.Kind = ch.Kind
 		ps.Adopts = ch.Adopts
 		ps.Validates = ch.Validates
+		ps.Drops = ch.Drops
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil

@@ -55,6 +55,11 @@ version 6 added the `catch-up` operation and its engine-measured counter family
 derived `detail.percent` and `detail.eta_ns` (see [Percent and ETA](#percent-and-eta)); version
 8 added `work.settle_rows_read` and changed nothing else, so a consumer of version 7 reads version 8 unchanged once it accepts the number; every operation's `work` carries the counter, `0` where it does not apply.
 
+The precision of `detail.percent` is not part of the version contract. Within version 8 it
+went from one decimal place to two, and the running ceiling from 99.9 to 99.99, with no
+version bump. A consumer reads `detail.percent` as a number below 100 and must not depend on
+how many decimal places it carries.
+
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
 all version independently.
@@ -73,7 +78,7 @@ licenses a consumer to intervene in the change itself.
 | `format_version` | int | always | Contract version; reject unknown versions. |
 | `phase` | string | always | Overall execution phase (see Phases). |
 | `step` | int | after the first step starts | 1-based position in a multi-step sequence. Absent before execution reaches step 1. |
-| `total_steps` | int | after `Start` | Number of steps in the execution; `1` for single-statement entry points. |
+| `total_steps` | int | after `Start` | Number of steps in the execution; `1` for single-statement entry points. It only grows during a run, for an execution that finds more steps while it runs (`Tracker.AddSteps`). For a partitioned index build it is an upper bound: a partition that already has its index attached takes no step, so a resumed run finishes with `step` below it. |
 | `elapsed_ns` | int | always | Nanoseconds since execution started. For a terminal phase, **frozen** at the instant the outcome was recorded — a late poll reports the execution's duration, not the observation's age. |
 | `step_elapsed_ns` | int | always | Nanoseconds since the current step started; frozen the same way at a terminal phase. |
 | `detail` | object | always | The operation currently executing (below). |
@@ -88,7 +93,7 @@ licenses a consumer to intervene in the change itself.
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
 | `current_locker_pid` | int | while waiting on a locker | PostgreSQL backend PID currently blocking the concurrent build; omitted when none is published. |
-| `percent` | number | running `copy`, `checksum` or `concurrent-index-build` step with a known total | The current step's completion, `0` to `99.9`, one decimal place, derived at the poll from `work` — see [Percent and ETA](#percent-and-eta). Never `100`: the step ending is completion. Omitted when the total is unknown, so an absent `percent` means unknown and `0` means nothing done yet. |
+| `percent` | number | running `copy`, `checksum` or `concurrent-index-build` step with a known total | The current step's completion, `0` to `99.99`, two decimal places, derived at the poll from `work` — see [Percent and ETA](#percent-and-eta). Never `100`: the step ending is completion. Omitted when the total is unknown, so an absent `percent` means unknown and `0` means progress that rounds to zero; the `work` counters say whether any work has been done. |
 | `eta_ns` | int | with `percent`, once the step has enough signal | Nanoseconds the current step is projected to take still, whole seconds, from its rate so far on the tracker's clock. Omitted whenever `percent` is, until the step has run 5 s and done 1% of its work, and once a counter has reached the estimate it is measured against. |
 | `work` | object | measured work only | Present exactly when something measured the step's work — the server published a progress row for a concurrent build, or the engine reported the copy, checksum or catch-up step's counters; then **every** counter below is present, so a fresh build or an empty copy reports honest zeros rather than an empty object. Which counters mean anything is decided by `operation`, not by `work` being present — see [Work counters](#work-counters). |
 
@@ -216,7 +221,7 @@ is known; every other snapshot omits them — a terminal one included, since it 
 | `catch-up`, and every other operation | — | always |
 
 Both row totals are the catalog's estimate, so a counter can reach or pass its total while work
-remains. `percent` therefore never reaches `100` while the step runs — it stops at `99.9` — and
+remains. `percent` therefore never reaches `100` while the step runs — it stops at `99.99` — and
 `eta_ns` is withdrawn once a counter has reached its total, because the total is then known to be
 short and the work left is unknown. On a resumed copy `rows_copied` counts only this run's rows,
 so the percent is this run's share of the source and ends short.
@@ -374,7 +379,7 @@ context ended reports `cancelled-by-caller`.
 ## Example
 
 A poll during step 2 of a 3-step sequence, mid concurrent index build — an access method that
-reports no sub-phase, 11 of 40 blocks into the 0–50 build band, so 13.8%; the step has run
+reports no sub-phase, 11 of 40 blocks into the 0–50 build band, so 13.75%; the step has run
 under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
 
 ```json
@@ -392,7 +397,7 @@ under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
     "active": true,
     "attempt": 2,
     "current_locker_pid": 31337,
-    "percent": 13.8,
+    "percent": 13.75,
     "work": {
       "rows_copied": 0,
       "rows_total": 0,
