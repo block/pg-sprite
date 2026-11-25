@@ -483,6 +483,9 @@ func onlineIdiomPlan(p planner.Plan) bool {
 // substituted the planner's safer sequence, or when the plan proved every
 // operation an online idiom, long work on a large table is the pattern's
 // purpose and the guard would refuse the very tables the pattern serves.
+// When every operation is proven catalog-only, what executes cannot
+// rewrite or read the table, so its size cannot make a wrong guess
+// expensive and there is nothing for the guard to bound.
 func sizeGuardApplies(p planner.Plan, substituted bool) bool {
-	return !substituted && !onlineIdiomPlan(p)
+	return !substituted && !onlineIdiomPlan(p) && !planner.ProvenCatalogOnly(p.Decisions)
 }

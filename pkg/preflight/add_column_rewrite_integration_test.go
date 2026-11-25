@@ -132,6 +132,24 @@ func TestAddColumnRewritesAsTheServerDecides(t *testing.T) {
 			why:   "a constant default is stored in the catalog",
 		},
 		{
+			name:  "NOT NULL without a default",
+			alter: `ALTER TABLE %[1]s.t ADD COLUMN unfilled int NOT NULL`,
+			want:  statement.AddColumnInPlaceScans,
+			why:   "no default fills the existing rows, so the server reads every row to prove there are none",
+		},
+		{
+			name:  "NOT NULL with DEFAULT NULL",
+			alter: `ALTER TABLE %[1]s.t ADD COLUMN null_default int NOT NULL DEFAULT NULL`,
+			want:  statement.AddColumnInPlaceScans,
+			why:   "a NULL default stores no value, so the NOT NULL is checked against every row",
+		},
+		{
+			name:  "NOT NULL with a default that evaluates to NULL",
+			alter: `ALTER TABLE %[1]s.t ADD COLUMN folded int NOT NULL DEFAULT nullif(1, 1)`,
+			want:  statement.AddColumnInPlaceScans,
+			why:   "the default is evaluated once to NULL and stores no value",
+		},
+		{
 			name:  "constant default with an inline check",
 			alter: `ALTER TABLE %[1]s.t ADD COLUMN checked int DEFAULT 1 CHECK (checked > 0)`,
 			want:  statement.AddColumnInPlace,

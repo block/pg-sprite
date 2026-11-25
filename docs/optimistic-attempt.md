@@ -58,6 +58,8 @@ pg-sprite executes a PostgreSQL schema change through an escalation ladder:
    `*preflight.SizeError`, because on a big table even a losing gamble costs a full
    budget of hard downtime under `ACCESS EXCLUSIVE`
    ([why the cost scales with size](#why-does-a-wrong-guess-cost-differently-on-small-vs-large-tables)).
+   An attempt whose every operation is proven catalog-only is exempt: it cannot
+   lose the gamble ([who gets size-checked](#who-gets-size-checked)).
 
 The ladder is **permanent design, not a stopgap**: the copy-and-swap engine is a rung
 beside the attempt, not a replacement for it. It runs the shapes the planner proves are
@@ -196,7 +198,8 @@ What happens to one statement, in order:
    `Options.MaxTableSizeBytes` ([the knob](#the-size-guard-knob)). Over it, the walk
    ends at Exit 4: a typed `*preflight.SizeError`, before any DDL and before any
    lock. Lane A passes `preflight.NoSizeLimit` — long work on large tables is its
-   purpose ([who gets size-checked](#who-gets-size-checked)).
+   purpose. So does a lane B attempt whose every operation is proven catalog-only
+   ([who gets size-checked](#who-gets-size-checked)).
 5. **Partition and tier gates — every executing lane.** Partition handling is checked
    against the server version, and the connected role is checked at the privilege
    tier the routed steps actually need ([engine-role.md](engine-role.md)) — a role
@@ -277,9 +280,10 @@ The limit is policy, not capability — one number, set by the embedding caller:
   `--max-table-size`.
 - **Default:** 1 GiB (`DefaultOptions`) — a default to tune, not a recommendation.
   The consequence is worth meeting here rather than in production: at the default,
-  even adding a nullable column to a table over 1 GiB is refused until the operator
-  raises the threshold, because the add runs as a blind bounded attempt
-  ([limitations.md](limitations.md)).
+  widening a `varchar` on a table over 1 GiB is refused until the operator raises
+  the threshold, because the change runs as a blind bounded attempt
+  ([limitations.md](limitations.md)). Adding a nullable column or dropping one is
+  not refused: PostgreSQL runs those on the catalog alone.
 - **What it measures:** the table's full on-disk footprint — heap, indexes, and
   TOAST, across all partitions (`preflight.CheckTable`, `pkg/preflight`).
 - **Validation:** the value must be positive; a zero or negative value is rejected at
@@ -298,14 +302,22 @@ the sanctioned way to converge a bounded-attempt change
 
 The size guard applies to exactly the executions that run the submitted form as one
 blind statement under `ACCESS EXCLUSIVE` — however confidently the planner classified
-it (`sizeGuardApplies` in `pkg/migrate`):
+it — unless every operation in it is proven catalog-only (`sizeGuardApplies` in
+`pkg/migrate`):
 
 | Execution shape | Size-guarded? | Why |
 |---|---|---|
 | Planner-proven online idiom (e.g. `CREATE INDEX CONCURRENTLY`) | No — passes `preflight.NoSizeLimit` | Long work on large tables is its *purpose*; every brief step is still budget-bounded |
 | Substituted safer sequence (planner replaced the submitted form) | No — passes `preflight.NoSizeLimit` | Same: the sequence is the proof |
-| Blind bounded attempt of the submitted form | **Yes** | Safety comes from the budget, and the budget's worst case scales with table size |
+| Every operation proven catalog-only (`proven_catalog_only` on each decision) | No — passes `preflight.NoSizeLimit` | What executes cannot rewrite or read the table, so a wrong guess costs the same on any size. Still budget-bounded |
+| Any other blind bounded attempt of the submitted form | **Yes** | Safety comes from the budget, and the budget's worst case scales with table size |
 | **Forced** run (operator acknowledged override) | **Yes** | A forced run bypasses shape admission but not the size guard — it is still one blind bounded attempt |
+
+An operation is proven catalog-only when PostgreSQL has no path that touches the
+table's rows: `DROP COLUMN`, `SET DEFAULT`, `DROP DEFAULT`, `DROP NOT NULL`,
+`DROP CONSTRAINT`, and an `ADD COLUMN` whose probe proved it adds in place without
+checking a `NOT NULL` against every row. The [plan report](plan-report.md) shows
+the mark per decision.
 
 The axis is not proof-versus-bet — `metadata-only` is a proof-shaped word on a
 guarded route. The guard hedges against the classifier being *wrong*, not against the
@@ -315,15 +327,18 @@ extension-owned column), the statement rewrites the table under `ACCESS EXCLUSIV
 exactly Case 3 of [the timelines](#timeline-the-four-bounded-attempt-scenarios). The
 exempt set is exempt because what executes can never produce Case 3, no matter how
 wrong the plan is: a planner-authored sequence or an already-online form never holds
-`ACCESS EXCLUSIVE` for the long work.
+`ACCESS EXCLUSIVE` for the long work, and a catalog-only operation has no long work
+to do. Its mark comes from PostgreSQL itself, not the classifier: the probe that
+adds the column to an empty copy of the table, or an operation the server only ever
+runs on the catalog.
 
 Per planner `reason`, the same rule (a docs test in `pkg/migrate` pins this table
 against `sizeGuardApplies`):
 
 | planner `reason` | Size-guarded? |
 |---|---|
-| `metadata-only` | **Yes** — a blind bounded attempt of the submitted form |
-| `fast-default` | **Yes** — same |
+| `metadata-only` | **Yes** — a blind bounded attempt of the submitted form, unless every decision in the plan is `proven_catalog_only` |
+| `fast-default` | **Yes** — same, with the same exemption |
 | `binary-coercible` | **Yes** — same |
 | `app-breaking-rename` | **Yes** — same, but only under `--force SCHEMA.TABLE`: without it the rename is refused `rewrite-required` (and a lint error) because it breaks running application code the moment it commits |
 | `partition-parent-lock` | **Yes** — same |
@@ -385,10 +400,13 @@ runtime.
 
 ### Aren't all native-safe changes online-safe by design, without a limit?
 
-Only the shapes whose *executed form* is already online. **Exemption comes from what
-executes — an already-online submitted form (`online-idiom`) or a substituted safe
-sequence (`safer-idiom`) — never from classification confidence. Everything else that
-executes is size-checked, `metadata-only` included.** Above the limit the attempt is not
+Only the shapes whose *executed form* cannot do long work under the lock.
+**Exemption comes from what executes — an already-online submitted form
+(`online-idiom`), a substituted safe sequence (`safer-idiom`), or operations
+PostgreSQL runs on the catalog alone (`proven_catalog_only`) — never from
+classification confidence. Everything else that executes is size-checked,
+including a `metadata-only` change with no catalog-only proof, such as a table
+option.** Above the limit the attempt is not
 even made — the typed `SizeError` is returned before any DDL runs. The full rule, per
 execution shape and per planner `reason`, is
 [who gets size-checked](#who-gets-size-checked).
@@ -544,9 +562,10 @@ page rests on:
 
 1. **The size check precedes all DDL.** Above the limit, the refusal is a typed
    `*preflight.SizeError` returned before any statement is issued — no lock is taken.
-2. **Proof-exempt, attempt-guarded.** Planner-proven idioms and substituted sequences
-   pass `NoSizeLimit`; blind attempts of the submitted form — including forced runs —
-   are always size-guarded.
+2. **Proof-exempt, attempt-guarded.** Planner-proven idioms, substituted sequences,
+   and attempts made only of proven catalog-only operations pass `NoSizeLimit`;
+   every other blind attempt of the submitted form — including forced runs — is
+   size-guarded.
 3. **Budgets are non-negotiable.** `lock_timeout` and `statement_timeout` are applied
    with `SET LOCAL` inside the attempt's transaction, regardless of session defaults.
 4. **Typed outcomes, SQLSTATE matching.** Budget overruns map `55P03`/`57014` to
