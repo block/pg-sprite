@@ -355,10 +355,37 @@ type Model struct {
 	// definition and cannot be expressed in a desired file, so the model
 	// carries them only for the renderer to refuse on.
 	ReferencedBy []string
+	// IncomingForeignKeys are the same foreign keys as ReferencedBy, in the
+	// same order, each with the schema of the table that holds it. Two
+	// tables in different schemas can share a name and a constraint name,
+	// so only these tell their foreign keys apart. Read for callers that
+	// act on another table's foreign key, such as one that drops the
+	// referencing table first, and not part of the table's shape.
+	IncomingForeignKeys []IncomingForeignKey `json:"-"`
+	// TableDependents are the objects that depend on the table as a whole
+	// and that DROP TABLE removes with it, such as triggers, rules,
+	// statistics objects, and publication memberships, each named by the
+	// server's description with its definition where the server prints
+	// one, in a stable order. Policies are in RowSecurity, and the
+	// dependents of single columns are on the columns. They are live
+	// facts for a reviewed table drop, not part of the table's declared
+	// shape, so they are left out of the model's JSON.
+	TableDependents []Dependent `json:"-"`
 	// Columns are the table's columns in attribute order.
 	Columns []Column
 	// Constraints are the table constraints, name-sorted.
 	Constraints []Constraint
 	// Indexes are the non-constraint indexes, name-sorted.
 	Indexes []Index
+}
+
+// IncomingForeignKey names a foreign key of another table that references
+// the model's table.
+type IncomingForeignKey struct {
+	// Schema is the schema of the table that holds the foreign key.
+	Schema string
+	// Table is the table that holds the foreign key.
+	Table string
+	// Constraint is the foreign key constraint's name.
+	Constraint string
 }

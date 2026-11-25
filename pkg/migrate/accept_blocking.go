@@ -85,6 +85,13 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 			return verdict.Verdict{}, err
 		}
 	}
+	heldVerdict, held, err := refuseOverStoppedRun(ctx, pool, st, locked.schema, locked.name)
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	if held {
+		return heldVerdict, nil
+	}
 	// INV: RF-10 — accepting the lock is not accepting the loss: a dropped
 	// index runs only when the destructive acknowledgement also names its
 	// table.
