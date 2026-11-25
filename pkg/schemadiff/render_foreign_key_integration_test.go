@@ -1,6 +1,7 @@
 package schemadiff_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -102,7 +103,7 @@ func TestRenderWithForeignKeysRefusesACrossSchemaReference(t *testing.T) {
 	other := testutil.NewSchema(t, pool)
 	publicUsers := "users_" + schema
 	t.Cleanup(func() {
-		_, err := pool.Exec(t.Context(), "DROP TABLE IF EXISTS public."+pgx.Identifier{publicUsers}.Sanitize()+" CASCADE")
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP TABLE IF EXISTS public."+pgx.Identifier{publicUsers}.Sanitize()+" CASCADE")
 		assert.NoError(t, err)
 	})
 	for name, referenced := range map[string]string{
