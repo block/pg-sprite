@@ -52,7 +52,7 @@ func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
 // Consumers ask "what is generally available?" by filtering on maturity, so
 // the preview set is pinned by id: a copy-and-swap row published as ga, or a
 // native row slipped into preview, changes what an automated caller is told
-// it may run without opting in.
+// needs no preview opt-in. Each row still needs its own safety flags.
 func TestPreviewRowsAreTheCopySwapRows(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ func TestPreviewRowsAreTheCopySwapRows(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		"alter-column-type-general-or-with-using",
 		"column-transform-expressions-during-a-copy-and-swap-rewrite",
-	}, preview)
+	}, preview, "the preview set changed: taking copy-and-swap out of preview also changes validateMaturity's copy-and-swap rule, its TestValidateRules case, this list, and the copy_and_swap sentence in docs/capabilities-contract.md")
 }
 
 func TestLoadRejectsInvalidYAML(t *testing.T) {
@@ -101,6 +101,15 @@ func TestValidateRules(t *testing.T) {
 			r.FrontDoors = FrontDoors{Migrate: DoorRefused, Diff: DoorRefused}
 			r.RefusalReason = verdict.ReasonBackendUnavailable
 		},
+		"min server major only on T1": func(r *Row) {
+			r.Tier = TierTwo
+			r.StatusMark = StatusPlanned
+			r.Maturity = ""
+			r.MinServerMajor = 18
+			r.FrontDoors = FrontDoors{Migrate: DoorRefused, Diff: DoorRefused}
+			r.RefusalReason = verdict.ReasonBackendUnavailable
+		},
+		"min server major later than the oldest supported": func(r *Row) { r.MinServerMajor = 14 },
 		"none only on T3":            func(r *Row) { r.EnginePath = PathNone },
 		"No names owner":             func(r *Row) { r.OnlineSafetyProblem = false },
 		"Yes omits owner":            func(r *Row) { r.OwningToolClass = "owner" },

@@ -34,7 +34,8 @@ type FrontDoorStatus string
 
 // Maturity says whether a supported capability is generally available or in
 // preview. Only a T1 row carries one: a planned or out-of-scope operation
-// does not run, so it has no maturity.
+// does not run, so it has no maturity. A ga row runs on every supported
+// server major unless its MinServerMajor names a later one.
 type Maturity string
 
 // Closed values used by capability rows.
@@ -81,6 +82,7 @@ type Row struct {
 	StatusMark          StatusMark     `yaml:"status_mark" json:"status_mark"`
 	EnginePath          EnginePath     `yaml:"engine_path" json:"engine_path"`
 	Maturity            Maturity       `yaml:"maturity,omitempty" json:"maturity,omitempty"`
+	MinServerMajor      int            `yaml:"min_server_major,omitempty" json:"min_server_major,omitempty"`
 	OnlineSafetyProblem bool           `yaml:"online_safety_problem" json:"online_safety_problem"`
 	OnlineSafetyDetail  string         `yaml:"online_safety_detail,omitempty" json:"online_safety_detail,omitempty"`
 	OwningToolClass     string         `yaml:"owning_tool_class,omitempty" json:"owning_tool_class,omitempty"`
@@ -144,6 +146,9 @@ func Validate(rows []Row) error {
 		if err := validateMaturity(row); err != nil {
 			return fmt.Errorf("%s: %w", prefix, err)
 		}
+		if err := validateMinServerMajor(row); err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
+		}
 		if !row.OnlineSafetyProblem && row.OwningToolClass == "" {
 			return fmt.Errorf("%s: No row requires owning_tool_class", prefix)
 		}
@@ -184,6 +189,26 @@ func validateMaturity(row Row) error {
 	}
 	if row.EnginePath == PathCopyAndSwap && row.Maturity != MaturityPreview {
 		return errors.New("a copy-and-swap row is preview while the route is opt-in")
+	}
+	return nil
+}
+
+// oldestSupportedServerMajor is the oldest PostgreSQL major pg-sprite
+// supports; a row that runs on every supported major omits min_server_major.
+const oldestSupportedServerMajor = 14
+
+// validateMinServerMajor checks that min_server_major appears only on a T1
+// row, where maturity alone would otherwise claim every supported major, and
+// only when it names a major later than the oldest supported one.
+func validateMinServerMajor(row Row) error {
+	if row.MinServerMajor == 0 {
+		return nil
+	}
+	if row.Tier != TierOne {
+		return errors.New("only a T1 row carries a min_server_major")
+	}
+	if row.MinServerMajor <= oldestSupportedServerMajor {
+		return fmt.Errorf("min_server_major %d must be later than %d; omit it when every supported major runs the row", row.MinServerMajor, oldestSupportedServerMajor)
 	}
 	return nil
 }

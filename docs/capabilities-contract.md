@@ -97,7 +97,8 @@ spellings.
 | `tier` | enum | yes | `t1`, `t2`, `t3` |
 | `status_mark` | enum | yes | `✅`, `🟡`, `⚪`, `🔵`, `❌` |
 | `engine_path` | enum | yes | `native_as_is`, `native_safer_sequence`, `native_planned_flow`, `copy_and_swap`, `none` |
-| `maturity` | enum | conditionally | Required on T1 rows, absent otherwise: `ga` (generally available) or `preview` (runs only when the run opts in). A `copy_and_swap` row is `preview` while that route is opt-in |
+| `maturity` | enum | conditionally | Required on T1 rows, absent otherwise: `ga` (generally available) or `preview` (runs only when the run opts in). A `copy_and_swap` row is `preview` while that route is opt-in. A `ga` row runs on every supported server major unless `min_server_major` names a later one |
+| `min_server_major` | integer | no | T1 rows only: the oldest PostgreSQL major the row runs on, present only when it is later than the oldest supported major; an older server refuses the operation |
 | `online_safety_problem` | boolean | yes | The matrix's leading Yes/No answer |
 | `online_safety_detail` | string | no | Markdown qualification after Yes/No, without the leading answer |
 | `owning_tool_class` | string | conditionally | Required when `online_safety_problem` is false; absent otherwise; preserves the class named after “No —” |
@@ -113,6 +114,8 @@ admission, not whether a direct SQL equivalent exists outside pg-sprite. `not_ap
 an operation that a door cannot express; `refused` means that door can identify and
 reject it.
 
+The generated page renders a `preview` row's status cell as `✅ preview`; its
+`status_mark` in JSON stays `✅`, so read maturity from `maturity`, not from the page.
 The renderer reconstructs the existing answer cell from
 `online_safety_problem`, `online_safety_detail`, and `owning_tool_class`. It renders
 the human engine-path labels from the enum and uses `reason_notes` verbatim. This
@@ -123,20 +126,21 @@ below):
 
 ```json
 {
-  "id": "refresh-materialized-view",
-  "area": "types_and_non_table_objects",
-  "operation": "`REFRESH MATERIALIZED VIEW`",
-  "tier": "t3",
-  "status_mark": "🔵",
-  "engine_path": "none",
-  "online_safety_problem": false,
-  "owning_tool_class": "data jobs / owner tooling",
+  "id": "add-foreign-key-not-valid-on-a-partitioned-parent",
+  "area": "constraints",
+  "operation": "`ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent**",
+  "tier": "t1",
+  "status_mark": "✅",
+  "engine_path": "native_safer_sequence",
+  "maturity": "ga",
+  "min_server_major": 18,
+  "online_safety_problem": true,
+  "online_safety_detail": "server version 18 or later",
   "front_doors": {
-    "migrate": "refused",
-    "diff": "refused"
+    "migrate": "supported",
+    "diff": "supported"
   },
-  "refusal_reason": "unsupported-statement",
-  "reason_notes": "A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs"
+  "reason_notes": "Supported on version 18 and later; refused on 14–17 with an environmental class"
 }
 ```
 
@@ -146,7 +150,8 @@ The generator replaces only content between paired markers such as
 `<!-- capabilities:begin column_changes -->` and
 `<!-- capabilities:end column_changes -->`. One more pair,
 `<!-- capabilities:begin summary -->` and `<!-- capabilities:end summary -->`, wraps the
-headline sentence above the tables that counts operations per tier: those counts are
+headline sentence above the tables that counts operations per tier, and the supported
+operations in preview: those counts are
 derived from the rows, so the generator writes them, and a row added to the YAML cannot
 leave the sentence one behind. The status legend below it stays hand-written; the mark set
 is a closed enum and the legend explains it rather than counting it. Everything outside the

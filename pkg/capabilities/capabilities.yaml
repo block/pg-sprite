@@ -199,6 +199,7 @@ rows:
     status_mark: "✅"
     engine_path: "native_safer_sequence"
     maturity: "ga"
+    min_server_major: 18
     online_safety_problem: true
     online_safety_detail: "server version 18 or later"
     front_doors:
@@ -535,7 +536,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "An enum column is an ordinary column to both front doors: adding one (with a constant default it is catalog-only), changing its default, and indexing it run natively, and a desired file can create a table with one. A desired file names an enum in the table's schema or `public` bare; introspection renders the live column through `format_type`, so the file and the live table compare equal and a rerun plans nothing. The enum type is created with owner tooling; after that its labels can be declared in a desired enum type file, or added with `ALTER TYPE ... ADD VALUE`. Retyping a column to or from an enum rewrites the table and runs on copy-and-swap"
+    reason_notes: "An enum column is an ordinary column to both front doors: adding one (with a constant default it is catalog-only), changing its default, and indexing it run natively, and a desired file can create a table with one. A desired file names an enum in the table's schema or `public` bare; introspection renders the live column through `format_type`, so the file and the live table compare equal and a rerun plans nothing. The enum type is created with owner tooling; after that its labels can be declared in a desired enum type file, or added with `ALTER TYPE ... ADD VALUE`. Retyping a column to or from an enum rewrites the table and runs on copy-and-swap (preview, opt-in)"
   - id: alter-type-add-value
     area: "types_and_non_table_objects"
     operation: "`ALTER TYPE ... ADD VALUE`"

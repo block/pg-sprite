@@ -193,8 +193,11 @@ adds, removes, or re-scopes a capability — a planner route, a refusal, a verdi
 a declarative-model boundary — updates all three in the same PR, and every release sweeps
 them against the shipped behavior before tagging. A supported row's `maturity` (`ga` or
 `preview`) is the answer to "is this generally available?": run
-`pg-sprite capabilities --json` rather than inferring it from the ✅ mark, and a PR that
-takes a route out of preview flips its rows to `ga` in the same change.
+`pg-sprite capabilities --json` rather than inferring it from the ✅ mark. A row that runs
+only from a later server major names it in `min_server_major`. A PR that takes a route out
+of preview flips its rows to `ga` in the same change, together with `validateMaturity`'s
+rule for that route, its `TestValidateRules` case, `TestPreviewRowsAreTheCopySwapRows`,
+and the route's sentence in `docs/capabilities-contract.md`.
 
 ## Logging and observability
 
