@@ -352,8 +352,9 @@ type Model struct {
 	// ReferencedBy lists the incoming foreign keys — constraints on other
 	// tables that reference this one — as "table.constraint" strings, in
 	// that order. Incoming foreign keys are not part of this table's own
-	// definition and cannot be expressed in a desired file, so the model
-	// carries them only for the renderer to refuse on.
+	// definition: each one is declared in the referencing table's desired
+	// file. Render refuses a referenced table unless the caller opts in
+	// with RenderOptions.ForeignKeys and renders the referencing tables too.
 	ReferencedBy []string
 	// IncomingForeignKeys are the same foreign keys as ReferencedBy, in the
 	// same order, each with the schema of the table that holds it. Two
