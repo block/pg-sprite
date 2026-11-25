@@ -88,6 +88,15 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = qualifiedDesired(ds, req.Schema); err != nil {
 			return plan.Report{}, err
 		}
+		// A new table's foreign keys reference tables that must already
+		// exist in the target schema. Building the desired table in the
+		// scratch schema checks each one, so planning refuses a missing or
+		// unreadable referenced table instead of leaving the create to fail.
+		if len(ds.ReferencedTables()) > 0 {
+			if _, err := schemadiff.IntrospectDesired(ctx, pool, req.Schema, ds); err != nil {
+				return plan.Report{}, err
+			}
+		}
 	case err != nil:
 		return plan.Report{}, err
 	default:

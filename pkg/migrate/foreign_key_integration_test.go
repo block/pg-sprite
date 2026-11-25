@@ -1,10 +1,12 @@
 package migrate_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -245,4 +247,66 @@ func TestRunDesiredCreatesATableWithAForeignKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 	assert.Empty(t, res.Plan.Statements, "the created table plans no statements")
+}
+
+// A new table's foreign key binds to the referenced table in the target
+// schema, never to a table of the same name the session's search_path
+// reaches elsewhere. When the target schema has no such table, nothing is
+// created: the run fails before the create, and the table stays absent.
+func TestRunDesiredCreateBindsForeignKeysToTheTargetSchema(t *testing.T) {
+	pool, schema := foreignKeySchema(t)
+	elsewhere := "fk_elsewhere_" + schema
+	_, err := pool.Exec(t.Context(), "CREATE TABLE public."+pgx.Identifier{elsewhere}.Sanitize()+" (id bigint PRIMARY KEY)")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP TABLE IF EXISTS public."+pgx.Identifier{elsewhere}.Sanitize()+" CASCADE")
+		assert.NoError(t, err)
+	})
+	desired := fmt.Sprintf(`
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES %s (id)
+);`, pgx.Identifier{elsewhere}.Sanitize())
+	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desired)}
+
+	_, err = migrate.RunDesired(t.Context(), pool, req, runOptions())
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, schemadiff.ErrReferencedTableNotFound)
+	var exists bool
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT to_regclass($1) IS NOT NULL", schema+".orders").Scan(&exists))
+	assert.False(t, exists, "a key that would bind outside the target schema creates nothing")
+}
+
+// A desired file that adds a primary key and a foreign key referencing it on
+// the same live table runs the key first, so the foreign key has the key it
+// references when it is added.
+func TestRunDesiredAddsAPrimaryKeyBeforeTheForeignKeyThatReferencesIt(t *testing.T) {
+	pool, schema := foreignKeySchema(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.employees (id bigint NOT NULL, manager_id bigint);
+		INSERT INTO %[1]s.employees VALUES (1, NULL), (2, 1)`, schema))
+	require.NoError(t, err)
+	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, `
+CREATE TABLE employees (
+    id bigint NOT NULL,
+    manager_id bigint,
+    CONSTRAINT employees_pkey PRIMARY KEY (id),
+    CONSTRAINT employees_manager_id_fkey FOREIGN KEY (manager_id) REFERENCES employees (id)
+);`)}
+
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	var kinds []schemadiff.ChangeKind
+	for _, st := range res.Plan.Statements {
+		kinds = append(kinds, st.Kind)
+	}
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, kinds[len(kinds)-1], "the foreign key comes after the key it references: %v", kinds)
+	var validated bool
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT convalidated FROM pg_catalog.pg_constraint
+		WHERE conrelid = ($1 || '.employees')::regclass AND conname = 'employees_manager_id_fkey'`, schema).Scan(&validated))
+	assert.True(t, validated)
 }

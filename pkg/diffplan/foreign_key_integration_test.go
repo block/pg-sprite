@@ -327,7 +327,7 @@ func TestPlanGreenfieldTableWithForeignKeyIsCreated(t *testing.T) {
 	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
 	assert.Equal(t, schemadiff.ChangeCreateTable, st.Kind)
-	assert.Contains(t, st.SQL, "REFERENCES users (id)")
+	assert.Contains(t, st.SQL, "REFERENCES "+schema+".users (id)", "the reference binds to the target schema")
 	assert.Empty(t, st.Cause)
 	assert.Equal(t, router.DispositionExecute, st.Disposition)
 	assert.Equal(t, router.DispositionExecute, report.Disposition)

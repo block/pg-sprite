@@ -330,9 +330,14 @@ func isPartition(create *pganalyze.CreateStmt) bool {
 
 // Qualify returns sql with its target relation qualified by schema; an
 // empty schema strips an existing qualification instead. It supports exactly
-// one CREATE TABLE, CREATE INDEX, or ALTER TABLE statement. This touches
-// qualification only — no semantics are ever derived or transformed at the
-// AST level (that is execute-and-introspect's job).
+// one CREATE TABLE, CREATE INDEX, or ALTER TABLE statement. A CREATE TABLE's
+// unqualified foreign-key references are qualified by schema too, because a
+// desired file's referenced tables live in the target schema: left
+// unqualified, a reference would resolve through the session's search_path
+// and could bind a same-named table in another schema. Stripping leaves
+// references as written. This touches qualification only — no semantics are
+// ever derived or transformed at the AST level (that is
+// execute-and-introspect's job).
 func Qualify(sql, schema string) (string, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
@@ -346,6 +351,13 @@ func Qualify(sql, schema string) (string, error) {
 	switch {
 	case node.GetCreateStmt() != nil:
 		rel = node.GetCreateStmt().GetRelation()
+		if schema != "" {
+			for _, con := range foreignKeyConstraints(node.GetCreateStmt()) {
+				if ref := con.GetPktable(); ref != nil && ref.GetSchemaname() == "" {
+					ref.Schemaname = schema
+				}
+			}
+		}
 	case node.GetIndexStmt() != nil:
 		rel = node.GetIndexStmt().GetRelation()
 	case node.GetAlterTableStmt() != nil:

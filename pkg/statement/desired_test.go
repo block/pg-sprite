@@ -113,6 +113,22 @@ func TestQualify(t *testing.T) {
 	assert.Equal(t, "ALTER TABLE s1.t ADD COLUMN c int", got)
 }
 
+// A CREATE TABLE's unqualified foreign-key references are qualified with
+// its target, column-level and table-level alike, so the key binds the
+// referenced table in the target schema whatever the session's search_path.
+// A qualified reference is left as written.
+func TestQualifyQualifiesCreateTableForeignKeyReferences(t *testing.T) {
+	got, err := Qualify("CREATE TABLE orders (id int PRIMARY KEY, user_id int REFERENCES users (id), "+
+		"parent_id int, FOREIGN KEY (parent_id) REFERENCES orders (id), other_id int REFERENCES s2.other (id))", "s1")
+	require.NoError(t, err)
+	assert.Equal(t, "CREATE TABLE s1.orders (id int PRIMARY KEY, user_id int REFERENCES s1.users (id), "+
+		"parent_id int, FOREIGN KEY (parent_id) REFERENCES s1.orders (id), other_id int REFERENCES s2.other (id))", got)
+
+	got, err = Qualify("CREATE TABLE s1.orders (user_id int REFERENCES users (id))", "")
+	require.NoError(t, err)
+	assert.Equal(t, "CREATE TABLE orders (user_id int REFERENCES users (id))", got, "stripping leaves references as written")
+}
+
 func TestQualifyEmptySchemaStripsQualification(t *testing.T) {
 	got, err := Qualify("CREATE INDEX i ON s1.t USING btree (c)", "")
 	require.NoError(t, err)

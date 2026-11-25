@@ -453,6 +453,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	}
 
 	// Constraints to add: new, or re-added after a definition change.
+	// Foreign keys are held back until the table's other constraints and
+	// indexes are in place, because a key can reference the primary key,
+	// unique constraint, or unique index the same diff adds to its own
+	// table.
+	var foreignKeys []Change
 	for _, con := range desired.Constraints {
 		if _, ok := adopted[con.Name]; ok {
 			changes = append(changes, Change{
@@ -464,11 +469,16 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 		had, ok := liveCons[con.Name]
 		if ok && validatesInPlace(had, con) {
-			changes = append(changes, Change{
+			validate := Change{
 				SQL:       "ALTER TABLE " + table + " VALIDATE CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:      validateConstraintKind(con),
 				Validates: &ConstraintValidation{Constraint: con.Name, Def: had.Def},
-			})
+			}
+			if con.ForeignKey {
+				foreignKeys = append(foreignKeys, validate)
+			} else {
+				changes = append(changes, validate)
+			}
 			continue
 		}
 		if !ok || had.Def != con.Def {
@@ -479,6 +489,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 					return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
 				}
 				sql = qualified
+				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con)})
+				continue
 			}
 			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con)})
 		}
@@ -497,6 +509,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			changes = append(changes, Change{SQL: qualified, Kind: ChangeCreateIndex})
 		}
 	}
+
+	// Foreign keys last, once everything they can reference on this table
+	// exists.
+	changes = append(changes, foreignKeys...)
 
 	return changes, nil
 }
