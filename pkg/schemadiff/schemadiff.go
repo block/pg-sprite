@@ -188,6 +188,17 @@ type Constraint struct {
 	// " NOT VALID". Only a live table carries one: CREATE TABLE ignores NOT
 	// VALID, so a desired constraint is always validated.
 	NotValid bool `json:"-"`
+	// ReferencesOtherSchema reports a foreign key whose referenced table is
+	// in another schema than the table's own. Def prints such a reference
+	// unqualified when that schema is on the introspection search_path
+	// (public), so only this tells it apart from a same-schema reference.
+	ReferencesOtherSchema bool `json:"-"`
+	// SelfReferencesStandaloneIndex reports a foreign key from the table to
+	// itself whose referenced columns are unique only through a standalone
+	// unique index, one no primary key or unique constraint owns. CREATE
+	// TABLE declares the key before any CREATE INDEX after it runs, so a
+	// file that renders both cannot create the table.
+	SelfReferencesStandaloneIndex bool `json:"-"`
 	// IndexInvalid reports a primary key, unique, or exclusion constraint
 	// whose index the server has not validated (pg_index.indisvalid is
 	// false). On a partitioned parent that is a key added with ALTER TABLE

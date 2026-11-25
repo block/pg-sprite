@@ -2,8 +2,10 @@ package schemadiff_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -92,23 +94,62 @@ func TestRenderWithForeignKeysPlansValidationOfANotValidKey(t *testing.T) {
 	assert.Equal(t, schemadiff.ChangeValidateForeignKey, changes[0].Kind)
 }
 
-// A desired file names tables only in its own schema, so a foreign key that
-// references a table in another schema is still refused.
+// A foreign key into another schema is refused, because a desired file names
+// tables only in its own schema. That holds for a reference into public too,
+// which introspection prints unqualified because public is on its search_path.
 func TestRenderWithForeignKeysRefusesACrossSchemaReference(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	other := testutil.NewSchema(t, pool)
-	for _, ddl := range []string{
-		fmt.Sprintf("CREATE TABLE %s.users (id bigint PRIMARY KEY)", other),
-		fmt.Sprintf("CREATE TABLE %s.orders (id bigint PRIMARY KEY, user_id bigint REFERENCES %s.users)", schema, other),
+	publicUsers := "users_" + schema
+	t.Cleanup(func() {
+		_, err := pool.Exec(t.Context(), "DROP TABLE IF EXISTS public."+pgx.Identifier{publicUsers}.Sanitize()+" CASCADE")
+		assert.NoError(t, err)
+	})
+	for name, referenced := range map[string]string{
+		"another schema": pgx.Identifier{other, "users"}.Sanitize(),
+		"public":         pgx.Identifier{"public", publicUsers}.Sanitize(),
 	} {
-		_, err := pool.Exec(t.Context(), ddl)
-		require.NoError(t, err)
-	}
+		t.Run(name, func(t *testing.T) {
+			table := "orders_" + strings.ReplaceAll(name, " ", "_")
+			for _, ddl := range []string{
+				fmt.Sprintf("CREATE TABLE %s (id bigint PRIMARY KEY)", referenced),
+				fmt.Sprintf("CREATE TABLE %s (id bigint PRIMARY KEY, user_id bigint REFERENCES %s)", pgx.Identifier{schema, table}.Sanitize(), referenced),
+			} {
+				_, err := pool.Exec(t.Context(), ddl)
+				require.NoError(t, err)
+			}
 
-	live, err := schemadiff.Introspect(t.Context(), pool, schema, "orders")
+			live, err := schemadiff.Introspect(t.Context(), pool, schema, table)
+			require.NoError(t, err)
+			_, err = schemadiff.RenderWith(live, schemadiff.RenderOptions{ForeignKeys: true})
+			require.ErrorIs(t, err, statement.ErrQualifiedName)
+			assert.Contains(t, err.Error(), table+"_user_id_fkey")
+		})
+	}
+}
+
+// A foreign key from a table to itself is refused when the columns it
+// references are unique only through a standalone unique index: the file's
+// CREATE TABLE would declare the key before the index after it exists, so the
+// file could not create the table. Declared as a UNIQUE constraint instead,
+// the same relationship renders and round-trips.
+func TestRenderWithForeignKeysRefusesASelfReferenceThroughAStandaloneIndex(t *testing.T) {
+	pool, schema := foreignKeyPool(t,
+		`CREATE TABLE %[1]s.accounts (id bigint PRIMARY KEY, code text NOT NULL, parent_code text)`,
+		`CREATE UNIQUE INDEX accounts_code_key ON %[1]s.accounts (code)`,
+		`ALTER TABLE %[1]s.accounts ADD CONSTRAINT accounts_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.accounts (code)`,
+		`CREATE TABLE %[1]s.ledgers (id bigint PRIMARY KEY, code text NOT NULL CONSTRAINT ledgers_code_key UNIQUE, parent_code text)`,
+		`ALTER TABLE %[1]s.ledgers ADD CONSTRAINT ledgers_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.ledgers (code)`)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
 	require.NoError(t, err)
 	_, err = schemadiff.RenderWith(live, schemadiff.RenderOptions{ForeignKeys: true})
-	require.ErrorIs(t, err, statement.ErrQualifiedName)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
+	assert.Contains(t, err.Error(), `"accounts_parent_fk"`)
+
+	rendered, changes := roundTripWithForeignKeys(t, pool, schema, "ledgers")
+	assert.Contains(t, rendered, `CONSTRAINT "ledgers_parent_fk" FOREIGN KEY (parent_code) REFERENCES ledgers(code)`)
+	assert.Empty(t, changes)
 }
 
 // A row-security file cannot carry a foreign key, so a table with both is
