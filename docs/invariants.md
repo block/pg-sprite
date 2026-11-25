@@ -858,6 +858,18 @@ statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
 same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
+The online partitioned `FOREIGN KEY` (`AddPartitionedForeignKey`) takes `SHARE ROW EXCLUSIVE` on
+one leaf and on the referenced table only for the leaf's `ADD FOREIGN KEY ... NOT VALID`, in a
+brief transaction under both bounds; the leaf's `VALIDATE CONSTRAINT` scans under `SHARE UPDATE
+EXCLUSIVE`, bounded by the caller's `ValidateBudget`, while writers keep committing
+(`TestEnsureLeafForeignKeyValidatesUnderAnOpenWriter`, `TestAddPartitionedForeignKeyOnline`). The
+parent's plain `ADD FOREIGN KEY` takes `SHARE ROW EXCLUSIVE` on the parent and every leaf, and
+`ACCESS EXCLUSIVE` on the referenced table, in one brief transaction: the step's own `LOCK TABLE`
+takes the tree's locks first under `lock_timeout`, a leaf no leaf step covered defers the statement
+to another pass (it would validate that leaf under the locks), and after the statement the step
+reads back that every leaf's adopted foreign key is the one its leaf step validated, under the
+same OID, rolling back with an invariant violation otherwise
+(`TestAddPartitionedForeignKeyParentStepLocks`, `TestAddPartitionedForeignKeyParentStepFailsClosed`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1500,7 +1512,14 @@ a replacement table is refused with its index left in place and named for an ope
 the build cannot prove the index is its own
 (`TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved` and
 `TestBuildPartitionedIndexTreeChangesDuringARun`, which detaches a partition between its build
-and its attach).
+and its attach). `AddPartitionedForeignKey` admits only a named `ADD FOREIGN KEY` on the
+preflighted partitioned table and renders every statement from the admitted columns, referenced
+table and columns, and rules alone; each leaf statement runs under a lock that holds the leaf in
+the tree and, for the `ADD`, the referenced table under its name; under the tree's lock, before the
+parent's statement, it proves the parent's and the referenced table's names still resolve to the
+tables it resolved and that every leaf has exactly one foreign key of the requested definition,
+validated and attached to nothing, which is the one its leaf step recorded
+(`TestAddPartitionedForeignKeyParentStepFailsClosed`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
