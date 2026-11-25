@@ -73,15 +73,31 @@ func TestAllowDestructiveFlagGrammar(t *testing.T) {
 
 	t.Run("the other acknowledgements stay rejected beside the pin", func(t *testing.T) {
 		for flag, c := range map[string]*MigrateCmd{
-			"--force":           {Desired: "orders.sql", ExpectFingerprint: "sha256:r", Force: "public.orders"},
-			"--accept-blocking": {Desired: "orders.sql", ExpectFingerprint: "sha256:r", AcceptBlocking: "public.orders"},
-			"--restart":         {Desired: "orders.sql", ExpectFingerprint: "sha256:r", Restart: "public.orders"},
-			"--block-writes":    {Desired: "orders.sql", ExpectFingerprint: "sha256:r", BlockWrites: "public.orders"},
+			"--force":        {Desired: "orders.sql", ExpectFingerprint: "sha256:r", Force: "public.orders"},
+			"--restart":      {Desired: "orders.sql", ExpectFingerprint: "sha256:r", Restart: "public.orders"},
+			"--block-writes": {Desired: "orders.sql", ExpectFingerprint: "sha256:r", BlockWrites: "public.orders"},
 		} {
 			err := c.validateInput()
 			require.Error(t, err, flag)
 			assert.Contains(t, err.Error(), flag+" cannot be combined with --desired")
 		}
+	})
+
+	// --accept-blocking accepts the lock of a reviewed plan's partitioned
+	// index drop, so with --desired it needs both the pin and the
+	// destructive acknowledgement that bind that drop.
+	t.Run("--accept-blocking with --desired needs the pin and --allow-destructive", func(t *testing.T) {
+		for name, c := range map[string]*MigrateCmd{
+			"without the pin":                {Desired: "orders.sql", AllowDestructive: "public.orders", AcceptBlocking: "public.orders"},
+			"without --allow-destructive":    {Desired: "orders.sql", ExpectFingerprint: "sha256:r", AcceptBlocking: "public.orders"},
+			"without either acknowledgement": {Desired: "orders.sql", AcceptBlocking: "public.orders"},
+		} {
+			err := c.validateInput()
+			require.Error(t, err, name)
+			assert.Contains(t, err.Error(), "--accept-blocking with --desired requires --expect-fingerprint and --allow-destructive", name)
+		}
+		c := &MigrateCmd{Desired: "orders.sql", ExpectFingerprint: "sha256:r", AllowDestructive: "public.orders", AcceptBlocking: "public.orders"}
+		require.NoError(t, c.validateInput())
 	})
 
 	t.Run("wires the acknowledgement into the engine policy", func(t *testing.T) {

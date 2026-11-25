@@ -76,5 +76,5 @@ func RunDesiredEnumType(ctx context.Context, pool *pgxpool.Pool, req EnumTypeReq
 	if refused, ok := AdmitPlan(DesiredRequest{ExpectedFingerprint: req.ExpectedFingerprint}, report); !ok {
 		return refused, nil
 	}
-	return executePlan(ctx, pool, report, opts, "", replan)
+	return executePlan(ctx, pool, report, opts, "", "", replan)
 }

@@ -252,6 +252,13 @@ const (
 	// leaves an invalid parent index and the partition indexes built so far;
 	// running the same statement again resumes from them.
 	ExecutionPartitionedIndexBuild Execution = "partitioned-index-build"
+	// ExecutionBlockingIndexDrop: the one step is the plain DROP INDEX of a
+	// partitioned table's index, which PostgreSQL cannot drop concurrently.
+	// It takes ACCESS EXCLUSIVE on the parent, every partition, and every
+	// partition's index for as long as it runs, so the statement stays
+	// refused and runs only when the operator accepts that lock, in one
+	// engine-owned transaction under explicit lock and statement budgets.
+	ExecutionBlockingIndexDrop Execution = "blocking-index-drop"
 )
 
 // Executions returns the closed set of Execution values. It is part of the
@@ -259,7 +266,7 @@ const (
 // format_version bump, and a consumer that meets an unrecognized value must
 // treat the sequence as unknown and refuse to run it.
 func Executions() []Execution {
-	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild}
+	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionBlockingIndexDrop}
 }
 
 // Decision is the classification of one operation.

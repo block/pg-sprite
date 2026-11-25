@@ -167,7 +167,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -208,7 +208,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -401,7 +401,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -443,7 +443,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -538,7 +538,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -577,7 +577,7 @@ when it starts.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -673,7 +673,7 @@ cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -738,7 +738,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -782,7 +782,7 @@ object it removes, and the fingerprint covers it.
 ```console
 $ pg-sprite migrate --desired orders.sql --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "diff",
   "schema": "public",
   "table": "orders",
@@ -959,7 +959,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "diff",
   "schema": "public",
   "table": "users",

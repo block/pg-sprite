@@ -1824,8 +1824,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   discarded, and a leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
   nothing, typed by its own sentinel so an embedder tells it from any other error.
-  Desired-state execution takes exactly one acknowledgement, the destructive one, and only
-  bound to a pinned plan fingerprint: `RunDesired` admits a plan holding a destructive
+  Desired-state execution takes two acknowledgements of its own, each bound to a pinned plan
+  fingerprint. The destructive one: `RunDesired` admits a plan holding a destructive
   statement only when the request pins the reviewed plan's fingerprint and names the desired
   table in its own destructive acknowledgement (`DesiredRequest.AllowDestructive`), and each
   destructive statement then runs under that acknowledgement, audited and carrying the
@@ -1834,10 +1834,15 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   also routes a statement to copy-and-swap is refused whole with `destructive-change`, since its
   drops would commit before copy-and-swap is checked. Without the acknowledgement the plan is refused whole with `destructive-change`; an
   acknowledgement without the fingerprint, or naming another table, is a usage error before
-  any statement runs, in a dry run and for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The other four, and
-  the destructive acknowledgement in `Options`, are rejected: `RunDesired` returns each one's
-  own sentinel before any database work, and `migrate --desired` rejects each flag, taking
-  `--allow-destructive` only with `--expect-fingerprint`. A new
+  any statement runs, in a dry run and for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The accept-blocking one
+  (`DesiredRequest.AcceptBlocking`, `--accept-blocking` with `--desired`) lifts exactly one
+  refusal, a pinned plan's drop of a partitioned table's index carrying the
+  `blocking-index-drop` execution, and only beside the pin and the destructive acknowledgement
+  naming the same table; without it that plan is refused whole with `destructive-change`, and
+  without the other two it is a usage error before any database work. The other acknowledgements
+  in `Options`, the destructive and accept-blocking ones included, are rejected: `RunDesired` returns each one's
+  own sentinel before any database work, and `migrate --desired` rejects each other flag, taking
+  `--allow-destructive` only with `--expect-fingerprint` and `--accept-blocking` only beside both. A new
   string or bool field reachable from `Options`, nested structs and pointers included, not
   declared as no acknowledgement, a
   new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI

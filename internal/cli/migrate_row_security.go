@@ -16,6 +16,10 @@ import (
 )
 
 func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, desired statement.DesiredWithRowSecurity) error {
+	if c.AcceptBlocking != "" {
+		return errors.New("--accept-blocking does not apply to a file that declares row security; " +
+			"drop a partitioned table's index with a desired file for the table definition alone")
+	}
 	b := executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
