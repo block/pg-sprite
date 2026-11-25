@@ -542,6 +542,10 @@ type Facts struct {
 	// backs, which the rename renames with it; empty when the index backs
 	// none, or when the fact was not read, as in an offline lint.
 	RenamedIndexConstraint string
+	// Partitioned reports that the table is a partitioned parent, which
+	// has no storage of its own; false for an ordinary table, a partition,
+	// and when the fact was not read, as in an offline lint.
+	Partitioned bool
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
@@ -559,7 +563,8 @@ func FactsFrom(live schemadiff.Model) Facts {
 			collations[col.Name] = col.Collation
 		}
 	}
-	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
+	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity,
+		Partitioned: live.PartitionKey != ""}
 }
 
 // ColumnDependents maps a column to the objects that depend on it, read
@@ -959,6 +964,13 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 
 	case statement.OpSetTablespace:
 		d.Route, d.Reason = RouteCopyAndSwap, ReasonRelocation
+		if facts.Partitioned {
+			// A partitioned parent has no heap to move: the server records
+			// the tablespace as the default for partitions created later,
+			// under a brief ACCESS EXCLUSIVE on the parent alone, and
+			// moves no existing partition or index.
+			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		}
 
 	case statement.OpAddConstraint:
 		d = classifyAddConstraint(op, st, sql, single)

@@ -81,7 +81,7 @@ refusal — never a silently wrong or incomplete result:
   ([running a copy-and-swap](docs/copy-and-swap.md#preview-the-route-is-closed-until-you-open-it)).
   Open, it carries a general
   `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
-  `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE`) refuse rather than fall
+  `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE` of a table with storage) refuse rather than fall
   through to a blocking rewrite, and the route's preflight refuses table shapes
   and environments it cannot run against. The shadow build also refuses a
   statement the copy cannot carry: a `USING` expression it cannot reproduce,

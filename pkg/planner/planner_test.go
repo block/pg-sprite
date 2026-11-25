@@ -48,6 +48,46 @@ func TestFactsFromExtractsReplicaIdentity(t *testing.T) {
 	assert.Equal(t, keys, planner.FactsFrom(live).ReplicaIdentity)
 }
 
+// FactsFrom marks a table with a partition key as a partitioned parent, so
+// an operation the server runs differently on one, such as SET TABLESPACE,
+// is judged from the same fact on every front door. A partition has no key
+// of its own and is not one.
+func TestFactsFromExtractsPartitioned(t *testing.T) {
+	parent := schemadiff.Model{
+		Columns:      []schemadiff.Column{{Name: "created_at", Type: "timestamp with time zone"}},
+		PartitionKey: "RANGE (created_at)",
+	}
+	partition := schemadiff.Model{
+		Columns:     []schemadiff.Column{{Name: "created_at", Type: "timestamp with time zone"}},
+		IsPartition: true,
+	}
+	assert.True(t, planner.FactsFrom(parent).Partitioned)
+	assert.False(t, planner.FactsFrom(partition).Partitioned)
+}
+
+// SET TABLESPACE moves an ordinary table's heap, a copy under ACCESS
+// EXCLUSIVE for as long as it takes, so it routes to copy-and-swap. A
+// partitioned parent has no heap: the server records the tablespace as
+// the default for partitions created later, under a brief ACCESS EXCLUSIVE
+// on the parent alone, and moves no partition, so it is metadata-only.
+// Without the fact, as in an offline lint, the planner assumes the move.
+func TestClassifySetTablespaceOnAPartitionedParentIsMetadataOnly(t *testing.T) {
+	const sql = "ALTER TABLE app.events SET TABLESPACE archive"
+
+	parent, err := planner.Classify(sql, planner.Facts{Partitioned: true})
+	require.NoError(t, err)
+	require.Len(t, parent.Decisions, 1)
+	assert.Equal(t, planner.RouteNative, parent.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonMetadataOnly, parent.Decisions[0].Reason)
+	assert.Empty(t, parent.Decisions[0].SaferSQL, "the statement runs as written")
+
+	ordinary, err := planner.Classify(sql, planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, ordinary.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, ordinary.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonRelocation, ordinary.Decisions[0].Reason)
+}
+
 // Dropping what REPLICA IDENTITY USING INDEX keys on leaves the table with
 // no usable identity, so UPDATE and DELETE fail under a publication. The
 // planner refuses the index drop in every form, the drop of the constraint
