@@ -110,8 +110,8 @@ narrates each gate; the [exit inventory](#exit-inventory) catalogs the endings.
              │                          │                         │
              ▼                          ▼                         ▼
    size guard: EXEMPT          size guard: table          engine carries it?
-   (NoSizeLimit — long         over the limit?               yes │       │ no
-   work on large tables            │        │                    │       ▼
+   (NoSizeLimit — long         over the limit, and not       yes │       │ no
+   work on large tables        proven catalog-only?              │       ▼
    is the purpose)              no │        │ yes                │  EXIT 5: typed
              │                     │        ▼                    │  refusal backend-
              ▼                     │   EXIT 4: SizeError         │  unavailable
@@ -326,6 +326,13 @@ An expression default such as `now()` stays guarded. PostgreSQL evaluates it onc
 under the lock, with the session's settings, and a function it calls can read any
 table, so the probe's answer does not bound its cost. The
 [plan report](plan-report.md) shows the mark per decision.
+
+Event triggers are outside the proof. An enabled event trigger that fires on
+`ALTER TABLE` runs its own code under the statement's lock, on a table of any size,
+so the size guard would not bound it on a small table either. The attempt's budget
+bounds it as it bounds every other statement: a trigger that runs too long is
+cancelled and the statement rolls back. Managed services such as Supabase install
+event triggers of their own, so excluding them would turn the exemption off there.
 
 The axis is not proof-versus-bet — `metadata-only` is a proof-shaped word on a
 guarded route. The guard hedges against the classifier being *wrong*, not against the
