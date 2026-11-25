@@ -22,8 +22,11 @@ import (
 const probeDeadline = 10 * time.Second
 
 // rewriteFixture is a schema holding table t, with 100 rows and the
-// columns id and note, beside three domains: positive_int, a CHECK;
-// required_text, a NOT NULL; and plain_text, no constraint at all.
+// columns id and note, beside four domains: positive_int, a CHECK;
+// required_text, a NOT NULL; plain_text, no constraint at all; and
+// defaulted_text, a default of its own. It also holds the enum tier and
+// the STABLE SQL functions row_count, which counts t's rows, and
+// one, which reads no table.
 type rewriteFixture struct {
 	url    string
 	pool   *pgxpool.Pool
@@ -40,12 +43,16 @@ func newRewriteFixture(t *testing.T) rewriteFixture {
 	f.exec(t, `CREATE DOMAIN %[1]s.positive_int AS int CHECK (VALUE > 0)`)
 	f.exec(t, `CREATE DOMAIN %[1]s.required_text AS text NOT NULL`)
 	f.exec(t, `CREATE DOMAIN %[1]s.plain_text AS text`)
+	f.exec(t, `CREATE DOMAIN %[1]s.defaulted_text AS text DEFAULT 'd'`)
+	f.exec(t, `CREATE TYPE %[1]s.tier AS ENUM ('free', 'paid')`)
+	f.exec(t, `CREATE FUNCTION %[1]s.one() RETURNS int STABLE LANGUAGE sql AS 'SELECT 1'`)
 	f.exec(t, `
 		CREATE TABLE %[1]s.t (
 			id   bigint PRIMARY KEY,
 			note text
 		)`)
 	f.exec(t, `INSERT INTO %[1]s.t SELECT g, 'n' FROM generate_series(1, 100) g`)
+	f.exec(t, `CREATE FUNCTION %[1]s.row_count() RETURNS bigint STABLE LANGUAGE sql AS 'SELECT count(*) FROM %[1]s.t'`)
 	return f
 }
 
@@ -158,8 +165,32 @@ func TestAddColumnRewritesAsTheServerDecides(t *testing.T) {
 		{
 			name:  "domain without constraints",
 			alter: `ALTER TABLE %[1]s.t ADD COLUMN plain_domain %[1]s.plain_text DEFAULT 'x'`,
+			want:  statement.AddColumnInPlaceRunsUserCode,
+			why:   "a domain with nothing to check adds in place, but any user-defined domain counts as code a user wrote",
+		},
+		{
+			name:  "domain with a default of its own",
+			alter: `ALTER TABLE %[1]s.t ADD COLUMN inherits %[1]s.defaulted_text`,
+			want:  statement.AddColumnInPlaceRunsUserCode,
+			why:   "the column takes the domain's default, which the statement does not show",
+		},
+		{
+			name:  "enum constant default",
+			alter: `ALTER TABLE %[1]s.t ADD COLUMN level %[1]s.tier DEFAULT 'free'`,
 			want:  statement.AddColumnInPlace,
-			why:   "a domain with nothing to check behaves as its base type",
+			why:   "an enum's input reads only the catalog",
+		},
+		{
+			name:  "enum array constant default",
+			alter: `ALTER TABLE %[1]s.t ADD COLUMN levels %[1]s.tier[] DEFAULT '{}'`,
+			want:  statement.AddColumnInPlace,
+			why:   "an array of an enum is read like the enum",
+		},
+		{
+			name:  "user function default",
+			alter: `ALTER TABLE %[1]s.t ADD COLUMN once int DEFAULT %[1]s.one()`,
+			want:  statement.AddColumnInPlaceRunsUserCode,
+			why:   "a user's function is evaluated once under the table's lock and can read any table",
 		},
 		{
 			name:  "check domain without a default",
@@ -225,6 +256,19 @@ func TestAddColumnRewritesAsTheServerDecides(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A default that counts the target table's rows is evaluated once, so the
+// probe sees no rewrite, but that one evaluation reads the whole table
+// under the statement's ACCESS EXCLUSIVE lock. The proof marks it as
+// running user code, so the column is never taken as catalog-only.
+func TestAddColumnRewritesMarksADefaultThatReadsTheTable(t *testing.T) {
+	f := newRewriteFixture(t)
+
+	proofs := f.prove(t, `ALTER TABLE %[1]s.t ADD COLUMN counted bigint DEFAULT %[1]s.row_count()`)
+	assert.Equal(t, map[string]statement.AddColumnProof{
+		"counted": statement.AddColumnInPlaceRunsUserCode,
+	}, proofs)
 }
 
 // A statement adding several columns is proved one column at a time, and

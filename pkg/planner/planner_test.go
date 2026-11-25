@@ -1045,20 +1045,27 @@ func TestNullFillCandidates(t *testing.T) {
 // rewrites, the type or the default, never from how the default is
 // written. A column the server could not prove, or that no proof was run
 // for, keeps the shape rules, and an expression default there fails closed
-// as unverified.
+// as unverified. Only a column with no default or a literal one, proven
+// to add in place without reading rows or running user code, is
+// catalog-only: an expression default is evaluated under the lock, with
+// the session's settings, so the probe's answer does not bound its cost.
 func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 	proven := planner.Facts{AddColumnProofs: map[string]statement.AddColumnProof{
-		"code":    statement.AddColumnTypeRewrites,
-		"strict":  statement.AddColumnTypeRewrites,
-		"scored":  statement.AddColumnTypeRewrites,
-		"id":      statement.AddColumnDefaultRewrites,
-		"created": statement.AddColumnInPlace,
-		"checked": statement.AddColumnInPlace,
-		"age":     statement.AddColumnInPlace,
-		"filled":  statement.AddColumnInPlaceScans,
-		"blank":   statement.AddColumnInPlaceScans,
-		"high":    statement.AddColumnUnproven,
-		"capped":  statement.AddColumnUnproven,
+		"code":     statement.AddColumnTypeRewrites,
+		"strict":   statement.AddColumnTypeRewrites,
+		"scored":   statement.AddColumnTypeRewrites,
+		"id":       statement.AddColumnDefaultRewrites,
+		"created":  statement.AddColumnInPlace,
+		"checked":  statement.AddColumnInPlace,
+		"age":      statement.AddColumnInPlace,
+		"filled":   statement.AddColumnInPlaceScans,
+		"blank":    statement.AddColumnInPlaceScans,
+		"tier":     statement.AddColumnInPlace,
+		"inherits": statement.AddColumnInPlaceRunsUserCode,
+		"once":     statement.AddColumnInPlaceRunsUserCode,
+		"scope":    statement.AddColumnInPlaceRunsUserCode,
+		"high":     statement.AddColumnUnproven,
+		"capped":   statement.AddColumnUnproven,
 	}}
 	cases := []struct {
 		name       string
@@ -1072,7 +1079,11 @@ func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 		{"constrained domain without a default", "ALTER TABLE t ADD COLUMN strict positive_int", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false, false},
 		{"constrained domain with a stable default", "ALTER TABLE t ADD COLUMN scored positive_int DEFAULT next_score()", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false, false},
 		{"volatile default", "ALTER TABLE t ADD COLUMN id uuid DEFAULT gen_random_uuid()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, false, false},
-		{"stable default stored in the catalog", "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()", planner.RouteNative, planner.ReasonFastDefault, false, true},
+		{"stable default stored in the catalog", "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()", planner.RouteNative, planner.ReasonFastDefault, false, false},
+		{"constant default stored in the catalog", "ALTER TABLE t ADD COLUMN tier text DEFAULT 'free'", planner.RouteNative, planner.ReasonFastDefault, false, true},
+		{"column taking its domain's default", "ALTER TABLE t ADD COLUMN inherits defaulted_text", planner.RouteNative, planner.ReasonMetadataOnly, false, false},
+		{"user function default stored in the catalog", "ALTER TABLE t ADD COLUMN once int DEFAULT one()", planner.RouteNative, planner.ReasonFastDefault, false, false},
+		{"constant default through a user type", "ALTER TABLE t ADD COLUMN scope text DEFAULT 'a'::scoped::text", planner.RouteNative, planner.ReasonFastDefault, false, false},
 		{"stored default with an inline check", "ALTER TABLE t ADD COLUMN checked timestamptz DEFAULT now() CHECK (checked > '2000-01-01')", planner.RouteNative, planner.ReasonSaferIdiom, false, false},
 		{"plain column", "ALTER TABLE t ADD COLUMN age int", planner.RouteNative, planner.ReasonMetadataOnly, false, true},
 		{"expression default the server could not prove", "ALTER TABLE t ADD COLUMN high bigint DEFAULT max_id()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, true, false},
@@ -1092,7 +1103,7 @@ func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 			assert.Equal(t, tc.reason, plan.Decisions[0].Reason)
 			assert.Equal(t, tc.unverified, plan.Decisions[0].Unverified)
 			assert.Equal(t, tc.catalog, plan.Decisions[0].ProvenCatalogOnly,
-				"only a column the server proved neither rewrites nor scans the table is catalog-only")
+				"only a column with no default or a literal one, that the server proved neither rewrites, scans the table, nor runs user code, is catalog-only")
 		})
 	}
 }
