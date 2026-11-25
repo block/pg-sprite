@@ -135,7 +135,8 @@ func TestRenderWithForeignKeysRefusesACrossSchemaReference(t *testing.T) {
 // could not create the table. Declared as a UNIQUE constraint instead, the
 // same relationship renders and round-trips, even when a standalone unique
 // index on the same columns was created first and the server bound the key
-// to it.
+// to it. A deferrable UNIQUE constraint on the columns does not count, since
+// a foreign key cannot reference one.
 func TestRenderWithForeignKeysRefusesASelfReferenceThroughAStandaloneIndex(t *testing.T) {
 	pool, schema := foreignKeyPool(t,
 		`CREATE TABLE %[1]s.accounts (id bigint PRIMARY KEY, code text NOT NULL, parent_code text)`,
@@ -146,13 +147,19 @@ func TestRenderWithForeignKeysRefusesASelfReferenceThroughAStandaloneIndex(t *te
 		`CREATE TABLE %[1]s.journals (id bigint PRIMARY KEY, code text NOT NULL, parent_code text)`,
 		`CREATE UNIQUE INDEX journals_code_idx ON %[1]s.journals (code)`,
 		`ALTER TABLE %[1]s.journals ADD CONSTRAINT journals_code_key UNIQUE (code)`,
-		`ALTER TABLE %[1]s.journals ADD CONSTRAINT journals_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.journals (code)`)
+		`ALTER TABLE %[1]s.journals ADD CONSTRAINT journals_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.journals (code)`,
+		`CREATE TABLE %[1]s.registers (id bigint PRIMARY KEY, code text NOT NULL, parent_code text)`,
+		`CREATE UNIQUE INDEX registers_code_idx ON %[1]s.registers (code)`,
+		`ALTER TABLE %[1]s.registers ADD CONSTRAINT registers_code_key UNIQUE (code) DEFERRABLE`,
+		`ALTER TABLE %[1]s.registers ADD CONSTRAINT registers_parent_fk FOREIGN KEY (parent_code) REFERENCES %[1]s.registers (code)`)
 
-	live, err := schemadiff.Introspect(t.Context(), pool, schema, "accounts")
-	require.NoError(t, err)
-	_, err = schemadiff.RenderWith(live, schemadiff.RenderOptions{ForeignKeys: true})
-	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
-	assert.Contains(t, err.Error(), `"accounts_parent_fk"`)
+	for _, table := range []string{"accounts", "registers"} {
+		live, err := schemadiff.Introspect(t.Context(), pool, schema, table)
+		require.NoError(t, err)
+		_, err = schemadiff.RenderWith(live, schemadiff.RenderOptions{ForeignKeys: true})
+		require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey, table)
+		assert.Contains(t, err.Error(), `"`+table+`_parent_fk"`)
+	}
 
 	rendered, changes := roundTripWithForeignKeys(t, pool, schema, "ledgers")
 	assert.Contains(t, rendered, `CONSTRAINT "ledgers_parent_fk" FOREIGN KEY (parent_code) REFERENCES ledgers(code)`)

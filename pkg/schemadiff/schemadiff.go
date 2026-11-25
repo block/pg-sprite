@@ -195,9 +195,10 @@ type Constraint struct {
 	ReferencesOtherSchema bool `json:"-"`
 	// SelfReferencesStandaloneIndex reports a foreign key from the table to
 	// itself whose referenced columns are unique only through a standalone
-	// unique index, one no primary key or unique constraint owns. CREATE
-	// TABLE declares the key before any CREATE INDEX after it runs, so a
-	// file that renders both cannot create the table.
+	// unique index, one no immediate primary key or unique constraint owns.
+	// A foreign key cannot reference a deferrable key, and CREATE TABLE
+	// declares the key before any CREATE INDEX after it runs, so a file that
+	// renders both cannot create the table.
 	SelfReferencesStandaloneIndex bool `json:"-"`
 	// IndexInvalid reports a primary key, unique, or exclusion constraint
 	// whose index the server has not validated (pg_index.indisvalid is
