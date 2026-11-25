@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -23,6 +25,57 @@ import (
 // is refused by the privilege preflight that names what it lacks, never by
 // the read of a store it cannot see.
 func TestRunRoutesAStatementOfARoleThatCannotReadTheCheckpointStore(t *testing.T) {
+	_, pool, schema := storeBlindTableOwner(t)
+
+	v, err := migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("ALTER TABLE %s.owned ADD COLUMN age int", schema)), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+
+	v, err = migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("ALTER TABLE %s.not_owned ADD COLUMN age int", schema)), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
+}
+
+// The same role, on a table where another role's copy-and-swap run stands,
+// cannot read the run's row, but the catalog shows what the run left: here
+// the shadow under the name the engine derives for owned. The native
+//
+//	ALTER TABLE owned ADD COLUMN age int
+//
+// would change the source under that run, so it is refused with
+// copy-and-swap-run-stopped and owned keeps its columns. The shadow stands
+// in for a stopped run's; what the front door reads, unable to read the
+// row, is only the catalog.
+func TestRunRefusesAStatementOfARoleThatCannotReadTheStoppedRunsRow(t *testing.T) {
+	admin, pool, schema := storeBlindTableOwner(t)
+	_, err := admin.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s (
+		    id int PRIMARY KEY
+		)`, pgx.Identifier{schema, schemachange.ShadowName(schema, "owned")}.Sanitize()))
+	require.NoError(t, err)
+
+	v, err := migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("ALTER TABLE %s.owned ADD COLUMN age int", schema)), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome, "%s: %s", v.Reason, v.Detail)
+	assert.Equal(t, verdict.CauseCopyAndSwapRunStopped, v.Cause)
+	var columns int
+	require.NoError(t, admin.QueryRow(t.Context(), `
+		SELECT count(*)
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'owned'`, schema).Scan(&columns))
+	assert.Equal(t, 1, columns, "nothing was executed")
+}
+
+// storeBlindTableOwner starts a server whose checkpoint store the admin
+// role owns, and a login role that owns the table owned in a new schema
+// but may not read the store; not_owned is the admin's. It returns the
+// admin's pool, the table owner's pool, and the schema.
+func storeBlindTableOwner(t *testing.T) (*pgxpool.Pool, *pgxpool.Pool, string) {
+	t.Helper()
 	serverURL := testutil.StartPostgres(t)
 	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
 	require.NoError(t, err)
@@ -59,15 +112,5 @@ func TestRunRoutesAStatementOfARoleThatCannotReadTheCheckpointStore(t *testing.T
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: u.String()})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-
-	v, err := migrate.Run(t.Context(), pool,
-		parseOne(t, fmt.Sprintf("ALTER TABLE %s.owned ADD COLUMN age int", schema)), runOptions())
-	require.NoError(t, err)
-	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
-
-	v, err = migrate.Run(t.Context(), pool,
-		parseOne(t, fmt.Sprintf("ALTER TABLE %s.not_owned ADD COLUMN age int", schema)), runOptions())
-	require.NoError(t, err)
-	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
+	return admin, pool, schema
 }

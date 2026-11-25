@@ -242,3 +242,236 @@ func TestRunDesiredRefusesAnEmptyPlanOverAStoppedCopySwapRun(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome, "%s: %s", v.Reason, v.Detail)
 	assert.Equal(t, checkpoint.PhaseDone, f.inspectRow(t).Phase)
 }
+
+// stopRetypeAtVerifying runs
+//
+//	ALTER TABLE orders ALTER COLUMN qty TYPE bigint
+//
+// through the front door and stops it, as a host would, when it saves
+// verifying: its shadow, its fence on the source, and its row stand.
+func (f copySwapFixture) stopRetypeAtVerifying(t *testing.T) statement.Statement {
+	t.Helper()
+	retype, err := statement.ParseOne(f.inSchema(`
+		ALTER TABLE {schema}.orders
+			ALTER COLUMN qty TYPE bigint`))
+	require.NoError(t, err)
+	stop := &progressLog{stopAt: checkpoint.PhaseVerifying}
+	opts := f.options()
+	opts.CopySwap.OnCheckpoint = stop.hook
+	_, err = Run(t.Context(), f.pool, retype, opts)
+	require.ErrorIs(t, err, errHostStopped)
+	require.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t).Phase)
+	return retype
+}
+
+// requireStoppedRunRefusal checks that v is the refusal of a statement over
+// a stopped run on orders.
+func (f copySwapFixture) requireStoppedRunRefusal(t *testing.T, v verdict.Verdict) {
+	t.Helper()
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome, "%s: %s", v.Reason, v.Detail)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
+	assert.Equal(t, verdict.CauseCopyAndSwapRunStopped, v.Cause)
+	assert.Equal(t, f.schema+".orders", v.Table)
+}
+
+// An index rename names the index, not its table, and is routed before the
+// front door reads a table's checkpoint row. Over the retype of qty stopped
+// in verifying,
+//
+//	ALTER INDEX orders_qty_idx RENAME TO orders_qty_renamed
+//
+// would rename the source's index under the run whose shadow was built to
+// match it, and the resume would then refuse the changed source. It is
+// refused with copy-and-swap-run-stopped once its owning table is known,
+// and the index keeps its name.
+func TestRunRefusesAnIndexRenameWhileACopySwapRunIsStopped(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	f.stopRetypeAtVerifying(t)
+
+	rename, err := statement.ParseOne(f.inSchema(`
+		ALTER INDEX {schema}.orders_qty_idx
+			RENAME TO orders_qty_renamed`))
+	require.NoError(t, err)
+	v, err := Run(t.Context(), f.pool, rename, DefaultOptions())
+	require.NoError(t, err)
+	f.requireStoppedRunRefusal(t, v)
+	assert.True(t, f.relationExists(t, "orders_qty_idx"), "nothing was executed")
+	assert.False(t, f.relationExists(t, "orders_qty_renamed"))
+}
+
+// A blocking DROP INDEX run under --accept-blocking takes the passthrough,
+// which resolves the index's table itself. Over the stopped retype it would
+// drop the source's index under the run; it is refused the same way, with
+// both acknowledgements given, and the index stays.
+func TestRunRefusesAnAcceptedDropIndexWhileACopySwapRunIsStopped(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	f.stopRetypeAtVerifying(t)
+
+	drop, err := statement.ParseOne(f.inSchema(`
+		DROP INDEX {schema}.orders_qty_idx`))
+	require.NoError(t, err)
+	opts := DefaultOptions()
+	opts.AcceptBlocking = f.schema + ".orders"
+	opts.AllowDestructive = f.schema + ".orders"
+	v, err := Run(t.Context(), f.pool, drop, opts)
+	require.NoError(t, err)
+	f.requireStoppedRunRefusal(t, v)
+	assert.True(t, f.relationExists(t, "orders_qty_idx"), "nothing was executed")
+}
+
+// A stopped run's row that this engine cannot read — here one a newer
+// engine wrote in another row format, the state a rolling upgrade leaves —
+// still holds the table while the run's shadow stands. The native
+//
+//	ALTER TABLE orders DROP COLUMN note
+//
+// reads no row of its own, so the front door refuses it rather than drop
+// the column under the run, and the shadow and the column stay.
+func TestRunRefusesAStatementWhileTheStoppedRunsRowIsOfAnotherFormat(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	f.stopRetypeAtVerifying(t)
+	f.exec(t, `UPDATE pgsprite.pgsprite_checkpoint SET format_version = format_version + 1`)
+
+	drop, err := statement.ParseOne(f.inSchema(`
+		ALTER TABLE {schema}.orders
+			DROP COLUMN note`))
+	require.NoError(t, err)
+	opts := DefaultOptions()
+	opts.AllowDestructive = f.schema + ".orders"
+	v, err := Run(t.Context(), f.pool, drop, opts)
+	require.NoError(t, err)
+	f.requireStoppedRunRefusal(t, v)
+	assert.True(t, f.hasColumn(t, "orders", "note"), "nothing was executed")
+	assert.True(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "the stopped run's shadow stands")
+}
+
+// A read of the stopped run's row that fails for any reason but a missing
+// row, a missing store, a privilege, or another format is an error, and
+// nothing routes. Here the store's slot_name column has another type, so
+// the row cannot be scanned:
+//
+//	ALTER TABLE orders ALTER COLUMN note SET DEFAULT 'x'
+//
+// returns the read's error, and note keeps no default.
+func TestRunStopsWhenTheStoppedRunRowCannotBeRead(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	f.stopRetypeAtVerifying(t)
+	f.exec(t, `
+		ALTER TABLE pgsprite.pgsprite_checkpoint
+			ALTER COLUMN slot_name TYPE integer USING 0`)
+
+	next, err := statement.ParseOne(f.inSchema(`
+		ALTER TABLE {schema}.orders
+			ALTER COLUMN note SET DEFAULT 'x'`))
+	require.NoError(t, err)
+	v, err := Run(t.Context(), f.pool, next, DefaultOptions())
+	require.Error(t, err, "outcome=%s reason=%s", v.Outcome, v.Reason)
+	assert.Empty(t, v.Outcome, "no verdict: the run stopped before routing")
+	var hasDefault bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT column_default IS NOT NULL
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = 'orders' AND column_name = 'note'`,
+		f.schema).Scan(&hasDefault))
+	assert.False(t, hasDefault, "nothing was executed")
+}
+
+// Desired-state execution with something to run over a stopped run sends
+// each statement through the imperative door, which refuses it: after the
+// retype of qty committed its swap, a desired schema that also adds extra
+// plans
+//
+//	ALTER TABLE orders ADD COLUMN extra text
+//
+// and that statement is refused with copy-and-swap-run-stopped, so extra
+// is not added.
+func TestRunDesiredRefusesANonEmptyPlanOverAStoppedCopySwapRun(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	st, err := statement.ParseOne(f.inSchema(`
+		ALTER TABLE {schema}.orders
+			ALTER COLUMN qty TYPE bigint`))
+	require.NoError(t, err)
+	f.crashAfterSwap(t, st, f.options())
+
+	desired, err := statement.ParseDesired(`
+		CREATE TABLE orders (
+			id    bigserial PRIMARY KEY,
+			qty   bigint NOT NULL,
+			note  text,
+			sku   text,
+			extra text
+		);
+		CREATE INDEX orders_qty_idx ON orders (qty);`)
+	require.NoError(t, err)
+	res, err := RunDesired(t.Context(), f.pool, DesiredRequest{Schema: f.schema, Desired: desired}, DefaultOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, res.Outcome, "%s: %s", res.Reason, res.Detail)
+	assert.Equal(t, verdict.CauseCopyAndSwapRunStopped, res.Cause)
+	assert.False(t, f.hasColumn(t, "orders", "extra"), "nothing ran over the stopped run")
+	assert.Equal(t, checkpoint.PhaseCutover, f.inspectRow(t).Phase)
+}
+
+// The stopped statement rerun with the restart acknowledgement is still
+// the stopped run's own statement, so it goes back to copy-and-swap even
+// though, against the swapped-in shape, it now routes natively:
+//
+//	ALTER TABLE orders DROP COLUMN note, ALTER COLUMN sku TYPE varchar(10)
+//
+// is a relabel once sku is varchar(10). There the restart meets a committed
+// swap, which it cannot discard: the run is refused with
+// restart-swap-committed and the cutover row stays, rather than the
+// acknowledgement being rejected as one for a native statement.
+func TestRunRestartOfTheStoppedStatementAfterItsSwapIsRefused(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	st, err := statement.ParseOne(f.inSchema(`
+		ALTER TABLE {schema}.orders
+			DROP COLUMN note,
+			ALTER COLUMN sku TYPE varchar(10)`))
+	require.NoError(t, err)
+	first := f.options()
+	first.AllowDestructive = f.schema + ".orders"
+	f.crashAfterSwap(t, st, first)
+
+	opts := f.options()
+	opts.AllowDestructive = f.schema + ".orders"
+	opts.CopySwap.Restart = f.schema + ".orders"
+	v, err := Run(t.Context(), f.pool, st, opts)
+	require.NoError(t, err, "outcome=%s reason=%s", v.Outcome, v.Reason)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome, "%s: %s", v.Reason, v.Detail)
+	assert.Equal(t, verdict.Cause(schemachange.CauseRestartSwapCommitted), v.Cause)
+	assert.Equal(t, checkpoint.PhaseCutover, f.inspectRow(t).Phase)
+}
+
+// A checkpoint store an older engine created, which lacks a column this
+// engine reads, cannot report the stopped run's row until a copy-and-swap
+// run evolves it, and a native statement never does. While the run's shadow
+// stands, the native
+//
+//	ALTER TABLE orders DROP COLUMN note
+//
+// is refused, not run over the stopped retype.
+func TestRunRefusesAStatementWhileTheCheckpointStoreIsBehind(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	f.stopRetypeAtVerifying(t)
+	f.exec(t, `
+		ALTER TABLE pgsprite.pgsprite_checkpoint
+			DROP COLUMN statement`)
+
+	drop, err := statement.ParseOne(f.inSchema(`
+		ALTER TABLE {schema}.orders
+			DROP COLUMN note`))
+	require.NoError(t, err)
+	opts := DefaultOptions()
+	opts.AllowDestructive = f.schema + ".orders"
+	v, err := Run(t.Context(), f.pool, drop, opts)
+	require.NoError(t, err)
+	f.requireStoppedRunRefusal(t, v)
+	assert.True(t, f.hasColumn(t, "orders", "note"), "nothing was executed")
+}

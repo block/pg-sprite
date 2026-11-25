@@ -1118,7 +1118,12 @@ keeps the one the row holds, a save with the same proof is accepted, and a save 
 different proof is `ErrInvariantViolation` and leaves the row unchanged, because a different
 shadow is a fresh start and a fresh start goes through `Delete`; `Delete` is the explicit fresh start, and it removes only the row whose
 `Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
-between survives and surfaces as a new `IncompatibleError`. `pkg/schemachange` applies the
+between survives and surfaces as a new `IncompatibleError`. `pkg/migrate` applies (b) at the
+front door, where a native route reads no row: before routing any statement on a table,
+`findStoppedRun` reads the table's row, and a statement other than the stopped run's own,
+compared as parsed, is refused (`copy-and-swap-run-stopped`); a row it cannot judge — another
+format or phase, a store an older engine created, a store the role may not read — holds the
+table while the catalog shows the run's shadow or retained source. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
 `checkResumeRow` — the row must name this table and the derived slot (`resume-row-mismatch`),
 be non-terminal (`resume-row-terminal`), and not be a row whose cutover already began
@@ -1821,7 +1826,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   structure or data, availability for a bounded window, or a stopped run's progress. On
   `migrate --alter`, an entry whose acknowledgement is missing is refused with its declared
   reason, except the restart: without `--restart` a stopped run resumes and nothing is
-  discarded, and a leftover no checkpoint records is refused and left standing. An
+  discarded, any other statement on its table is refused (`copy-and-swap-run-stopped`), and a
+  leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
   nothing, typed by its own sentinel so an embedder tells it from any other error.
   Desired-state execution takes exactly one acknowledgement, the destructive one, and only

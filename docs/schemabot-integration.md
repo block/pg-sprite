@@ -1016,7 +1016,10 @@ the row `done`.
 copy-and-swap run's checkpoint row stands short of `done`, `migrate.Run` reads it before
 routing any statement on the table, without the table's lock. Its own statement, compared as
 parsed, goes back to copy-and-swap and the `Runner` decides the resume under the lock, as
-above; `--force` does not send it native. Any other statement is refused with
+above; `--force` does not send it native and is not reported in the verdict, since the
+change already has a shadow and a native attempt would leave it behind. Any other statement
+on the table, an index rename and a blocking index statement under `--accept-blocking`
+included, is refused with
 `copy-and-swap-refused`, class `environmental`, cause `copy-and-swap-run-stopped`, and
 nothing executes; the `detail` names the stopped statement and its phase. A host finishes the
 stopped run by running its statement again, then runs the new one. Before the swap, a new
@@ -1028,10 +1031,16 @@ plan for the table is empty while such a row stands — the table matches the de
 only because the stopped run swapped it in, and the retained source and the row would
 otherwise stay with nothing to finish them; a non-empty plan meets the row statement by
 statement through `Run`. A read of the row that fails stops `Run` before a verdict, with
-nothing executed. A row that is `done`, or that this engine cannot read (another format, an
-unknown phase), holds nothing here, and nor does a checkpoint store the connecting role has no
-privilege to read: such a role cannot run copy-and-swap through that store, so its statements
-route as they would with no row and meet the privilege preflight as usual.
+nothing executed. A row that is `done` holds nothing. A row this engine cannot judge — in
+another format or an unknown phase (a rolling upgrade), in a checkpoint store an older engine
+created that no copy-and-swap run has evolved yet, or in a store the connecting role has no
+privilege to read — holds the table exactly while the catalog shows that run's shadow or
+retained source (the `pgsprite_…_new` or `pgsprite_…_old` relation the engine derives from the
+table's name): the same refusal, whose `detail` names the relation and why the row cannot be
+judged; `--restart` lifts it only for a statement that routes to copy-and-swap, whose route
+then judges the row itself under the table's lock. With neither relation standing, statements route
+as they would with no row. `--dry-run` does not read the row, so a preview can show a route the
+apply then refuses or resumes.
 
 **What `--restart` excludes.** It is a copy-and-swap acknowledgement, so it is an error —
 before any verdict, with nothing executed or discarded — on a statement the router sends
