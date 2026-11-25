@@ -191,7 +191,13 @@ operation and object type, tiered supported / planned / out of scope, with reaso
 README's "What pg-sprite does not do yet" section is the short-form pointer. Any PR that
 adds, removes, or re-scopes a capability — a planner route, a refusal, a verdict outcome,
 a declarative-model boundary — updates all three in the same PR, and every release sweeps
-them against the shipped behavior before tagging.
+them against the shipped behavior before tagging. A supported row's `maturity` (`ga` or
+`preview`) is the answer to "is this generally available?": run
+`pg-sprite capabilities --json` rather than inferring it from the ✅ mark. A row that runs
+only from a later server major names it in `min_server_major`. A PR that takes a route out
+of preview flips its rows to `ga` in the same change, together with `validateMaturity`'s
+rule for that route, its `TestValidateRules` case, `TestPreviewRowsAreTheCopySwapRows`,
+and the route's sentence in `docs/capabilities-contract.md`.
 
 ## Logging and observability
 

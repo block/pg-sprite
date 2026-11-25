@@ -21,15 +21,18 @@ import (
 // stands and review the new plan.
 var ErrDroppedObjectDrift = errors.New("the object the plan drops changed after planning")
 
-// ErrDroppedObjectHasDescendants means a reviewed column, constraint, NOT
-// NULL, or table drop names a table that is partitioned or has inheritance
-// children, read under the table's lock. The drop would reach into the
-// tables below it: a table drop drops them, a column drop removes their
-// copies of the column, a constraint drop removes their copies of the
-// constraint (and, for a partitioned table's key, each partition's index),
-// and a NOT NULL drop clears it on their copies. The plan reviewed only the
-// named table's object and its dependents, so nothing was dropped. The
-// outcome is permanent.
+// ErrDroppedObjectHasDescendants means a reviewed drop would reach tables
+// below the named one, read under the table's lock. A column, constraint,
+// or NOT NULL drop is refused on a table that has inheritance children,
+// and a NOT NULL drop on a partitioned table that has partitions: a column
+// drop would remove the children's copies of the column and anything on
+// them, a constraint drop their copies of the constraint, and a NOT NULL
+// drop would clear it on their copies. A column or constraint drop on a
+// partitioned table whose every descendant is a declarative partition is
+// not refused here: see refusePartitionedDrop. A table drop is refused on
+// a partitioned table or an inheritance parent, since it would drop the
+// tables below. The plan reviewed only the named table's object and its
+// dependents, so nothing was dropped. The outcome is permanent.
 var ErrDroppedObjectHasDescendants = errors.New("the object the plan drops also reaches tables below it")
 
 // opDrops reports whether op drops the column, constraint, or NOT NULL
@@ -115,28 +118,76 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 	return refuseDropBelow(ctx, tx, st, d, target)
 }
 
-// refuseDropBelow refuses a drop on a table that has partitions or
-// inheritance children, read under the table's lock. A drop without ONLY
-// reaches their copies of the object too, and with them anything that
+// refuseDropBelow refuses a drop on a table with tables below it, read
+// under the table's lock, unless the drop is a column or constraint drop
+// on a partitioned table whose every descendant is a declarative
+// partition (refusePartitionedDrop).
+//
+// An inheritance child owns its copies of a column or constraint: a drop
+// without ONLY reaches those copies too, and with them anything that
 // depends on a copy, none of which the plan reviewed. A drop with ONLY is
 // refused as well: it would leave the children's copies standing, which is
 // not the change the plan reviewed either, and a plan never says ONLY.
 func refuseDropBelow(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
-	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
-	var below bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
-		  JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.inhparent
-		  JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
-		 WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2)`,
-		st.Schema(), st.Table()).Scan(&below); err != nil {
+	partitioned, below, err := tablesBelow(ctx, tx, st.Schema(), st.Table())
+	if err != nil {
 		return fmt.Errorf("read the tables below %s before dropping %s %s: %w", target, d.Kind, d.Name, err)
 	}
-	if below {
-		return fmt.Errorf("%w: %s has partitions or inheritance children, and dropping %s %s would reach their copies "+
-			"and anything on them, which the plan did not review", ErrDroppedObjectHasDescendants, target, d.Kind, d.Name)
+	if len(below) == 0 {
+		return refuseEmptyPartitionedColumnDrop(ctx, tx, st, d, target, partitioned)
 	}
-	return nil
+	if !declarativePartitionTree(partitioned, below) {
+		return fmt.Errorf("%w: %s has inheritance children (%s), and dropping %s %s would reach their copies "+
+			"and anything on them, which the plan did not review", ErrDroppedObjectHasDescendants, target,
+			strings.Join(inheritanceChildren(below), ", "), d.Kind, d.Name)
+	}
+	return refusePartitionedDrop(ctx, tx, st, d, target)
+}
+
+// refuseEmptyPartitionedColumnDrop checks a reviewed column drop on a
+// table with nothing below it. A partitioned table with no partitions
+// still has a partition key, which PostgreSQL refuses to drop, so its
+// column drop meets the same check as one with partitions and a key column
+// is refused with the same typed outcome; a plain table's drop passes.
+func refuseEmptyPartitionedColumnDrop(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string, partitioned bool) error {
+	if !partitioned || d.Kind != schemadiff.DroppedColumn {
+		return nil
+	}
+	return refusePartitionedColumnDrop(ctx, tx, st, d, target)
+}
+
+// refusePartitionedDrop decides a reviewed drop on a partitioned table that
+// has partitions. A partition's columns and inherited constraints are the
+// parent's: PostgreSQL refuses to drop them on the partition alone, and
+// the parent's drop removes them from every partition in the same catalog
+// change, so the reviewed parent object is the whole of what a constraint
+// drop removes. A column drop also removes whatever a partition built on
+// its copy of the column, which refusePartitionedColumnDrop checks. A NOT
+// NULL drop is refused: a partition can hold a NOT NULL of its own on the
+// column, and the parent's drop reaches it in a way that differs between
+// PostgreSQL versions. A drop with ONLY is refused too, as on any table
+// with tables below it.
+func refusePartitionedDrop(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
+	only, err := dropSaysOnly(st)
+	if err != nil {
+		return err
+	}
+	if only {
+		return fmt.Errorf("%w: %s has partitions, and dropping %s %s from it alone with ONLY is not the change the plan reviewed",
+			ErrDroppedObjectHasDescendants, target, d.Kind, d.Name)
+	}
+	switch d.Kind {
+	case schemadiff.DroppedColumn:
+		return refusePartitionedColumnDrop(ctx, tx, st, d, target)
+	case schemadiff.DroppedConstraint:
+		return nil
+	case schemadiff.DroppedNotNull:
+		return fmt.Errorf("%w: %s has partitions, and dropping the NOT NULL of column %s would reach their copies, "+
+			"which the plan did not review", ErrDroppedObjectHasDescendants, target, d.Name)
+	default:
+		return fmt.Errorf("%w: a reviewed drop of %s %s on partitioned table %s is not a column, constraint, or NOT NULL drop",
+			ErrInvariantViolation, d.Kind, d.Name, target)
+	}
 }
 
 // droppingStep returns the index of the admitted step that drops d, or -1

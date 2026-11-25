@@ -43,6 +43,37 @@ func TestCapabilitiesJSON(t *testing.T) {
 	assert.Positive(t, toolOwned)
 }
 
+// The jq recipes in docs/capabilities.md select on the JSON keys maturity and
+// min_server_major, so their spelling is pinned on the raw output rather than
+// through the Row type, which would round-trip a renamed tag unnoticed.
+func TestCapabilitiesJSONMaturityKeys(t *testing.T) {
+	cmd := CapabilitiesCmd{JSON: true, version: "test-version"}
+	var out bytes.Buffer
+	require.NoError(t, cmd.run(&out))
+
+	var response struct {
+		Capabilities []map[string]any `json:"capabilities"`
+	}
+	require.NoError(t, json.Unmarshal(out.Bytes(), &response))
+	byID := map[string]map[string]any{}
+	for _, row := range response.Capabilities {
+		byID[row["id"].(string)] = row
+	}
+
+	dropColumn := byID["drop-column"]
+	assert.Equal(t, "ga", dropColumn["maturity"])
+	assert.NotContains(t, dropColumn, "min_server_major", "a row every supported major runs omits min_server_major")
+
+	partitionedFK := byID["add-foreign-key-not-valid-on-a-partitioned-parent"]
+	assert.Equal(t, "ga", partitionedFK["maturity"])
+	assert.Equal(t, float64(18), partitionedFK["min_server_major"], "PostgreSQL before 18 refuses this row's statement")
+
+	planned := byID["add-column-with-volatile-default-now-gen-random-uuid"]
+	require.NotNil(t, planned, "the planned row used here is in the registry")
+	assert.Equal(t, "t2", planned["tier"])
+	assert.NotContains(t, planned, "maturity", "a T2 row carries no maturity")
+}
+
 // New is the only place the binary's version reaches the capabilities
 // output, so the wiring is pinned through New rather than by constructing
 // the command directly.
@@ -85,6 +116,11 @@ func TestCapabilitiesTextLayout(t *testing.T) {
 		require.Greater(t, len(runes), markColumn, line)
 		assert.Equal(t, string(row.StatusMark), string(runes[markColumn:]), "status mark is the last column on %q", line)
 		assert.Contains(t, line, " "+string(row.Tier)+" ", "tier is printed on %q", line)
+		if row.Maturity == "" {
+			assert.Contains(t, line, " "+string(row.Tier)+"   — ", "a row without a maturity renders an em dash after the tier on %q", line)
+		} else {
+			assert.Contains(t, line, " "+string(row.Tier)+"   "+string(row.Maturity)+" ", "maturity follows the tier on %q", line)
+		}
 		if row.OwningToolClass == "" {
 			sawEmptyOwner = true
 			assert.Contains(t, line, " — ", "an empty owner renders as an em dash on %q", line)
