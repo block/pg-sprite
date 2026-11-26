@@ -106,7 +106,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. The route is in preview and runs only when the run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled`); without it the statement is refused with `copy-and-swap-refused`, cause `copy-and-swap-not-enabled`, before the route's preflight runs or anything is written. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, and with `dependent-policy`, naming the policies, when a row-level security policy reads it, and likewise with `dependent-trigger`, `dependent-generated-column`, or `partition-key` when a trigger's `UPDATE OF` list or `WHEN` condition names it, a generated column reads it, or it is in a partition key, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`). A statement that also drops a column and adds one of the same name is refused when the copy cannot fill the new column — the primary key, a source identity column, or a column that refuses NULL with no default of its own or its domain's (`shadow-statement-readd`); a statement that also declares a new identity or `serial` column, re-added or kept, is refused with `shadow-statement-new-sequence` — see [limitations.md](limitations.md)"
+    reason_notes: "Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. The route is in preview and runs only when the run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled`); without it the statement is refused with `copy-and-swap-refused`, cause `copy-and-swap-not-enabled`, before the route's preflight runs or anything is written. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, and with `dependent-policy`, naming the policies, when a row-level security policy reads it, and likewise with `dependent-trigger`, `dependent-generated-column`, or `partition-key` when a trigger's `UPDATE OF` list or `WHEN` condition names it, a generated column reads it, or it is in a partition key, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`); `migrate --dry-run` and `migrate --desired --dry-run` end in the same refusal for a table in a partition or inheritance tree (`copy-and-swap-partitioned`). A `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`). A statement that also drops a column and adds one of the same name is refused when the copy cannot fill the new column — the primary key, a source identity column, or a column that refuses NULL with no default of its own or its domain's (`shadow-statement-readd`); a statement that also declares a new identity or `serial` column, re-added or kept, is refused with `shadow-statement-new-sequence` — see [limitations.md](limitations.md)"
   - id: set-default-drop-default-drop-not-null
     area: "column_changes"
     operation: "`SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL`"
@@ -333,15 +333,15 @@ rows:
   - id: detach-partition-concurrently
     area: "partitioned_tables"
     operation: "`DETACH PARTITION [CONCURRENTLY]`"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
-      migrate: refused
+      migrate: supported
       diff: not_applicable
-    refusal_reason: unsupported-statement
-    reason_notes: "`CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`suggest` shows the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form ends in the same `unsupported-statement` refusal and exit code 2 as the real run. A desired schema cannot express a detach, so `diff` never produces one"
+    reason_notes: "The plain form is rewritten to `DETACH PARTITION ... CONCURRENTLY`, which takes `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes of the other partitions keep running. It runs outside a transaction block under the brief budgets: `--lock-timeout` bounds each lock wait, the wait for transactions that still read the partition through the table included, and `--statement-timeout` the whole statement. Flagged **destructive**, since the partition's rows leave the table: `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. A detach that stops after its first transaction committed fails with `partition-detach-interrupted` and leaves the partition detach-pending; running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`. PostgreSQL detaches one partition of a table at a time, so while another partition is detach-pending the detach fails with `partition-detach-pending` before anything runs, naming that partition and its `FINALIZE`. PostgreSQL refuses a concurrent detach from a table with a `DEFAULT` partition, so both forms are refused there (`unsupported-statement`, `by-design`, in `--dry-run` too) before anything runs; `--force SCHEMA.TABLE` runs the plain `DETACH PARTITION` as submitted under bounded budgets, taking `ACCESS EXCLUSIVE` on the table and the partition. `DETACH PARTITION ... FINALIZE` itself is refused with `unsupported-statement`: rerun the statement that started the detach. A desired schema cannot express a detach, so `diff` never produces one"
   - id: set-tablespace-on-a-partitioned-parent
     area: "partitioned_tables"
     operation: "`SET TABLESPACE` on a **partitioned parent**"
@@ -376,8 +376,8 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: backend-unavailable
-    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned source"
+    refusal_reason: copy-and-swap-refused
+    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned parent, a partition, or a member of an inheritance tree (`copy-and-swap-partitioned`), and `migrate --dry-run` and `migrate --desired --dry-run` end in that same refusal (`copy-and-swap-unlogged` or `copy-and-swap-force-rls` instead when the table is also UNLOGGED or forces row security, which the preflight decides first); the plan `diff` prints still routes the change as `execute`, since it does not read the route's preflight"
   - id: plain-tables-their-indexes
     area: "declarative_model"
     operation: "Plain tables + their indexes"

@@ -16,7 +16,8 @@ and the closed vocabularies below (caveats, guidance codes, and the embedded pla
 reasons and execution contracts): adding a value to any of them is a contract change and
 bumps `format_version`, even if no field is added or renamed.
 
-The current version is **6**: version 6 added `add-integer-primary-key` to the
+The current version is **7**: version 7 added `no-default-partition` to the Caveats
+vocabulary; version 6 added `add-integer-primary-key` to the
 Guidance vocabulary; version 5 added `alter-column-type-in-place`; version 4 added `coordinated-constraint-rename`; version 3 added `expand-contract-column` and
 `coordinated-table-rename` to the Guidance vocabulary and admitted `app-breaking-rename`
 as a suggestion `reason`; version 2 added `name-constraint-then-validate` and
@@ -80,6 +81,7 @@ share one.)
 | `separate-transactions` | The steps must commit separately — the weaker locks the sequence exists for are held to commit, so one enclosing transaction reproduces the blocking the rewrite avoids. |
 | `invalid-index-on-failure` | A failed or cancelled concurrent build leaves an INVALID index that must be detected (`pg_index.indisvalid`) and dropped or rebuilt before retrying. |
 | `detach-finalize-on-failure` | An interrupted concurrent detach leaves the partition half-detached; it must be finished with `DETACH PARTITION FINALIZE`. |
+| `no-default-partition` | The concurrent detach runs only when the parent has no `DEFAULT` partition. PostgreSQL refuses it outright otherwise (`cannot detach partitions concurrently when a default partition exists`, in every supported version), so the blocking `DETACH PARTITION` is the only detach for that parent, or the `DEFAULT` partition has to be detached first. The advice is offline and cannot see whether the parent has one; `migrate` reads the catalog and refuses the concurrent detach there before anything runs. |
 | `validation-scan` | The VALIDATE step still scans every row — the rewrite trades the lock strength, not the scan. |
 | `scaffold-constraint-on-failure` | A failed VALIDATE leaves the NOT VALID constraint the sequence added on the live table, and replaying the sequence then fails at the ADD CONSTRAINT step (`duplicate_object`). The runner must detect the leftover constraint (`pg_constraint`) and resume from the VALIDATE step, or drop it and restart. |
 
@@ -226,7 +228,7 @@ for PostgreSQL online DDL (background in
 | Operation as written | Recommended safer form | Caveats |
 |---|---|---|
 | `CREATE INDEX` / `DROP INDEX` / `REINDEX` (non-concurrent) | The `CONCURRENTLY` form of the same statement | `non-transactional`, `invalid-index-on-failure` |
-| `ALTER TABLE … DETACH PARTITION` (non-concurrent) | `DETACH PARTITION … CONCURRENTLY` | `non-transactional`, `detach-finalize-on-failure` |
+| `ALTER TABLE … DETACH PARTITION` (non-concurrent) | `DETACH PARTITION … CONCURRENTLY` | `non-transactional`, `detach-finalize-on-failure`, `no-default-partition` |
 | `ALTER TABLE … ALTER COLUMN … SET NOT NULL` | `ADD CONSTRAINT … CHECK (col IS NOT NULL) NOT VALID` → `VALIDATE CONSTRAINT` → `SET NOT NULL` → `DROP CONSTRAINT` (scaffold) | `separate-transactions`, `validation-scan`, `scaffold-constraint-on-failure` |
 | `ALTER TABLE … ADD PRIMARY KEY` / `ADD UNIQUE` | `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT … USING INDEX` | `non-transactional`, `separate-transactions`, `invalid-index-on-failure` |
 | `ALTER TABLE … ADD CHECK` / `ADD FOREIGN KEY` | `ADD CONSTRAINT … NOT VALID` → `VALIDATE CONSTRAINT` | `separate-transactions`, `validation-scan`, `scaffold-constraint-on-failure` |
@@ -243,7 +245,7 @@ A constructed rewrite (`pg-sprite suggest --json` over
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "suggestions": [
     {
       "statement": 1,
@@ -264,7 +266,7 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "suggestions": [
     {
       "statement": 1,
