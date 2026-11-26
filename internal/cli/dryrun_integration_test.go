@@ -682,7 +682,10 @@ func TestMigrateSetTablespaceOnAPartitionedParentMovesNoPartition(t *testing.T) 
 		_, err := pool.Exec(t.Context(), sql)
 		require.NoError(t, err, sql)
 	}
-	exec(`COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/` + tablespace + `'`)
+	// The program drains its stdin after mkdir: a program that exits without
+	// reading it can close the pipe before the server writes the row, and the
+	// COPY then fails with a broken pipe.
+	exec(`COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/` + tablespace + ` && cat > /dev/null'`)
 	exec(`CREATE TABLESPACE ` + tablespace + ` LOCATION '/tmp/` + tablespace + `'`)
 	t.Cleanup(func() {
 		ctx := context.WithoutCancel(t.Context())
