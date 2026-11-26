@@ -50,7 +50,7 @@ func recordNotNullScaffolds(ctx context.Context, pool *pgxpool.Pool, statements 
 		if err := pool.QueryRow(ctx, "SELECT pg_catalog.quote_ident($1)", scaffold.column).Scan(&quoted); err != nil {
 			return fmt.Errorf("quote column %s for the definition of helper constraint %s: %w", scaffold.column, scaffold.constraint, err)
 		}
-		validated := "CHECK ((" + quoted + " IS NOT NULL))"
+		validated := notNullHelperDef(quoted)
 		ps.Validates = &schemadiff.ConstraintValidation{
 			Constraint: scaffold.constraint,
 			Def:        validated + " NOT VALID",
@@ -157,7 +157,7 @@ func singleOp(sql string) (*statement.Op, error) {
 
 // resumeNotNullHelpers finds, for each SET NOT NULL the diff plans, the helper
 // CHECK an earlier run of its online sequence left on the live table: a run
-// stopped after adding the helper and before dropping it, because its
+// stopped after adding the helper and before SET NOT NULL, because its
 // validation failed and the run was cancelled or gave up. The diff reads that
 // helper as a live constraint the desired schema lacks and plans its drop, a
 // drop of live structure a reviewer would have to approve, followed by a
@@ -167,7 +167,9 @@ func singleOp(sql string) (*statement.Op, error) {
 // exactly the definition the sequence gives it, NOT VALID or validated. Its
 // drop leaves the changes, and the column is returned so the planner resumes
 // the sequence at the helper's validation; the sequence's own last step still
-// drops it. Any other constraint under that name keeps its drop.
+// drops it. Any other constraint under that name keeps its drop. A run that
+// stopped after SET NOT NULL, because the helper's drop ran out of retries,
+// leaves a column the diff no longer changes, so that helper keeps its drop.
 func resumeNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, table string, changes []schemadiff.Change) ([]schemadiff.Change, map[string]bool, error) {
 	var helpers map[string]bool
 	for _, ch := range changes {
@@ -183,10 +185,9 @@ func resumeNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, table string,
 		if err := pool.QueryRow(ctx, "SELECT pg_catalog.quote_ident($1)", op.Column).Scan(&quoted); err != nil {
 			return nil, nil, fmt.Errorf("quote column %s for the definition of helper constraint %s: %w", op.Column, name, err)
 		}
-		validated := "CHECK ((" + quoted + " IS NOT NULL))"
 		drop := slices.IndexFunc(changes, func(other schemadiff.Change) bool {
 			return other.Drops != nil && other.Drops.Kind == schemadiff.DroppedConstraint && other.Drops.Name == name &&
-				(other.Drops.Definition == validated || other.Drops.Definition == validated+" NOT VALID")
+				isNotNullHelperDef(other.Drops.Definition, quoted)
 		})
 		if drop < 0 {
 			continue
@@ -200,19 +201,34 @@ func resumeNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, table string,
 	return changes, helpers, nil
 }
 
+// notNullHelperDef is the definition pg_get_constraintdef prints for the
+// validated helper of the column quote_ident renders as quoted.
+func notNullHelperDef(quoted string) string {
+	return "CHECK ((" + quoted + " IS NOT NULL))"
+}
+
+// isNotNullHelperDef reports whether def is the helper's definition for the
+// column quoted, NOT VALID or validated.
+func isNotNullHelperDef(def, quoted string) bool {
+	validated := notNullHelperDef(quoted)
+	return def == validated || def == validated+" NOT VALID"
+}
+
 // LeftoverNotNullHelpers returns each helper CHECK that a stopped run of the
 // online SET NOT NULL sequence left on schema.table, as the record a checked
 // drop of it needs. A run leaves one when it stops after adding the helper and
-// before dropping it: its validation failed on a NULL row and the run was
-// cancelled or gave up. Until it is dropped, the helper rejects every write
-// that leaves its column NULL.
+// before dropping it: its validation failed on a NULL row, or its drop ran out
+// of retries after SET NOT NULL, and the run was cancelled or gave up. Until it
+// is dropped, the helper rejects every write that leaves its column NULL.
 //
 // A constraint is such a helper under the same rule the planner uses to
 // resume one: the name the sequence gives the helper of one of the table's
 // columns, and exactly the definition the sequence gives it, NOT VALID or
-// validated. PostgreSQL never generates that name itself. The records are
-// read from the live catalog, so a drop checked against one refuses a
-// constraint replaced after the read.
+// validated. PostgreSQL never generates that name itself, but a check a user
+// wrote with exactly that name and definition matches too, so a caller backing
+// out a run drops only the helpers that run added. The records are read from
+// the live catalog, so a drop checked against one refuses a constraint
+// replaced after the read.
 func LeftoverNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, schema, table string) ([]schemadiff.DroppedObject, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT c.conname, pg_catalog.pg_get_constraintdef(c.oid), a.attname, pg_catalog.quote_ident(a.attname)
@@ -235,8 +251,7 @@ func LeftoverNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, schema, tab
 		if name != planner.NotNullHelperName(table, column) {
 			continue
 		}
-		validated := "CHECK ((" + quoted + " IS NOT NULL))"
-		if def != validated && def != validated+" NOT VALID" {
+		if !isNotNullHelperDef(def, quoted) {
 			continue
 		}
 		helpers = append(helpers, schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: name, Definition: def})

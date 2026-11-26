@@ -1010,11 +1010,16 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   once validated, so a helper a failed validation left `NOT VALID` refuses the drop as
   `dropped-object-drift`; fix the rows and resume at the validation step, after which the drop
   matches. The statement stays non-destructive, since the helper is the plan's own. A run that
-  stopped before the drop, cancelled or out of retries, leaves the helper on the table; the next
-  plan of the same file finds it under its name with the helper's exact definition, plans no drop
-  of it, and starts the sequence at its validation. A cancel that backs the change out instead
-  calls `diffplan.LeftoverNotNullHelpers` for each table and drops every helper it returns through
-  `executor.RunSequenceDropping` with that record; until then the helper rejects NULL writes. Each re-reads the index, constraint,
+  stopped before `SET NOT NULL`, cancelled or out of retries, leaves the helper on the table; the
+  next plan of the same file finds it under its name with the helper's exact definition, plans no
+  drop of it, and starts the sequence at its validation. A run that stopped after `SET NOT NULL`,
+  because the helper's drop ran out of retries, leaves a column already `NOT NULL`; the next plan
+  carries the helper's drop as a destructive drop, which removes nothing the column does not
+  already enforce. A cancel that backs the change out instead calls
+  `diffplan.LeftoverNotNullHelpers` for each table and drops, through `executor.RunSequenceDropping`
+  with that record, each returned helper the cancelled run added: the `Validates` constraint of a
+  statement it ran. A check a user wrote with the helper's exact name and definition is returned
+  too, and is not the run's to drop. Until it is dropped, the helper rejects NULL writes. Each re-reads the index, constraint,
   column, or NOT NULL under the
   lock it runs with (the dropping session, for an index) and refuses with `adopted-index-drift`,
   `validated-constraint-drift`, `renamed-index-drift`, `dropped-object-drift`, or
