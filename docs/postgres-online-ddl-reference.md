@@ -30,7 +30,7 @@ above (lock × work done) gives exactly three buckets every DDL in this referenc
 | --- | --- | --- | --- | --- | --- |
 | **Catalog-only** | none — a catalog entry changes; no row is read or written | brief `ACCESS EXCLUSIVE` (milliseconds once acquired) | `ALGORITHM=INSTANT` | `ADD COLUMN` (nullable or constant default), `DROP COLUMN`, `SET/DROP DEFAULT`, `DROP NOT NULL`, renames, [binary-coercible type changes](binary-coercible-type-changes.md) | native, as written |
 | **Full scan, no rewrite** | every row is *read* (to validate or to build an index); the heap is not rewritten | native online forms hold `SHARE UPDATE EXCLUSIVE` for the scan; the as-written forms hold a blocking lock for the whole scan | `ALGORITHM=INPLACE` | `SET NOT NULL`, `ADD CONSTRAINT … CHECK/FOREIGN KEY`, `ADD CONSTRAINT … UNIQUE`, `CREATE INDEX` | native, **safer sequence** substituted (`NOT VALID` + `VALIDATE`, `CONCURRENTLY` + `USING INDEX`) |
-| **Full rewrite** | every row is *written* into a new heap; all indexes rebuilt | `ACCESS EXCLUSIVE` for the whole rewrite | `ALGORITHM=COPY` | `ALTER COLUMN TYPE` (non-coercible), `ADD COLUMN … DEFAULT <volatile>`, `ADD COLUMN … GENERATED … STORED`, `SET TABLESPACE`, `VACUUM FULL`/`CLUSTER` | **copy-and-swap** — runs a general `ALTER COLUMN TYPE` when the run opens the preview route with `--copy-and-swap`; the other rewrites refuse `backend-unavailable` ([copy-and-swap.md](copy-and-swap.md)) |
+| **Full rewrite** | every row is *written* into a new heap; all indexes rebuilt | `ACCESS EXCLUSIVE` for the whole rewrite | `ALGORITHM=COPY` | `ALTER COLUMN TYPE` (non-coercible), `ADD COLUMN … DEFAULT <volatile>`, `ADD COLUMN … GENERATED … STORED`, `SET TABLESPACE` (of a table with storage; on a partitioned parent it is catalog-only), `VACUUM FULL`/`CLUSTER` | **copy-and-swap** — runs a general `ALTER COLUMN TYPE` when the run opens the preview route with `--copy-and-swap`; the other rewrites refuse `backend-unavailable` ([copy-and-swap.md](copy-and-swap.md)) |
 
 Two things fall out of this. For a coarse "does this cost scale with table size?" question,
 the last two buckets answer alike — only the first is free. For deciding *how* to run the
@@ -257,6 +257,7 @@ ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lo
 | `RENAME TABLE` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only — basis for cutover swap |
 | `SET SCHEMA` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | |
 | `SET TABLESPACE` | ACCESS EXCLUSIVE | **Yes** (moves heap) | No | ✅ **Yes** (repack-style) | Rewrite/move; use a repack-style copy instead |
+| `SET TABLESPACE` on a **partitioned parent** | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | The parent has no heap: sets the default tablespace for partitions created later and moves no existing partition or index. [`metadata-only`](#metadata-only) |
 | `SET (fillfactor=...)` and most reloptions | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | Applies to new rows |
 | `CLUSTER` / `VACUUM FULL` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** (`pg_repack`) | Use `pg_repack` |
 | `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief unless the parent has a `DEFAULT` partition, which it scans while it holds the parent; it also queues behind long-running queries and then blocks every reader of the parent. With a `DEFAULT` partition, create the table on its own and [attach it](#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build) instead |
@@ -435,6 +436,7 @@ writes, only competing DDL and vacuum:
 | Operation | Lock actually taken |
 |---|---|
 | `ADD COLUMN` (plain), `DROP COLUMN`, `SET DEFAULT` / `DROP DEFAULT`, `DROP NOT NULL`, `SET SCHEMA`, `DROP CONSTRAINT` | brief `ACCESS EXCLUSIVE` |
+| `SET TABLESPACE` on a partitioned parent — sets the default for partitions created later; no existing partition moves | brief `ACCESS EXCLUSIVE` on the parent alone |
 | `ALTER INDEX ... RENAME`, `SET STATISTICS`, `SET (attribute_option)`, `SET (storage_parameter)` | `SHARE UPDATE EXCLUSIVE` — reads and writes proceed |
 | `CREATE TABLE` (standalone, not a partition) | no lock on any existing relation |
 
@@ -609,7 +611,11 @@ table already has, so an added column with this reason is refused
 
 The operation physically moves the table's storage (for example
 `SET TABLESPACE`): rewrite-scale I/O under an exclusive lock. Routed to the
-copy-and-swap backend.
+copy-and-swap backend. A partitioned parent has no storage to move, so a live
+plan classifies `SET TABLESPACE` on one as [`metadata-only`](#metadata-only); a
+partition and an ordinary table keep this reason. An offline plan (`lint`,
+`suggest`) cannot tell which the table is, so it keeps this reason as
+`unverified`.
 
 ### `partition-parent-lock`
 
