@@ -99,6 +99,11 @@ type leafKeyResult struct {
 	// recoveredDebris is whether the step removed an earlier build's
 	// leftover before it built.
 	recoveredDebris bool
+	// buildStarted is whether the step began the concurrent build or the
+	// removal of debris, which commit as they go. It is set on the result
+	// returned with an error too, so the caller knows the leaf may hold an
+	// index without its constraint.
+	buildStarted bool
 }
 
 // ensureLeafKey brings one leaf partition to the requested key: a PRIMARY KEY
@@ -168,15 +173,17 @@ func ensureLeafKey(ctx context.Context, pool *pgxpool.Pool, spec partitionedKeyS
 	case leafKeyBuildNeeded:
 		result.action = leafKeyBuilt
 		result.recoveredDebris = plan.debris
+		result.buildStarted = true
 		if idx, err = buildLeafKeyIndex(ctx, pool, tx, spec, node, name, want, plan.debris, b); err != nil {
-			return leafKeyResult{}, err
+			return leafKeyResult{buildStarted: true}, err
 		}
 	default:
 		return leafKeyResult{}, fmt.Errorf("%w: unknown leaf key state %d", ErrInvariantViolation, plan.state)
 	}
 	constraintOID, err := addLeafKeyConstraint(ctx, tx, spec, node, idx, want)
 	if err != nil {
-		return leafKeyResult{}, err
+		// The constraint's transaction rolled back, but a built index stays.
+		return leafKeyResult{buildStarted: result.buildStarted}, err
 	}
 	result.constraint, result.constraintOID = idx.name, constraintOID
 	result.index, result.indexOID = idx.name, idx.oid

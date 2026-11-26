@@ -957,6 +957,28 @@ func TestClassifySetNotNullSequence(t *testing.T) {
 	}, d.SaferSQL)
 }
 
+// A helper an earlier run of the sequence left on the live table is
+// validated, not added again: the sequence resumes at its validation, and
+// its last step still drops it.
+func TestClassifySetNotNullSequenceResumesAtALiveHelper(t *testing.T) {
+	withHelper := facts
+	withHelper.NotNullHelpers = map[string]bool{"age": true}
+	plan, err := planner.Classify("ALTER TABLE s.t ALTER COLUMN age SET NOT NULL", withHelper)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	d := plan.Decisions[0]
+	assert.Equal(t, planner.RouteNative, d.Route)
+	assert.Equal(t, []string{
+		`ALTER TABLE "s"."t" VALIDATE CONSTRAINT "t_age_not_null_check"`,
+		`ALTER TABLE "s"."t" ALTER COLUMN "age" SET NOT NULL`,
+		`ALTER TABLE "s"."t" DROP CONSTRAINT "t_age_not_null_check"`,
+	}, d.SaferSQL)
+
+	other, err := planner.Classify("ALTER TABLE s.t ALTER COLUMN name SET NOT NULL", withHelper)
+	require.NoError(t, err)
+	assert.Len(t, other.Decisions[0].SaferSQL, 4, "another column's helper is added as usual")
+}
+
 func TestClassifyAddPrimaryKeySequence(t *testing.T) {
 	d := classifyOne(t, "ALTER TABLE s.t ADD CONSTRAINT t_pkey PRIMARY KEY (id)")
 	assert.Equal(t, []string{
