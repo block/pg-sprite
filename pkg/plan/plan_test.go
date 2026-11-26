@@ -257,6 +257,63 @@ func TestRoutePartitionedParentRoutesCreateIndexAndRefusesTheRest(t *testing.T) 
 	})
 }
 
+// A diff-derived drop of a partitioned table's index stays refused, because
+// PostgreSQL has no concurrent drop for it, and discloses the one drop there
+// is: the plain DROP INDEX as its step, with the blocking-index-drop
+// execution, so a reviewer sees the blocking form and the fingerprint pins it.
+// An alter-source drop, which carries no reviewed definition, stays refused
+// with nothing to run.
+func TestRoutePartitionedParentDisclosesTheBlockingIndexDrop(t *testing.T) {
+	const sql = "DROP INDEX s.p_c_idx"
+	dropStatement := func() plan.Statement {
+		return plan.Statement{
+			SQL:         sql,
+			Kind:        schemadiff.ChangeDropIndex,
+			Destructive: true,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom, Destructive: true,
+				SaferSQL:          []string{"DROP INDEX CONCURRENTLY s.p_c_idx"},
+				SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   []string{"DROP INDEX CONCURRENTLY s.p_c_idx"},
+			Execution: planner.ExecutionAutocommit,
+			Drops: &schemadiff.DroppedObject{
+				Kind: schemadiff.DroppedIndex, Name: "p_c_idx",
+				Definition: "CREATE INDEX p_c_idx ON ONLY s.p USING btree (c)",
+			},
+		}
+	}
+
+	t.Run("a reviewed drop carries the plain drop", func(t *testing.T) {
+		r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{dropStatement()}}
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		st := r.Statements[0]
+		assert.Equal(t, router.DispositionRefuse, st.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, st.Reason)
+		assert.Equal(t, verdict.ClassByDesign, st.Class)
+		require.NotNil(t, st.BlockingPassthroughEligible)
+		assert.True(t, *st.BlockingPassthroughEligible)
+		assert.Empty(t, st.Backend)
+		assert.Equal(t, []string{sql}, st.ExecSQL, "the plain drop, never CONCURRENTLY")
+		assert.Equal(t, planner.ExecutionBlockingIndexDrop, st.Execution)
+		assert.Empty(t, st.Decisions[0].SaferSQL, "no concurrent idiom is offered")
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+	})
+
+	t.Run("a drop with no reviewed definition stays refused with nothing to run", func(t *testing.T) {
+		st := dropStatement()
+		st.Kind, st.Drops = "", nil
+		r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{st}}
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Statements[0].Disposition)
+		assert.Empty(t, r.Statements[0].ExecSQL)
+		assert.Empty(t, r.Statements[0].Execution)
+	})
+}
+
 // The partition refusal's class is a property of the cause: an index-adoption
 // refusal is by-design, a pre-18 NOT VALID foreign key is environmental. A
 // registry keyed on the reason alone could not tell them apart.
@@ -603,7 +660,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 23,
+		"format_version": 24,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -661,7 +718,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 23,
+		"format_version": 24,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -686,7 +743,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 23,
+		"format_version": 24,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -804,6 +861,33 @@ func TestFingerprintCoversPartitionedIndexBuildExecution(t *testing.T) {
 		plan.Fingerprint([]plan.Statement{literal}),
 		plan.Fingerprint([]plan.Statement{autocommit}),
 		"an autocommit execution is not hashed, so dry-run and run fingerprints that differ only in it agree")
+}
+
+// A reviewed drop of a partitioned table's index pins the blocking form it
+// runs as: the same refused statement with no step to run, or with the
+// plain drop as an ordinary step, is a different plan, so a pin taken on one
+// cannot run the other.
+func TestFingerprintCoversBlockingIndexDropExecution(t *testing.T) {
+	refused := plan.Statement{
+		SQL:         "DROP INDEX app.events_kind_idx",
+		Route:       planner.RouteNative,
+		Disposition: router.DispositionRefuse,
+		Drops: &schemadiff.DroppedObject{
+			Kind: schemadiff.DroppedIndex, Name: "events_kind_idx",
+			Definition: "CREATE INDEX events_kind_idx ON ONLY app.events USING btree (kind)",
+		},
+	}
+	blocking := refused
+	blocking.ExecSQL = []string{refused.SQL}
+	blocking.Execution = planner.ExecutionBlockingIndexDrop
+	autocommit := blocking
+	autocommit.Execution = planner.ExecutionAutocommit
+
+	pinned := plan.Fingerprint([]plan.Statement{blocking})
+	assert.NotEqual(t, pinned, plan.Fingerprint([]plan.Statement{refused}),
+		"the refusal with no step to run is not the blocking drop")
+	assert.NotEqual(t, pinned, plan.Fingerprint([]plan.Statement{autocommit}),
+		"the plain drop as an ordinary step is not the blocking drop")
 }
 
 // What a drop removes is part of the plan's identity, name and definition

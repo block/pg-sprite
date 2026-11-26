@@ -280,6 +280,10 @@ cannot apply here. The other acknowledgements work the same way:
     --lock-timeout 3s --statement-timeout 10m
   ```
 
+  With `--desired` it lifts one refusal only, a reviewed plan's drop of a
+  partitioned table's index, and needs `--expect-fingerprint` and
+  `--allow-destructive` too, all naming the desired file's table.
+
   See [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
 
 ## Rewrite a table online
@@ -544,8 +548,9 @@ refused (plan-fingerprint-mismatch)
   `diff --desired` again to review what is left.
 - `--dry-run` prints the fingerprint to pin and executes nothing; with both
   flags it previews the plan the run would execute. Some plans stay refused
-  with both flags, such as a drop beside a copy-and-swap statement or a drop
-  of a partitioned table's index. For those, the dry run prints the refusal
+  with both flags, such as a drop beside a copy-and-swap statement, or a drop
+  of a partitioned table's index, which a run also needs `--accept-blocking`
+  for and a dry run cannot carry. For those, the dry run prints the refusal
   the pinned run gives instead of the flags. In `--json` output on a
   destructive plan, `fingerprint` covers the refused plan and cannot be
   pinned: pin `pinnable_fingerprint`, the same value the text output prints.
@@ -733,7 +738,7 @@ and row, checksum, and catch-up counters directly; that snapshot is the
 $ pg-sprite migrate --dry-run --json --alter "ALTER TABLE orders ADD COLUMN ref text UNIQUE" > plan.json; echo $?
 2
 $ jq -c '{format_version, table, disposition}' plan.json
-{"format_version": 23,"table":"orders","disposition":"rewrite-required"}
+{"format_version": 24,"table":"orders","disposition":"rewrite-required"}
 ```
 
 The exit code answers the question a pipeline asks first, without parsing
