@@ -105,3 +105,26 @@ func TestPartitionedIndexEditsRefuseUneditableStatements(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, statement.ErrNotCreateIndex)
 }
+
+// IndexKeyColumns names the key's plain columns in key order. An expression
+// key and an INCLUDE column are not key columns.
+func TestIndexKeyColumnsNamesThePlainKeyColumns(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{"plain columns", "CREATE UNIQUE INDEX i ON app.events (id, ts)", []string{"id", "ts"}},
+		{"an expression key", "CREATE UNIQUE INDEX i ON app.events (id, lower(region))", []string{"id"}},
+		{"an include column", "CREATE UNIQUE INDEX i ON app.events (id) INCLUDE (ts)", []string{"id"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := statement.IndexKeyColumns(tt.sql)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+	_, err := statement.IndexKeyColumns("CREATE INDEX ON app.events (id)")
+	assert.ErrorIs(t, err, statement.ErrIndexUnnamed)
+}

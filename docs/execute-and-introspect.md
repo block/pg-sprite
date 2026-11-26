@@ -217,7 +217,7 @@ ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email);
 | --- | --- | --- | --- |
 | `DEFAULT now()` vs `DEFAULT CURRENT_TIMESTAMP` | `now()` vs `CURRENT_TIMESTAMP` | a `SET DEFAULT` | converges: the next `diff` is empty |
 | `DEFAULT 1 + 1` vs `DEFAULT 2` | `(1 + 1)` vs `2`; the server does not evaluate the expression | a `SET DEFAULT` | converges |
-| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change`; running the add with `migrate --alter`, then the drop with `migrate --alter --allow-destructive public.accounts`, then `migrate --desired` for the rest, converges ([why the two differ, and the commands](#why---desired-and---alter-treat-the-drop-differently)) |
+| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change` unless the run pins the reviewed plan with `--expect-fingerprint` and `--allow-destructive public.accounts`; running the add with `migrate --alter`, then the drop with `migrate --alter --allow-destructive public.accounts`, then `migrate --desired` for the rest, converges without a window ([why the two differ, and the commands](#why---desired-and---alter-treat-the-drop-differently)) |
 | `name text COLLATE "C"` vs `name text` | collation `"C"` vs the type's default | refused: `unsupported schema change: column "name" collation change ("" vs "pg_catalog.\"C\"")` | does not converge through pg-sprite; a collation change rewrites the column and rebuilds its indexes, which the diff does not derive |
 
 The same table written with `int8`, `TEXT`, `TIMESTAMP WITH TIME ZONE`, `current_timestamp`,
@@ -264,20 +264,24 @@ who wrote the drop.
   `DROP CONSTRAINT accounts_email_key` and `ADD CONSTRAINT accounts_email_uniq`. A desired file
   cannot say whether that is a rename or the deliberate removal of a guarantee, so pg-sprite does
   not infer that the loss is intended. Any destructive statement refuses the whole plan,
-  including the harmless `ADD`, and there is no acknowledgement to lift it: `--allow-destructive`
-  cannot be combined with `--desired`.
+  including the harmless `ADD`, until the run pins the plan you reviewed: `--expect-fingerprint`
+  with the `sha256:...` value `diff --desired` prints, and `--allow-destructive public.accounts`.
+  The acknowledgement then covers that plan and no other, and a plan that changed since the
+  review is refused. The plan runs its statements in the order `diff` prints them, here the
+  `DROP` before the `ADD`.
 - **`migrate --alter`: the operator wrote the drop.** The intent is explicit, but the drop is still
   refused with `destructive-change` until `--allow-destructive public.accounts` names the table.
   The `ADD` is not destructive and runs without it.
 
 ```text
---desired   diff derives DROP + ADD    → destructive statement in the plan → whole plan refused, no override
+--desired   diff derives DROP + ADD    → destructive statement in the plan → whole plan refused unless the run
+                                         pins its fingerprint and names public.accounts
 --alter     operator writes the ADD    → runs (the safer UNIQUE sequence)
             operator writes the DROP   → refused unless --allow-destructive public.accounts
 --desired   rerun for the rest         → the two SET DEFAULTs run; a fresh plan is empty: converged
 ```
 
-To converge the example, run the `ADD` before the `DROP`:
+To converge the example without a window, run the `ADD` before the `DROP`:
 
 ```sh
 pg-sprite migrate --alter 'ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email)'
@@ -297,7 +301,18 @@ again.
 
 The refusal of a desired plan is not permission to run its statements one by one. An
 orchestrator should not turn a refused plan into acknowledged `--alter` statements on its own;
-running the drop is a separate decision an operator makes.
+running the drop is a separate decision an operator makes. The decision is made on the plan
+itself when the run pins it:
+
+```sh
+pg-sprite diff --desired accounts.sql                       # review; note the fingerprint
+pg-sprite migrate --desired accounts.sql \
+  --expect-fingerprint sha256:… --allow-destructive public.accounts
+```
+
+Without `--allow-destructive`, the refusal names the fingerprint to pin and the table to name.
+With `--dry-run` and both flags, the preview is the plan the run would execute; without them
+it is the refusal, followed by the same two flags.
 
 When a reported difference was not meant as a change, write the desired file the way the server
 stores it. [`pg-sprite pull`](pull.md) exports a live table in that form.

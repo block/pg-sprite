@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -73,15 +74,30 @@ func lockLostError(lost, stepErr error) error {
 // runs on the pool, so a cfg and a pool that reach different databases would
 // give the build no exclusion while both looked healthy.
 func confirmLockInPoolDatabase(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, schema, table string) error {
+	name := qualifiedName(schema, table)
 	holder, found, err := dbconn.LookupTableLockHolder(ctx, pool, schema, table)
 	if err != nil {
-		return fmt.Errorf("confirm the table lock for %s from the pool: %w", qualifiedName(schema, table), err)
+		return fmt.Errorf("confirm the table lock for %s from the pool: %w", name, err)
+	}
+	if !found {
+		return fmt.Errorf("%w: LK-1: no session holds the table lock for %s in the database the pool is connected to; the connection target and the pool must reach the same database",
+			ErrInvariantViolation, name)
+	}
+	if holder.PID != lock.BackendPID() {
+		return fmt.Errorf("%w: LK-1: backend %d holds the table lock for %s in the pool's database, not the build's lock session (backend %d); the connection target and the pool must reach the same database",
+			ErrInvariantViolation, holder.PID, name, lock.BackendPID())
 	}
 	// A PID is unique only within one server, so the holder's backend start
 	// must match too: the pair is what identifies the lock's own session.
-	if !found || holder.PID != lock.BackendPID() || !holder.BackendStart.Equal(lock.BackendStart()) {
-		return fmt.Errorf("%w: LK-1: the table lock for %s is not held in the database the pool is connected to; the connection target and the pool must reach the same database",
-			ErrInvariantViolation, qualifiedName(schema, table))
+	// pg_stat_activity hides another role's backend start, and without it
+	// the pair cannot be compared, so the build refuses rather than assume.
+	if holder.BackendStart.IsZero() {
+		return fmt.Errorf("%w: the pool's role cannot read when the session holding the table lock for %s started, so it cannot tell that session from one on another server; connect the pool as the role the connection target uses, or grant the pool's role pg_read_all_stats",
+			ErrTableLockUnconfirmed, name)
+	}
+	if !holder.BackendStart.Equal(lock.BackendStart()) {
+		return fmt.Errorf("%w: LK-1: backend %d in the pool's database holds the table lock for %s but started at %s, and the build's lock session started at %s; the connection target and the pool must reach the same server",
+			ErrInvariantViolation, holder.PID, name, holder.BackendStart.Format(time.RFC3339Nano), lock.BackendStart().Format(time.RFC3339Nano))
 	}
 	return nil
 }

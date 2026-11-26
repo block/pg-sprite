@@ -12,7 +12,7 @@ results to the workflows you can use today and includes commands to run the suit
 | Succeeds | pg-sprite executed the requested change and the database checks matched the expected result |
 | Requires unavailable copy-and-swap | pg-sprite refused the change with `backend-unavailable`; it did not execute the requested DDL |
 | Routes to copy-and-swap | With the route opened, its preflight refused the change with `copy-and-swap-refused` before writing anything, and the desired plan routes it to copy-and-swap |
-| Refuses a destructive desired plan | The entire plan was refused, including any supported additions in the same plan |
+| Refuses a destructive desired plan | Run without a pinned fingerprint and acknowledgement, the entire plan was refused, including any supported additions in the same plan |
 | Execution fails | The expected error occurred, and the test verified the durable state left behind |
 
 A passing refusal test does **not** mean the change is supported. When the engine
@@ -102,7 +102,12 @@ Handle unrelated upgrades in a separate follow-up. When making an upgrade:
 3. Run the required Supabase CI job and investigate failures before accepting
    new versions
 4. Update the tested versions and any changed limits in `docs/supabase.md` in
-   the same PR
+   the same PR. `make check-guide-versions` (also the first step of
+   `make check-image-pins`) confirms, offline, that the first paragraph under
+   the "What works today" heading names each pinned tag's version (a leading
+   `v` dropped), and fails naming any pin it does not. Keep the versions in
+   that first paragraph and the heading as written: the check reads nothing
+   else
 
 This check is triggered by agent work, not a scheduled update bot. Fresh CI
 runners pull the pinned images on each run, which also exposes unavailable pins,

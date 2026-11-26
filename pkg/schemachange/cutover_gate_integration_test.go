@@ -2,7 +2,9 @@ package schemachange_test
 
 import (
 	"math"
+	"reflect"
 	"testing"
+	"unsafe"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
@@ -174,6 +176,48 @@ func TestGateCutoverRefusesProofsThatDoNotDescribeTheSameCopy(t *testing.T) {
 		_, err := schemachange.GateCutover(t.Context(), f.pool, orders.lock, orders.built, shipments.verified, schemachange.Options{})
 		assert.Equal(t, schemachange.CauseCutoverUnverified, schemachange.RefusalCauseOf(err))
 	})
+}
+
+// No pass leaves more than checksum.MaxCarryKeys keys for the swap, so
+// only a forged proof names more; the swap compares every carried key
+// under ACCESS EXCLUSIVE, and the gate refuses such a proof as unverified
+// before any catalog read (CO-1). The proof here is a real one with its
+// carried keys overwritten past what the type lets any package set:
+// exactly the bound passes the gate, which leaves the compare to the
+// swap, and one key more is refused. The over-bound proof is handed a
+// closed pool, so only a refusal made before the gate's first read names
+// the key count.
+func TestGateCutoverRefusesAProofNamingMoreKeysThanAPassMayLeave(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	orders := f.stage(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
+
+	_, err := schemachange.GateCutover(t.Context(), f.pool, orders.lock, orders.built, carrying(t, orders.verified, checksum.MaxCarryKeys), schemachange.Options{})
+	require.NoError(t, err)
+
+	closed, err := dbconn.NewPool(t.Context(), f.cfg)
+	require.NoError(t, err)
+	closed.Close()
+	_, err = schemachange.GateCutover(t.Context(), closed, orders.lock, orders.built, carrying(t, orders.verified, checksum.MaxCarryKeys+1), schemachange.Options{})
+	assert.Equal(t, schemachange.CauseCutoverUnverified, schemachange.RefusalCauseOf(err))
+	assert.ErrorContains(t, err, "leaves 1025 keys for the swap to compare, more than the 1024 a pass may leave")
+}
+
+// carrying forges verified into a proof that leaves keys 1 through n for
+// the swap. The field is sealed in package checksum, which mints at most
+// MaxCarryKeys, so the only way to hand the gate more is to write it
+// through reflect and unsafe, as a forger would.
+func carrying(t *testing.T, verified checksum.VerifiedShadow, n int) checksum.VerifiedShadow {
+	t.Helper()
+	keys := make([]int64, n)
+	for i := range keys {
+		keys[i] = int64(i + 1)
+	}
+	field := reflect.ValueOf(&verified).Elem().FieldByName("carried")
+	require.True(t, field.IsValid(), "checksum.VerifiedShadow has a carried field")
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(keys))
+	require.Len(t, verified.Carried(), n)
+	return verified
 }
 
 // The gate runs under the same per-table lock as every shadow operation

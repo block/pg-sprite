@@ -48,8 +48,9 @@ const SlotNamePrefix = "pgsprite_"
 // never dropped.
 func IsEngineSlotName(name string) bool { return slotNamePattern.MatchString(name) }
 
-// outputPlugin is PostgreSQL's built-in logical-decoding output plugin.
-const outputPlugin = "pgoutput"
+// OutputPlugin is PostgreSQL's built-in logical-decoding output plugin,
+// the one every engine slot decodes with.
+const OutputPlugin = "pgoutput"
 
 const (
 	sqlstateDuplicateObject   = "42710"
@@ -156,7 +157,7 @@ func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 		return nil, errors.Join(fmt.Errorf("create slot %s: %w", name, err), conn.Close(ctx))
 	}
 
-	result, err := pglogrepl.CreateReplicationSlot(ctx, conn, name, outputPlugin, pglogrepl.CreateReplicationSlotOptions{
+	result, err := pglogrepl.CreateReplicationSlot(ctx, conn, name, OutputPlugin, pglogrepl.CreateReplicationSlotOptions{
 		Mode:           pglogrepl.LogicalReplication,
 		SnapshotAction: "EXPORT_SNAPSHOT",
 	})

@@ -121,7 +121,7 @@ $ echo 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);' \
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "suggestions": [
     {
       "statement": 1,

@@ -14,14 +14,16 @@ import (
 // The statement-type gate applies to a dry run exactly as it does to an
 // apply: a gated kind must not dry-run to an executable plan and then
 // refuse on apply. Offline — the gate decides before any connection is
-// made, so no database is needed.
+// made, so no database is needed. A single-index DROP INDEX is the
+// exception: its refusal depends on whether the index is partitioned, so
+// the dry run reads the catalog (TestMigrateDropIndexOfPartitionedTable).
 func TestDryRunGatesUnsupportedStatementKinds(t *testing.T) {
 	cases := []struct {
 		name   string
 		alter  string
 		reason verdict.Reason
 	}{
-		{"drop index", "DROP INDEX users_email_idx", verdict.ReasonIndexStatement},
+		{"drop several indexes", "DROP INDEX users_email_idx, users_name_idx", verdict.ReasonIndexStatement},
 		{"reindex", "REINDEX TABLE users", verdict.ReasonIndexStatement},
 		{"create table", "CREATE TABLE t (id int)", verdict.ReasonUnsupportedStatement},
 		{"other statement kind", "TRUNCATE users", verdict.ReasonUnsupportedStatement},

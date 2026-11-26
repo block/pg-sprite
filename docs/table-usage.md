@@ -5,10 +5,11 @@ pg-sprite answers that from PostgreSQL's own statistics, and is honest about how
 those statistics can prove. This page explains what the check reads, how it decides, and
 — most importantly — what it cannot see.
 
-`DROP TABLE` is still refused by both front doors today
+`DROP TABLE` is still refused by both front doors today. A reviewed drop runs through the
+Go API, `executor.ExecuteDropTable`, which does not consult this check
 ([capabilities](capabilities.md#deliberately-operator-owned)). The check described here is
-a read-only primitive, `preflight.ReadTableUsage` and `TableUsage.Judge`, that a later
-drop path will consult. Nothing calls it yet. Its index-level sibling,
+a read-only primitive, `preflight.ReadTableUsage` and `TableUsage.Judge`, that an owner can
+run before asking for that review. Nothing in pg-sprite calls it yet. Its index-level sibling,
 `preflight.ReadIndexUsage`, reads one index's `idx_scan`, `last_idx_scan`, and uniqueness
 (summed over the leaf indexes of a partitioned index) under the same limits, including the
 saved `track_counts` settings check, and is reported, never judged, on a refused `DROP INDEX`

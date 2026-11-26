@@ -330,8 +330,8 @@ func TestAddPartitionedKeyRefusals(t *testing.T) {
 
 			var keyErr *UniqueIndexPartitionKeyError
 			require.ErrorAs(t, err, &keyErr)
-			assert.Equal(t, CodeUniqueIndexMissingPartitionKey, OutcomeCode(err))
-			assert.Equal(t, []MissingPartitionKey{{Table: f.schema + ".events", Columns: []string{"created_at"}}}, keyErr.Missing)
+			assert.Equal(t, CodeUniqueIndexPartitionKey, OutcomeCode(err))
+			assert.Equal(t, []MissingPartitionKey{{Schema: f.schema, Table: "events", Columns: []string{"created_at"}}}, keyErr.Missing)
 			f.requireNothingCreated(t, "events", "events_2026_01", "events_2026_02")
 		})
 
