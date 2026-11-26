@@ -1081,17 +1081,32 @@ It takes a `preflight.CopySwapShape` (`preflight.CheckPrivileges` with
 `preflight.CheckCopySwapShape`), not a target: a discard grows nothing, so it is not asked for
 the disk or the slot headroom the stopped run itself holds. It has no CLI flag or verb.
 
+The shape check reads the table as it stands now, so a table that has changed shape since the
+run stopped — a user trigger, a foreign key, or a dependent view added — has no
+`CopySwapShape` to hand to `Discard`. The operator then removes the run by hand, with no run
+in flight: delete the table's row from `pgsprite.pgsprite_checkpoint`, drop the shadow
+(`_pgsprite_…_new` in the table's schema), and for a blocked-writes run drop the
+`pgsprite_write_fence` trigger from the table; `pg-sprite reap` (`Store.ReapOrphanSlots`) then
+drops a live run's slot and publication, which no row names any more. A `cutover` row is not
+removed this way: read the catalog first, since a swap that committed is finished by running
+the statement again.
+
+A live row's slot is dropped with `decode.DropSlot`, which waits for a walsender holding it,
+bounded only by the context `Discard` is given, so a host's `Cancel` passes a deadline. Every
+error comes back beside a `Discarded` that names what the call dropped before it.
+
 | Outcome | What it means | What the adapter does |
 | --- | --- | --- |
-| `Discarded` with `Nothing()` false | The call held the table lock, and dropped what the stopped run left in the restart's order — the shadow (`Shadow`), the hold on the source (`Slot` and `Publication` for a live row, `WriteFence` for a blocked-writes row), then the row (`RowPhase` is the phase it was in). With no row, a shadow or fence under the table's names and a slot and publication of its derived name are dropped the same way, the slot as the orphan reaper drops one | Done: the table is as if no run had started, and the next `Run` of any statement starts from the beginning |
+| `Discarded` with `Nothing()` false | The call held the table lock, and dropped what the stopped run left in the restart's order — the shadow (`Shadow`), the hold on the source (`Slot` and `Publication` for a live row, `WriteFence` for a blocked-writes row), then the row (`RowPhase` is the phase it was in, any phase but `done`, a `failed` row included). With no row, a shadow or fence under the table's names and a slot and publication of its derived name are dropped the same way, the slot as the orphan reaper drops one | Done: the table is as if no run had started, and the next `Run` of any statement starts from the beginning |
 | `Discarded` with `Nothing()` true, nil error | Nothing of a run stands on the table | Done. This is the answer to a discard called again after one that completed, so a `Cancel` retried after a crash is safe to repeat |
 | `*dbconn.TableLockHeldError` | A run, or another discard, holds the table lock; the call waited for nothing and touched nothing | Stop the run first (cancel its context and wait for `Run` to return), then call `Discard` again |
 | `restart-swap-committed` | The row is in `cutover` and the catalog shows its swap committed: the new table is live under the source's name. Nothing was dropped | The change cannot be discarded. Run the same statement again, without a restart, to finish it; undoing it is a new schema change |
 | `resume-row-terminal` | The row is `done`: the change completed. Nothing was dropped | Treat the change as applied; a `KeepOld` rollback window is the caller's own to end |
 | `resume-row-mismatch` | The row names a slot other than the table's derived name. Nothing was dropped | Operator: the row is not this table's run's; inspect it before deleting anything |
-| error wrapping `decode.ErrSlotActive` | No row records the table's derived slot and a process holds it, so the discard, which drops such a slot only as the reaper would, left it; the shadow and fence before it may already be gone | Find the holder, end it, and call `Discard` again |
+| `resume-slot-foreign` | No row records the table's run, and a slot of its derived name is named by a live row of another table: two tables can derive the same name, and the slot is that table's run's. The shadow and fence before it are gone, and `Discarded` names them | Leave the slot; it is the other run's. Once that run ends, `Discard` again drops the slot if it is still there |
+| error wrapping `decode.ErrSlotActive` | No row records the table's derived slot and a process holds it, so the discard, which drops such a slot only as the reaper would, left it; the shadow and fence before it are gone, and `Discarded` names them | Find the holder, end it, and call `Discard` again |
 | error wrapping `preflight.ErrCopySwapProofMismatch` | A slot stands to be dropped and the shape was proven without replication access. Nothing was dropped | Prove the shape with `LogicalDecoding` and call again |
-| any other error | A drop failed partway; what the call dropped before the failure is gone, and the row still records whatever stands | Call `Discard` again; each step is idempotent, and its `Discarded` names only what that call dropped |
+| any other error | A drop failed partway, or the context's deadline ended the wait for a walsender holding a live row's slot. `Discarded` names each leftover the call dropped before it; a drop the error interrupted is not named, though part of it may be gone (a slot dropped before its publication). The row still records whatever stands | Call `Discard` again, after ending a holder if one kept the slot; each step is idempotent, and its `Discarded` names only what that call dropped |
 
 ## Design constraints the integration imposes
 

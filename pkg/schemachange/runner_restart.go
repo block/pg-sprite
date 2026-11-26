@@ -30,7 +30,8 @@ func (r *Runner) discardRow(ctx context.Context, pool *pgxpool.Pool, lock *dbcon
 	if err := r.checkDiscardable(ctx, pool, lock, target, cp); err != nil {
 		return err
 	}
-	return r.discardRecorded(ctx, pool, lock, target, cp)
+	_, err := r.discardRecorded(ctx, pool, lock, target, cp)
+	return err
 }
 
 // checkDiscardable refuses, before anything is discarded, a row whose run
@@ -48,19 +49,30 @@ func (r *Runner) checkDiscardable(ctx context.Context, pool *pgxpool.Pool, lock 
 	return nil
 }
 
+// recordedSteps is how far a discardRecorded got: each step it finished.
+// A step that failed is not reported, though part of it may be gone.
+type recordedSteps struct {
+	shadow, hold, row bool
+}
+
 // discardRecorded discards what the row cp records, once checkDiscardable
-// has accepted it: the shadow, then the hold, then the row.
-func (r *Runner) discardRecorded(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, cp checkpoint.Checkpoint) error {
+// has accepted it: the shadow, then the hold, then the row. It reports the
+// steps it finished beside any error.
+func (r *Runner) discardRecorded(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, cp checkpoint.Checkpoint) (recordedSteps, error) {
+	var done recordedSteps
 	if err := r.discardShadow(ctx, pool, lock, target); err != nil {
-		return err
+		return done, err
 	}
+	done.shadow = true
 	if err := r.discardHold(ctx, pool, lock, target, cp); err != nil {
-		return err
+		return done, err
 	}
+	done.hold = true
 	if err := r.store.Delete(ctx, lock, cp.Schema, cp.Table, cp.Identity()); err != nil {
-		return fmt.Errorf("discard checkpoint row for %s.%s: %w", cp.Schema, cp.Table, err)
+		return done, fmt.Errorf("discard checkpoint row for %s.%s: %w", cp.Schema, cp.Table, err)
 	}
-	return nil
+	done.row = true
+	return done, nil
 }
 
 // refuseSwappedRestart refuses the restart, or the discard (Runner.Discard),

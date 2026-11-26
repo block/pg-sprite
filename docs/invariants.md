@@ -791,7 +791,10 @@ at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
 same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
 from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
 and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
-checkpoint over the newer engine's row; `pkg/migrate` `Run` and `RunDesired` prove, before the
+checkpoint over the newer engine's row; `pkg/schemachange` `Runner.Discard` takes the table's
+lock itself before it reads the row or drops anything, and a held lock refuses it at once with
+`TableLockHeldError`, touching nothing, so a discard cannot overlap a run on the table
+(`TestRunnerDiscardRefusesWhileARunHoldsTheTableLock`); `pkg/migrate` `Run` and `RunDesired` prove, before the
 preflight and before the lock session opens, that `CopySwapOptions.Connection` reaches the
 pool's database (the cluster's system identifier and `current_database()` on both sides), and
 stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
@@ -1247,8 +1250,11 @@ restart (`RunOptions.Restart`) do the same sequence under the run's own lock, or
 is the one stop the Runner abandons itself, through the same discard, since a resume would
 meet the same rows (abandons-on-a-data-fault and holds-a-run-whose-abandon-fails tests); a
 discard that finds no row drops a slot of the derived name only as the reaper drops an
-orphan, under `Store.WithSlotLock`, the row read again, through `DropIdleSlot`
-(discard-drops-an-unrecorded-shadow-and-slot test) — where
+orphan, under `Store.WithSlotLock`, every table's rows read again by slot name through
+`Store.LiveRowNamesSlot`, through `DropIdleSlot` (discard-drops-an-unrecorded-shadow-and-slot
+test), and refuses as `resume-slot-foreign` a slot another table's live row names, since the
+derived name is a hash two tables can share
+(`TestRunnerDiscardKeepsTheSlotAnotherTablesRowNames`) — where
 `Runner.checkDiscardable` drops a slot only when it is the target's derived name and refuses any other
 as `resume-row-mismatch` before discarding anything (refuses-a-row-naming-another-engine-slot
 test); the slot

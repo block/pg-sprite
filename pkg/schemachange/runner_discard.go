@@ -55,12 +55,15 @@ func (d Discarded) Nothing() bool {
 // With the lock held the row is read and the leftovers found from the
 // catalog, and Discard dispatches on the row:
 //
-//   - A row in a phase before its swap committed is discarded as
-//     RunOptions.Restart discards it — the shadow first, then the slot or
-//     the fence, then the row — so a discard that stops partway leaves a
-//     row that still records what stands, and a second Discard finishes
-//     it. A row naming a slot other than the table's derived name is
-//     refused as resume-row-mismatch before anything is dropped (ST-3).
+//   - A row in a phase before its swap committed, or a row a caller
+//     marked failed, is discarded as RunOptions.Restart discards it — the
+//     shadow first, then the slot or the fence, then the row — so a
+//     discard that stops partway leaves a row that still records what
+//     stands, and a second Discard finishes it. The slot is dropped with
+//     decode.DropSlot, which waits for a walsender holding it, bounded
+//     only by ctx, so a caller passes a deadline. A row naming a slot
+//     other than the table's derived name is refused as
+//     resume-row-mismatch before anything is dropped (ST-3).
 //   - A cutover row is answered by the catalog first (LK-4): a swap that
 //     committed is refused as restart-swap-committed, and nothing is
 //     dropped — the shadow already bears the source's name and the source
@@ -70,26 +73,36 @@ func (d Discarded) Nothing() bool {
 //   - A done row records a change that completed and is refused as
 //     resume-row-terminal: there is no run to discard.
 //   - No row: a shadow, a write fence, or a slot and publication of the
-//     table's derived names that no row records are dropped. The slot is
-//     dropped as the orphan reaper drops one (checkpoint.Store.
-//     ReapOrphanSlots), under the engine's lock on its name and without
-//     waiting for a holder, so a held slot is refused with an error
-//     wrapping decode.ErrSlotActive and left; a slot of the name that is
-//     not this database's logical slot is not the engine's and is left.
-//     Nothing found is the zero Discarded with Schema and Table set, whose
-//     Nothing is true, and no error.
+//     table's derived names that no row records are dropped, the shadow
+//     and the fence first. The slot is dropped as the orphan reaper drops
+//     one (checkpoint.Store.ReapOrphanSlots): under the engine's lock on
+//     its name, only once a read of every table's rows shows that no
+//     row in a non-terminal phase names it, and without waiting for a
+//     holder. The slot's name is a hash of the table's, so another
+//     table's run can own a slot of the same name; that slot is refused
+//     as resume-slot-foreign and left. A held slot is refused with an
+//     error wrapping decode.ErrSlotActive and left; a slot of the name
+//     that is not this database's logical slot is not the engine's and is
+//     left. Nothing found is the zero Discarded with Schema and Table set,
+//     whose Nothing is true, and no error.
 //
 // A slot is dropped over a replication connection, so a discard that
 // finds one refuses a shape whose privilege proof did not verify
 // replication access, before dropping anything, with an error wrapping
 // preflight.ErrCopySwapProofMismatch. Discard writes the checkpoint table
-// into existence as Run does (checkpoint.Store.Ensure). Every error is
-// returned with the zero Discarded, with a lost table lock reported as
-// shadow-lock-lost; what an interrupted call dropped is gone, and the
-// next call reports only what it drops itself.
+// into existence as Run does (checkpoint.Store.Ensure). An error is
+// returned beside what the call dropped before it, with Schema and Table
+// set: each leftover whose drop finished is named, and one whose drop the
+// error interrupted is not, though part of it may be gone (a slot dropped
+// before its publication). RowPhase is set only once the row is deleted.
+// A lost table lock is reported as shadow-lock-lost, and a nil pool as
+// ErrInvariantViolation before the lock is taken.
 func (r *Runner) Discard(ctx context.Context, pool *pgxpool.Pool, shape preflight.CopySwapShape) (discarded Discarded, err error) {
 	if err := checkProof(shape); err != nil {
 		return Discarded{}, err
+	}
+	if pool == nil {
+		return Discarded{}, fmt.Errorf("%w: a discard requires a pool", ErrInvariantViolation)
 	}
 	schema, table := shape.Schema(), shape.Table()
 	// INV: LK-1 — the discard holds the run's lock, so it cannot overlap a
@@ -109,95 +122,103 @@ func (r *Runner) Discard(ctx context.Context, pool *pgxpool.Pool, shape prefligh
 	}()
 	discarded, err = r.discard(ctx, pool, lock, shape)
 	if err != nil {
-		return Discarded{}, lockLossCause(lock, fmt.Errorf("discard %s.%s: %w", schema, table, err))
+		return discarded, lockLossCause(lock, fmt.Errorf("discard %s.%s: %w", schema, table, err))
 	}
 	return discarded, nil
 }
 
 // discard reads the table's row under the lock and discards what it
-// records, or what no row records.
+// records, or what no row records, reporting what it dropped beside any
+// error.
 func (r *Runner) discard(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, shape preflight.CopySwapShape) (Discarded, error) {
+	none := Discarded{Schema: shape.Schema(), Table: shape.Table()}
 	if err := r.store.Ensure(ctx); err != nil {
-		return Discarded{}, err
+		return none, err
 	}
 	cp, err := r.store.Inspect(ctx, shape.Schema(), shape.Table())
 	switch {
 	case errors.Is(err, checkpoint.ErrNotFound):
 		return r.discardLeftovers(ctx, pool, lock, shape)
 	case err != nil:
-		return Discarded{}, err
-	case cp.Phase.Terminal():
-		return Discarded{}, refuse(CauseResumeTerminal, nil, "checkpoint row for %s.%s is in phase %s: the run it records has ended, so there is no run to discard", cp.Schema, cp.Table, cp.Phase)
+		return none, err
+	case cp.Phase == checkpoint.PhaseDone:
+		return none, refuse(CauseResumeTerminal, nil, "checkpoint row for %s.%s is in phase %s: the change it records completed, so there is no run to discard", cp.Schema, cp.Table, cp.Phase)
 	default:
 		return r.discardStoppedRun(ctx, pool, lock, shape, cp)
 	}
 }
 
 // discardStoppedRun discards the run the row cp records, as a restart
-// discards it, and reports what was there to drop.
+// discards it, and reports what it dropped.
 func (r *Runner) discardStoppedRun(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, shape preflight.CopySwapShape, cp checkpoint.Checkpoint) (Discarded, error) {
+	discarded := Discarded{Schema: cp.Schema, Table: cp.Table}
 	if err := r.checkDiscardable(ctx, pool, lock, shape, cp); err != nil {
-		return Discarded{}, err
+		return discarded, err
 	}
 	found, err := r.findLeftovers(ctx, pool, lock, shape)
 	if err != nil {
-		return Discarded{}, err
-	}
-	discarded := Discarded{Schema: cp.Schema, Table: cp.Table, RowPhase: cp.Phase}
-	if found.shadow {
-		discarded.Shadow = ShadowName(shape.Schema(), shape.Table())
+		return discarded, err
 	}
 	// The hold is the one the row records, as discardHold releases it.
-	if cp.SlotName == "" {
-		discarded.WriteFence = found.fence
-	} else {
+	if cp.SlotName != "" {
 		if err := requireReplication(shape, found); err != nil {
-			return Discarded{}, err
+			return discarded, err
 		}
+	}
+	done, err := r.discardRecorded(ctx, pool, lock, shape, cp)
+	if done.shadow && found.shadow {
+		discarded.Shadow = ShadowName(shape.Schema(), shape.Table())
+	}
+	if done.hold && cp.SlotName == "" {
+		discarded.WriteFence = found.fence
+	}
+	if done.hold && cp.SlotName != "" {
 		discarded.Slot, discarded.Publication = found.names(shape)
 	}
-	if err := r.discardRecorded(ctx, pool, lock, shape, cp); err != nil {
-		return Discarded{}, err
+	if done.row {
+		discarded.RowPhase = cp.Phase
 	}
-	return discarded, nil
+	return discarded, err
 }
 
 // discardLeftovers drops what a run left that no checkpoint row records:
 // the shadow and the write fence as a restart drops them, and a slot and
 // publication of the table's derived names as the reaper drops an orphan.
+// It reports what it dropped beside any error.
 func (r *Runner) discardLeftovers(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, shape preflight.CopySwapShape) (Discarded, error) {
+	discarded := Discarded{Schema: shape.Schema(), Table: shape.Table()}
 	found, err := r.findLeftovers(ctx, pool, lock, shape)
 	if err != nil {
-		return Discarded{}, err
-	}
-	discarded := Discarded{Schema: shape.Schema(), Table: shape.Table(), WriteFence: found.fence}
-	if found.shadow {
-		discarded.Shadow = ShadowName(shape.Schema(), shape.Table())
-	}
-	discarded.Slot, discarded.Publication = found.names(shape)
-	if discarded.Nothing() {
-		return discarded, nil
+		return discarded, err
 	}
 	if err := requireReplication(shape, found); err != nil {
-		return Discarded{}, err
+		return discarded, err
 	}
-	if found.shadow || found.fence {
-		if err := r.discardUnrecorded(ctx, pool, lock, shape); err != nil {
-			return Discarded{}, err
+	if found.shadow {
+		if err := r.discardShadow(ctx, pool, lock, shape); err != nil {
+			return discarded, err
 		}
+		discarded.Shadow = ShadowName(shape.Schema(), shape.Table())
+	}
+	if found.fence {
+		if err := dropWriteFenceOf(ctx, pool, lock, shape, r.opts.Shadow); err != nil {
+			return discarded, err
+		}
+		discarded.WriteFence = true
 	}
 	if found.slot || found.publication {
 		if err := r.discardOrphanSlot(ctx, pool, shape); err != nil {
-			return Discarded{}, err
+			return discarded, err
 		}
+		discarded.Slot, discarded.Publication = found.names(shape)
 	}
 	return discarded, nil
 }
 
 // discardOrphanSlot drops the slot and publication of the table's derived
 // name that no checkpoint row records, the way the reaper drops an orphan:
-// under the engine's lock on the slot's name, after reading again that no
-// row names it, and without waiting for a holder.
+// under the engine's lock on the slot's name, after reading every table's
+// rows again for one that names it, and without waiting for a holder.
 func (r *Runner) discardOrphanSlot(ctx context.Context, pool *pgxpool.Pool, shape preflight.CopySwapShape) error {
 	name := shape.DecodingName()
 	return r.store.WithSlotLock(ctx, r.cfg, name, func(ctx context.Context) error {
@@ -211,6 +232,18 @@ func (r *Runner) discardOrphanSlot(ctx context.Context, pool *pgxpool.Pool, shap
 			// keeps any run from saving one, so a row here is a write
 			// that bypassed the lock.
 			return fmt.Errorf("%w (ST-3): a checkpoint row for %s.%s in phase %s appeared while the discard held the table lock", ErrInvariantViolation, cp.Schema, cp.Table, cp.Phase)
+		}
+		owned, err := r.store.LiveRowNamesSlot(ctx, name)
+		if err != nil {
+			return err
+		}
+		if owned {
+			// INV: ST-3 — the slot's name is a hash, so another table's
+			// run can own the same name; a slot a live row of any table
+			// names is that run's and is left, as the reaper leaves it.
+			foreign := &decode.ForeignStateError{Object: decode.ForeignObjectSlot, Name: name,
+				Detail: "a checkpoint row of another table names it"}
+			return refuse(CauseResumeSlotForeign, []error{foreign}, "slot %s of %s.%s's derived name is another table's run's", name, shape.Schema(), shape.Table())
 		}
 		// INV: ST-3 — an unrecorded slot is dropped only while no process
 		// holds it; a held slot is its holder's and is left as found.

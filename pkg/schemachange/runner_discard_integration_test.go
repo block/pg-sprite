@@ -295,3 +295,88 @@ func TestRunnerDiscardDropsAnUnrecordedShadowAndSlot(t *testing.T) {
 	}, discarded)
 	assert.Equal(t, leftoverState{}, readLeftovers(t, f.pool, shape))
 }
+
+// A row a caller marked failed records a run that ended without its
+// change, and still stands on what the run left: here a quiesced run's
+// shadow and the write fence that keeps the source from taking writes.
+// The discard drops them and the row, as a restart would, and the source
+// takes writes again.
+func TestRunnerDiscardDropsTheLeftoversOfAFailedRow(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	shape := proveShape(t, f.pool, f.schema, "orders", false)
+	_, err := f.run(t, "orders", restartAlter, schemachange.RunOptions{AfterCheckpoint: (&stopAfter{phase: checkpoint.PhaseVerifying}).hook})
+	require.ErrorIs(t, err, errStopHere)
+	row := f.inspectRow(t, "orders")
+	row.Phase = checkpoint.PhaseFailed
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "orders")
+	require.NoError(t, err)
+	require.NoError(t, f.store.Save(t.Context(), lock, row))
+	require.NoError(t, lock.Release(t.Context()))
+	require.Equal(t, leftoverState{Shadow: true, Fence: true, Row: true}, readLeftovers(t, f.pool, shape))
+
+	discarded, err := discardWith(t, f.cfg, f.store, f.pool, shape)
+	require.NoError(t, err)
+	assert.Equal(t, schemachange.Discarded{
+		Schema:     f.schema,
+		Table:      "orders",
+		RowPhase:   checkpoint.PhaseFailed,
+		Shadow:     schemachange.ShadowName(f.schema, "orders"),
+		WriteFence: true,
+	}, discarded)
+	assert.Equal(t, leftoverState{}, readLeftovers(t, f.pool, shape))
+	f.assertWritable(t, "orders")
+}
+
+// A write fence that no row records, with no shadow beside it — a
+// quiesced run stopped after its first save, whose row and shadow an
+// operator then removed — is taken off the source by a discard on its
+// own, and the source takes writes again.
+func TestRunnerDiscardTakesOffAnUnrecordedFenceAlone(t *testing.T) {
+	f := newDecodingFixture(t, 100)
+	shape := proveShape(t, f.pool, f.table.Schema, f.table.Table, false)
+	_, err := f.runOn(t, f.quiescedTarget(t), schemachange.RunOptions{
+		AfterCheckpoint: (&stopAfter{phase: checkpoint.PhaseCopying}).hook,
+	})
+	require.ErrorIs(t, err, errStopHere)
+	f.deleteRow(t)
+	shadow := pgx.Identifier{f.table.Schema, schemachange.ShadowName(f.table.Schema, f.table.Table)}.Sanitize()
+	_, err = f.pool.Exec(t.Context(), `DROP TABLE `+shadow)
+	require.NoError(t, err)
+	require.Equal(t, leftoverState{Fence: true}, readLeftovers(t, f.pool, shape))
+
+	discarded, err := discardWith(t, f.cfg, f.store, f.pool, shape)
+	require.NoError(t, err)
+	assert.Equal(t, schemachange.Discarded{
+		Schema:     f.table.Schema,
+		Table:      f.table.Table,
+		WriteFence: true,
+	}, discarded)
+	assert.Equal(t, leftoverState{}, readLeftovers(t, f.pool, shape))
+	assert.False(t, f.fenced(t), "the source takes writes again")
+}
+
+// A publication of the table's derived name that no row records, beside
+// a shadow, with its slot already gone — a live run stopped after its
+// first save, whose row and slot an operator then removed — is dropped
+// with the shadow, and the report names the publication and no slot.
+func TestRunnerDiscardDropsAnUnrecordedPublicationWithoutItsSlot(t *testing.T) {
+	f := newDecodingFixture(t, 100)
+	shape := proveShape(t, f.pool, f.table.Schema, f.table.Table, true)
+	_, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: (&stopAfter{phase: checkpoint.PhaseCopying}).hook})
+	require.ErrorIs(t, err, errStopHere)
+	f.deleteRow(t)
+	_, err = f.pool.Exec(t.Context(), `SELECT pg_drop_replication_slot($1)`, shape.DecodingName())
+	require.NoError(t, err)
+	require.Equal(t, leftoverState{Shadow: true, Publication: true}, readLeftovers(t, f.pool, shape))
+
+	discarded, err := discardWith(t, f.cfg, f.store, f.pool, shape)
+	require.NoError(t, err)
+	assert.Equal(t, schemachange.Discarded{
+		Schema:      f.table.Schema,
+		Table:       f.table.Table,
+		Shadow:      schemachange.ShadowName(f.table.Schema, f.table.Table),
+		Publication: shape.DecodingName(),
+	}, discarded)
+	assert.Equal(t, leftoverState{}, readLeftovers(t, f.pool, shape))
+}
