@@ -222,7 +222,7 @@ func (ds DesiredSchema) WithExtensionSchemas(schemas ...string) (DesiredSchema, 
 func ParseDesired(sql string) (DesiredSchema, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredSchema{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
+		return DesiredSchema{}, parseFailure(sql, err)
 	}
 	return parseDesiredTree(sql, tree)
 }

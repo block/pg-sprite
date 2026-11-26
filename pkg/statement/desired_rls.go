@@ -124,7 +124,7 @@ func (d DesiredWithRowSecurity) PolicyReads() []QualifiedName { return slices.Cl
 func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredWithRowSecurity{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
+		return DesiredWithRowSecurity{}, parseFailure(sql, err)
 	}
 	return parseDesiredWithRowSecurityTree(sql, tree)
 }
@@ -321,7 +321,7 @@ func locksRows(msg protoreflect.Message) bool {
 func HasRowSecurityDeclaration(sql string) (bool, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return false, fmt.Errorf("%w: %w", ErrParseDesired, err)
+		return false, parseFailure(sql, err)
 	}
 	return hasRowSecurity(tree), nil
 }

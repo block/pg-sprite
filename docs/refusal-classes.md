@@ -70,6 +70,9 @@ one `statement.Refusal` per statement, with its line), so the author fixes them 
 file still takes one verdict: a partition anywhere in it decides the class, then the one-table and
 one-type rules, then the first refused statement's kind.
 
+A file the parser cannot read is not a refusal: it is `statement.ErrParseDesired`, carrying a
+`*statement.SyntaxError` with the line, column and line text where the parser stopped.
+
 ### Reasons keyed on the site
 
 | Existing `reason` | Refusal site or shape | `class` | `owner`, when present |

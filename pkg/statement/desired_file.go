@@ -45,11 +45,12 @@ const (
 // policy, a policy comment, or ENABLE, DISABLE, FORCE or NO FORCE ROW LEVEL
 // SECURITY) must pass ParseDesiredWithRowSecurity's rules; any other file
 // must pass ParseDesired's. Refusals are those front doors' typed errors,
-// unchanged; input that is not valid SQL is refused with [ErrParseDesired].
+// unchanged; input that is not valid SQL is refused with [ErrParseDesired],
+// located by a [*SyntaxError] when the parser says where it stopped.
 func ParseDesiredFile(sql string) (DesiredFile, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredFile{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
+		return DesiredFile{}, parseFailure(sql, err)
 	}
 	if declaresEnumType(tree) {
 		enumType, err := parseDesiredEnumTree(sql, tree)
