@@ -199,3 +199,50 @@ func resumeNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, table string,
 	}
 	return changes, helpers, nil
 }
+
+// LeftoverNotNullHelpers returns each helper CHECK that a stopped run of the
+// online SET NOT NULL sequence left on schema.table, as the record a checked
+// drop of it needs. A run leaves one when it stops after adding the helper and
+// before dropping it: its validation failed on a NULL row and the run was
+// cancelled or gave up. Until it is dropped, the helper rejects every write
+// that leaves its column NULL.
+//
+// A constraint is such a helper under the same rule the planner uses to
+// resume one: the name the sequence gives the helper of one of the table's
+// columns, and exactly the definition the sequence gives it, NOT VALID or
+// validated. PostgreSQL never generates that name itself. The records are
+// read from the live catalog, so a drop checked against one refuses a
+// constraint replaced after the read.
+func LeftoverNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, schema, table string) ([]schemadiff.DroppedObject, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT c.conname, pg_catalog.pg_get_constraintdef(c.oid), a.attname, pg_catalog.quote_ident(a.attname)
+		FROM pg_catalog.pg_constraint c
+		JOIN pg_catalog.pg_class r ON r.oid = c.conrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid = r.relnamespace
+		JOIN pg_catalog.pg_attribute a ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdropped
+		WHERE n.nspname = $1 AND r.relname = $2 AND c.contype = 'c'
+		ORDER BY c.conname, a.attnum`, schema, table)
+	if err != nil {
+		return nil, fmt.Errorf("read the check constraints of %s.%s: %w", schema, table, err)
+	}
+	defer rows.Close()
+	var helpers []schemadiff.DroppedObject
+	for rows.Next() {
+		var name, def, column, quoted string
+		if err := rows.Scan(&name, &def, &column, &quoted); err != nil {
+			return nil, fmt.Errorf("read the check constraints of %s.%s: %w", schema, table, err)
+		}
+		if name != planner.NotNullHelperName(table, column) {
+			continue
+		}
+		validated := "CHECK ((" + quoted + " IS NOT NULL))"
+		if def != validated && def != validated+" NOT VALID" {
+			continue
+		}
+		helpers = append(helpers, schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: name, Definition: def})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the check constraints of %s.%s: %w", schema, table, err)
+	}
+	return helpers, nil
+}

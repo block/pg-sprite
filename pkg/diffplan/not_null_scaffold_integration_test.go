@@ -364,3 +364,61 @@ func TestPlanSetNotNullResumesAtTheHelperARunLeft(t *testing.T) {
 		assert.Equal(t, 1, sequences)
 	})
 }
+
+// A cancelled SET NOT NULL left its helper on the table, NOT VALID, and the
+// helper rejects a NULL write the application could make before the run.
+// LeftoverNotNullHelpers finds that helper, and a checked drop of the record
+// it returns removes it, so the NULL write lands again. A check under the
+// helper's name with another definition, and a check with the definition
+// under another name, are not helpers and are left alone.
+func TestLeftoverNotNullHelpersFindsTheHelperAStoppedRunLeft(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			email text,
+			"Note" text,
+			qty int,
+			CONSTRAINT orders_qty_not_null_check CHECK (qty > 0)
+		);
+		INSERT INTO %[1]s.orders VALUES (1, NULL, NULL, 1);
+		ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_email_present CHECK (email IS NOT NULL) NOT VALID;
+		ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_email_not_null_check CHECK (email IS NOT NULL) NOT VALID;
+		ALTER TABLE %[1]s.orders ADD CONSTRAINT "orders_Note_not_null_check" CHECK ("Note" IS NOT NULL) NOT VALID`, schema))
+	require.NoError(t, err)
+
+	helpers, err := diffplan.LeftoverNotNullHelpers(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	assert.Equal(t, []schemadiff.DroppedObject{
+		{Kind: schemadiff.DroppedConstraint, Name: "orders_Note_not_null_check", Definition: `CHECK (("Note" IS NOT NULL)) NOT VALID`},
+		{Kind: schemadiff.DroppedConstraint, Name: "orders_email_not_null_check", Definition: "CHECK ((email IS NOT NULL)) NOT VALID"},
+	}, helpers)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %s.orders DROP CONSTRAINT orders_email_present`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s.orders VALUES (2, NULL, 'n', 1)`, schema))
+	require.Error(t, err, "the helper rejects a NULL email")
+
+	pt, err := preflight.CheckTable(t.Context(), pool, schema, "orders", 1<<30)
+	require.NoError(t, err)
+	for _, helper := range helpers {
+		_, err = executor.RunSequenceDropping(t.Context(), pool, pt,
+			[]string{fmt.Sprintf(`ALTER TABLE %q.orders DROP CONSTRAINT %q`, schema, helper.Name)},
+			helperDropBudget, executor.DefaultRetryPolicy(), helper)
+		require.NoError(t, err)
+	}
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s.orders VALUES (3, NULL, NULL, 1)`, schema))
+	require.NoError(t, err, "with the helpers gone, a NULL write lands again")
+
+	helpers, err = diffplan.LeftoverNotNullHelpers(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	assert.Empty(t, helpers)
+	var others int
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT count(*) FROM pg_catalog.pg_constraint
+		WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_qty_not_null_check'`, schema).Scan(&others))
+	assert.Equal(t, 1, others, "a check under a helper's name with another definition stays")
+}
