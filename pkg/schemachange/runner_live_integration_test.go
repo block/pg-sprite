@@ -4,16 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/applier"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -421,53 +423,122 @@ func TestRunnerLiveRestartDiscardsAStoppedRunWhole(t *testing.T) {
 	assert.Equal(t, schemachange.CarriedCompare{}, result.CarriedCompare, "a swap left no key compares none")
 }
 
-// hotRowInterval paces the rewrites of the row the live pass cannot judge:
-// fast enough that the row changes between every two of the pass's
-// rereads.
-const hotRowInterval = time.Millisecond
+// hotRowApplyDeadline bounds each wait for the run's catch-up to apply and
+// confirm one rewrite of the hot row.
+const hotRowApplyDeadline = 30 * time.Second
 
-// One row of the table is rewritten from the verifying save until the
-// cutover save, so the live pass reads it changed at every reread. The
-// run is told nothing about it: a Runner leaves the row for the swap by
-// default, and the swap compares it under its lock after the real
-// catch-up's drain has applied the row's last rewrite. Without that
-// default the run would stop in verification with *UnresolvedError.
+// hotRow is a live run's catch-up as its verification pass reads it,
+// wrapped so that one source row changes between every two reads the pass
+// makes of it while the shadow holds a value between the two. Before
+// every reread the pass reads the confirmed position, and that read lets
+// the catch-up apply and confirm one rewrite of the row, then holds the
+// catch-up's flushes and rewrites the row again. The reread then finds
+// the source moved since the last read and the shadow holding neither
+// what that read saw on the source nor what the source holds now, so the
+// row is still changing at every reread, however the run's goroutines
+// are scheduled.
+type hotRow struct {
+	t       *testing.T
+	pool    *pgxpool.Pool
+	catchup *applier.Catchup
+	rewrite string
+	resume  func()
+}
+
+// hold holds the catch-up's flushes off the shadow and then rewrites the
+// row, so the source holds a value the shadow does not until the hold is
+// let go.
+func (h *hotRow) hold() {
+	resume, err := h.catchup.Pause(h.t.Context())
+	if err != nil {
+		h.t.Errorf("hold the catch-up's flushes: %v", err)
+		return
+	}
+	h.resume = resume
+	h.write()
+}
+
+// Confirmed lets go of the hold, rewrites the row, marks the WAL after
+// the rewrite committed, and waits until the catch-up has confirmed past
+// the marker: the rewrite is then in the shadow, and the position is past
+// the pass's last read, which committed before the rewrite. It then holds
+// the flushes behind one more rewrite and returns the position the
+// catch-up confirmed.
+func (h *hotRow) Confirmed() decode.LSN {
+	if h.resume != nil {
+		h.resume()
+	}
+	h.write()
+	if marker, ok := h.mark(); ok {
+		assert.Eventually(h.t, func() bool { return h.catchup.Confirmed() >= marker },
+			hotRowApplyDeadline, 5*time.Millisecond, "the catch-up applies the rewrite of the hot row")
+	}
+	h.hold()
+	return h.catchup.Confirmed()
+}
+
+// write rewrites the row in a transaction of its own.
+func (h *hotRow) write() {
+	if _, err := h.pool.Exec(h.t.Context(), h.rewrite); err != nil {
+		h.t.Errorf("rewrite the hot row: %v", err)
+	}
+}
+
+// mark writes a marker to the WAL past every transaction committed so far
+// and returns its position.
+func (h *hotRow) mark() (decode.LSN, bool) {
+	ctx := h.t.Context()
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		h.t.Errorf("begin the hot row's marker: %v", err)
+		return 0, false
+	}
+	marker, err := decode.MarkWAL(ctx, tx)
+	if err != nil {
+		h.t.Errorf("mark the WAL after the hot row's rewrite: %v", err)
+		if err := tx.Rollback(ctx); err != nil {
+			h.t.Errorf("roll back the hot row's marker: %v", err)
+		}
+		return 0, false
+	}
+	if err := tx.Commit(ctx); err != nil {
+		h.t.Errorf("commit the hot row's marker: %v", err)
+		return 0, false
+	}
+	return marker, true
+}
+
+// One row of the table changes between every two reads the live pass makes
+// of it, so the pass can never judge it. The pass reads the run's own
+// catch-up through hotRow: as the pass begins the catch-up's flushes are
+// held and the row rewritten, so the sweep finds the row's chunk
+// differing, and every reread finds the row still changing. The run is
+// told nothing about it: a Runner leaves the row for the swap by default,
+// and the swap compares it under its lock after the real catch-up's drain
+// has applied the row's last rewrite, which the last hold kept off the
+// shadow. Without that default the run would stop in verification with
+// *UnresolvedError.
 func TestRunnerLeavesARowThatNeverHoldsStillForTheSwap(t *testing.T) {
 	const seeded = 2500
 	f := newDecodingFixture(t, seeded)
 
-	hotCtx, stopHot := context.WithCancel(t.Context())
-	var hot sync.WaitGroup
-	var start sync.Once
-	t.Cleanup(func() { stopHot(); hot.Wait() })
-	rewrite := fmt.Sprintf(`UPDATE %s SET amount = amount + 1 WHERE id = 7`, f.table.Qualified())
-	hook := func(_ context.Context, cp checkpoint.Checkpoint) error {
-		switch cp.Phase {
-		case checkpoint.PhaseVerifying:
-			start.Do(func() {
-				hot.Go(func() {
-					tick := time.NewTicker(hotRowInterval)
-					defer tick.Stop()
-					for {
-						select {
-						case <-hotCtx.Done():
-							return
-						case <-tick.C:
-						}
-						if _, err := f.pool.Exec(hotCtx, rewrite); err != nil && hotCtx.Err() == nil {
-							t.Errorf("rewrite the hot row: %v", err)
-							return
-						}
-					}
-				})
-			})
-		case checkpoint.PhaseCutover:
-			stopHot()
-			hot.Wait()
+	hot := &hotRow{t: t, pool: f.pool, rewrite: fmt.Sprintf(`
+		UPDATE %s
+		SET amount = amount + 1
+		WHERE id = 7`, f.table.Qualified())}
+	t.Cleanup(func() {
+		if hot.resume != nil {
+			hot.resume()
 		}
-		return nil
-	}
-	result, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: hook})
+	})
+	r, err := schemachange.NewRunner(f.cfg, f.store, liveRunOptions(schemachange.RunOptions{}))
+	require.NoError(t, err)
+	schemachange.WrapLiveConfirmed(r, func(c *applier.Catchup) checksum.ConfirmedSource {
+		hot.catchup = c
+		hot.hold()
+		return hot
+	})
+	result, err := r.Run(t.Context(), f.pool, f.target, f.liveStatement(t))
 	require.NoError(t, err)
 
 	f.assertLiveDone(t, result)
