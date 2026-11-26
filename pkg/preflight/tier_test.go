@@ -119,6 +119,19 @@ func TestRequiredTier(t *testing.T) {
 		assert.Contains(t, err.Error(), "not a shape the engine executes")
 	})
 
+	t.Run("an index drop that reaches beyond one index fails closed", func(t *testing.T) {
+		// A one-table privilege check cannot vouch for several indexes or
+		// for the dependent objects a CASCADE drops.
+		for _, sql := range []string{
+			"DROP INDEX CONCURRENTLY s.i CASCADE",
+			"DROP INDEX s.i, s.j",
+		} {
+			_, err := preflight.RequiredTier([]string{sql})
+			require.Error(t, err, sql)
+			assert.Contains(t, err.Error(), "reaches beyond one index", sql)
+		}
+	})
+
 	t.Run("an unparseable step fails closed", func(t *testing.T) {
 		_, err := preflight.RequiredTier([]string{"not sql at all"})
 		require.Error(t, err)
@@ -133,7 +146,7 @@ func TestRequiredTier(t *testing.T) {
 			"ALTER TABLE s.u ADD COLUMN c int",
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "mixes CREATE TABLE with ALTER TABLE")
+		assert.Contains(t, err.Error(), "mixes CREATE TABLE with a change to an existing table")
 	})
 
 	t.Run("a set mixing create table with an index drop fails closed", func(t *testing.T) {
@@ -144,6 +157,6 @@ func TestRequiredTier(t *testing.T) {
 			"DROP INDEX CONCURRENTLY s.i",
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "mixes CREATE TABLE with ALTER TABLE")
+		assert.Contains(t, err.Error(), "mixes CREATE TABLE with a change to an existing table")
 	})
 }
