@@ -1,14 +1,19 @@
 package executor_test
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 )
@@ -143,6 +148,110 @@ func TestExecuteBlockingPartitionedIndexDropLockBudgetDropsNothing(t *testing.T)
 	require.ErrorAs(t, err, &budgetErr)
 	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
 	assert.Equal(t, b.LockTimeout, budgetErr.Budget)
+	assert.Equal(t, before, schemaIndexes(t, pool, schema), "nothing was dropped")
+}
+
+// The stated lock budget, not the session's own lock_timeout, ends the
+// wait: on a pool whose sessions wait 30s for a lock, a 200ms budget is
+// refused long before the session default would fire, with nothing dropped.
+func TestExecuteBlockingPartitionedIndexDropWaitsOnlyTheStatedLockBudget(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
+		URL:              testutil.StartPostgres(t),
+		LockTimeout:      30 * time.Second,
+		StatementTimeout: time.Minute,
+	})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	definition := seedPartitionedKindIndex(t, pool, schema)
+	before := schemaIndexes(t, pool, schema)
+	reader, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	_, err = reader.Exec(t.Context(), fmt.Sprintf(`LOCK TABLE %s.events_2026_02 IN ACCESS SHARE MODE`, schema))
+	require.NoError(t, err)
+
+	b := executor.BlockingBudget{LockTimeout: 200 * time.Millisecond, StatementTimeout: 50 * time.Second}
+	start := time.Now()
+	_, err = executor.ExecuteBlockingPartitionedIndexDrop(t.Context(), pool, schema, "events", "events_kind_idx", definition, b)
+	elapsed := time.Since(start)
+	require.NoError(t, reader.Rollback(t.Context()))
+	var budgetErr *executor.BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
+	assert.Less(t, elapsed, 10*time.Second, "the 200ms budget, not the session's 30s lock_timeout, ended the wait")
+	assert.Equal(t, before, schemaIndexes(t, pool, schema), "nothing was dropped")
+}
+
+// The index is read only once the parent's lock is granted: a session that
+// holds the lock, swaps the index for another definition under the same
+// name, and commits while the drop waits leaves the drop to read the swapped
+// index and refuse it as drift, so the index the plan never reviewed stands.
+func TestExecuteBlockingPartitionedIndexDropReadsTheIndexUnderTheParentLock(t *testing.T) {
+	pool, schema := newPool(t)
+	definition := seedPartitionedKindIndex(t, pool, schema)
+	swapper, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := swapper.Rollback(context.WithoutCancel(t.Context())); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Errorf("roll back the swapper: %v", err)
+		}
+	})
+	_, err = swapper.Exec(t.Context(), fmt.Sprintf(`LOCK TABLE %s.events IN ACCESS EXCLUSIVE MODE`, schema))
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.ExecuteBlockingPartitionedIndexDrop(t.Context(), pool, schema, "events", "events_kind_idx", definition,
+			executor.BlockingBudget{LockTimeout: 10 * time.Second, StatementTimeout: 20 * time.Second})
+		done <- err
+	}()
+
+	const lockWaitDeadline = 5 * time.Second
+	require.Eventually(t, func() bool {
+		var waiting int
+		err := pool.QueryRow(t.Context(), `
+			SELECT count(*)
+			  FROM pg_stat_activity
+			 WHERE wait_event_type = 'Lock'
+			   AND position($1 in query) > 0`, schema).Scan(&waiting)
+		return err == nil && waiting == 1
+	}, lockWaitDeadline, 50*time.Millisecond, "the drop waits on the swapper's lock")
+
+	_, err = swapper.Exec(t.Context(), fmt.Sprintf(`
+		DROP INDEX %[1]s.events_kind_idx;
+		CREATE INDEX events_kind_idx ON %[1]s.events (kind, id);`, schema))
+	require.NoError(t, err)
+	require.NoError(t, swapper.Commit(t.Context()))
+
+	require.ErrorIs(t, <-done, executor.ErrDroppedIndexDrift)
+	assert.Contains(t, schemaIndexes(t, pool, schema), "events_kind_idx", "the swapped-in index stands")
+}
+
+// A drop that would remove a partition's replica identity index is refused,
+// with nothing dropped: the partition's UPDATE and DELETE would fail while a
+// publication publishes them.
+func TestExecuteBlockingPartitionedIndexDropRefusesAPartitionsReplicaIdentityIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint NOT NULL,
+			created_at timestamptz NOT NULL
+		) PARTITION BY RANGE (created_at);
+
+		CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+
+		CREATE UNIQUE INDEX events_uq ON %[1]s.events (id, created_at);
+
+		ALTER TABLE %[1]s.events_2026 REPLICA IDENTITY USING INDEX events_2026_id_created_at_idx;`, schema))
+	require.NoError(t, err)
+	live, found, err := schemadiff.ReadDroppedObject(t.Context(), pool, schema, "events", schemadiff.DroppedIndex, "events_uq")
+	require.NoError(t, err)
+	require.True(t, found)
+	before := schemaIndexes(t, pool, schema)
+
+	_, err = executor.ExecuteBlockingPartitionedIndexDrop(t.Context(), pool, schema, "events", "events_uq", live.Definition, blockingDropBudget)
+	require.ErrorIs(t, err, executor.ErrUnsupportedAcceptedBlocking)
 	assert.Equal(t, before, schemaIndexes(t, pool, schema), "nothing was dropped")
 }
 

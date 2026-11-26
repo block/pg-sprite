@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -35,7 +36,8 @@ type BlockingIndexDrop struct {
 // plan carried (schemadiff.DroppedObject.Definition).
 //
 // It runs in one engine-owned transaction under b's lock_timeout and
-// statement_timeout. The table's ACCESS EXCLUSIVE lock is requested first,
+// statement_timeout and the search_path the plan's definition was read
+// under, the schema then public. The table's ACCESS EXCLUSIVE lock is requested first,
 // as a statement of its own, which reaches every partition: an exhausted
 // lock budget is a *BudgetError with CauseLock and nothing was submitted.
 // Under that lock the index is read again and the drop refused, dropping
@@ -84,6 +86,12 @@ func executeBlockingPartitionedIndexDrop(ctx context.Context, pool *pgxpool.Pool
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(b.StatementTimeout.Milliseconds(), 10)
 	if _, err := tx.Exec(ctx, settings); err != nil {
 		return BlockingIndexDrop{}, fmt.Errorf("set the blocking drop budgets: %w", err)
+	}
+	// The index is read under the search_path the plan's definition was read
+	// under, the schema then public, so an expression's function or an
+	// operator class in the schema prints alike in both reads.
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
+		return BlockingIndexDrop{}, fmt.Errorf("set the blocking drop search_path: %w", err)
 	}
 	// INV: AB-2 — the parent's lock, which recurses to every partition, is
 	// requested before anything is submitted, so an exhausted lock budget

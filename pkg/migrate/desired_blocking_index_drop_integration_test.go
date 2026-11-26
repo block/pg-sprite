@@ -132,6 +132,36 @@ func TestRunDesiredDropsPartitionedIndexUnderAcceptedBlocking(t *testing.T) {
 	assert.Zero(t, kindIndexCount(t, pool, schema), "the parent's index and every partition's index are gone")
 }
 
+// An index over a function in the table's schema runs too: the executor
+// reads the index again under the search_path the plan read it under, the
+// schema then public, so the function prints unqualified in both reads and
+// the unchanged index is not mistaken for drift.
+func TestRunDesiredBlockingDropOfAnIndexOverASchemaFunction(t *testing.T) {
+	pool, schema := seedEventsWithKindIndex(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		DROP INDEX %[1]s.events_kind_idx;
+
+		CREATE FUNCTION %[1]s.norm(text) RETURNS text
+			LANGUAGE sql IMMUTABLE
+			AS $$ SELECT lower($1) $$;
+
+		CREATE INDEX events_kind_idx ON %[1]s.events (%[1]s.norm(kind));`, schema))
+	require.NoError(t, err)
+	report := reviewKindIndexDrop(t, pool, schema)
+	table := schema + ".events"
+
+	res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+		Schema:              schema,
+		Desired:             parseDesired(t, eventsWithoutKindIndex),
+		ExpectedFingerprint: report.Fingerprint,
+		AllowDestructive:    table,
+		AcceptBlocking:      table,
+	}, blockingDropOptions())
+	require.NoError(t, err, res.Detail)
+	assert.Equal(t, verdict.OutcomeExecutedWithoutOnlineSafety, res.Outcome)
+	assert.Zero(t, kindIndexCount(t, pool, schema), "the parent's index and every partition's index are gone")
+}
+
 // Without the acceptance the plan is refused as it always was, whole and
 // before anything runs, and the refusal names the flags that run the drop.
 func TestRunDesiredRefusesPartitionedIndexDropWithoutAcceptance(t *testing.T) {

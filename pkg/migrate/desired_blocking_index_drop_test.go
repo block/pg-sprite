@@ -1,6 +1,8 @@
 package migrate
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -148,4 +150,24 @@ func TestRunDesiredChecksTheAcceptanceBeforeAnyDatabaseWork(t *testing.T) {
 		require.ErrorIs(t, err, executor.ErrInvalidBlockingBudget)
 		assert.Equal(t, DesiredResult{}, res)
 	})
+}
+
+// blockingIndexDropFailureDetail renders what a failed blocking drop left
+// behind: drift dropped nothing and needs a re-plan, a commit the client
+// could not confirm may have landed and must be inspected before a retry,
+// and every other failure rolled back with the index standing.
+func TestBlockingIndexDropFailureDetailSaysWhatTheFailureLeftBehind(t *testing.T) {
+	drift := blockingIndexDropFailureDetail(fmt.Errorf("check: %w", executor.ErrDroppedIndexDrift), "app.events", "events_kind_idx")
+	assert.Contains(t, drift, "nothing was dropped on app.events")
+	assert.Contains(t, drift, "re-plan")
+
+	unknown := blockingIndexDropFailureDetail(&executor.BlockingOutcomeUnknownError{Err: errors.New("connection reset")}, "app.events", "events_kind_idx")
+	assert.Contains(t, unknown, "outcome unknown")
+	assert.Contains(t, unknown, "DROP INDEX events_kind_idx")
+	assert.Contains(t, unknown, "inspect the indexes of app.events before retrying")
+	assert.NotContains(t, unknown, "rolled back")
+
+	other := blockingIndexDropFailureDetail(errors.New("connection refused"), "app.events", "events_kind_idx")
+	assert.Contains(t, other, "index events_kind_idx did not commit and was rolled back")
+	assert.Contains(t, other, "still stands on app.events and every partition")
 }

@@ -991,7 +991,8 @@ explicit, non-zero `lock_timeout` and a `statement_timeout` longer than it. Tran
 settings override ambient defaults, and an absent, sub-millisecond, or server-unrepresentable
 bound — or a statement bound that is not longer than the lock bound, under which the lock
 budget could never be the operative bound — is refused before a session is acquired.
-*Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
+*Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, and `ExecuteBlockingPartitionedIndexDrop`
+for the desired-state drop of a partitioned table's index). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#engine-owned-session-and-budgets).
 
 ### AB-2 — Lock-budget exhaustion executes nothing
@@ -1003,8 +1004,9 @@ submitted and is reported as a lock refusal or the caller's cancellation, never 
 work. The DDL's own lock requests are then granted at once. An ungranted lock is not retried:
 PostgreSQL aborts that transaction, and the executor returns the typed lock-budget outcome.
 A materialized view, which `LOCK TABLE` cannot name, is the one target whose statement
-acquires its own locks. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, SQLSTATE
-`55P03` and `57014` on the lock request). *Source:*
+acquires its own locks. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking` and
+`ExecuteBlockingPartitionedIndexDrop`, which requests the parent's lock before it reads the
+index again, SQLSTATE `55P03` and `57014` on the lock request). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#failure-and-interruption-semantics).
 
 ### AB-3 — The acknowledgement names the table the statement locks, resolved from the catalog
@@ -1696,7 +1698,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   (`CREATE INDEX ON ONLY`, then a concurrent build and attach per partition), each step committing
   on its own. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
   refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
-  concurrent idiom PostgreSQL rejects for it. *Enforced:* preflight (`RefusesPartitionedParent`,
+  concurrent idiom PostgreSQL rejects for it. The plan keeps a desired-state drop of a
+  partitioned index refused; a desired-state run lifts only that refusal, running the plain
+  `DROP INDEX` under the acknowledgements and pin [RF-12](#rf-12) records. *Enforced:* preflight (`RefusesPartitionedParent`,
   with `RoutesToPartitionedIndexBuild` naming the one shape that is routed instead) and
   sequence-executor admission, which refuses every index-building step on a parent because the
   build is its own executor entry point; the concurrent drop by preflight and plan reporting,
