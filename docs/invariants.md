@@ -1562,10 +1562,13 @@ detach pending, before it builds, and in the constraint's transaction locks the 
 identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-pending cases,
 `TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`). `AddPartitionedKey` admits only a named
 `ADD PRIMARY KEY` or `ADD UNIQUE` on the preflighted partitioned table and renders the parent's
-statement from the admitted kind, name, and columns alone; under the tree's lock, before that
-statement, it proves the parent's name still resolves to the table it resolved and that every
-leaf has exactly one constraint of the requested key, attached to nothing, which is the
-constraint and index its leaf step recorded (`TestAddPartitionedKeyParentStepFailsClosed`).
+statement from the admitted kind, name, and columns alone; it refuses a tree holding a partition
+with its detach pending before any leaf step, since a key given to a partition leaving the tree
+would not stay the parent's (`TestAddPartitionedKeyRefusals/a_partition_with_its_detach_pending`);
+under the tree's lock, before that statement, it proves the parent's name still resolves to the
+table it resolved and that every leaf has exactly one constraint of the requested key, attached
+to nothing, which is the constraint and index its leaf step recorded
+(`TestAddPartitionedKeyParentStepFailsClosed`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
