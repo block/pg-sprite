@@ -340,7 +340,7 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 		assert.Equal(t, `ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`, changes[0].SQL)
 		assert.Equal(t, ChangeValidateForeignKey, changes[0].Kind)
 		assert.False(t, changes[0].Destructive)
-		assert.True(t, changes[0].Kind.IsForeignKey(), "desired-state execution refuses it with every foreign-key change")
+		assert.True(t, changes[0].Kind.IsForeignKey(), "validating a foreign key is a foreign-key change")
 		assert.Equal(t, &ConstraintValidation{Constraint: fk.Name, Def: fk.Def + " NOT VALID"}, changes[0].Validates)
 	})
 
@@ -366,6 +366,54 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 		changes, err := Diff("public", with(check), with(check))
 		require.NoError(t, err)
 		assert.Empty(t, changes)
+	})
+}
+
+// An added CHECK or FOREIGN KEY records the definition it has once added NOT
+// VALID, so a plan that validates it in a later step can check that the
+// constraint under that name is still the one the add created. A changed
+// constraint's re-add records it too; its drop records nothing of the kind.
+func TestDiffAddedConstraintRecordsItsNotValidDefinition(t *testing.T) {
+	check := Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"}
+	fk := Constraint{Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true}
+	with := func(cons ...Constraint) Model {
+		m := base()
+		m.Constraints = append(m.Constraints, cons...)
+		return m
+	}
+
+	t.Run("check constraint", func(t *testing.T) {
+		changes, err := Diff("public", base(), with(check))
+		require.NoError(t, err)
+		require.Len(t, changes, 1)
+		assert.Equal(t, &ConstraintValidation{Constraint: check.Name, Def: check.Def + " NOT VALID"}, changes[0].AddsNotValid)
+		assert.Nil(t, changes[0].Validates, "the add itself validates nothing that already exists")
+	})
+
+	t.Run("foreign key", func(t *testing.T) {
+		changes, err := Diff("public", base(), with(fk))
+		require.NoError(t, err)
+		require.Len(t, changes, 1)
+		assert.Equal(t, &ConstraintValidation{Constraint: fk.Name, Def: fk.Def + " NOT VALID"}, changes[0].AddsNotValid)
+	})
+
+	t.Run("changed constraint", func(t *testing.T) {
+		changed := Constraint{Name: check.Name, Def: "CHECK ((length((name)::text) > 1))"}
+		changes, err := Diff("public", with(check), with(changed))
+		require.NoError(t, err)
+		require.Len(t, changes, 2)
+		assert.Nil(t, changes[0].AddsNotValid, "the drop adds nothing")
+		assert.Equal(t, &ConstraintValidation{Constraint: check.Name, Def: changed.Def + " NOT VALID"}, changes[1].AddsNotValid)
+	})
+
+	t.Run("unique constraint", func(t *testing.T) {
+		unique := Constraint{Name: "events_name_key", Def: "UNIQUE (name)"}
+		changes, err := Diff("public", base(), with(unique))
+		require.NoError(t, err)
+		require.NotEmpty(t, changes)
+		for _, ch := range changes {
+			assert.Nil(t, ch.AddsNotValid, "a key cannot be added NOT VALID: %s", ch.SQL)
+		}
 	})
 }
 

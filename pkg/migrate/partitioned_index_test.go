@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -60,4 +61,73 @@ func TestPartitionedIndexFailureVerdictClaimsOnlyWhatTheErrorProves(t *testing.T
 		assert.Contains(t, v.Detail, "outcome unknown: a COMMIT did not return success")
 		assert.Contains(t, v.Detail, "inspect the indexes of billing.orders and its partitions")
 	})
+}
+
+// A partition whose rows break a unique index stops the build with a
+// data-fault verdict that names the partition and the invalid index the
+// failed build left on it, and that a rerun meets the same rows until they
+// are corrected. An invalid index the run could not prove its own is placed
+// on no table and gets the investigation steps the plain build gives.
+func TestPartitionedIndexFailureVerdictNamesThePartitionOfADataFault(t *testing.T) {
+	st, err := statement.ParseOne("CREATE UNIQUE INDEX orders_id_uq ON billing.orders (id, placed_on)")
+	require.NoError(t, err)
+	build := &pgconn.PgError{Code: "23505", Message: `could not create unique index "orders_id_uq_p16397"`}
+	failed := func(cleanup error) error {
+		return fmt.Errorf("build the index of partition billing.orders_2026_02: %w", &executor.InvalidIndexError{
+			Schema: "billing", Index: "orders_id_uq_p16397", Table: "orders_2026_02", Build: build, Cleanup: cleanup,
+		})
+	}
+
+	t.Run("own leftover", func(t *testing.T) {
+		v := partitionedIndexFailureVerdict(st, failed(executor.ErrBuildLeftInvalidIndex))
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Contains(t, v.Detail, `the rows of partition "billing"."orders_2026_02" violate index "billing"."orders_id_uq_p16397"`)
+		assert.Contains(t, v.Detail, "every rerun meets the same rows until they are corrected")
+		assert.Contains(t, v.Detail, "correct the rows, then run the same statement again")
+		assert.Contains(t, v.Detail, `"billing"."orders_id_uq_p16397" invalid on "billing"."orders_2026_02"`)
+		assert.Contains(t, v.Detail, "the partitions after it not yet reached by this run")
+		assert.NotContains(t, v.Detail, "fix the cause the error names")
+	})
+	t.Run("a leftover not proven this run's own", func(t *testing.T) {
+		v := partitionedIndexFailureVerdict(st, failed(executor.ErrAbandonmentUnproven))
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Contains(t, v.Detail, `violate index "billing"."orders_id_uq_p16397"`)
+		assert.Contains(t, v.Detail, "inspect it before any removal")
+		assert.NotContains(t, v.Detail, "orders_2026_02", "the leftover is not placed on a table the run did not prove")
+		assert.NotContains(t, v.Detail, "run the same statement again")
+	})
+}
+
+// PostgreSQL lets a partition live in another schema than its parent. The
+// detail names the partition and its index by the partition's own schema,
+// which the failed build's error carries, never by the parent's.
+func TestPartitionedIndexFailureVerdictNamesAPartitionInAnotherSchema(t *testing.T) {
+	st, err := statement.ParseOne("CREATE UNIQUE INDEX orders_id_uq ON billing.orders (id, placed_on)")
+	require.NoError(t, err)
+	v := partitionedIndexFailureVerdict(st, fmt.Errorf("build the index of partition archive.orders_2026_02: %w", &executor.InvalidIndexError{
+		Schema: "archive", Index: "orders_id_uq_p16397", Table: "orders_2026_02",
+		Build:   &pgconn.PgError{Code: "23505", Message: `could not create unique index "orders_id_uq_p16397"`},
+		Cleanup: executor.ErrBuildLeftInvalidIndex,
+	}))
+	assert.Equal(t, string(executor.CodeDataFault), v.Code)
+	assert.Equal(t, "billing.orders", v.Table, "the verdict's table is the parent the statement named")
+	assert.Contains(t, v.Detail, `the rows of partition "archive"."orders_2026_02" violate index "archive"."orders_id_uq_p16397"`)
+	assert.Contains(t, v.Detail, `"archive"."orders_id_uq_p16397" invalid on "archive"."orders_2026_02"`)
+}
+
+// A rerun whose recovery of a partition's invalid index meets another
+// backend still building it fails with an *InvalidIndexError that names the
+// partition, but its code is invalid-index-build-in-flight, not data-fault:
+// the rows are not at fault, so the data-fault detail does not apply.
+func TestPartitionedIndexDataFaultDetailLeavesAnInFlightBuildAlone(t *testing.T) {
+	err := fmt.Errorf("recover the invalid index billing.orders_id_uq_p16397 on partition billing.orders_2026_02: %w", &executor.InvalidIndexError{
+		Schema: "billing", Index: "orders_id_uq_p16397", Table: "orders_2026_02", BuilderPID: 4242,
+		Cleanup: executor.ErrInvalidIndexBuildInFlight,
+	})
+	_, dataFault := partitionedIndexDataFaultDetail("billing.orders", err)
+	assert.False(t, dataFault)
+	st, parseErr := statement.ParseOne("CREATE UNIQUE INDEX orders_id_uq ON billing.orders (id, placed_on)")
+	require.NoError(t, parseErr)
+	assert.Equal(t, string(executor.CodeInvalidIndexBuildInFlight), partitionedIndexFailureVerdict(st, err).Code)
 }

@@ -21,7 +21,7 @@ func validRow() Row {
 func TestEmbeddedCapabilitiesValidate(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
-	assert.Len(t, rows, 63)
+	assert.Len(t, rows, 65)
 }
 
 // The engine refuses a partitioned parent with its own target-fact reason

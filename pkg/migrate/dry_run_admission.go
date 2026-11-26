@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -71,6 +72,45 @@ func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, st sta
 		}
 		return executor.AdmitPartitionedUniqueIndex(ctx, pool, steps[0])
 	})
+}
+
+// AdmitCopySwapPartitioning is the dry run's reading of the copy-and-swap
+// route's partition refusal, for a statement routed to the copy-and-swap
+// backend: a target that is a partitioned parent, a partition, or part of
+// an inheritance tree is refused with the verdict [Run] ends in when the
+// route's preflight refuses it — reason copy-and-swap-refused, cause
+// copy-and-swap-partitioned, or the unlogged or forced row security cause
+// the preflight decides first — read from the live catalog on pool through
+// preflight.CheckCopySwapPartitioning. It claims nothing else the route's
+// preflight decides: the privileges, every other table's shape, and the
+// cluster and volume are read when the route runs, as is whether the run
+// opened the route at all. A host that plans through the library calls it
+// with a pool from pkg/dbconn. schema and the verdict, the boolean, and the
+// error mean what they mean for [AdmitRoutedSteps]: the boolean is true
+// when it refuses, the opposite sense of [AdmitPlanCopySwapPartitioning],
+// which follows [AdmitPlan].
+func AdmitCopySwapPartitioning(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string) (verdict.Verdict, bool, error) {
+	unqualified := st.Schema() == "" && st.Table() != ""
+	if unqualified && schema == "" {
+		return verdict.Verdict{}, false, fmt.Errorf("admit copy-and-swap partitioning for %s: %w", st.Table(), errAdmissionSchemaUnknown)
+	}
+	target := st
+	if unqualified {
+		resolved, err := resolveForVerdict(st, schema)
+		if err != nil {
+			return verdict.Verdict{}, false, err
+		}
+		target = resolved
+	}
+	err := preflight.CheckCopySwapPartitioning(ctx, pool, target.Schema(), target.Table())
+	if err == nil {
+		return verdict.Verdict{}, false, nil
+	}
+	v, err := copySwapPreflightVerdict(target, err)
+	if err != nil {
+		return verdict.Verdict{}, false, err
+	}
+	return v, true, nil
 }
 
 // admitRouted qualifies the steps of an unqualified st and applies admit to
