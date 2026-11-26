@@ -46,12 +46,11 @@ var (
 	// success over nothing executed would be a false proof.
 	ErrEmptySequence = errors.New("sequence has no steps")
 	// ErrUnsupportedSequenceStep is returned when a step is not one of the
-	// shapes this executor can run safely: an ALTER TABLE step, or a
-	// CREATE INDEX CONCURRENTLY step. The concurrent forms of other
-	// statements are refused deliberately — a DROP INDEX CONCURRENTLY or
-	// REINDEX CONCURRENTLY is not driven yet, and a cancelled
-	// DETACH PARTITION CONCURRENTLY leaves a detach-pending partition
-	// state this executor does not own detecting or recovering.
+	// shapes this executor can run safely: an ALTER TABLE step, a lone
+	// DETACH PARTITION ... CONCURRENTLY, or a CREATE INDEX CONCURRENTLY
+	// step. The concurrent forms of other statements are refused
+	// deliberately — a DROP INDEX CONCURRENTLY or REINDEX CONCURRENTLY is
+	// not driven yet.
 	ErrUnsupportedSequenceStep = errors.New("step is not a shape the sequence executor can run safely")
 	// ErrUnsupportedPartitionedParent is returned when the target is a
 	// partitioned parent and the admitted sequence is not supported there.
@@ -77,12 +76,17 @@ const (
 	// long online scan, bounded by the validate budget rather than the
 	// brief one.
 	StepValidateConstraint StepKind = "validate-constraint"
+	// StepDetachPartition: an ALTER TABLE whose one subcommand is DETACH
+	// PARTITION ... CONCURRENTLY, run outside a transaction block under
+	// the brief budgets, which finishes a partition an earlier run left
+	// detach-pending.
+	StepDetachPartition StepKind = "detach-partition-concurrently"
 )
 
 // StepKinds returns the closed set of StepKind values. It is part of the
 // documented contract: docs/execution-model.md names every kind.
 func StepKinds() []StepKind {
-	return []StepKind{StepBrief, StepConcurrentIndexBuild, StepValidateConstraint}
+	return []StepKind{StepBrief, StepConcurrentIndexBuild, StepValidateConstraint, StepDetachPartition}
 }
 
 // ValidateBudget bounds one VALIDATE CONSTRAINT step. The validation scan
@@ -158,6 +162,10 @@ type StepReport struct {
 	// Index carries the concurrent build's verified report; nil for every
 	// other step kind.
 	Index *IndexBuildReport `json:"index,omitempty"`
+	// FinishedPendingDetach is true for a detach step that found its
+	// partition left detach-pending by an earlier run and finished it with
+	// DETACH PARTITION ... FINALIZE.
+	FinishedPendingDetach bool `json:"finished_pending_detach,omitempty"`
 }
 
 // SequenceReport is the record of a sequence run: one report per committed
@@ -329,6 +337,16 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if sequenceHasConcurrentBuild(admitted) && pool.Config().MaxConns < 2 {
 		return rep, ErrPoolTooSmall
 	}
+	// A concurrent detach the table's DEFAULT partition rules out is
+	// decidable now, before any step commits.
+	for _, step := range admitted {
+		if step.kind != StepDetachPartition {
+			continue
+		}
+		if err := AdmitDetachPartition(ctx, pool, step.st.SQL()); err != nil {
+			return rep, err
+		}
+	}
 	adoptingStep, err := adoptionStep(admitted, adopts)
 	if err != nil {
 		return rep, err
@@ -352,7 +370,10 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 			start = tracker.Now()
 		}
 		var indexReport *IndexBuildReport
+		finishedPendingDetach := false
 		switch step.kind {
+		case StepDetachPartition:
+			finishedPendingDetach, err = detachPartitionConcurrently(ctx, pool, pt, step.st, b.Brief, retry)
 		case StepConcurrentIndexBuild:
 			r, buildErr := buildIndexConcurrently(ctx, pool, step.st.SQL(), b.Concurrent, tracker)
 			err = buildErr
@@ -380,7 +401,7 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 			}
 			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, stepAdopts, nil, stepDropped, tracker)
 		default:
-			// Admission produces only the three kinds above; an unknown
+			// Admission produces only the four kinds above; an unknown
 			// kind here is a programming error and aborts fail-closed.
 			err = fmt.Errorf("%w: unhandled step kind %q", ErrInvariantViolation, step.kind)
 		}
@@ -389,10 +410,11 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 		}
 		duration := elapsedSince(tracker, start)
 		rep.Steps = append(rep.Steps, StepReport{
-			SQL:      step.st.SQL(),
-			Kind:     step.kind,
-			Duration: duration,
-			Index:    indexReport,
+			SQL:                   step.st.SQL(),
+			Kind:                  step.kind,
+			Duration:              duration,
+			Index:                 indexReport,
+			FinishedPendingDetach: finishedPendingDetach,
 		})
 	}
 	return rep, nil
@@ -413,7 +435,9 @@ func sequenceTargetFacts(ctx context.Context, pool *pgxpool.Pool, schema, table 
 
 func progressOperation(kind StepKind) progress.Operation {
 	switch kind {
-	case StepBrief:
+	case StepBrief, StepDetachPartition:
+		// A concurrent detach does no work the server reports: it runs
+		// under the brief budgets, waiting on locks and older snapshots.
 		return progress.OperationBrief
 	case StepValidateConstraint:
 		return progress.OperationValidate
@@ -575,10 +599,16 @@ func admitStepShape(sql string) (sequenceStep, error) {
 // classes. A VALIDATE CONSTRAINT — and only a lone one — gets the validate
 // class: in a multi-operation ALTER the validation shares its transaction
 // with the other subcommands, so the whole statement must prove itself
-// under the brief budgets instead. Any CONCURRENTLY subcommand (DETACH
-// PARTITION CONCURRENTLY) is refused: cancelling its wait leaves a
-// detach-pending partition state this executor does not own recovering.
+// under the brief budgets instead. A lone DETACH PARTITION ... CONCURRENTLY
+// gets the detach class; any other CONCURRENTLY subcommand is refused.
 func admitAlterTableStep(st statement.Statement, sql string) (sequenceStep, error) {
+	detaches, err := isConcurrentDetach(st)
+	if err != nil {
+		return sequenceStep{}, err
+	}
+	if detaches {
+		return sequenceStep{st: st, kind: StepDetachPartition}, nil
+	}
 	ops, err := statement.ParseOps(sql)
 	if err != nil {
 		return sequenceStep{}, err

@@ -704,13 +704,14 @@ CREATE INDEX t_v_idx ON t (v);`
 
 	t.Run("stops at an execution-time refusal", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
-		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v varchar(10))", schema))
 		require.NoError(t, err)
 
 		// The plan admits at plan time (diffplan applies no size guard),
-		// but Run size-guards the blind ADD COLUMN attempt: with the
-		// threshold below one heap page the first statement refuses at
-		// execution time and everything after it is never attempted.
+		// but Run size-guards the blind type change to text, which no
+		// probe proves catalog-only: with the threshold below one heap
+		// page the first statement refuses at execution time and
+		// everything after it is never attempted.
 		opts := runOptions()
 		opts.MaxTableSizeBytes = 1
 		res, err := migrate.RunDesired(t.Context(), pool,

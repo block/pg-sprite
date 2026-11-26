@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -191,6 +192,100 @@ func TestMigrateDesiredTableRefusesACopyWhileTheRouteIsClosed(t *testing.T) {
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.Equal(t, before, after, "neither the retype nor the add-column ran")
+}
+
+// A desired file that narrows a column of a partitioned table plans the
+// retype through copy-and-swap, whose preflight refuses a partitioned parent
+// at admission, before any statement runs. The dry run must end in that
+// same whole-plan refusal, plan included, instead of previewing a plan the
+// run turns down. The run opens the route and gives it free disk, so the
+// partition shape is what refuses it.
+func TestMigrateDesiredDryRunRefusesCopySwapOnPartitionedParentLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint NOT NULL,
+			created date NOT NULL,
+			note text,
+			PRIMARY KEY (id, created)
+		) PARTITION BY RANGE (created);
+		CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`, schema))
+	require.NoError(t, err)
+	desired := `CREATE TABLE events (
+ id bigint NOT NULL,
+ created date NOT NULL,
+ note varchar(10),
+ PRIMARY KEY (id, created)
+ ) PARTITION BY RANGE (created);`
+
+	run := func(cmd *MigrateCmd) migrate.DesiredResult {
+		var out strings.Builder
+		require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused,
+			"the refusal exit code must not depend on --dry-run")
+		var result migrate.DesiredResult
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &result))
+		return result
+	}
+	dryRun := run(desiredCommand(t, url, schema, desired, "--dry-run"))
+	applied := run(desiredCommand(t, url, schema, desired, "--copy-and-swap", "--free-disk", "1TiB"))
+
+	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, dryRun.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, dryRun.Class)
+	assert.Equal(t, verdict.Cause(preflight.CopySwapCausePartitioned), dryRun.Cause)
+	assert.Empty(t, dryRun.Verdicts, "whole-plan admission runs no statement")
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the run reports")
+}
+
+// A desired file that declares the partitioned table's row security as it
+// stands, and narrows a column, plans only the retype, which the run hands
+// to the same plan admission as a file without row security. The dry run
+// ends in the run's whole-plan copy-and-swap refusal there too.
+func TestMigrateDesiredRLSDryRunRefusesCopySwapOnPartitionedParentLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint NOT NULL,
+			created date NOT NULL,
+			note text,
+			PRIMARY KEY (id, created)
+		) PARTITION BY RANGE (created);
+		CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+		ALTER TABLE %[1]s.events ENABLE ROW LEVEL SECURITY`, schema))
+	require.NoError(t, err)
+	desired := `CREATE TABLE events (
+ id bigint NOT NULL,
+ created date NOT NULL,
+ note varchar(10),
+ PRIMARY KEY (id, created)
+ ) PARTITION BY RANGE (created);
+ ALTER TABLE events ENABLE ROW LEVEL SECURITY;`
+
+	run := func(cmd *MigrateCmd) migrate.DesiredResult {
+		var out strings.Builder
+		require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused,
+			"the refusal exit code must not depend on --dry-run")
+		var result migrate.DesiredResult
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &result))
+		return result
+	}
+	dryRun := run(desiredCommand(t, url, schema, desired, "--dry-run"))
+	applied := run(desiredCommand(t, url, schema, desired, "--copy-and-swap", "--free-disk", "1TiB"))
+
+	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, dryRun.Reason)
+	assert.Equal(t, verdict.Cause(preflight.CopySwapCausePartitioned), dryRun.Cause)
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the run reports")
 }
 
 func TestMigrateDesiredCreatesMissingTable(t *testing.T) {

@@ -117,8 +117,10 @@ const maxPartitionedKeyPasses = 5
 //     key over a column the parent allows to be NULL
 //     (ErrPartitionedKeyNullableColumn); a parent that already has exactly
 //     the requested constraint is reported done;
-//  2. refuses a tree that holds a foreign table (ErrForeignTablePartition) or
-//     a sub-partitioned partition (ErrPartitionedKeySubPartitioned);
+//  2. refuses a tree that holds a foreign table (ErrForeignTablePartition), a
+//     sub-partitioned partition (ErrPartitionedKeySubPartitioned), or a
+//     partition whose DETACH PARTITION CONCURRENTLY has not finished
+//     (ErrPartitionDetachPending), before any partition is touched;
 //  3. gives each leaf the key constraint: a concurrent build of its unique
 //     index, then ADD CONSTRAINT ... USING INDEX, resumed from whatever an
 //     earlier run left;

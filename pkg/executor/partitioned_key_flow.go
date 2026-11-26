@@ -163,7 +163,8 @@ func (f *partitionedKeyFlow) checkParent(ctx context.Context) (bool, error) {
 
 // readTree lists the partition tree and refuses a tree the build does not
 // take. It is read at the start and on every later pass, so a foreign table
-// or a sub-partitioned partition attached mid-run refuses the run too.
+// or a sub-partitioned partition attached mid-run, or a detach left pending
+// mid-run, refuses the run too.
 func (f *partitionedKeyFlow) readTree(ctx context.Context) ([]partitionNode, error) {
 	var tree []partitionNode
 	err := f.tx.read(ctx, "list the partition tree", func(ctx context.Context, q querier) error {
@@ -182,8 +183,11 @@ func (f *partitionedKeyFlow) readTree(ctx context.Context) ([]partitionNode, err
 }
 
 // refuseKeyTree refuses a tree holding a foreign table, which cannot carry
-// the index a key needs, or a sub-partitioned partition, which the build does
-// not take.
+// the index a key needs, a sub-partitioned partition, which the build does
+// not take, or a partition whose detach has not finished, which is leaving
+// the tree, so a key given to it would not stay the parent's. Refusing the
+// pending partition here, before any leaf step, leaves every other partition
+// untouched.
 func refuseKeyTree(target indexTarget, tree []partitionNode) error {
 	parent := qualifiedName(target.schema, target.table)
 	if foreign := foreignPartitions(tree); len(foreign) > 0 {
@@ -197,6 +201,10 @@ func refuseKeyTree(target indexTarget, tree []partitionNode) error {
 	}
 	if len(nested) > 0 {
 		return fmt.Errorf("%w: %s under %s", ErrPartitionedKeySubPartitioned, strings.Join(nested, ", "), parent)
+	}
+	if pending := detachPendingPartitions(tree); len(pending) > 0 {
+		return fmt.Errorf("%w: %s under %s; finish each detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then rerun",
+			ErrPartitionDetachPending, strings.Join(pending, ", "), parent)
 	}
 	return nil
 }

@@ -193,6 +193,7 @@ func admissionSentinels() []error {
 		executor.ErrIfNotExistsUnsupported,
 		executor.ErrPartitionedIndexTablespace,
 		executor.ErrUniqueIndexPartitionKey,
+		executor.ErrDetachDefaultPartition,
 	}
 }
 
@@ -216,6 +217,12 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 	if errors.Is(err, executor.ErrUniqueIndexPartitionKey) {
 		// PostgreSQL itself rejects the index in every supported version, so
 		// no engine release runs it; the statement has to change.
+		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
+	if errors.Is(err, executor.ErrDetachDefaultPartition) {
+		// PostgreSQL rejects a concurrent detach beside a DEFAULT partition
+		// in every supported version; the table or the statement has to
+		// change.
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true

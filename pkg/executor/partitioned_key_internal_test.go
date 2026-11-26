@@ -426,6 +426,22 @@ func TestAddPartitionedKeyRefusals(t *testing.T) {
 			require.ErrorIs(t, err, ErrForeignTablePartition)
 			f.requireNothingCreated(t, "events", "events_2026_01", "events_2026_02")
 		})
+
+		// A cancelled DETACH PARTITION ... CONCURRENTLY leaves events_2026_02
+		// detach-pending: it is leaving the tree, so a key given to it would
+		// not stay the parent's. The tree read refuses it before any leaf
+		// step, so events_2026_01, listed first, gets no index either.
+		t.Run("a partition with its detach pending", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			f.cancelDetach(t, "events", "events_2026_02")
+
+			_, err := f.add(t, addEventsPrimaryKey)
+
+			require.ErrorIs(t, err, ErrPartitionDetachPending)
+			assert.Equal(t, CodePartitionDetachPending, OutcomeCode(err))
+			f.requireNothingCreated(t, "events", "events_2026_01", "events_2026_02")
+		})
 	})
 }
 
