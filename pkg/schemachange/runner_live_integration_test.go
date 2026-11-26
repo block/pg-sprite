@@ -436,7 +436,10 @@ const hotRowApplyDeadline = 30 * time.Second
 // the source moved since the last read and the shadow holding neither
 // what that read saw on the source nor what the source holds now, so the
 // row is still changing at every reread, however the run's goroutines
-// are scheduled.
+// are scheduled. Each read writes and blocks, which a production source
+// never does: the script is keyed to the pass reading the position once
+// per reread, so a pass that read it less often would see the row settle
+// and the test would report Carried 0 for that reason, not a flake.
 type hotRow struct {
 	t       *testing.T
 	pool    *pgxpool.Pool
