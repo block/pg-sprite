@@ -159,6 +159,13 @@ func (c Column) IsGenerated() bool {
 	return c.Generated || c.Virtual
 }
 
+// ForeignKeyReference is the table a foreign key references, by name in the
+// key's own schema, and the referenced columns in key order.
+type ForeignKeyReference struct {
+	Table   string
+	Columns []string
+}
+
 // Constraint is one table constraint: its name plus the server-decompiled
 // definition (pg_get_constraintdef), e.g. "PRIMARY KEY (id)".
 type Constraint struct {
@@ -188,6 +195,23 @@ type Constraint struct {
 	// " NOT VALID". Only a live table carries one: CREATE TABLE ignores NOT
 	// VALID, so a desired constraint is always validated.
 	NotValid bool `json:"-"`
+	// ReferencesOtherSchema reports a foreign key whose referenced table is
+	// in another schema than the table's own. Def prints such a reference
+	// unqualified when that schema is on the introspection search_path
+	// (public), so only this tells it apart from a same-schema reference.
+	ReferencesOtherSchema bool `json:"-"`
+	// SelfReferencesStandaloneIndex reports a foreign key from the table to
+	// itself whose referenced columns are unique only through a standalone
+	// unique index, one no immediate primary key or unique constraint owns.
+	// A foreign key cannot reference a deferrable key, and CREATE TABLE
+	// declares the key before any CREATE INDEX after it runs, so a file that
+	// renders both cannot create the table.
+	SelfReferencesStandaloneIndex bool `json:"-"`
+	// References names, for a foreign key, the table and the columns it
+	// references, in key order. Planning checks the role's REFERENCES
+	// privilege on them for a key the plan adds. Nil for every other
+	// constraint.
+	References *ForeignKeyReference `json:"-"`
 	// IndexInvalid reports a primary key, unique, or exclusion constraint
 	// whose index the server has not validated (pg_index.indisvalid is
 	// false). On a partitioned parent that is a key added with ALTER TABLE
@@ -352,8 +376,9 @@ type Model struct {
 	// ReferencedBy lists the incoming foreign keys — constraints on other
 	// tables that reference this one — as "table.constraint" strings, in
 	// that order. Incoming foreign keys are not part of this table's own
-	// definition and cannot be expressed in a desired file, so the model
-	// carries them only for the renderer to refuse on.
+	// definition: each one is declared in the referencing table's desired
+	// file. Render refuses a referenced table unless the caller opts in
+	// with RenderOptions.ForeignKeys and renders the referencing tables too.
 	ReferencedBy []string
 	// IncomingForeignKeys are the same foreign keys as ReferencedBy, in the
 	// same order, each with the schema of the table that holds it. Two

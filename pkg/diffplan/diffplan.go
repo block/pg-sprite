@@ -88,6 +88,20 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = qualifiedDesired(ds, req.Schema); err != nil {
 			return plan.Report{}, err
 		}
+		// A new table's foreign keys reference tables that must already
+		// exist in the target schema. Building the desired table in the
+		// scratch schema checks each one, so planning refuses a missing or
+		// unreadable table, and one whose referenced columns the role cannot
+		// reference, instead of leaving the create to fail.
+		if len(ds.ReferencedTables()) > 0 {
+			desired, err := schemadiff.IntrospectDesired(ctx, pool, req.Schema, ds)
+			if err != nil {
+				return plan.Report{}, err
+			}
+			if err := requireReferencesForCreatedKeys(ctx, pool, req.Schema, desired); err != nil {
+				return plan.Report{}, err
+			}
+		}
 	case err != nil:
 		return plan.Report{}, err
 	default:
@@ -97,6 +111,12 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, err
 		}
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
+			return plan.Report{}, err
+		}
+		if changes, facts.NotNullHelpers, err = resumeNotNullHelpers(ctx, pool, ds.Table(), changes); err != nil {
+			return plan.Report{}, err
+		}
+		if err := requireReferencesForAddedKeys(ctx, pool, req.Schema, changes); err != nil {
 			return plan.Report{}, err
 		}
 		// The diff never drops an unfinished index build; the report
@@ -126,7 +146,10 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return plan.Report{}, err
 	}
-	plan.RefuseForeignKeyChanges(&report)
+	if err := recordNotNullScaffolds(ctx, pool, report.Statements); err != nil {
+		return plan.Report{}, err
+	}
+	plan.RefuseForeignKeyDrops(&report)
 	if !tableExists {
 		// Shape refusals are stamped first so the disclosure below only
 		// describes the statements that remain executable.
@@ -155,6 +178,36 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	report.ExtensionSchemas = ds.ExtensionSchemas()
 	report.Fingerprint = report.ComputeFingerprint()
 	return report, nil
+}
+
+// requireReferencesForAddedKeys checks the REFERENCES privilege for each
+// foreign key the plan adds to the live table. A key the plan leaves alone,
+// or only validates, needs no such check.
+func requireReferencesForAddedKeys(ctx context.Context, pool *pgxpool.Pool, schema string, changes []schemadiff.Change) error {
+	for _, change := range changes {
+		if change.References == nil {
+			continue
+		}
+		if err := schemadiff.RequireReferencesPrivilege(ctx, pool, schema, *change.References); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requireReferencesForCreatedKeys checks the REFERENCES privilege for each
+// foreign key a new table declares to another table. A key to the new table
+// itself needs none, since the role creating the table owns it.
+func requireReferencesForCreatedKeys(ctx context.Context, pool *pgxpool.Pool, schema string, desired schemadiff.Model) error {
+	for _, con := range desired.Constraints {
+		if con.References == nil || con.References.Table == desired.Table {
+			continue
+		}
+		if err := schemadiff.RequireReferencesPrivilege(ctx, pool, schema, *con.References); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // refuseDesiredPartitionedIndexTablespace stops a plan that would build an
@@ -313,10 +366,35 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 		ps.Kind = ch.Kind
 		ps.Adopts = ch.Adopts
 		ps.Validates = ch.Validates
+		if ch.AddsNotValid != nil {
+			validates, err := validatesInSequence(ps.ExecSQL, ch.AddsNotValid.Constraint)
+			if err != nil {
+				return nil, "", fmt.Errorf("plan derived statement %q: %w", routed.Statements[i].Statement, err)
+			}
+			if validates {
+				ps.Validates = ch.AddsNotValid
+			}
+		}
 		ps.Drops = ch.Drops
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil
+}
+
+// validatesInSequence reports whether a step of execSQL validates the named
+// constraint: an add of a CHECK or FOREIGN KEY the planner runs as ADD ...
+// NOT VALID and then VALIDATE CONSTRAINT.
+func validatesInSequence(execSQL []string, constraint string) (bool, error) {
+	for _, sql := range execSQL {
+		ops, err := statement.ParseOps(sql)
+		if err != nil {
+			return false, fmt.Errorf("read the operations of %q: %w", sql, err)
+		}
+		if len(ops) == 1 && ops[0].Kind == statement.OpValidateConstraint && ops[0].Name == constraint {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // qualifiedDesired renders the desired statements as the plan for a table

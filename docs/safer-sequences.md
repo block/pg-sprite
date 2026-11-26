@@ -104,7 +104,7 @@ the tool itself (see below):
 | `ADD PRIMARY KEY` (direct) | The same 2 steps — **on a column already `NOT NULL`**. On a nullable column, adopting the index must also set `NOT NULL`, and PostgreSQL validates that by scanning the heap under `ACCESS EXCLUSIVE` — the blocking work the substitution exists to avoid, and a scan the brief step budget cancels. Reach `NOT NULL` first via the 4-step sequence above, then add the primary key |
 | `ADD CHECK` / `ADD FOREIGN KEY` (direct) | 2 steps: `ADD CONSTRAINT … NOT VALID` → `VALIDATE CONSTRAINT` — the validation scan runs under a lock that lets reads and writes proceed |
 | `CREATE INDEX` (non-concurrent) | 1 statement: the same build with `CONCURRENTLY` — on a live table only. On a table that does not exist yet (`diff` greenfield) the build is [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) and runs as written |
-| `DETACH PARTITION` (non-concurrent) | 1 statement: `DETACH PARTITION … CONCURRENTLY` — shown by `suggest`, but **execution refuses this step** ([why](#when-the-substitution-does-not-help)) |
+| `DETACH PARTITION` (non-concurrent) | 1 statement: `DETACH PARTITION … CONCURRENTLY`, run outside a transaction block; an interrupted run leaves the partition detach-pending, and running the statement again finishes it. Refused when the parent has a `DEFAULT` partition ([why](#when-the-substitution-does-not-help)) |
 
 Statements already in the safe form (`… USING INDEX`, `… NOT VALID`,
 `CONCURRENTLY`) are recognized as the online idiom and run as submitted.
@@ -121,7 +121,7 @@ $ echo 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);' \
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "suggestions": [
     {
       "statement": 1,
@@ -168,11 +168,13 @@ It does not cover:
   pg-sprite refuses with a typed reason
   ([`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent))
   rather than substituting a sequence it cannot run online.
-- **`DETACH PARTITION … CONCURRENTLY` at execution.** The planner
-  substitutes it and `suggest` shows it, but the executor refuses to
-  run the step — and `--dry-run` reports that refusal rather than a plan:
-  a cancelled concurrent detach leaves a detach-pending partition state
-  it does not own recovering.
+- **`DETACH PARTITION … CONCURRENTLY` beside a `DEFAULT` partition.**
+  PostgreSQL refuses the concurrent detach outright when the parent has a
+  `DEFAULT` partition (`cannot detach partitions concurrently when a
+  default partition exists`), so `migrate` refuses the substitution there
+  from the catalog, and `--dry-run` reports that refusal rather than a
+  plan; the blocking `DETACH PARTITION` under `--force` is the only detach.
+  `suggest` cannot see the parent and marks the rewrite `no-default-partition`.
 
 ## Check the claims yourself
 
@@ -202,4 +204,4 @@ A safer sequence is a *different way to run the change*, not a free
 upgrade, so each substitution carries typed caveats in the
 [suggest report](suggest-report.md#caveats-caveats) — `non-transactional`,
 `separate-transactions`, `invalid-index-on-failure`, `validation-scan`,
-`detach-finalize-on-failure` — that automation can branch on.
+`detach-finalize-on-failure`, `no-default-partition` — that automation can branch on.

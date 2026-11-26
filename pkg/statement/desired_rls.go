@@ -124,36 +124,34 @@ func (d DesiredWithRowSecurity) PolicyReads() []QualifiedName { return slices.Cl
 func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredWithRowSecurity{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
+		return DesiredWithRowSecurity{}, parseFailure(sql, err)
 	}
-	return parseDesiredWithRowSecurityTree(sql, tree)
+	return parseDesiredWithRowSecurityTree(newDesiredSource(sql), tree)
 }
 
 // parseDesiredWithRowSecurityTree applies ParseDesiredWithRowSecurity's
-// admission rules to tree, the parse of source.
-func parseDesiredWithRowSecurityTree(source string, tree *pganalyze.ParseResult) (DesiredWithRowSecurity, error) {
-	var tableSQL strings.Builder
+// admission rules to tree, the parse of source. The table and its indexes go
+// through ParseDesired's rules as statements of source, so a refusal of one
+// of them names its place in the file, not its place among them.
+func parseDesiredWithRowSecurityTree(source *desiredSource, tree *pganalyze.ParseResult) (DesiredWithRowSecurity, error) {
+	var definition []fileStatement
 	var security []*pganalyze.RawStmt
 	hasTable := false
-	for _, raw := range tree.GetStmts() {
-		node := raw.GetStmt()
+	for _, stmt := range fileStatements(tree) {
+		node := stmt.raw.GetStmt()
 		if node.GetCreateStmt() != nil {
 			hasTable = true
 		}
 		if node.GetCreateStmt() != nil || node.GetIndexStmt() != nil {
-			text, err := deparseOne(node)
-			if err != nil {
-				return DesiredWithRowSecurity{}, err
-			}
-			tableSQL.WriteString(text + ";\n")
+			definition = append(definition, stmt)
 		} else {
-			security = append(security, raw)
+			security = append(security, stmt.raw)
 		}
 	}
 	if !hasTable {
 		return DesiredWithRowSecurity{}, ErrRowSecurityTableDefinitionRequired
 	}
-	table, err := ParseDesired(tableSQL.String())
+	table, err := parseDesiredTree(source, definition)
 	if err != nil {
 		return DesiredWithRowSecurity{}, err
 	}
@@ -196,7 +194,7 @@ func parseDesiredWithRowSecurityTree(source string, tree *pganalyze.ParseResult)
 // admitRowSecurity admits raw, one row-security statement of source, and
 // returns the table it targets and, for a policy, the tables its expressions
 // read.
-func admitRowSecurity(source string, raw *pganalyze.RawStmt, enabled, forced *int) (string, []QualifiedName, error) {
+func admitRowSecurity(source *desiredSource, raw *pganalyze.RawStmt, enabled, forced *int) (string, []QualifiedName, error) {
 	node := raw.GetStmt()
 	switch {
 	case node.GetAlterTableStmt() != nil:
@@ -321,7 +319,7 @@ func locksRows(msg protoreflect.Message) bool {
 func HasRowSecurityDeclaration(sql string) (bool, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return false, fmt.Errorf("%w: %w", ErrParseDesired, err)
+		return false, parseFailure(sql, err)
 	}
 	return hasRowSecurity(tree), nil
 }

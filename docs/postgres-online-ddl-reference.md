@@ -262,8 +262,8 @@ ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lo
 | `CLUSTER` / `VACUUM FULL` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** (`pg_repack`) | Use `pg_repack` |
 | `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief unless the parent has a `DEFAULT` partition, which it scans while it holds the parent; it also queues behind long-running queries and then blocks every reader of the parent. With a `DEFAULT` partition, create the table on its own and [attach it](#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build) instead |
 | `ATTACH PARTITION` | SHARE UPDATE EXCLUSIVE on parent; ACCESS EXCLUSIVE on the attached table and on the `DEFAULT` partition, which are scanned unless proven | No | Yes on the parent; blocked on the attached table and `DEFAULT` while held | ➖ Native pattern | [Prove the bound on both tables and build the parent's indexes first](#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build) |
-| `DETACH PARTITION` | ACCESS EXCLUSIVE | No | No | ➖ Use `CONCURRENTLY` | |
-| `DETACH PARTITION CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | PG 14+ |
+| `DETACH PARTITION` | ACCESS EXCLUSIVE on parent and partition | No | No | ➖ Use `CONCURRENTLY` | The only detach when the parent has a `DEFAULT` partition |
+| `DETACH PARTITION CONCURRENTLY` | SHARE UPDATE EXCLUSIVE on parent and partition, then ACCESS EXCLUSIVE on the partition alone | No | Yes | ❌ No | PG 14+; two transactions, never in a transaction block; refused when the parent has a `DEFAULT` partition. Between them it waits for every transaction that could still see the partition through the parent (a lock wait, so `lock_timeout` cancels it), and rows routed into the partition's range fail meanwhile; an interrupted run leaves the partition detach-pending until `DETACH PARTITION ... FINALIZE` |
 
 ### Safe pattern: attach a partition without a scan or an index build
 
@@ -843,8 +843,8 @@ an unclassified statement is never executed.
 | warning on a plan `--allow-destructive` acknowledged; without it `migrate` refuses the statement as `destructive-change` | per the routing decision | per the routing decision | 2 unless acknowledged |
 
 The change discards live data or structure: `DROP COLUMN`, `DROP TABLE`,
-truncating conversions, a dropped constraint or index, or `DROP NOT NULL`
-(which discards the same guarantee as dropping the equivalent constraint;
+truncating conversions, a dropped constraint or index, a detached partition
+(its rows leave the table), or `DROP NOT NULL` (which discards the same guarantee as dropping the equivalent constraint;
 `DROP DEFAULT` is deliberately not destructive — a default guarantees nothing
 about existing rows and is recreated by a metadata-only statement). Emitted
 alongside the routing decision as a warning so destructive intent is always
@@ -961,14 +961,15 @@ cannot route.
 |---|---|---|---|
 | refused — never executed | — | — | 2 |
 
-The desired file adds or drops a foreign key, or creates a table that
-declares one. `diff` shows the statement so the change is reviewable, but
-desired-state execution (`migrate --desired`) does not apply foreign-key
-changes yet. To apply one, run the statement with `pg-sprite migrate --alter`:
-an `ADD FOREIGN KEY` runs as `NOT VALID` followed by `VALIDATE CONSTRAINT`, so
-writes keep flowing during the scan. For a new table, create it without the
-foreign key first, and name the referenced table with its schema in the
-`ADD FOREIGN KEY`, since `migrate --alter` qualifies only the altered table.
+The desired file no longer declares a live foreign key. `diff` shows the
+drop so the change is reviewable, but desired-state execution
+(`migrate --desired`) does not drop foreign keys yet. To drop one, run the
+statement with `pg-sprite migrate --alter --allow-destructive SCHEMA.TABLE`.
+
+A foreign key the desired file adds is not refused: it runs as
+`ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT`, so writes
+keep flowing during the scan, and a new table is created with its foreign
+keys.
 
 ### `table-not-found`
 

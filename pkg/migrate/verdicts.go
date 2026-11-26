@@ -31,6 +31,17 @@ import (
 // names, whose refusal [GateWithCatalog] completes from the catalog; [Run]
 // re-checks it regardless.
 func Gate(st statement.Statement) (verdict.Verdict, bool) {
+	if st.FinalizesDetach() {
+		// The statement cannot be reprinted faithfully, so it is refused
+		// before anything reprints it; the detach it finishes is finished
+		// by running the statement that started it again.
+		return verdict.Verdict{
+			Statement: st.SQL(),
+			Detail: "pg-sprite does not run DETACH PARTITION ... FINALIZE as written; running the " +
+				"DETACH PARTITION ... CONCURRENTLY statement that started the detach again finishes it, " +
+				"or run this statement directly against the database",
+		}.WithRefusal(verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)), true
+	}
 	r, refused := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 	if !refused {
 		return verdict.Verdict{}, false
@@ -372,6 +383,12 @@ func failureVerdict(st statement.Statement, err error,
 	if buildFault {
 		v.Detail += "; " + leftover
 	}
+	if errors.Is(err, executor.ErrDetachInterrupted) {
+		// The step's own first transaction committed, which the generic
+		// wording above denies; the error names the partition and the
+		// statement that finishes it.
+		v.Detail = fmt.Sprintf("sequence step %d of %d: %v", stepErr.Step, stepErr.Total, stepErr.Err)
+	}
 	return v
 }
 
@@ -493,6 +510,9 @@ func onlineIdiomPlan(p planner.Plan) bool {
 // substituted the planner's safer sequence, or when the plan proved every
 // operation an online idiom, long work on a large table is the pattern's
 // purpose and the guard would refuse the very tables the pattern serves.
+// When every operation is proven catalog-only, what executes cannot
+// rewrite or read the table, so its size cannot make a wrong guess
+// expensive and there is nothing for the guard to bound.
 func sizeGuardApplies(p planner.Plan, substituted bool) bool {
-	return !substituted && !onlineIdiomPlan(p)
+	return !substituted && !onlineIdiomPlan(p) && !planner.ProvenCatalogOnly(p.Decisions)
 }

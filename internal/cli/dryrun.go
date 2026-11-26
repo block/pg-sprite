@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -24,10 +26,13 @@ import (
 // the apply makes; so does the
 // destructive-change gate, unless --allow-destructive names the table, and
 // the executor's shape admission of the routed steps, once they are known, when
-// no earlier apply check refuses first, and the partitioned index build's
-// check of a unique index against the tree's partition keys. The checks that need the apply's
+// no earlier apply check refuses first, the partitioned index and key
+// builds' check of a unique key against the tree's partition keys, and the
+// copy-and-swap route's refusal of a table in a partition or inheritance
+// tree. The checks that need the apply's
 // live facts — the size guard and the privilege preflight, which the apply
-// runs before admission — are not run. Introspecting the
+// runs before admission, and the rest of the copy-and-swap preflight — are
+// not run. Introspecting the
 // target table sharpens type-change classification; a missing table means
 // zero facts and a strictly more conservative plan.
 func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
@@ -104,6 +109,12 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		report.Statements = append(report.Statements, ps)
 	}
 	if facts.Target.Partitioned() {
+		// An ADD PRIMARY KEY or ADD UNIQUE runs as the partitioned key build
+		// on apply, routed on the submitted statement before the
+		// partitioned-parent policy sees the planner's steps.
+		if err = plan.RoutePartitionedKeyBuilds(&report); err != nil {
+			return err
+		}
 		if err = plan.RoutePartitionedParent(&report, facts.Target.ServerMajor()); err != nil {
 			return err
 		}
@@ -121,6 +132,19 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			if ps.Disposition != router.DispositionExecute {
 				continue
 			}
+			// The copy-and-swap route's preflight refuses a table in a
+			// partition or inheritance tree before it builds anything,
+			// and so does the dry run, from the same catalog facts.
+			if ps.Backend == router.BackendCopyAndSwap {
+				v, refused, admitErr := migrate.AdmitCopySwapPartitioning(ctx, pool, st, report.Schema)
+				if admitErr != nil {
+					return admitErr
+				}
+				if refused {
+					return c.emit(out, v)
+				}
+				continue
+			}
 			// Only the native route's steps run through the sequence
 			// executor; a copy-and-swap statement has none, since the
 			// engine builds its shadow from the statement itself.
@@ -128,8 +152,11 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 				continue
 			}
 			admit := migrate.AdmitRoutedSteps
-			if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+			switch ps.Execution {
+			case planner.ExecutionPartitionedIndexBuild:
 				admit = migrate.AdmitPartitionedIndexRequest
+			case planner.ExecutionPartitionedKeyBuild:
+				admit = migrate.AdmitPartitionedKeyRequest
 			}
 			v, refused, admitErr := admit(st, report.Schema, ps.ExecSQL)
 			if admitErr != nil {
@@ -138,17 +165,30 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			if refused {
 				return c.emit(out, v)
 			}
-			// A unique index must contain the tree's partition keys, which
-			// only the live catalog knows; the build refuses one that does
-			// not before it creates anything, and so does the dry run.
-			if ps.Execution == planner.ExecutionPartitionedIndexBuild {
-				v, refused, admitErr = migrate.AdmitPartitionedUniqueIndex(ctx, pool, st, report.Schema, ps.ExecSQL)
+			// A unique index or key must contain the tree's partition keys,
+			// which only the live catalog knows; the build refuses one that
+			// does not before it creates anything, and so does the dry run.
+			// The key build also refuses a sub-partitioned tree there.
+			if catalogAdmit := partitionKeyAdmission(ps.Execution); catalogAdmit != nil {
+				v, refused, admitErr = catalogAdmit(ctx, pool, st, report.Schema, ps.ExecSQL)
 				if admitErr != nil {
 					return admitErr
 				}
 				if refused {
 					return c.emit(out, v)
 				}
+			}
+			// A concurrent detach is refused when the table has a DEFAULT
+			// partition, which only the live catalog knows. A detach is
+			// destructive, so it got this far only under the
+			// acknowledgement, which the apply's refusal records.
+			v, refused, admitErr = migrate.AdmitDetachPartition(ctx, pool, st, report.Schema, ps.ExecSQL)
+			if admitErr != nil {
+				return admitErr
+			}
+			if refused {
+				v.AllowedDestructive = ps.Destructive
+				return c.emit(out, v)
 			}
 		}
 	}
@@ -170,6 +210,20 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		return verdict.ErrRefused
 	}
 	return nil
+}
+
+// partitionKeyAdmission returns the catalog check a partitioned build makes
+// of a unique key against the tree's partition keys before it creates
+// anything, or nil for an execution that makes none.
+func partitionKeyAdmission(e planner.Execution) func(context.Context, *pgxpool.Pool, statement.Statement, string, []string) (verdict.Verdict, bool, error) {
+	switch e {
+	case planner.ExecutionPartitionedIndexBuild:
+		return migrate.AdmitPartitionedUniqueIndex
+	case planner.ExecutionPartitionedKeyBuild:
+		return migrate.AdmitPartitionedKeyCatalog
+	default:
+		return nil
+	}
 }
 
 // runsOwnExecutor reports whether the apply runs the statement through an

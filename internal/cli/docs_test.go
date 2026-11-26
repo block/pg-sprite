@@ -78,8 +78,13 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
 	require.Len(t, blocks, 21, "the doc publishes twenty-one captured --json outputs")
 
+	// A live plan proves the added column against the server; a nullable
+	// column with no default is added in place, so the plan marks it
+	// catalog-only.
+	noteFacts := usersFacts()
+	noteFacts.AddColumnProofs = map[string]statement.AddColumnProof{"note": statement.AddColumnInPlace}
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
-		"public", "users", usersFacts())
+		"public", "users", noteFacts)
 	saferIdiom := alterReport(t, "ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)",
 		"public", "users", usersFacts())
 	executed := verdict.Verdict{

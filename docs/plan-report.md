@@ -11,14 +11,21 @@ the examples at the end of this page.
 `migrate --dry-run --json` emits a refusal verdict instead of a report when the apply would
 refuse the statement before planning it, or refuse its routed steps from their shape alone:
 an unsupported statement kind, an unnamed or `IF NOT EXISTS` index build, a `DETACH
-PARTITION`. `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
+PARTITION` from a table with a `DEFAULT` partition, or a statement routed to copy-and-swap on a
+partitioned parent, a partition, or a member of an inheritance tree (cause
+`copy-and-swap-partitioned`, or `copy-and-swap-unlogged` or `copy-and-swap-force-rls` when the
+table is also UNLOGGED or forces row security). `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
 file itself is refused before a plan exists: a statement the file may not hold (a type, a data
 change), a second table, partitions of a table, a table shape the planner cannot build, or a
 difference the diff does not converge (storage parameters, persistence, a collation, an identity,
 a generated column, a serial column). That verdict exits 2 and carries no `format_version`, `fingerprint`, or `exec_sql`; a consumer
 branches on the exit code and on whether `format_version` is present before reading the output
 as a report. ([CLI output examples](cli-output-examples.md) shows
-both shapes.)
+both shapes.) `migrate --desired --dry-run --json` also ends, exit 2, in the run's whole-plan
+refusal result instead of a report when a planned statement routes to copy-and-swap on a
+partitioned parent, a partition, or a member of an inheritance tree (cause
+`copy-and-swap-partitioned`); that result embeds this report under `plan`, while `diff --json`
+prints the report with the statement's `execute` disposition.
 
 ## Versioning: `format_version`
 
@@ -29,7 +36,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **24**: version 24 added the `blocking-index-drop` execution contract, which a refused `drop-index` of a partitioned table's index carries with its plain `DROP INDEX` as `exec_sql`, and which the fingerprint covers; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **27**: version 27 added the `partitioned-key-build` execution contract, which an `ALTER TABLE ... ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table carries in a `migrate --dry-run` plan in place of its refusal and which the fingerprint covers; version 26 runs the `add-foreign-key` and `validate-foreign-key` kinds instead of refusing them, so `declarative-foreign-key` now refuses only `drop-foreign-key`, and retires the `foreign-key` cause, since the create path creates a table with its foreign keys; version 25 added the `proven_catalog_only` decision field, which marks an operation PostgreSQL runs on the catalog alone and which the fingerprint does not cover; version 24 added the `blocking-index-drop` execution contract, which a refused `drop-index` of a partitioned table's index carries with its plain `DROP INDEX` as `exec_sql`, and which the fingerprint covers; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -93,8 +100,8 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `route` | string | always | The planner's aggregate route for the statement (see Routes). |
 | `backend` | string | except refusals | The assigned execution strategy (see Backends); absent for refusals. |
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
-| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `declarative-foreign-key` for a foreign-key change; `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
-| `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`, plus a `CREATE TABLE` that declares a foreign key (`reason` `declarative-foreign-key`, `cause` `foreign-key`). Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
+| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `declarative-foreign-key` for a foreign-key drop; `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
+| `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`. Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
 | `class` | string | refusals only | This statement's refusal class (see Classes): how a consumer routes it — wait for a capability, hand to an owner, use a safer idiom, fix the environment, or report a bug. Present exactly when `disposition` is `refuse`. Explanatory: excluded from the fingerprint. |
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the work (see Owners). Present exactly when `class` is `no-online-safety-problem`. Explanatory: excluded from the fingerprint. |
 | `blocking_passthrough_eligible` | bool | refusals only | Whether this typed refusal is in the closed accepted-blocking registry. Independent of flags and catalog lookups; explanatory and excluded from the fingerprint. |
@@ -113,6 +120,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `route` | string | always | Where the operation goes (see Routes). |
 | `reason` | string | always | The typed cause of the routing decision (see Reasons). Automation branches on this, never on prose. |
 | `unverified` | bool | when true | The planner failed closed to this route for lack of live facts — the route is what the engine would do, not a proven property of the change. With facts (a live introspection or a supplied column type) the same operation may classify as native. Absent means the decision is proven. |
+| `proven_catalog_only` | bool | when true | PostgreSQL runs this operation on the catalog alone: it never rewrites or reads the table's rows, so it costs the same on a table of any size. Set for `DROP COLUMN`, `DROP DEFAULT`, `DROP NOT NULL`, and `DROP CONSTRAINT`, and for an `ADD COLUMN` the server's probe proved adds without a rewrite or a scan. Absent means not established, not that the operation reads rows. A statement whose decisions all carry it is exempt from the [size guard](optimistic-attempt.md#who-gets-size-checked). |
 | `safer_sql` | array | safer-idiom only | The ordered safer native sequence, when the planner could construct it. A safer form of the submitted operation, not a semantic equivalent: it converges on the same declared end state with different locking, transactionality, and failure modes. |
 | `safer_sql_execution` | string | with `safer_sql` | The typed execution contract for `safer_sql` (see Execution contracts). Present exactly when `safer_sql` is. |
 | `dependent_views` | array | when a view blocks the change | The views and materialized views that read the column, each schema-qualified with every identifier quoted, sorted. Present whenever one blocks the change, which makes `reason` `dependent-view`. Catalog identifiers: a consumer rendering them into a shared surface must clamp and escape them. |
@@ -173,7 +181,7 @@ treat the statement and report as refused.
 |---|---|
 | `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
 | `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. The report carries no partition cause: a `drop-index` statement with this reason is a drop PostgreSQL cannot run concurrently, whose plain form a `diff`-source statement carries as `exec_sql` with `execution` `blocking-index-drop`, and which `migrate --desired` runs from the pinned plan, and `migrate --alter` as submitted, under `--accept-blocking` and `--allow-destructive` (`blocking_passthrough_eligible` is true), and any other `kind` is an index build or a constraint the parent cannot take online. |
-| `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs `ADD FOREIGN KEY` online. |
+| `declarative-foreign-key` | The statement drops a foreign key, and desired-state execution does not drop foreign keys yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs the drop. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
 support, then privileges.
@@ -194,12 +202,13 @@ and privilege checks because it needs no connection.
 | `autocommit-each-step` | The steps run one at a time, in order, each in its own implicit transaction — never inside an enclosing transaction block. The CONCURRENTLY forms refuse an enclosing block outright, and a multi-step sequence inside one block holds every earlier step's locks across the steps designed to avoid them. A failed step leaves partial state the runner must detect and recover before retrying (a failed CONCURRENTLY build leaves an invalid index, `pg_index.indisvalid = false`). |
 | `partitioned-index-build` | The one step is a `CREATE INDEX` on a partitioned table, and the executor runs it as the partition-aware index build, never as the statement: the parent's index is created with `ONLY`, each partition's index is built concurrently and attached, and the parent's index turns valid with the last attach. The partitions are listed when the build runs, not when the plan is made, so they are not in `exec_sql`. The statement must not be run as written, which would build every partition's index under a lock that blocks writes to the whole tree. A failed or interrupted run leaves an invalid parent index and the partition indexes built so far; running the same statement again resumes from them. |
 | `blocking-index-drop` | Only on a refused `drop-index` statement whose table is partitioned: the one step is the plain `DROP INDEX` of the parent's index, which PostgreSQL cannot drop concurrently (`DROP INDEX CONCURRENTLY` fails with SQLSTATE `0A000`). It takes `ACCESS EXCLUSIVE` on the parent, every partition, and every partition's index for as long as it runs, so the statement stays `refuse` and the report's disposition with it. `migrate --desired` runs it only when the run pins this plan's fingerprint and names the table in `--allow-destructive` and `--accept-blocking`, with an explicit `--statement-timeout` longer than `--lock-timeout`: in one engine-owned transaction it requests the parent's lock under `lock_timeout`, reads the index again (still the parent's partitioned index, with the `drops` definition), drops it under `statement_timeout`, and reads back that the parent's index and every attached partition index are gone before it commits. It is never run `CONCURRENTLY` and never falls back to another form. A consumer that runs statements itself must not run it as an online step. |
+| `partitioned-key-build` | The one step is an `ALTER TABLE ... ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table, and the executor runs it as the partitioned key build, never as the statement: each partition's unique index is built concurrently and given the constraint with `ADD CONSTRAINT ... USING INDEX`, then the parent's `ADD CONSTRAINT` adopts every partition's constraint in one brief transaction that builds nothing. The partitions are listed when the build runs, not when the plan is made, so they are not in `exec_sql`. The statement must not be run as written, which would build every partition's index under `ACCESS EXCLUSIVE` on the whole tree. A failed or interrupted run leaves the partition constraints finished so far; running the same statement again resumes from them. Only a `migrate --dry-run` plan carries it today; a `diff` plan refuses the same statement with `unsupported-partitioned-parent`. |
 
 ### Dispositions (`disposition`)
 
 | Value | Meaning |
 |---|---|
-| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. Nor does it say whether the run has opened the route: copy-and-swap is in preview, and a run without `--copy-and-swap` (`CopySwapOptions.Enabled`) refuses the plan the same way with cause `copy-and-swap-not-enabled`. |
+| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. (A `migrate` dry run reads one shape fact of that preflight, a table in a partition or inheritance tree, and ends in the refusal instead of a report; see the top of this page.) Nor does it say whether the run has opened the route: copy-and-swap is in preview, and a run without `--copy-and-swap` (`CopySwapOptions.Enabled`) refuses the plan the same way with cause `copy-and-swap-not-enabled`. |
 | `rewrite-required` | Native but not executable as submitted — it blocks the table, or it is a rename that breaks every running application instance still using the old name — and no safer sequence could be constructed; `guidance` names the manual path. `migrate` runs it as written only when `--force` names the table. |
 | `unavailable` | Routed to copy-and-swap for an operation the engine does not carry yet; nothing executes. |
 | `refuse` | The planner refused the statement; no backend is assigned. |
@@ -240,7 +249,6 @@ detail and the text diff both read this field.
 | `inherits` | `INHERITS` binds to an existing parent the absence proof does not cover. |
 | `like` | `LIKE` reads an existing source table the absence proof does not cover. |
 | `of-type` | `OF` binds to an existing composite type the absence proof does not cover. |
-| `foreign-key` | A foreign key locks each referenced table, and desired-state execution does not run foreign-key changes yet. |
 | `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid. |
 | `concurrently` | A table born this run needs no concurrent index build. |
 | `duplicate-name` | The desired set claims the same relation name twice. |
@@ -296,9 +304,9 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `set-not-null` | Adds the NOT NULL attribute. |
 | `drop-not-null` | Removes the NOT NULL attribute. |
 | `add-constraint` | Adds a table constraint other than a foreign key. |
-| `add-foreign-key` | Adds a foreign-key constraint. Always refused for execution (`declarative-foreign-key`). |
+| `add-foreign-key` | Adds a foreign-key constraint. Runs as `ADD CONSTRAINT ... NOT VALID`, then `VALIDATE CONSTRAINT`, which checks the existing rows while reads and writes continue. |
 | `validate-constraint` | Validates a live check constraint left `NOT VALID` whose definition otherwise matches the desired one, the state an interrupted online add leaves behind. Not destructive. |
-| `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Always refused for execution (`declarative-foreign-key`). |
+| `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Runs as written; the scan takes `SHARE UPDATE EXCLUSIVE`, so reads and writes continue. |
 | `create-index` | Creates an index. |
 | `add-enum-value` | Adds a label to an enum type (`ALTER TYPE ... ADD VALUE`), placed `BEFORE` the next label the type already carries when the file lists it ahead of one. The only kind a desired enum type file plans. Not destructive. |
 
@@ -326,11 +334,12 @@ time is the consumer's side of the contract.
 
 The serialization is exact and pinned by test: for each statement in plan order, hash the
 canonical `sql`, `route`, `backend`, and `disposition`, then each `exec_sql` entry, then — only
-for a statement whose `execution` is `partitioned-index-build` or `blocking-index-drop` — that
-`execution` value. Every field is followed by a unit separator (`0x1F`), and each statement
-closes with a record separator (`0x1E`). The `execution` is hashed for those two values because
-their `exec_sql` is the statement as written: the build's `CREATE INDEX` run as a literal
-`CREATE INDEX CONCURRENTLY` on a plain table is a different plan, and a reviewed drop of a
+for a statement whose `execution` is `partitioned-index-build`, `partitioned-key-build`, or
+`blocking-index-drop` — that `execution` value. Every field is followed by a unit separator
+(`0x1F`), and each statement closes with a record separator (`0x1E`). The `execution` is hashed
+for those three values because their `exec_sql` is the statement as written: each build's
+statement run literally (a `CREATE INDEX CONCURRENTLY`, an `ALTER TABLE ... ADD PRIMARY KEY`)
+on a plain table is a different plan, and a reviewed drop of a
 partitioned table's index pins the blocking form a run that accepts it executes, so the plan
 cannot switch drop forms unnoticed; a statement with any other `execution` hashes as it did
 before. Explanatory fields (`decisions`, `kind`, `destructive`, `reason`, `cause`,
@@ -379,7 +388,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 27,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -399,7 +408,8 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
           "operation": "DROP COLUMN legacy_status",
           "destructive": true,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -422,7 +432,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 27,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -467,7 +477,8 @@ A desired state that drops an index and adds a column with a constant default:
           "operation": "ADD COLUMN region",
           "destructive": false,
           "route": "native",
-          "reason": "fast-default"
+          "reason": "fast-default",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -489,7 +500,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 27,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

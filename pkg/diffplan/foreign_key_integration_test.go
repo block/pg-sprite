@@ -15,7 +15,6 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
-	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -48,7 +47,7 @@ func planOrders(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, d
 }
 
 // requireForeignKeyRefusal asserts the statement is planned and refused with
-// the declarative foreign-key reason, so the diff is reviewable but never
+// the declarative foreign-key reason, so the drop is reviewable but never
 // executes.
 func requireForeignKeyRefusal(t *testing.T, st plan.Statement) {
 	t.Helper()
@@ -108,9 +107,11 @@ CREATE TABLE employees (
 	assert.Empty(t, report.Statements)
 }
 
-// A foreign key the desired file adds is planned so the operator sees the
-// diff, and refused for execution with the declarative foreign-key reason.
-func TestPlanAddForeignKeyIsShownAndRefused(t *testing.T) {
+// A foreign key the desired file adds on a live table runs online: the plan
+// executes it as ADD CONSTRAINT ... NOT VALID, which holds its locks only
+// briefly, then VALIDATE CONSTRAINT, which checks the existing rows while
+// reads and writes continue.
+func TestPlanAddForeignKeyRunsAsNotValidThenValidate(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %s.orders (
@@ -128,16 +129,22 @@ func TestPlanAddForeignKeyIsShownAndRefused(t *testing.T) {
 		"ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id)", schema),
 		st.SQL)
 	assert.False(t, st.Destructive)
-	requireForeignKeyRefusal(t, st)
-	assert.Equal(t, router.DispositionRefuse, report.Disposition)
-	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, report.Reason)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, []string{
+		fmt.Sprintf("ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) NOT VALID", schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."orders" VALIDATE CONSTRAINT "orders_user_id_fkey"`, schema),
+	}, st.ExecSQL)
+	assert.Equal(t, &schemadiff.ConstraintValidation{
+		Constraint: "orders_user_id_fkey",
+		Def:        "FOREIGN KEY (user_id) REFERENCES users(id) NOT VALID",
+	}, st.Validates, "the validation step checks the key its add left, so it never validates a key put in its place")
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // A live foreign key left NOT VALID with the declared definition plans as one
-// validation, not as a drop and re-add, and is refused like every declarative
-// foreign-key change: the plan shows the one statement that converges the
-// table, and nothing runs it.
-func TestPlanNotValidForeignKeyIsValidatedAndRefused(t *testing.T) {
+// validation, not as a drop and re-add, and runs that validation as the one
+// statement that converges the table.
+func TestPlanNotValidForeignKeyIsValidated(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -155,9 +162,9 @@ func TestPlanNotValidForeignKeyIsValidatedAndRefused(t *testing.T) {
 	assert.Equal(t, schemadiff.ChangeValidateForeignKey, st.Kind)
 	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_user_id_fkey", schema), st.SQL)
 	assert.False(t, st.Destructive)
-	requireForeignKeyRefusal(t, st)
-	assert.Equal(t, router.DispositionRefuse, report.Disposition)
-	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, report.Reason)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, []string{st.SQL}, st.ExecSQL)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // Planning a foreign key never locks the live referenced table, even in the
@@ -205,7 +212,7 @@ CREATE TABLE %[2]s (
 
 	require.Len(t, report.Statements, 1)
 	assert.Equal(t, schemadiff.ChangeAddForeignKey, report.Statements[0].Kind)
-	requireForeignKeyRefusal(t, report.Statements[0])
+	assert.Equal(t, router.DispositionExecute, report.Statements[0].Disposition)
 }
 
 // A live foreign key the desired file no longer declares is planned as a
@@ -253,6 +260,70 @@ CREATE TABLE orders (
 // foreign key: the scratch build copies the table's shape with LIKE, which
 // needs SELECT on it. The plan fails with a typed error naming the table.
 func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
+	schema, err := planOrdersForeignKeyAsRole(t, "")
+	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReadable)
+	assert.ErrorContains(t, err, schema+".users")
+}
+
+// A planning role that can read a referenced table but lacks REFERENCES on
+// it cannot plan its foreign key either: the run would fail creating the key
+// on the live table, so the plan refuses with a typed error naming the table
+// instead of reporting a plan the role cannot execute.
+func TestPlanForeignKeyWithoutReferencesGrantFails(t *testing.T) {
+	schema, err := planOrdersForeignKeyAsRole(t, "SELECT")
+	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReferenceable)
+	assert.ErrorContains(t, err, schema+".users(id)")
+}
+
+// PostgreSQL lets a role add a foreign key when it holds REFERENCES on each
+// referenced column, without the privilege on the whole table, so planning
+// accepts a column grant too.
+func TestPlanForeignKeyWithColumnReferencesGrantPlans(t *testing.T) {
+	_, report, err := planOrdersAsRole(t, "SELECT, REFERENCES (id)", false, ordersReferencingUsers)
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, report.Statements[0].Kind)
+}
+
+// A plan that leaves a live foreign key alone needs no REFERENCES on the
+// table it references: a role that can only read users plans a new column on
+// orders, whose key to users the file keeps unchanged.
+func TestPlanUnchangedForeignKeyNeedsNoReferencesGrant(t *testing.T) {
+	_, report, err := planOrdersAsRole(t, "SELECT", true, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id),
+    note text
+);`)
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, schemadiff.ChangeAddColumn, report.Statements[0].Kind)
+	assert.Contains(t, report.Statements[0].SQL, "note")
+}
+
+// ordersReferencingUsers is a desired orders file whose key to users the
+// live orders table does not have.
+const ordersReferencingUsers = `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id)
+);`
+
+// planOrdersForeignKeyAsRole plans a foreign key from orders to users as a
+// throwaway role that holds the given privileges on users ("" for none) and
+// returns the test schema and the plan's error.
+func planOrdersForeignKeyAsRole(t *testing.T, usersGrant string) (string, error) {
+	t.Helper()
+	schema, _, err := planOrdersAsRole(t, usersGrant, false, ordersReferencingUsers)
+	return schema, err
+}
+
+// planOrdersAsRole plans the desired orders file as a throwaway role that
+// can read orders and holds the given privileges on users ("" for none). The
+// live orders table carries a key to users when liveKey is set. It returns
+// the test schema, the plan, and the plan's error.
+func planOrdersAsRole(t *testing.T, usersGrant string, liveKey bool, desired string) (string, plan.Report, error) {
+	t.Helper()
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -270,6 +341,16 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 		GRANT USAGE, CREATE ON SCHEMA %[1]s TO %[2]s;
 		GRANT SELECT ON %[1]s.orders TO %[2]s`, schema, pgx.Identifier{role}.Sanitize()))
 	require.NoError(t, err)
+	if liveKey {
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id)", schema))
+		require.NoError(t, err)
+	}
+	if usersGrant != "" {
+		_, err = pool.Exec(t.Context(), fmt.Sprintf("GRANT %s ON %s.users TO %s",
+			usersGrant, schema, pgx.Identifier{role}.Sanitize()))
+		require.NoError(t, err)
+	}
 	var db string
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT current_database()").Scan(&db))
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("GRANT CREATE ON DATABASE %s TO %s",
@@ -279,6 +360,7 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 		// Revoke every grant so the role's own cleanup can drop it.
 		_, err := pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(`
 			REVOKE ALL ON %[1]s.orders FROM %[2]s;
+			REVOKE ALL ON %[1]s.users FROM %[2]s;
 			REVOKE ALL ON SCHEMA %[1]s FROM %[2]s;
 			REVOKE CREATE ON DATABASE %[3]s FROM %[2]s`,
 			schema, pgx.Identifier{role}.Sanitize(), pgx.Identifier{db}.Sanitize()))
@@ -289,13 +371,8 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(planner.Close)
 
-	_, err = diffplan.Plan(t.Context(), planner, diffplan.Request{Schema: schema, Desired: parseDesired(t, `
-CREATE TABLE orders (
-    id bigint PRIMARY KEY,
-    user_id bigint NOT NULL REFERENCES users (id)
-);`)})
-	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReadable)
-	assert.ErrorContains(t, err, schema+".users")
+	report, err := diffplan.Plan(t.Context(), planner, diffplan.Request{Schema: schema, Desired: parseDesired(t, desired)})
+	return schema, report, err
 }
 
 // plannerPassword is the password the throwaway planning role logs in with.
@@ -311,9 +388,10 @@ func urlAsRole(t *testing.T, serverURL, role string) string {
 	return u.String()
 }
 
-// A new table that declares a foreign key is planned, and its CREATE TABLE is
-// refused by the create path with the foreign-key cause.
-func TestPlanGreenfieldTableWithForeignKeyIsShownAndRefused(t *testing.T) {
+// A new table that declares a foreign key is created with it: the table is
+// empty, so there are no rows to check, and the create step takes its lock on
+// the referenced table under the same brief budget as every create step.
+func TestPlanGreenfieldTableWithForeignKeyIsCreated(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 
 	report := planOrders(t, t.Context(), pool, schema, ordersWithForeignKey)
@@ -323,26 +401,27 @@ func TestPlanGreenfieldTableWithForeignKeyIsShownAndRefused(t *testing.T) {
 	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
 	assert.Equal(t, schemadiff.ChangeCreateTable, st.Kind)
-	assert.Contains(t, st.SQL, "REFERENCES users (id)")
-	assert.Equal(t, executor.CreateShapeForeignKey, st.Cause)
-	requireForeignKeyRefusal(t, st)
+	assert.Contains(t, st.SQL, "REFERENCES "+schema+".users (id)", "the reference binds to the target schema")
+	assert.Empty(t, st.Cause)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // Statements without a foreign key in the same plan still execute; only the
-// foreign-key statement is refused, and admission is all-or-nothing.
-func TestPlanForeignKeyRefusalLeavesOtherStatementsRouted(t *testing.T) {
+// foreign-key drop is refused, and admission is all-or-nothing.
+func TestPlanForeignKeyDropRefusalLeavesOtherStatementsRouted(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
-		CREATE TABLE %s.orders (
+		CREATE TABLE %[1]s.orders (
 			id bigint PRIMARY KEY,
-			user_id bigint NOT NULL
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id)
 		)`, schema))
 	require.NoError(t, err)
 
 	report := planOrders(t, t.Context(), pool, schema, `
 CREATE TABLE orders (
     id bigint PRIMARY KEY,
-    user_id bigint NOT NULL REFERENCES users (id),
+    user_id bigint NOT NULL,
     note text
 );`)
 
@@ -351,9 +430,9 @@ CREATE TABLE orders (
 		kinds[st.Kind] = st
 	}
 	require.Contains(t, kinds, schemadiff.ChangeAddColumn)
-	require.Contains(t, kinds, schemadiff.ChangeAddForeignKey)
+	require.Contains(t, kinds, schemadiff.ChangeDropForeignKey)
 	assert.Equal(t, router.DispositionExecute, kinds[schemadiff.ChangeAddColumn].Disposition)
-	requireForeignKeyRefusal(t, kinds[schemadiff.ChangeAddForeignKey])
+	requireForeignKeyRefusal(t, kinds[schemadiff.ChangeDropForeignKey])
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
 

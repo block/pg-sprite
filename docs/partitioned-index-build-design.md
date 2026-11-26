@@ -304,12 +304,86 @@ predicate.
   matches the desired one plans as an unfinished build (the same `CREATE INDEX`),
   so a desired run that crashed mid-flow resumes instead of re-planning empty.
 
+## Primary key and unique constraints
+
+`executor.AddPartitionedKey(ctx, cfg, pool, pt, sql, budget)` (and
+`AddPartitionedKeyAsStep`) adds a `PRIMARY KEY` or `UNIQUE` constraint to a
+partitioned table online. `migrate --alter` (`migrate.Run`) routes a lone
+`ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table to it, on the submitted
+statement (`preflight.RoutesToPartitionedKeyBuild`), before the plain table's
+`USING INDEX` sequence the planner makes for it meets the partitioned-parent
+refusal; a forced run and `ADD CONSTRAINT ... USING INDEX` still meet that
+refusal. The dry run plans it with the execution `partitioned-key-build` and
+reports the shape, partition key, and sub-partitioned tree refusals; the
+parent's checks are read only under the build's lock, so for those the dry run
+reports the build and the apply refuses. Desired-state plans (`diff`,
+`migrate --desired`) do not route it yet and refuse the statement. A plain
+`ALTER TABLE parent ADD CONSTRAINT` builds every partition's index under
+`ACCESS EXCLUSIVE`, but it adopts a partition's unattached constraint of the
+same definition instead of building one. The flow relies on that:
+
+1. **Admission**, before the lock: exactly one schema-qualified
+   `ALTER TABLE parent ADD CONSTRAINT name {PRIMARY KEY | UNIQUE} (columns)`.
+   The name is required, because each partition's index and constraint are named
+   `<name>_p<partition OID>` (the derived names above) and a rerun finds them by
+   those names. `INCLUDE`, `NULLS NOT DISTINCT`, `DEFERRABLE`, `INITIALLY
+   DEFERRED`, `WITH (...)`, `USING INDEX TABLESPACE`, `USING INDEX`, `ONLY`, and
+   a repeated column are refused (`partitioned-key-unsupported-shape`); a dry run
+   calls `AdmitPartitionedKeyShape` for the same answer.
+2. **Under the advisory table lock**, before any partition is touched: the
+   target must be partitioned; the key must include every partition key column
+   (the unique index check above, with its error); the parent must not already
+   have another constraint under the name, a relation holding the name its index
+   would take, or, for a primary key, another primary key
+   (`partitioned-key-parent-conflict`); a primary key's columns must be
+   `NOT NULL` on the parent. A parent that already has exactly the requested
+   constraint, adopted on every partition, is reported done: that is what a run
+   that stopped after its last commit leaves.
+3. **The tree** must hold only leaf partitions directly under the parent: a
+   foreign table (`foreign-table-partition`) and a sub-partitioned partition
+   (`partitioned-key-sub-partitioned`) are refused, and so is a partition whose
+   `DETACH PARTITION ... CONCURRENTLY` has not finished
+   (`partition-detach-pending`): it is leaving the tree, so a key given to it
+   would not stay the parent's.
+4. **Each leaf** gets its unique index built concurrently and then
+   `ADD CONSTRAINT ... USING INDEX` in a brief transaction (`ensureLeafKey`),
+   resumed from whatever the leaf holds.
+5. **The parent's step**, one brief transaction under `lock_timeout` and
+   `statement_timeout`:
+
+   ```sql
+   LOCK TABLE schema.parent IN ACCESS EXCLUSIVE MODE;
+   -- prove the name is still the resolved table; list the tree; every leaf must
+   -- have exactly one unattached constraint of the key, the one its leaf step
+   -- recorded on the recorded index
+   ALTER TABLE schema.parent ADD CONSTRAINT name PRIMARY KEY (columns);
+   -- read back: the parent's constraint and its valid partitioned index, and on
+   -- every leaf the adopted constraint (conparentid) is the recorded one, on
+   -- the recorded index OID, now attached to the parent's index
+   COMMIT;
+   ```
+
+   The `LOCK TABLE` takes the locks the `ADD CONSTRAINT` takes, so the proof
+   holds until the statement runs. A leaf no leaf step covered (a partition
+   created meanwhile) would have its index built under the lock, so the step
+   adds nothing and the walk goes round again, up to five passes
+   (`partitioned-key-unsettled`). Any other mismatch, before or after the
+   statement, is an invariant violation and the transaction rolls back. The
+   window holds `ACCESS EXCLUSIVE` on the tree for catalog reads and writes only,
+   a few per partition.
+
+The report (`PartitionedKeyReport`) lists each leaf's constraint, index, and
+action (`found`, `constrained`, or `built`, and whether it recovered debris), the
+parent constraint's OID, the passes, and the duration.
+
 ## Out of scope
 
 - A changed index on a parent, which plans as a drop and a recreate. The drop
   needs a reviewed drop from a schema file (M2.2) and stays refused.
 - Primary key and unique constraints added with `ADD CONSTRAINT ... USING INDEX`
-  on a parent. PostgreSQL does not support them (`parent-index-adoption`).
+  on a parent. PostgreSQL does not support them (`parent-index-adoption`);
+  `AddPartitionedKey` above builds the plain form instead.
+- A primary key or unique constraint on a tree with sub-partitioned partitions.
 
 ## Verified against PostgreSQL
 

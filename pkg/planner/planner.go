@@ -259,6 +259,18 @@ const (
 	// refused and runs only when the operator accepts that lock, in one
 	// engine-owned transaction under explicit lock and statement budgets.
 	ExecutionBlockingIndexDrop Execution = "blocking-index-drop"
+	// ExecutionPartitionedKeyBuild: the one step is an ALTER TABLE ... ADD
+	// PRIMARY KEY or ADD UNIQUE on a partitioned table, and it runs as the
+	// partitioned key build, not as the statement: each partition's unique
+	// index is built concurrently and given the constraint with ADD
+	// CONSTRAINT ... USING INDEX, then the parent's ADD CONSTRAINT adopts
+	// them in one brief transaction that builds nothing. The partitions are
+	// listed when the build runs, not when the plan is made. The statement
+	// must not be run as written, which would build every partition's index
+	// under ACCESS EXCLUSIVE on the whole tree. A failed or interrupted run
+	// leaves the partition constraints finished so far; running the same
+	// statement again resumes from them.
+	ExecutionPartitionedKeyBuild Execution = "partitioned-key-build"
 )
 
 // Executions returns the closed set of Execution values. It is part of the
@@ -266,7 +278,7 @@ const (
 // format_version bump, and a consumer that meets an unrecognized value must
 // treat the sequence as unknown and refuse to run it.
 func Executions() []Execution {
-	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionBlockingIndexDrop}
+	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionBlockingIndexDrop, ExecutionPartitionedKeyBuild}
 }
 
 // Decision is the classification of one operation.
@@ -296,6 +308,20 @@ type Decision struct {
 	// of the change: with facts (a live introspection or a supplied
 	// column type) the same operation may classify as native.
 	Unverified bool `json:"unverified,omitempty"`
+	// ProvenCatalogOnly marks an operation PostgreSQL runs on the catalog
+	// alone, never rewriting or reading the table's rows, so its cost does
+	// not grow with the table. Unlike Reason metadata-only, which is the
+	// planner's classification, it is set only where that is certain: for
+	// DROP COLUMN, DROP DEFAULT, DROP NOT NULL, and DROP CONSTRAINT, which
+	// PostgreSQL defines that way, and for an ADD COLUMN the server's probe
+	// proved adds in place without a scan. SET DEFAULT is not marked: the
+	// server coerces the new default to the column's type under the lock,
+	// and for a user-defined type that runs the type's input function. Absent means
+	// not established, not that the operation reads rows. An event trigger
+	// is outside the proof: its code runs under the statement's lock
+	// whatever the table's size, bounded by the attempt's budget like any
+	// other statement.
+	ProvenCatalogOnly bool `json:"proven_catalog_only,omitempty"`
 	// SaferSQL is the ordered safer native sequence, present only for
 	// safer-idiom decisions where the planner could construct it. It is a
 	// safer form of the submitted statement, not a semantic equivalent: it
@@ -549,6 +575,14 @@ type Facts struct {
 	// backs, which the rename renames with it; empty when the index backs
 	// none, or when the fact was not read, as in an offline lint.
 	RenamedIndexConstraint string
+	// NotNullHelpers are the columns whose SET NOT NULL helper is already on
+	// the live table: a CHECK (column IS NOT NULL) under the name
+	// NotNullHelperName gives it, left by an earlier run of the online
+	// sequence that stopped before its last step dropped it. The sequence
+	// resumes at the helper's validation instead of adding it again. A
+	// column absent from the map has no such helper, or the fact was not
+	// read, as in an offline lint.
+	NotNullHelpers map[string]bool
 	// Storage reports whether the table has storage of its own: a heap for
 	// an ordinary table or a partition, none for a partitioned parent.
 	// StorageUnread when the fact was not read, as in an offline lint.
@@ -705,6 +739,42 @@ func fillsNotNullWithNull(op statement.Op, facts Facts) bool {
 // column, or "" when no proof was run.
 func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
 	return facts.AddColumnProofs[op.Column]
+}
+
+// addsInPlace reports whether the server proved the column adds without
+// rewriting the table, whether or not it then scans it to check a NOT
+// NULL.
+func addsInPlace(proof statement.AddColumnProof) bool {
+	return proof == statement.AddColumnInPlace || proof == statement.AddColumnInPlaceScans ||
+		proof == statement.AddColumnInPlaceRunsUserCode
+}
+
+// addsOnCatalogAlone reports whether adding op's column is proven to cost
+// the same on a table of any size. The probe must prove it adds in place,
+// evaluating nothing a user defined (statement.AddColumnInPlace), and the
+// default, if any, must be a literal. A default expression is evaluated
+// once under the table's lock, and its value can depend on the session,
+// such as a setting the probe ran with and the statement does not, so
+// what the probe saw is not proof of what the statement will do.
+func addsOnCatalogAlone(op statement.Op, facts Facts) bool {
+	literalOrNone := op.Default == statement.DefaultNone || op.Default == statement.DefaultConstant
+	return literalOrNone && addColumnProof(op, facts) == statement.AddColumnInPlace
+}
+
+// ProvenCatalogOnly reports whether every decision is an operation
+// PostgreSQL is certain to run on the catalog alone (see
+// Decision.ProvenCatalogOnly), so running them costs the same on a table of
+// any size. An empty plan proves nothing and reports false.
+func ProvenCatalogOnly(decisions []Decision) bool {
+	if len(decisions) == 0 {
+		return false
+	}
+	for _, d := range decisions {
+		if !d.ProvenCatalogOnly {
+			return false
+		}
+	}
+	return true
 }
 
 // unprovenRewriteReason names the only cause the statement's shape leaves
@@ -926,7 +996,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
 		case addColumnProof(op, facts) == statement.AddColumnUnproven:
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
-		case op.Default == statement.DefaultExpression && addColumnProof(op, facts) != statement.AddColumnInPlace:
+		case op.Default == statement.DefaultExpression && !addsInPlace(addColumnProof(op, facts)):
 			// No proof was run, as in an offline lint: the default may be
 			// computed for every row.
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, ReasonVolatileDefault, true
@@ -942,14 +1012,33 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			// A constant, or an expression the server proved it stores
 			// in the catalog.
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		default:
 			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		}
 
-	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,
-		statement.OpDropNotNull,
-		statement.OpSetColumnOptions, statement.OpSetRelOptions,
-		statement.OpSetSchema, statement.OpDropConstraint:
+	case statement.OpDropColumn, statement.OpDropDefault,
+		statement.OpDropNotNull, statement.OpDropConstraint:
+		// PostgreSQL never touches the table's rows for these and runs no
+		// user code: a dropped column is only marked dropped, a dropped
+		// default applies to rows written later, and dropping a NOT NULL
+		// or a constraint has nothing to check. An index the drop takes
+		// with it is removed as a file, not read.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		d.ProvenCatalogOnly = true
+
+	case statement.OpSetDefault:
+		// The new default applies to rows written later, so no row is
+		// read. It is still not proven catalog-only: the server coerces
+		// the expression to the column's type under the lock, and for a
+		// user-defined base type that runs the type's input function,
+		// which can read any table. The planner has no fact that rules
+		// that out, so the statement stays size-guarded.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+
+	case statement.OpSetColumnOptions, statement.OpSetRelOptions,
+		statement.OpSetSchema:
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 
 	case statement.OpRenameColumn, statement.OpRenameTable:
@@ -984,7 +1073,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// an online VALIDATE, then SET NOT NULL is a catalog flip (PG 12+).
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 		if single {
-			d.SaferSQL = setNotNullSequence(st, op.Column)
+			d.SaferSQL = setNotNullSequence(st, op.Column, facts.NotNullHelpers[op.Column])
 		}
 
 	case statement.OpSetTablespace:
@@ -1356,17 +1445,33 @@ func tableIdent(st statement.Statement) string {
 // (step 2) leaves the same scaffold and is safe to re-run. Steps 3 and 4
 // are metadata-only and safe to re-run; a leftover scaffold is removed by
 // running step 4 alone.
-func setNotNullSequence(st statement.Statement, column string) []string {
+//
+// helperLive is set when the scaffold is already on the live table, left by
+// a run that stopped before step 4 (Facts.NotNullHelpers). The sequence then
+// starts at step 2: validating a scaffold that a run already validated
+// checks no rows, and the scaffold checks new writes until step 4 drops it,
+// as it did while that run was in progress.
+func setNotNullSequence(st statement.Statement, column string, helperLive bool) []string {
 	table := tableIdent(st)
-	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null_check", st.Table(), column))
-	con := pgx.Identifier{conName}.Sanitize()
+	con := pgx.Identifier{NotNullHelperName(st.Table(), column)}.Sanitize()
 	col := pgx.Identifier{column}.Sanitize()
-	return []string{
+	steps := []string{
 		fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s IS NOT NULL) NOT VALID", table, con, col),
 		fmt.Sprintf("ALTER TABLE %s VALIDATE CONSTRAINT %s", table, con),
 		fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, col),
 		fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", table, con),
 	}
+	if helperLive {
+		return steps[1:]
+	}
+	return steps
+}
+
+// NotNullHelperName is the name of the helper CHECK the online SET NOT NULL
+// sequence adds to table for column, fitted to PostgreSQL's identifier
+// limit.
+func NotNullHelperName(table, column string) string {
+	return fitIdentifier(fmt.Sprintf("%s_%s_not_null_check", table, column))
 }
 
 // canBuildUsingIndexSequence reports whether an ADD PRIMARY KEY / UNIQUE

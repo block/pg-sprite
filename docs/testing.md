@@ -89,7 +89,11 @@ Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
 connection; cancellation tests use context deadlines. A statement-budget
 overrun is forced with a `ddl_command_end` event trigger that sleeps inside
 the statement, never with a table large enough to be slow: a fixed row
-count is a bet on how fast the server is. After any injected
+count is a bet on how fast the server is. For the same reason a race between
+two of the engine's own steps is staged, not timed: a test wraps the one read
+the code under test makes and does real work at it (`PaceOverMark` for the
+copy's lag reading, `WrapLiveConfirmed` for the verification pass's
+confirmed position) rather than racing a ticker to it. After any injected
 failure the test asserts the **durable state** (no wedged schema-change record,
 no leaked shadow objects/slots/triggers) and the ability to proceed — not
 merely the returned error type. *Binds:* Phase 3 onward; full
@@ -192,7 +196,9 @@ database, asserting on `--json` fields and exit codes only, never on prose.
 The operator-run [corpus replay](../replay/README.md) (`make replay`) drives
 the same binary through a real project's schema-change history and is not
 a CI gate; so is the [load proof](#the-load-proof) (`make load-proof`), which
-drives it through a copy-and-swap under a concurrent write load. *Binds:*
+drives it through a copy-and-swap under a concurrent write load, and its
+[library variant](#the-library-load-proof) (`make load-proof-library`), which
+drives the same change through `migrate.Run`. *Binds:*
 Phase 2 (first executing command). *Source:* pgroll `make examples` CI job; pg_repack driving its CLI through `pg_regress`.
 
 ### TM-9 — The operation must outlive the observer
@@ -232,6 +238,7 @@ capability no peer suite has.
 | `make check-image-pins` | Runs `make check-guide-versions` first. Then it asks each image's registry whether every `image: repo:tag@sha256:…` pin in `compose/supabase.yml` still names its digest (the index digest or one platform manifest in it), and fails naming each pin whose tag resolves elsewhere. Docker pulls by digest and ignores the tag, so a wrong tag otherwise passes CI and misstates the tested versions. `PINS_FILE` selects another compose file. The script, `scripts/check-image-pins.sh [compose-file]`, exits 1 for a mismatched or missing tag and 2 when an image could not be checked — a registry lookup failed twice (unreachable, rate-limited, or not authorized) or an `image:` line is not a pin it can read — so the check is incomplete; through `make` both are a failure. CI's Supabase job runs it before starting the services; on a PR that did not touch `compose/supabase.yml`, exit 1 means a publisher moved a tag (re-pin in a separate PR) and exit 2 is usually the registry (re-run the job). Needs `docker buildx` and network access; no login for public images, `docker login` first for private ones. `make test-image-pins` drives both scripts through each outcome, the registry check against a stand-in docker, with no network; CI's Supabase job runs it first. |
 | `make replay` / `make replay-refresh` / `make replay-down` | Corpus replay ([replay/README.md](../replay/README.md)): drive the built binary through a pinned real-project schema-change history, asserting each statement's typed outcome. Operator-run, not a CI gate. |
 | `make load-proof LOAD_PROOF_FREE_DISK=…` | The [load proof](#the-load-proof): the built binary carries a copy-and-swap over a large table while a concurrent workload writes it, and writes `results.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF=1`, which the target sets. |
+| `make load-proof-library LOAD_PROOF_FREE_DISK=…` | The [library load proof](#the-library-load-proof): the same change under the same load, driven in-process through `migrate.Run`, cancelled through its context mid-copy and mid-verify and resumed each time, and writes `results-library.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF_LIBRARY=1`, which the target sets. |
 | `make slot-release-proof` | The slot release proof: a catch-up on a busy source runs on the real clock through two of PostgreSQL's own slot releases (about 15 seconds apart) with the slot's retained WAL crossing the lag ceiling before each, and logs the slot's positions at every reading. `PG_VERSION` selects the major. A minute or more of wall-clock time per run, so not a merge gate; skipped unless `SLOT_RELEASE_PROOF=1`, which the target sets. CI runs it as the `Slot Release Proof` workflow weekly on `main` (and on demand), once per major 14 → 18 with each major a separate job, and on any pull request that changes the workflow or the proof's test file; the workflow is not part of `all-green`. Each scheduled run also re-enables the workflow through the API, so GitHub's 60-day inactivity rule does not switch the schedule off. A red job is the first place to look when a major's release cadence may have changed, but on a shared runner it can also be contention or an image pull, so read the logged positions before changing the sizing rule. GitHub opens no issue for a failed scheduled run: it emails only whoever last edited the workflow's schedule. The badge at the top of the README shows the latest scheduled run on `main`; maintainers check it, or the workflow's runs in the Actions tab, after each Monday run. A unit test in `internal/testutil` pins the target to a test that exists and the matrix to the majors `make test-supported-postgres` runs. The unit tests in `pkg/applier` pin the same release model on every pull request. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
@@ -288,7 +295,8 @@ updates and deletes, half the updates rewriting the out-of-line column, and
 `pg-sprite migrate --copy-and-swap --keep-old --json` with
 `ALTER TABLE … ALTER COLUMN id TYPE bigint` while the load writes. The CLI calls the
 same `migrate.Run` an importer calls, so the proof covers that entry point with the
-options the CLI sets; an importer's own cancellation and resume are not part of it.
+options the CLI sets; an importer's own cancellation and resume are the
+[library load proof](#the-library-load-proof)'s.
 
 A pass proves:
 
@@ -355,6 +363,69 @@ them for the swap to compare under its lock.
 A load much lighter than `LOAD_PROOF_WORKERS=2 LOAD_PROOF_RATE=5` can commit no delete
 before the mark, and the run then
 fails as one that judged no stream.
+
+### The library load proof
+
+`make load-proof-library LOAD_PROOF_FREE_DISK=<free space>` runs `TestLoadProofLibrary` in
+[integration/loadproof](../integration/loadproof/library_test.go): the load proof's change,
+table, and load, driven in-process through `migrate.Run` the way an importer such as
+SchemaBot drives it, rather than through the binary. It takes the load proof's variables and
+database, and writes its record to `results-library.json` (`LOAD_PROOF_RESULTS` moves it).
+It is operator-run, not a CI gate; it is skipped unless `LOAD_PROOF_LIBRARY=1`, which the
+target sets, and needs no binary.
+
+The host starts from `migrate.DefaultOptions()` and the copy-and-swap fields the CLI sets for
+`--copy-and-swap --keep-old --free-disk`, on a pool dialed as the CLI dials it, with
+`Options.Logger` writing the engine's decisions and warnings into the test's output, and adds three
+options only the library exposes: `Options.Progress`, a tracker it reads from its own
+goroutine; `CopySwap.OnCheckpoint`, its hook on every checkpoint save; and
+`CopySwap.CheckpointInterval`, set to a tenth of a second so a cancelled copy resumes from
+close by. It then makes three calls with the same statement:
+
+1. The first is cancelled through its context, with a cause of the host's, from
+   `OnCheckpoint` on the first periodic save of a copy still running — in `copying`, with a
+   landed watermark short of the key space.
+2. The second resumes from that row and is cancelled from the host's tracker poll once the
+   verification pass (`checksum`) has compared a chunk.
+3. The third resumes from the `verifying` row and runs to its verdict.
+
+Before each resume the host waits for the server to let go of the slot the cancelled call
+held, as an importer must, since a resume that meets the slot still held is refused as
+`resume-slot-held`, and for the load to commit a few writes per worker while no call runs,
+so the stopped interval always holds writes that only the kept slot can carry into the new
+table. Nothing is timed: the phases are read from the save and the tracker, and each wait is
+a poll with a named deadline.
+
+A pass proves, beyond what the load proof's oracles prove of the result:
+
+- each cancelled call returns a failed verdict coded `cancelled-by-caller` whose error
+  carries both `context.Canceled` and the host's cause, and leaves the row in the phase the
+  host cancelled in — after the first, in `copying` at the watermark the save recorded — so
+  each cancel landed inside its phase, not after it;
+- each call after a stop resumed the stopped run rather than starting over: the shadow it
+  leaves, and in the end the swapped-in table, is the relation the first call built (by OID);
+  the second call's first copying save is at or above the watermark the first stopped at; and
+  the third saves no `copying` row;
+- every call, cancelled or not, gives back every connection it took from the host's pool;
+- the third call returns `executed-via-copy-and-swap` with the swap's WAL position, the
+  row is `done`, and no replication slot is left under the name the engine derives for the
+  table or the one the row named;
+- the retained `_old` table and the live table agree row for row, the live table's catalog
+  equals a natively changed table's, every load failure is one the swap causes, and the load
+  inserts after the swap — the load proof's own oracles, with its exclusions, judged against
+  the last call's swap and exit.
+
+The record has the load proof's shape, without `binary`, plus `attempts`: per call, when it
+started and how long it ran, how long the host waited for the slot before it, the phases
+`OnCheckpoint` was handed with the watermark each first carried, the phase it was cancelled
+in, the row's phase and watermark after it, the shadow's OID, the pool connections still
+counted as acquired when it returned, the writes the load committed before the next call,
+the last tracker counters the host read, and its outcome, code, and error. The phase list
+the checkpoint poll records spans all three calls.
+
+The library proof has been shown to pass at 20,000 and 50,000 rows on a laptop with
+`fsync=off` under the default load, and not yet at the default table size, which needs the
+same host as the load proof's default run.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
 

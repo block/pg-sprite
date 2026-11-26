@@ -35,9 +35,16 @@ func readDoc(t *testing.T) string {
 // canonicalize, classify, route.
 func classifyCanonical(t *testing.T, sql string) planner.Plan {
 	t.Helper()
+	return classifyCanonicalWithFacts(t, sql, planner.Facts{})
+}
+
+// classifyCanonicalWithFacts is classifyCanonical with the facts a live
+// introspection would supply, such as the server's proof for an added column.
+func classifyCanonicalWithFacts(t *testing.T, sql string, facts planner.Facts) planner.Plan {
+	t.Helper()
 	canonical, err := statement.Canonical(sql)
 	require.NoError(t, err)
-	classified, err := planner.Classify(canonical, planner.Facts{})
+	classified, err := planner.Classify(canonical, facts)
 	require.NoError(t, err)
 	return classified
 }
@@ -72,7 +79,10 @@ func TestDocExamplesMatchPipelineOutput(t *testing.T) {
 	diff.TableExists = &exists
 	routedD := router.Route([]planner.Plan{
 		classifyCanonical(t, `DROP INDEX "app"."orders_legacy_idx"`),
-		classifyCanonical(t, `ALTER TABLE "app"."orders" ADD COLUMN "region" text DEFAULT 'emea'`),
+		// A live plan proves the constant default is stored in the catalog,
+		// so the column is added in place and marked catalog-only.
+		classifyCanonicalWithFacts(t, `ALTER TABLE "app"."orders" ADD COLUMN "region" text DEFAULT 'emea'`,
+			planner.Facts{AddColumnProofs: map[string]statement.AddColumnProof{"region": statement.AddColumnInPlace}}),
 	})
 	diff.Disposition = routedD.Disposition
 	kinds := []schemadiff.ChangeKind{schemadiff.ChangeDropIndex, schemadiff.ChangeAddColumn}

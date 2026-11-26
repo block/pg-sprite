@@ -106,7 +106,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. The route is in preview and runs only when the run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled`); without it the statement is refused with `copy-and-swap-refused`, cause `copy-and-swap-not-enabled`, before the route's preflight runs or anything is written. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, and with `dependent-policy`, naming the policies, when a row-level security policy reads it, and likewise with `dependent-trigger`, `dependent-generated-column`, or `partition-key` when a trigger's `UPDATE OF` list or `WHEN` condition names it, a generated column reads it, or it is in a partition key, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`). A statement that also drops a column and adds one of the same name is refused when the copy cannot fill the new column — the primary key, a source identity column, or a column that refuses NULL with no default of its own or its domain's (`shadow-statement-readd`); a statement that also declares a new identity or `serial` column, re-added or kept, is refused with `shadow-statement-new-sequence` — see [limitations.md](limitations.md)"
+    reason_notes: "Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. The route is in preview and runs only when the run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled`); without it the statement is refused with `copy-and-swap-refused`, cause `copy-and-swap-not-enabled`, before the route's preflight runs or anything is written. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, and with `dependent-policy`, naming the policies, when a row-level security policy reads it, and likewise with `dependent-trigger`, `dependent-generated-column`, or `partition-key` when a trigger's `UPDATE OF` list or `WHEN` condition names it, a generated column reads it, or it is in a partition key, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`); `migrate --dry-run` and `migrate --desired --dry-run` end in the same refusal for a table in a partition or inheritance tree (`copy-and-swap-partitioned`). A `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`). A statement that also drops a column and adds one of the same name is refused when the copy cannot fill the new column — the primary key, a source identity column, or a column that refuses NULL with no default of its own or its domain's (`shadow-statement-readd`); a statement that also declares a new identity or `serial` column, re-added or kept, is refused with `shadow-statement-new-sequence` — see [limitations.md](limitations.md)"
   - id: set-default-drop-default-drop-not-null
     area: "column_changes"
     operation: "`SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL`"
@@ -168,6 +168,19 @@ rows:
       migrate: supported
       diff: supported
     reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. The sequence carries the key's `INCLUDE` columns, `NULLS NOT DISTINCT`, `WITH (...)` storage parameters, and index tablespace onto the index, and `DEFERRABLE` / `INITIALLY DEFERRED` onto the attach. A storage parameter the sequence cannot render faithfully (a value that is not a plain word, number, or string, a value containing a backslash, or a namespaced parameter name) gets no rewrite and is refused as `rewrite-required` with the `unique-index-then-constraint` guidance: build the index with it, then attach it. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning"
+  - id: add-primary-key-add-unique-on-a-partitioned-parent
+    area: "constraints"
+    operation: "`ADD PRIMARY KEY` / `ADD UNIQUE` on a **partitioned parent**"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_planned_flow"
+    maturity: "ga"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: refused
+    refusal_reason: unsupported-partitioned-parent
+    reason_notes: "PostgreSQL refuses `ADD CONSTRAINT ... USING INDEX` on a partitioned table, and a plain `ADD CONSTRAINT` builds every partition's index under `ACCESS EXCLUSIVE` on the whole tree, so `migrate --alter` runs a lone named `ADD CONSTRAINT name {PRIMARY KEY | UNIQUE} (columns)` on a partitioned parent as the partitioned key build: each partition's unique index is built concurrently and given the constraint with `ADD CONSTRAINT ... USING INDEX`, then the parent's plain `ADD CONSTRAINT` adopts them in one brief transaction that builds nothing. The partitions are listed when the run executes, each step commits on its own, an advisory lock refuses a second pg-sprite run on the same table, and the same statement run again resumes from the partition constraints already finished. Refused before anything is created, with `unsupported-statement`: an unnamed constraint or one with `INCLUDE`, `NULLS NOT DISTINCT`, `DEFERRABLE`, `WITH (...)`, or `USING INDEX TABLESPACE` (`capability-boundary`), a key that lacks a partition key column (`by-design`), a parent that already has a primary key or another object under the name, or a primary key over a column that allows `NULL` (`environmental`), and a tree with a sub-partitioned partition (`capability-boundary`), each only while the run has changed nothing (a stop after a partition's index build began is a failed verdict with the executor's code); the dry run reports the shape, partition key, and sub-partitioned tree refusals too, while the parent and nullable column checks are read only under the build's lock, so for those the dry run reports `execute` and the apply refuses. The blocking form is never run as submitted: `--force` meets the `unsupported-partitioned-parent` refusal instead of the build. `diff` and `migrate --desired` still refuse the statement (`unsupported-partitioned-parent`). See [partitioned-index-build-design.md](partitioned-index-build-design.md#primary-key-and-unique-constraints)"
   - id: add-check-add-foreign-key-imperative
     area: "constraints"
     operation: "`ADD CHECK` / `ADD FOREIGN KEY` (imperative)"
@@ -333,15 +346,15 @@ rows:
   - id: detach-partition-concurrently
     area: "partitioned_tables"
     operation: "`DETACH PARTITION [CONCURRENTLY]`"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
-      migrate: refused
+      migrate: supported
       diff: not_applicable
-    refusal_reason: unsupported-statement
-    reason_notes: "`CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`suggest` shows the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form ends in the same `unsupported-statement` refusal and exit code 2 as the real run. A desired schema cannot express a detach, so `diff` never produces one"
+    reason_notes: "The plain form is rewritten to `DETACH PARTITION ... CONCURRENTLY`, which takes `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes of the other partitions keep running. It runs outside a transaction block under the brief budgets: `--lock-timeout` bounds each lock wait, the wait for transactions that still read the partition through the table included, and `--statement-timeout` the whole statement. Flagged **destructive**, since the partition's rows leave the table: `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. A detach that stops after its first transaction committed fails with `partition-detach-interrupted` and leaves the partition detach-pending; running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`. PostgreSQL detaches one partition of a table at a time, so while another partition is detach-pending the detach fails with `partition-detach-pending` before anything runs, naming that partition and its `FINALIZE`. PostgreSQL refuses a concurrent detach from a table with a `DEFAULT` partition, so both forms are refused there (`unsupported-statement`, `by-design`, in `--dry-run` too) before anything runs; `--force SCHEMA.TABLE` runs the plain `DETACH PARTITION` as submitted under bounded budgets, taking `ACCESS EXCLUSIVE` on the table and the partition. `DETACH PARTITION ... FINALIZE` itself is refused with `unsupported-statement`: rerun the statement that started the detach. A desired schema cannot express a detach, so `diff` never produces one"
   - id: set-tablespace-on-a-partitioned-parent
     area: "partitioned_tables"
     operation: "`SET TABLESPACE` on a **partitioned parent**"
@@ -376,8 +389,8 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: backend-unavailable
-    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned source"
+    refusal_reason: copy-and-swap-refused
+    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned parent, a partition, or a member of an inheritance tree (`copy-and-swap-partitioned`), and `migrate --dry-run` and `migrate --desired --dry-run` end in that same refusal (`copy-and-swap-unlogged` or `copy-and-swap-force-rls` instead when the table is also UNLOGGED or forces row security, which the preflight decides first); the plan `diff` prints still routes the change as `execute`, since it does not read the route's preflight"
   - id: plain-tables-their-indexes
     area: "declarative_model"
     operation: "Plain tables + their indexes"
@@ -401,7 +414,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "The model carries each constraint's validity (`pg_constraint.convalidated`). A live constraint left `NOT VALID` with the desired definition, which an interrupted online add leaves behind, plans as one `VALIDATE CONSTRAINT` statement (`validate-constraint`), which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing, instead of a destructive drop and re-add. The statement names only the constraint, so execution reads the constraint again under that same lock and refuses with the permanent `validated-constraint-drift` code, validating nothing, if it was dropped or replaced under the same name since planning. A foreign key plans as `validate-foreign-key`, refused with `declarative-foreign-key` like every declarative foreign-key change. `CREATE TABLE` ignores `NOT VALID`, so a desired file cannot declare it: for a check constraint, `pull` renders the validated definition, and the baseline re-diffs to that one validation rather than to zero. `pull` refuses a table that owns a foreign key, validated or not, with `ErrUnrenderableForeignKey`"
+    reason_notes: "The model carries each constraint's validity (`pg_constraint.convalidated`). A live constraint left `NOT VALID` with the desired definition, which an interrupted online add leaves behind, plans as one `VALIDATE CONSTRAINT` statement (`validate-constraint`), which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing, instead of a destructive drop and re-add. The statement names only the constraint, so execution reads the constraint again under that same lock and refuses with the permanent `validated-constraint-drift` code, validating nothing, if it was dropped or replaced under the same name since planning. A foreign key plans as `validate-foreign-key` and runs the same way. `CREATE TABLE` ignores `NOT VALID`, so a desired file cannot declare it: for a check constraint, `pull` renders the validated definition, and the baseline re-diffs to that one validation rather than to zero. For a foreign key, a caller that renders foreign keys (`RenderOptions.ForeignKeys`) gets the validated definition the same way"
   - id: declarative-unnamed-check-numbering
     area: "declarative_model"
     operation: "Unnamed check constraints whose generated names differ from the live table's"
@@ -426,9 +439,21 @@ rows:
       diff: refused
     refusal_reason: unsupported-statement
     reason_notes: "Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline. A desired file that declares `INHERITS` is refused before planning builds anything, since the scratch build would lock the live parent and add an inheritance edge to it"
-  - id: tables-that-own-or-are-referenced-by-foreign-keys
+  - id: declarative-foreign-key-add
     area: "declarative_model"
-    operation: "Tables that own **or are referenced by** foreign keys"
+    operation: "Foreign keys a desired file adds, on a live table or a new one"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    maturity: "ga"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "A desired file may declare a foreign key to an unqualified table that exists in the target schema, or to its own table. `diff` shows a matching foreign key as no change. A key the file adds to a live table plans as `add-foreign-key` and runs as two autocommitted steps: `ADD CONSTRAINT ... NOT VALID`, a brief `SHARE ROW EXCLUSIVE` lock on both tables that checks no existing row, then `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing. A row that breaks the key fails the validation with the key left `NOT VALID`, still enforced for new writes; once the rows are fixed, the next plan is that one validation. A `CREATE TABLE` that declares a foreign key runs as written, since the new table is empty, under the same brief lock budget as every create. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table. Export refuses both sides by default. A caller that opts in with `RenderOptions.ForeignKeys` gets each table's own foreign keys written out, and must render the referencing tables too, because an incoming FK lives in the referencing table's file. Export still refuses an FK into another schema, an FK from a table to itself whose referenced columns have no immediate primary key or `UNIQUE` constraint (only a standalone unique index, or only a deferrable constraint beside one), and an FK on a table rendered with `RenderOptions.RowSecurity` (`statement.ErrRowSecurityForeignKey`)"
+  - id: declarative-foreign-key-drop
+    area: "declarative_model"
+    operation: "Foreign keys a desired file no longer declares"
     tier: "t2"
     status_mark: "🟡"
     engine_path: "native_planned_flow"
@@ -437,7 +462,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: declarative-foreign-key
-    reason_notes: "Planned but not executed. A desired file may declare a foreign key to an unqualified table that exists in the target schema; `diff` shows a matching foreign key as no change and an added or dropped one as an `add-foreign-key` or `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table, the lock a plain `SELECT` takes, and never blocks its writes. Export still refuses both sides — an incoming FK cannot be expressed in the table's own desired file. Declarative FK execution (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned"
+    reason_notes: "Planned but not executed. `diff` shows a live foreign key the desired file leaves out as a `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan; a drop is also destructive, so it needs `--allow-destructive`. To drop a key now, run the statement through the imperative front door (`migrate --alter`). A changed key plans as a drop and an add, so it is refused the same way"
   - id: unlogged-tables
     area: "declarative_model"
     operation: "Unlogged tables"
@@ -520,11 +545,11 @@ rows:
     engine_path: "native_as_is"
     maturity: "ga"
     online_safety_problem: true
-    online_safety_detail: "a `REFERENCES` clause would take a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, but the create path refuses a `CREATE TABLE` that declares one, so no live table is locked"
+    online_safety_detail: "a `REFERENCES` clause takes a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, under the same lock budget as the `CREATE TABLE`, so a busy referenced table makes the step time out and retry rather than queue writes behind it"
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `REFERENCES`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `CONCURRENTLY` is refused upstream at desired-file parse and re-checked at admission as defense in depth"
+    reason_notes: "Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `CONCURRENTLY` is refused upstream at desired-file parse and re-checked at admission as defense in depth"
   - id: extension-objects-named-unqualified-in-a-desired-file
     area: "declarative_model"
     operation: "Extension types, functions, and operators named unqualified in a desired file (such as `citext` installed in an `extensions` schema)"

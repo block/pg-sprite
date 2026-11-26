@@ -7,7 +7,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -222,6 +221,11 @@ func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner, desiredTabl
 		w.diag("note", "", "the partitions are listed when the run starts, each step commits on its own, and an interrupted run is resumed by running the same statement again")
 		return 1
 	}
+	if ps.Execution == planner.ExecutionPartitionedKeyBuild {
+		w.diag("note", "", runner+" will add the constraint partition by partition instead of running the statement: build each partition's unique index concurrently and give it the constraint with ADD CONSTRAINT ... USING INDEX, then run the parent's ADD CONSTRAINT, which adopts them in one brief transaction that builds nothing")
+		w.diag("note", "", "the partitions are listed when the run starts, each step commits on its own, and an interrupted run is resumed by running the same statement again")
+		return 1
+	}
 	if substituted(ps) {
 		w.diag("note", "", runner+" will run a safer online sequence instead:")
 		for n, sql := range ps.ExecSQL {
@@ -400,7 +404,7 @@ func verdictText(r verdict.Reason) string {
 	case verdict.ReasonUnsupportedPartitionedParent:
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
 	case verdict.ReasonDeclarativeForeignKey:
-		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — " +
+		return "dropping a foreign key is not supported for desired-state apply yet; this change is shown for review only — " +
 			"to apply it, run the statement with pg-sprite migrate --alter"
 	default:
 		return string(r)
@@ -412,13 +416,6 @@ func verdictText(r verdict.Reason) string {
 // carry one, mirroring the run path's refusal verdict detail; target-fact
 // refusals render their verdictText.
 func refuseText(ps plan.Statement, r verdict.Reason) string {
-	if r == verdict.ReasonDeclarativeForeignKey && ps.Cause == executor.CreateShapeForeignKey {
-		// The statement front door refuses CREATE TABLE, so a new table
-		// is created without the foreign key and gains it afterwards.
-		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — " +
-			"create the table without the foreign key, then add it with pg-sprite migrate --alter, " +
-			"naming the referenced table with its schema"
-	}
 	if r == verdict.ReasonUnsupportedPartitionedParent && ps.Kind == schemadiff.ChangeDropIndex &&
 		ps.Execution == planner.ExecutionBlockingIndexDrop {
 		return "PostgreSQL has no concurrent drop for an index of a partitioned table; the drop is this plain DROP INDEX, " +

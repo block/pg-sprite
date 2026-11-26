@@ -85,3 +85,44 @@ func TestMigrateDesiredRefusesADesiredFileBeforePlanning(t *testing.T) {
 		assert.Equal(t, "CREATE DOMAIN email AS text", v.Statement)
 	}
 }
+
+// A desired file that refuses several statements lists every one with where
+// it starts, in each output format, so its author fixes them in one edit. The
+// verdict itself still describes the one refusal that decides it.
+func TestDiffListsEveryStatementADesiredFileRefuses(t *testing.T) {
+	file := writeDesiredFile(t, `CREATE TABLE orders (
+  id bigint PRIMARY KEY
+);
+
+COMMENT ON TABLE orders IS 'Orders placed by accounts';
+
+CREATE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;
+`)
+	wantLines := []string{
+		"line 5, column 1 (statement 2): statement kind not allowed in a desired schema: COMMENT ON TABLE orders IS 'Orders placed by accounts'",
+		"line 7, column 1 (statement 3): statement kind not allowed in a desired schema: CREATE FUNCTION touch()",
+	}
+
+	var jsonOut strings.Builder
+	err := (&DiffCmd{Desired: file, JSON: true}).run(t.Context(), &jsonOut)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(jsonOut.String()), &v))
+	assert.Equal(t, "COMMENT ON TABLE orders IS 'Orders placed by accounts'", v.Statement)
+	require.Len(t, v.RefusedStatements, 2)
+	assert.Equal(t, verdict.RefusedStatement{Statement: 2, Line: 5, Column: 1,
+		Detail: "statement kind not allowed in a desired schema: COMMENT ON TABLE orders IS 'Orders placed by accounts'"}, v.RefusedStatements[0])
+	assert.Equal(t, 7, v.RefusedStatements[1].Line)
+
+	var text strings.Builder
+	err = (&DiffCmd{Desired: file, OutputFlags: OutputFlags{Color: "never"}}).run(t.Context(), &text)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	assert.Contains(t, text.String(), "\n  refused:   "+wantLines[0])
+	assert.Contains(t, text.String(), "\n             "+wantLines[1])
+
+	var sqlOut strings.Builder
+	err = (&DiffCmd{Desired: file, SQL: true}).run(t.Context(), &sqlOut)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	assert.Contains(t, sqlOut.String(), "\n-- refused at "+wantLines[0]+"\n")
+	assert.Contains(t, sqlOut.String(), "\n-- refused at "+wantLines[1])
+}

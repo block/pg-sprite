@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -128,6 +127,33 @@ func TestDryRunTextPartitionedIndexBuild(t *testing.T) {
 	text := out.String()
 	flat := strings.Join(strings.Fields(text), " ")
 	assert.Contains(t, flat, "will build the index partition by partition instead of running the statement")
+	assert.Contains(t, flat, "an interrupted run is resumed by running the same statement again")
+	assert.Contains(t, text, "plan:\n  public.events (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	assert.NotContains(t, text, "runs as written")
+}
+
+// A dry run of a key on a partitioned table names the partitioned key build:
+// the statement does not run as written, and the note says how an
+// interrupted run continues.
+func TestDryRunTextPartitionedKeyBuild(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "events", "16.10"
+	report.Disposition = router.DispositionExecute
+	sql := `ALTER TABLE "public"."events" ADD CONSTRAINT "events_pkey" PRIMARY KEY ("id", "created")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionPartitionedKeyBuild,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	flat := strings.Join(strings.Fields(text), " ")
+	assert.Contains(t, flat, "will add the constraint partition by partition instead of running the statement")
 	assert.Contains(t, flat, "an interrupted run is resumed by running the same statement again")
 	assert.Contains(t, text, "plan:\n  public.events (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
 	assert.NotContains(t, text, "runs as written")
@@ -782,16 +808,16 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	assert.NotContains(t, out.String(), "Debian")
 }
 
-// A foreign-key change in a desired-state plan says in words that foreign
-// keys are not applied declaratively, so the reader of the diff knows the
-// change is shown for review only.
+// A foreign-key drop in a desired-state plan says in words that it is not
+// applied declaratively, so the reader of the diff knows the change is shown
+// for review only.
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
 	report := plan.NewReport(plan.SourceDiff)
 	report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
 	report.Disposition = router.DispositionRefuse
 	report.Statements = append(report.Statements, plan.Statement{
-		SQL:         "ALTER TABLE public.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (id)",
-		Kind:        schemadiff.ChangeAddForeignKey,
+		SQL:         "ALTER TABLE public.orders DROP CONSTRAINT orders_user_id_fkey",
+		Kind:        schemadiff.ChangeDropForeignKey,
 		Route:       planner.RouteNative,
 		Disposition: router.DispositionRefuse,
 		Reason:      verdict.ReasonDeclarativeForeignKey,
@@ -802,19 +828,6 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	// The renderer wraps prose; compare with whitespace collapsed.
 	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — foreign keys are not supported for desired-state apply yet; "+
+	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — dropping a foreign key is not supported for desired-state apply yet; "+
 		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
-
-	created := report
-	created.Statements = []plan.Statement{{
-		SQL:         "CREATE TABLE public.shipments (id bigint PRIMARY KEY, order_id bigint NOT NULL REFERENCES orders (id))",
-		Kind:        schemadiff.ChangeCreateTable,
-		Disposition: router.DispositionRefuse,
-		Reason:      verdict.ReasonDeclarativeForeignKey,
-		Class:       verdict.ClassCapabilityBoundary,
-		Cause:       executor.CreateShapeForeignKey,
-	}}
-	out.Reset()
-	require.NoError(t, writeDryRunText(&out, palette{}, created))
-	assert.Contains(t, flat(out.String()), "create the table without the foreign key, then add it with pg-sprite migrate --alter, naming the referenced table with its schema")
 }

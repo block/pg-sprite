@@ -126,10 +126,11 @@ type Options struct {
 	CopySwap CopySwapOptions
 
 	// Connection is the connection target the run opens dedicated sessions
-	// from when a statement needs one the pool cannot supply: a CREATE INDEX
-	// on a partitioned table takes the parent's table lock on a session of its
-	// own. It must reach the database the pool was dialed with, which the run
-	// proves before it opens anything; a run that needs it and finds it unset
+	// from when a statement needs one the pool cannot supply: a CREATE INDEX,
+	// ADD PRIMARY KEY, or ADD UNIQUE on a partitioned table takes the parent's
+	// table lock on a session of its own. It must reach the database the
+	// pool was dialed with, which the run proves before it opens anything; a
+	// run that needs it and finds it unset
 	// returns [ErrConnectionRequired]. The CLI always sets it. A statement
 	// that needs no dedicated session never reads it.
 	Connection dbconn.Config
@@ -570,9 +571,12 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // override runs the submitted form as one blind bounded attempt, whatever
 // its kind — so it goes through the optimistic executor directly, under the
 // same brief budgets. Blind attempts of the submitted form — including
-// forced ones — are size-guarded; substituted sequences and planner-proven
-// online idioms are not — long work on large tables is their purpose, and
-// every brief step is still budget-bounded. Before anything runs, the
+// forced ones — are size-guarded unless every operation in the plan is
+// proven catalog-only (planner.ProvenCatalogOnly): such a statement reads
+// and writes no rows, so its cost does not grow with the table. Substituted
+// sequences and planner-proven online idioms are not size-guarded — long
+// work on large tables is their purpose, and every brief step is still
+// budget-bounded. Before anything runs, the
 // connected role is checked at the tier the routed steps actually need
 // (engine-role contract), so a role that would die mid-change is refused
 // with the exact provisioning statement instead.
@@ -620,16 +624,22 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		return verdict.Verdict{}, err
 	}
 	// A CREATE INDEX on a partitioned table runs as the partition-aware
-	// index build, which no step list can carry; a forced submitted form is
-	// the operator's override of that routing and meets the partitioned-parent
+	// index build, and an ADD PRIMARY KEY or ADD UNIQUE as the partitioned
+	// key build, which no step list can carry; the key is routed on the
+	// submitted statement, because the planner's steps for it are a plain
+	// table's USING INDEX sequence. A forced submitted form is the
+	// operator's override of that routing and meets the partitioned-parent
 	// refusal like any other step list.
-	buildsPartitioned := false
+	buildsPartitioned, buildsKey := false, false
 	if pt.Partitioned() && !forced {
 		if buildsPartitioned, err = preflight.RoutesToPartitionedIndexBuild(execSQL); err != nil {
 			return verdict.Verdict{}, err
 		}
+		if buildsKey, err = preflight.RoutesToPartitionedKeyBuild(st.SQL()); err != nil {
+			return verdict.Verdict{}, err
+		}
 	}
-	if !buildsPartitioned {
+	if !buildsPartitioned && !buildsKey {
 		if err := preflight.CheckPartitionSupport(pt, serverMajor, execSQL); err != nil {
 			if partitionErr, ok := errors.AsType[*preflight.UnsupportedPartitionedParentError](err); ok {
 				return partitionedParentVerdict(st, partitionErr, forced)
@@ -660,6 +670,9 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 
 	if buildsPartitioned {
 		return partitionedIndexBuild(ctx, pool, pt, st, opts, step, logger)
+	}
+	if buildsKey {
+		return partitionedKeyBuild(ctx, pool, pt, st, opts, step, logger)
 	}
 
 	retry := opts.retry()
@@ -709,6 +722,9 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	if forced {
 		v.Detail = fmt.Sprintf("forced: the submitted form ran as-is under budgets (lock %s, statement %s), overriding the engine's routing",
 			opts.Budget.Brief.LockTimeout, opts.Budget.Brief.StatementTimeout)
+	}
+	if detail, ok := detachDetail(rep, opts.Budget.Brief); ok {
+		v.Detail = detail
 	}
 	v.StatisticsRefresh = refreshRetypedStatistics(ctx, pool, pt, st, opts.Budget.Brief, logger)
 	v.Detail += statisticsDetail(v.StatisticsRefresh)

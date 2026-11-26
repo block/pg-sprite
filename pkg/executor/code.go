@@ -104,6 +104,14 @@ const (
 	// whose concurrent detach did not finish, so no index can be attached
 	// for it.
 	CodePartitionDetachPending Code = "partition-detach-pending"
+	// CodeDetachDefaultPartition: a DETACH PARTITION ... CONCURRENTLY on a
+	// table that has a DEFAULT partition, which PostgreSQL rejects; nothing
+	// was executed.
+	CodeDetachDefaultPartition Code = "detach-default-partition"
+	// CodeDetachInterrupted: a DETACH PARTITION ... CONCURRENTLY stopped
+	// after its first transaction committed, leaving the partition
+	// detach-pending; running the same statement again finishes it.
+	CodeDetachInterrupted Code = "partition-detach-interrupted"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
@@ -111,6 +119,36 @@ const (
 	// CodePartitionedIndexUnsettled: partitions kept appearing without an
 	// index until the build ran out of passes; a rerun resumes.
 	CodePartitionedIndexUnsettled Code = "partitioned-index-unsettled"
+	// CodePartitionedKeyNameTaken: the name a partitioned key constraint
+	// needs on a partition is held by something that is not the requested
+	// key; the occupant is left for an operator.
+	CodePartitionedKeyNameTaken Code = "partitioned-key-name-taken"
+	// CodePartitionedKeyConflict: a partition already has a key constraint
+	// that conflicts with the requested one; nothing was added to it.
+	CodePartitionedKeyConflict Code = "partitioned-key-conflict"
+	// CodePartitionedKeyNullableColumn: a primary key was requested over a
+	// column a partition allows to be NULL; nothing was built.
+	CodePartitionedKeyNullableColumn Code = "partitioned-key-nullable-column"
+	// CodeNotAddKeyConstraint: the statement handed to the partitioned key
+	// build is not one ALTER TABLE with a single ADD PRIMARY KEY or ADD
+	// UNIQUE.
+	CodeNotAddKeyConstraint Code = "not-add-key-constraint"
+	// CodePartitionedKeyUnsupportedShape: the partitioned key statement
+	// names no constraint or carries a clause the build cannot carry to
+	// every partition; nothing was created.
+	CodePartitionedKeyUnsupportedShape Code = "partitioned-key-unsupported-shape"
+	// CodePartitionedKeyParentConflict: the partitioned table already has a
+	// constraint under the requested name that is not the requested key, a
+	// relation holds the name its index would take, or a primary key is
+	// requested and it has one; nothing was created.
+	CodePartitionedKeyParentConflict Code = "partitioned-key-parent-conflict"
+	// CodePartitionedKeySubPartitioned: a partition of the target is itself
+	// partitioned, which the partitioned key build does not take; nothing
+	// was created.
+	CodePartitionedKeySubPartitioned Code = "partitioned-key-sub-partitioned"
+	// CodePartitionedKeyUnsettled: partitions kept appearing without the key
+	// constraint until the build ran out of passes; a rerun resumes.
+	CodePartitionedKeyUnsettled Code = "partitioned-key-unsettled"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -314,8 +352,18 @@ func Codes() []Code {
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
 		CodePartitionDetachPending,
+		CodeDetachDefaultPartition,
+		CodeDetachInterrupted,
 		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
+		CodePartitionedKeyNameTaken,
+		CodePartitionedKeyConflict,
+		CodePartitionedKeyNullableColumn,
+		CodeNotAddKeyConstraint,
+		CodePartitionedKeyUnsupportedShape,
+		CodePartitionedKeyParentConflict,
+		CodePartitionedKeySubPartitioned,
+		CodePartitionedKeyUnsettled,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -379,7 +427,15 @@ func (c Code) Permanent() bool {
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
 		CodePartitionDetachPending,
+		CodeDetachDefaultPartition,
 		CodePartitionedIndexTablespace,
+		CodePartitionedKeyNameTaken,
+		CodePartitionedKeyConflict,
+		CodePartitionedKeyNullableColumn,
+		CodeNotAddKeyConstraint,
+		CodePartitionedKeyUnsupportedShape,
+		CodePartitionedKeyParentConflict,
+		CodePartitionedKeySubPartitioned,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -500,10 +556,30 @@ func sentinelCode(err error) Code {
 		return CodeTableLockUnconfirmed
 	case errors.Is(err, ErrPartitionDetachPending):
 		return CodePartitionDetachPending
+	case errors.Is(err, ErrDetachDefaultPartition):
+		return CodeDetachDefaultPartition
+	case errors.Is(err, ErrDetachInterrupted):
+		return CodeDetachInterrupted
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
 		return CodePartitionedIndexUnsettled
+	case errors.Is(err, ErrPartitionedKeyNameTaken):
+		return CodePartitionedKeyNameTaken
+	case errors.Is(err, ErrPartitionedKeyConflict):
+		return CodePartitionedKeyConflict
+	case errors.Is(err, ErrPartitionedKeyNullableColumn):
+		return CodePartitionedKeyNullableColumn
+	case errors.Is(err, ErrNotAddKeyConstraint):
+		return CodeNotAddKeyConstraint
+	case errors.Is(err, ErrPartitionedKeyUnsupportedShape):
+		return CodePartitionedKeyUnsupportedShape
+	case errors.Is(err, ErrPartitionedKeyParentConflict):
+		return CodePartitionedKeyParentConflict
+	case errors.Is(err, ErrPartitionedKeySubPartitioned):
+		return CodePartitionedKeySubPartitioned
+	case errors.Is(err, ErrPartitionedKeyUnsettled):
+		return CodePartitionedKeyUnsettled
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):

@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/migrate"
@@ -73,6 +75,30 @@ func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report
 	}
 	plan.RefuseDestructive(&report)
 	return report, report.PinnableFingerprint
+}
+
+// previewDesired is a desired-state dry run's admission and preview. A plan
+// the run's plan admission accepts, under the dry run's pin and
+// acknowledgement, next meets the copy-and-swap route's refusal of a table
+// in a partition or inheritance tree, which the run reads at admission
+// before anything executes; the dry run prints that refusal as the run's
+// result. Every other plan is previewed by writeDesiredPreview, which
+// reports plan admission's refusals as the run would.
+func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out io.Writer, report plan.Report) error {
+	if err := migrate.CheckDesiredAllowDestructiveTable(c.AllowDestructive, report); err != nil {
+		return err
+	}
+	req := migrate.DesiredRequest{ExpectedFingerprint: c.ExpectFingerprint, AllowDestructive: c.AllowDestructive}
+	if _, admitted := migrate.AdmitPlan(req, report); admitted && len(report.Statements) > 0 {
+		refusal, admitted, err := migrate.AdmitPlanCopySwapPartitioning(ctx, pool, report)
+		if err != nil {
+			return err
+		}
+		if !admitted {
+			return c.finishDesired(out, refusal, nil)
+		}
+	}
+	return c.writeDesiredPreview(out, report)
 }
 
 // writeDesiredPreview prints a desired-state dry run's plan and, for a
@@ -206,7 +232,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		// Preview uses desired-state admission: a routed native step can still
 		// discard live structure, which RunDesired refuses before execution
 		// unless the run pins the plan and names the table.
-		return c.writeDesiredPreview(out, report)
+		return c.previewDesired(ctx, pool, out, report)
 	}
 	opts, stopProgress, err := c.startProgress(ctx, c.desiredOptions(c.diag()))
 	if err != nil {

@@ -33,12 +33,11 @@ var ErrUnrenderablePartition = errors.New("partitions cannot be rendered as a de
 var ErrUnrenderableInheritance = errors.New("table inheritance cannot be rendered as a desired schema")
 
 // ErrUnrenderableForeignKey is returned when the table owns foreign keys or
-// other tables reference it with foreign keys. The single-table model carries
-// no incoming foreign-key topology, so a rendered baseline would look
-// complete while silently dropping the table's relationships. Desired files
-// may declare outgoing foreign keys for planning, but desired-state
-// execution refuses every foreign-key change, so a baseline carrying one
-// could never be applied; the renderer refuses both directions instead.
+// other tables reference it with foreign keys, unless the caller opts in
+// with RenderOptions.ForeignKeys. A foreign key belongs to the file of the
+// table that holds it, so a rendered baseline of a referenced table is
+// complete only when the referencing tables are rendered with it, which one
+// table's model cannot show.
 var ErrUnrenderableForeignKey = errors.New("tables that own or are referenced by foreign keys cannot be rendered as a desired schema")
 
 // ErrUnrenderableUnlogged is returned for an unlogged table. The
@@ -85,6 +84,40 @@ var ErrUnrenderableSequenceOptions = errors.New("sequence options cannot be rend
 // no other way to declare the second (see ErrDesiredConstraintMerged).
 var ErrUnrenderableMergedConstraints = errors.New("constraints that repeat each other on the same columns cannot be rendered as a desired schema")
 
+// renderRefusals returns every verdict the renderer refuses a table with.
+func renderRefusals() []error {
+	return []error{
+		ErrUnrenderableDefault,
+		ErrUnrenderablePartition,
+		ErrUnrenderableInheritance,
+		ErrUnrenderableForeignKey,
+		ErrUnrenderableUnlogged,
+		ErrUnrenderableCollation,
+		ErrUnrenderableVirtual,
+		ErrUnrenderableToastOptions,
+		ErrMultipleOwnedSequences,
+		ErrUnrenderableSequenceOptions,
+		ErrUnrenderableMergedConstraints,
+		ErrUnrenderableUnattachedIndex,
+		ErrUnrenderablePartitionedRowSecurity,
+		ErrUnrenderableRowSecurity,
+		statement.ErrRowSecurityForeignKey,
+	}
+}
+
+// RenderRefusal returns the verdict a Render error carries, such as
+// ErrUnrenderableUnlogged, so a caller can say what the table holds without
+// the schema and table names the full error repeats. It reports false for an
+// error that carries none of the renderer's verdicts.
+func RenderRefusal(err error) (error, bool) {
+	for _, verdict := range renderRefusals() {
+		if errors.Is(err, verdict) {
+			return verdict, true
+		}
+	}
+	return nil, false
+}
+
 // Render renders the canonical model into a desired-state schema file: one
 // CREATE TABLE, with a WITH clause carrying the table's storage parameters,
 // followed by the model's CREATE INDEX statements. The output
@@ -102,6 +135,42 @@ var ErrUnrenderableMergedConstraints = errors.New("constraints that repeat each 
 // declared on the whole table; its partitions are not rendered, and one
 // with an index some partition lacks is refused.
 func Render(m Model) (string, error) {
+	return renderTable(m, RenderOptions{})
+}
+
+// RenderOptions widens what RenderWith writes beyond Render's default.
+type RenderOptions struct {
+	// ForeignKeys writes the table's own foreign keys, each as its
+	// constraint in the CREATE TABLE, and renders a table other tables
+	// reference instead of refusing it. Still refused: a foreign key whose
+	// referenced table is in another schema, because a desired file names
+	// tables only in its own schema (statement.ErrQualifiedName); one from
+	// the table to itself whose referenced columns are unique only through
+	// a standalone index, which the CREATE TABLE would declare before the
+	// index exists (ErrUnrenderableForeignKey); and one on a table rendered
+	// with RowSecurity (statement.ErrRowSecurityForeignKey).
+	//
+	// The caller takes on what one table's model cannot show: it renders
+	// every table in Model.IncomingForeignKeys too, so each relationship is
+	// written in the file of the table that holds it. A baseline that
+	// leaves a referencing table out drops that table's foreign key.
+	ForeignKeys bool
+	// RowSecurity writes the table's row security settings and policies
+	// after it, as RenderWithRowSecurity does.
+	RowSecurity bool
+}
+
+// RenderWith renders the model as Render does, widened by opts.
+func RenderWith(m Model, opts RenderOptions) (string, error) {
+	if opts.RowSecurity {
+		return renderWithRowSecurity(m, opts)
+	}
+	return renderTable(m, opts)
+}
+
+// renderTable renders the table without its row security, which it
+// refuses when the model carries any.
+func renderTable(m Model, opts RenderOptions) (string, error) {
 	if m.RowSecurity.present() {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableRowSecurity)
 	}
@@ -122,11 +191,14 @@ func Render(m Model) (string, error) {
 	if len(m.InheritanceChildren) != 0 {
 		return "", fmt.Errorf("render table %q: has inheritance children %s: %w", m.Table, strings.Join(m.InheritanceChildren, ", "), ErrUnrenderableInheritance)
 	}
-	if fks := ownForeignKeys(m); len(fks) != 0 {
+	if fks := ownForeignKeys(m); len(fks) != 0 && !opts.ForeignKeys {
 		return "", fmt.Errorf("render table %q: owns foreign keys (%s): %w", m.Table, strings.Join(fks, ", "), ErrUnrenderableForeignKey)
 	}
-	if len(m.ReferencedBy) != 0 {
+	if len(m.ReferencedBy) != 0 && !opts.ForeignKeys {
 		return "", fmt.Errorf("render table %q: referenced by foreign keys (%s): %w", m.Table, strings.Join(m.ReferencedBy, ", "), ErrUnrenderableForeignKey)
+	}
+	if err := unrenderableForeignKey(m); err != nil {
+		return "", fmt.Errorf("render table %q: %w", m.Table, err)
 	}
 	if m.Unlogged {
 		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableUnlogged)
@@ -290,9 +362,9 @@ func identityExpressible(c Column) error {
 // sequence that merely happens to carry the serial-style name is not
 // ownership, and rendering it as serial would silently convert a shared
 // sequence into a private one), and a default of nextval on the sequence
-// named <table>_<column>_seq. The name check covers only names that need
-// no quoting inside the nextval literal; exotic or truncated sequence
-// names fail closed to ErrUnrenderableDefault.
+// named <table>_<column>_seq, spelled the way the server prints it
+// (serialDefault). A truncated sequence name fails closed to
+// ErrUnrenderableDefault.
 func serialType(table string, c Column) (string, bool) {
 	base, ok := map[string]string{
 		"smallint": "smallserial",
@@ -302,10 +374,61 @@ func serialType(table string, c Column) (string, bool) {
 	if !ok || !c.NotNull || !c.SequenceOwned {
 		return "", false
 	}
-	if c.Default != "nextval('"+table+"_"+c.Name+"_seq'::regclass)" {
+	if c.Default != serialDefault(table+"_"+c.Name+"_seq") {
 		return "", false
 	}
 	return base, true
+}
+
+// serialDefault is the default the server prints for a serial column whose
+// sequence is named sequence: nextval of the sequence's regclass text as a
+// string literal. The regclass text quotes the name exactly when
+// quote_ident would, so a name with an uppercase letter, such as an ORM's
+// "User_id_seq", prints quoted. quote_ident also quotes a keyword, and a
+// name ending in _seq is never one. The caller has checked that the column
+// owns the sequence (Column.SequenceOwned), and PostgreSQL keeps an owned
+// sequence in its table's schema: it refuses OWNED BY across schemas and
+// refuses to move an owned sequence out. The introspecting session's
+// search_path lists that schema first, so the text is unqualified.
+func serialDefault(sequence string) string {
+	regclass := sequence
+	if !plainIdentifier(sequence) {
+		regclass = `"` + strings.ReplaceAll(sequence, `"`, `""`) + `"`
+	}
+	return "nextval('" + strings.ReplaceAll(regclass, "'", "''") + "'::regclass)"
+}
+
+// plainIdentifier reports whether quote_ident leaves name unquoted, keywords
+// aside: it starts with a lowercase ASCII letter or an underscore, and the
+// rest are lowercase ASCII letters, digits, or underscores.
+func plainIdentifier(name string) bool {
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return name != ""
+}
+
+// unrenderableForeignKey refuses a foreign key of the table that a desired
+// file cannot declare faithfully: one into another schema, which a file
+// cannot name, and one from the table to itself whose referenced columns are
+// unique only through a standalone index, which the file's CREATE TABLE
+// would declare before the index exists.
+func unrenderableForeignKey(m Model) error {
+	for _, con := range m.Constraints {
+		switch {
+		case !con.ForeignKey:
+		case con.ReferencesOtherSchema:
+			return fmt.Errorf("foreign key %q references a table in another schema: %w", con.Name, statement.ErrQualifiedName)
+		case con.SelfReferencesStandaloneIndex:
+			return fmt.Errorf("foreign key %q references the table's own columns through a standalone unique index; declare the index as an immediate UNIQUE constraint first: %w", con.Name, ErrUnrenderableForeignKey)
+		}
+	}
+	return nil
 }
 
 // ownForeignKeys returns the names of the foreign keys the table itself

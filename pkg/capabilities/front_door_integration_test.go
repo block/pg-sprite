@@ -92,6 +92,22 @@ var migrateClaims = map[string]migrateClaim{
 			`CREATE INDEX CONCURRENTLY accounts_state_idx ON %[1]s.accounts (state)`,
 		},
 	},
+	// The plain detach is rewritten to its concurrent form, and both forms
+	// run concurrently; the partition's rows leave the table, so the run
+	// needs the destructive acknowledgement.
+	"detach-partition-concurrently": {
+		setup: `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY
+			) PARTITION BY RANGE (id);
+			CREATE TABLE %[1]s.accounts_low PARTITION OF %[1]s.accounts FOR VALUES FROM (0) TO (1000);
+			CREATE TABLE %[1]s.accounts_high PARTITION OF %[1]s.accounts FOR VALUES FROM (1000) TO (2000)`,
+		statements: []string{
+			`ALTER TABLE %[1]s.accounts DETACH PARTITION %[1]s.accounts_low`,
+			`ALTER TABLE %[1]s.accounts DETACH PARTITION %[1]s.accounts_high CONCURRENTLY`,
+		},
+		destructive: true,
+	},
 	"drop-column": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (
@@ -233,6 +249,22 @@ var migrateClaims = map[string]migrateClaim{
 			`ALTER TABLE %[1]s.events SET TABLESPACE pg_default`,
 		},
 	},
+	// The key runs as the partitioned key build: each partition's unique
+	// index concurrently, then the parent's ADD CONSTRAINT adopts them.
+	"add-primary-key-add-unique-on-a-partitioned-parent": {
+		setup: `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				code text,
+				created_at date NOT NULL
+			) PARTITION BY RANGE (created_at);
+			CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
+			CREATE TABLE %[1]s.events_2 PARTITION OF %[1]s.events FOR VALUES FROM ('2026-02-01') TO ('2026-03-01')`,
+		statements: []string{
+			`ALTER TABLE %[1]s.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`,
+			`ALTER TABLE %[1]s.events ADD CONSTRAINT events_code_key UNIQUE (code, created_at)`,
+		},
+	},
 	"drop-constraint": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (
@@ -268,6 +300,7 @@ var declarativeOnlyClaims = []string{
 	"declarative-not-valid-constraint",
 	"declarative-unnamed-check-numbering",
 	"extension-objects-named-unqualified-in-a-desired-file",
+	"declarative-foreign-key-add",
 }
 
 // Every capability row that publishes `front_doors.migrate: supported` must
