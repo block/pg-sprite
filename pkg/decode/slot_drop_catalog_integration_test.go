@@ -76,4 +76,10 @@ func TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals(t *testing.T
 	assert.Equal(t, decode.ForeignObjectPublication, foreign.Object)
 	assert.True(t, f.publicationExists(t, name), "someone else's publication is left alone")
 	assert.True(t, f.publicationExists(t, "aaa_decoy"), "the decoy is not the drop's either")
+	// The slot was dropped before the publication was judged, and the error
+	// says so, so a caller counting what it removed counts the slot.
+	assert.ErrorIs(t, err, decode.ErrSlotDroppedPublicationLeft)
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, name)
+	require.NoError(t, err)
+	assert.False(t, found, "the engine-shaped slot of the name is gone")
 }
