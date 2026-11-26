@@ -385,9 +385,11 @@ func serialType(table string, c Column) (string, bool) {
 // string literal. The regclass text quotes the name exactly when
 // quote_ident would, so a name with an uppercase letter, such as an ORM's
 // "User_id_seq", prints quoted. quote_ident also quotes a keyword, and a
-// name ending in _seq is never one. The sequence lives in the table's
-// schema, which the introspecting session's search_path lists, so the text
-// is unqualified.
+// name ending in _seq is never one. The caller has checked that the column
+// owns the sequence (Column.SequenceOwned), and PostgreSQL keeps an owned
+// sequence in its table's schema: it refuses OWNED BY across schemas and
+// refuses to move an owned sequence out. The introspecting session's
+// search_path lists that schema first, so the text is unqualified.
 func serialDefault(sequence string) string {
 	regclass := sequence
 	if !plainIdentifier(sequence) {

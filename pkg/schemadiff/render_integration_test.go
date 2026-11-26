@@ -127,28 +127,47 @@ func TestRenderRoundTripsSerialTable(t *testing.T) {
 // default with the sequence name quoted, nextval('"User_id_seq"'::regclass).
 // A mixed-case column and a table name with a space take the same route.
 func TestRenderRoundTripsSerialTableWithAQuotedName(t *testing.T) {
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
-	require.NoError(t, err)
-	defer pool.Close()
-	schema := testutil.NewSchema(t, pool)
-
-	for _, ddl := range []string{
-		fmt.Sprintf(`CREATE TABLE %s."User" ("id" SERIAL NOT NULL, "email" TEXT NOT NULL, CONSTRAINT "User_pkey" PRIMARY KEY ("id"))`, schema),
-		fmt.Sprintf(`CREATE TABLE %s."Line Item" ("ItemId" BIGSERIAL PRIMARY KEY, "qty" integer NOT NULL)`, schema),
+	for _, tt := range []struct {
+		name   string
+		table  string
+		ddl    string
+		column string
+	}{
+		{
+			name:  "ORM model table",
+			table: "User",
+			ddl: `CREATE TABLE %s."User" (
+				"id" SERIAL NOT NULL,
+				"email" TEXT NOT NULL,
+				CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+			)`,
+			column: `"id" serial NOT NULL`,
+		},
+		{
+			name:  "table name with a space",
+			table: "Line Item",
+			ddl: `CREATE TABLE %s."Line Item" (
+				"ItemId" BIGSERIAL PRIMARY KEY,
+				"qty" integer NOT NULL
+			)`,
+			column: `"ItemId" bigserial NOT NULL`,
+		},
 	} {
-		_, err := pool.Exec(t.Context(), ddl)
-		require.NoError(t, err)
-	}
+		t.Run(tt.name, func(t *testing.T) {
+			pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+			require.NoError(t, err)
+			defer pool.Close()
+			schema := testutil.NewSchema(t, pool)
+			_, err = pool.Exec(t.Context(), fmt.Sprintf(tt.ddl, schema))
+			require.NoError(t, err)
 
-	for table, column := range map[string]string{"User": `"id" serial NOT NULL`, "Line Item": `"ItemId" bigserial NOT NULL`} {
-		t.Run(table, func(t *testing.T) {
-			model, err := schemadiff.Introspect(t.Context(), pool, schema, table)
+			model, err := schemadiff.Introspect(t.Context(), pool, schema, tt.table)
 			require.NoError(t, err)
 			rendered, err := schemadiff.Render(model)
 			require.NoError(t, err)
-			assert.Contains(t, rendered, column)
+			assert.Contains(t, rendered, tt.column)
 
-			live, desired, changes := roundTrip(t, pool, schema, table)
+			live, desired, changes := roundTrip(t, pool, schema, tt.table)
 			assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired))
 			assert.Empty(t, changes)
 		})
