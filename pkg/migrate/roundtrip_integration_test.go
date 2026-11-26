@@ -142,6 +142,22 @@ CREATE UNIQUE INDEX t_pkey ON t (id);`
 		assert.Equal(t, []string{"ALTER TABLE t ALTER COLUMN email SET NOT NULL"}, plannedSQL(t, res))
 	})
 
+	t.Run("sets a column whose name needs quoting NOT NULL", func(t *testing.T) {
+		// The validation step checks the helper check against the
+		// definition the plan recorded for it, so the run only executes if
+		// that definition quotes the column the way the catalog prints it.
+		live := `CREATE TABLE t (
+    id bigint PRIMARY KEY,
+    "Email" text
+);`
+		desired := `CREATE TABLE t (
+    id bigint PRIMARY KEY,
+    "Email" text NOT NULL
+);`
+		res := assertRoundTrip(t, pool, live, desired)
+		assert.Equal(t, []string{`ALTER TABLE t ALTER COLUMN "Email" SET NOT NULL`}, plannedSQL(t, res))
+	})
+
 	t.Run("adds a check constraint", func(t *testing.T) {
 		// The planner adds the check NOT VALID and validates it separately,
 		// so the scan runs without blocking writes. The oracle proves the

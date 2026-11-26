@@ -69,6 +69,68 @@ func TestDesiredFileRefusalVerdicts(t *testing.T) {
 	}
 }
 
+// A desired file that refuses several statements still gets one verdict, and
+// its class, statement, and detail all describe the same refusal: a partition
+// anywhere in the file outranks a statement the file may not hold.
+func TestDesiredFileRefusalOfSeveralStatementsDescribesOne(t *testing.T) {
+	_, err := statement.ParseDesiredFile("CREATE TABLE log (id int, at date) PARTITION BY RANGE (at);\n" +
+		"COMMENT ON TABLE log IS 'events';\n" +
+		"CREATE TABLE log_p1 PARTITION OF log FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');\n")
+	require.Error(t, err)
+	refused, ok := errors.AsType[*statement.RefusedStatementsError](err)
+	require.True(t, ok, "%v", err)
+	require.Len(t, refused.Refusals, 2, "the comment and the partition are both reported")
+
+	v, ok := DesiredFileRefusal(err, "unused")
+	require.True(t, ok)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+	assert.Equal(t, "CREATE TABLE log_p1 PARTITION OF log FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')", v.Statement)
+	assert.Equal(t, "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed", v.Detail)
+	require.Len(t, v.RefusedStatements, 2, "the verdict lists both refused statements")
+	assert.Equal(t, []int{2, 3}, []int{v.RefusedStatements[0].Line, v.RefusedStatements[1].Line})
+	assert.Equal(t, []int{2, 3}, []int{v.RefusedStatements[0].Statement, v.RefusedStatements[1].Statement})
+	assert.Contains(t, v.RefusedStatements[0].Detail, "COMMENT ON TABLE log")
+}
+
+// A file that refuses a single statement takes a verdict that names it, with
+// no list of refused statements.
+func TestDesiredFileRefusalOfOneStatementListsNone(t *testing.T) {
+	_, err := statement.ParseDesiredFile("CREATE TABLE t (id int);\nCOMMENT ON TABLE t IS 'x';\n")
+	v, ok := DesiredFileRefusal(err, "unused")
+	require.True(t, ok, "%v", err)
+	assert.Equal(t, "COMMENT ON TABLE t IS 'x'", v.Statement)
+	assert.Empty(t, v.RefusedStatements)
+}
+
+// An input error outranks every refusal beside it: the file takes no verdict,
+// so its author sees the input error rather than a refusal that hides it.
+func TestDesiredFileRefusalLeavesAnInputErrorBesideARefusalAlone(t *testing.T) {
+	_, err := statement.ParseDesiredFile("CREATE TABLE public.t (id int);\nCOMMENT ON TABLE t IS 'x';\n")
+	require.ErrorIs(t, err, statement.ErrQualifiedName)
+	require.ErrorIs(t, err, statement.ErrDisallowedStatement)
+	_, ok := DesiredFileRefusal(err, "")
+	assert.False(t, ok, "the qualified table name is an input error: %v", err)
+}
+
+// When a second table precedes a partition, the verdict still describes the
+// partition: its class decides the file's verdict, so its statement and
+// detail do too, not the earlier table's.
+func TestDesiredFileRefusalDescribesThePartitionAfterASecondTable(t *testing.T) {
+	_, err := statement.ParseDesiredFile("CREATE TABLE a (id int);\n" +
+		"CREATE TABLE b (id int);\n" +
+		"CREATE TABLE p PARTITION OF a DEFAULT;\n")
+	require.Error(t, err)
+	refused, ok := errors.AsType[*statement.RefusedStatementsError](err)
+	require.True(t, ok, "%v", err)
+	require.Len(t, refused.Refusals, 2, "the second table and the partition are both reported")
+
+	v, ok := DesiredFileRefusal(err, "unused")
+	require.True(t, ok)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+	assert.Equal(t, "CREATE TABLE p PARTITION OF a DEFAULT", v.Statement)
+	assert.Equal(t, "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed", v.Detail)
+}
+
 // A planner refusal of the desired table carries no statement of its own, so
 // the verdict names the statement the caller passes.
 func TestDesiredFileRefusalNamesTheCallersStatementForAPlannerRefusal(t *testing.T) {

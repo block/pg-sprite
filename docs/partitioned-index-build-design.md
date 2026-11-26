@@ -363,7 +363,8 @@ same definition instead of building one. The flow relies on that:
    window holds `ACCESS EXCLUSIVE` on the tree for catalog reads and writes only,
    and the proof and the read-back each read every partition in a fixed number of
    statements (the partitions' OIDs passed as one array), so the number of
-   statements under the lock does not grow with the number of partitions
+   statements, and of round trips, under the lock does not grow with the number
+   of partitions; the lock itself and each read still cover every partition
    (`TestAddPartitionedKeyParentStepRoundTrips`).
 
 The report (`PartitionedKeyReport`) lists each leaf's constraint, index, and

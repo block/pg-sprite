@@ -89,7 +89,11 @@ Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
 connection; cancellation tests use context deadlines. A statement-budget
 overrun is forced with a `ddl_command_end` event trigger that sleeps inside
 the statement, never with a table large enough to be slow: a fixed row
-count is a bet on how fast the server is. After any injected
+count is a bet on how fast the server is. For the same reason a race between
+two of the engine's own steps is staged, not timed: a test wraps the one read
+the code under test makes and does real work at it (`PaceOverMark` for the
+copy's lag reading, `WrapLiveConfirmed` for the verification pass's
+confirmed position) rather than racing a ticker to it. After any injected
 failure the test asserts the **durable state** (no wedged schema-change record,
 no leaked shadow objects/slots/triggers) and the ability to proceed — not
 merely the returned error type. *Binds:* Phase 3 onward; full
