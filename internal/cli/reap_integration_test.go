@@ -151,6 +151,7 @@ func TestReapDryRunListsTheOrphanAndDropsNothing(t *testing.T) {
 		DryRun:                true,
 		CheckpointTableExists: true,
 		Dropped:               []string{},
+		PublicationLeft:       []string{},
 		WouldDrop:             []string{f.orphan},
 		Live:                  []string{f.live},
 		Active:                []string{},
@@ -174,6 +175,7 @@ func TestReapDropsTheOrphanAndKeepsLiveAndForeignSlots(t *testing.T) {
 		FormatVersion:         reapFormatVersion,
 		CheckpointTableExists: true,
 		Dropped:               []string{f.orphan},
+		PublicationLeft:       []string{},
 		WouldDrop:             []string{},
 		Live:                  []string{f.live},
 		Active:                []string{},
@@ -210,7 +212,7 @@ func TestReapJSONListsAreArraysWhenEmpty(t *testing.T) {
 	require.NoError(t, cmd.run(t.Context(), &out))
 	var raw map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &raw))
-	for _, key := range []string{"dropped", "would_drop", "live", "active", "foreign"} {
+	for _, key := range []string{"dropped", "publication_left", "would_drop", "live", "active", "foreign"} {
 		assert.JSONEq(t, `[]`, string(raw[key]), "%s is an empty array", key)
 	}
 	assert.JSONEq(t, `true`, string(raw["checkpoint_table_exists"]))
@@ -225,9 +227,9 @@ func TestReapJSONListsAreArraysWhenEmpty(t *testing.T) {
 // publication publishes every table, which is not the single-table
 // publication the engine makes: the drop takes the second slot, then
 // refuses its publication, so both slots are reported dropped, the second
-// is the one the pass stopped at, and the second publication stays. Both
-// names are made by hand in the engine's shape so the pass reaches them in
-// this order.
+// is the one the pass stopped at, and the second publication stays, named
+// under publication_left. Both names are made by hand in the engine's
+// shape so the pass reaches them in this order.
 func TestReapReportsWhatWasDroppedBeforeAFailedDrop(t *testing.T) {
 	url := testutil.NewDatabase(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -273,6 +275,7 @@ func TestReapReportsWhatWasDroppedBeforeAFailedDrop(t *testing.T) {
 		Stopped:               true,
 		Failed:                second,
 		Dropped:               []string{first, second},
+		PublicationLeft:       []string{second},
 		WouldDrop:             []string{},
 		Live:                  []string{},
 		Active:                []string{},
@@ -311,13 +314,14 @@ func TestReapReportsAnAbsentCheckpointTableAndExitsZero(t *testing.T) {
 	for _, dryRun := range []bool{true, false} {
 		report := runReap(t, &ReapCmd{DBFlags: DBFlags{URL: url}, DryRun: dryRun})
 		assert.Equal(t, reapReport{
-			FormatVersion: reapFormatVersion,
-			DryRun:        dryRun,
-			Dropped:       []string{},
-			WouldDrop:     []string{},
-			Live:          []string{},
-			Active:        []string{},
-			Foreign:       []string{},
+			FormatVersion:   reapFormatVersion,
+			DryRun:          dryRun,
+			Dropped:         []string{},
+			PublicationLeft: []string{},
+			WouldDrop:       []string{},
+			Live:            []string{},
+			Active:          []string{},
+			Foreign:         []string{},
 		}, report, "dry run %t", dryRun)
 
 		args := []string{"reap", "--url", url, "--json"}
@@ -375,6 +379,7 @@ func TestReapReportsTheSlotItStoppedAtWhenTheOnlyDropFails(t *testing.T) {
 		Stopped:               true,
 		Failed:                orphan,
 		Dropped:               []string{orphan},
+		PublicationLeft:       []string{orphan},
 		WouldDrop:             []string{},
 		Live:                  []string{},
 		Active:                []string{},
@@ -423,6 +428,7 @@ func TestReapKeepsWhatItDroppedWhenTheCheckpointTableGoesMidPass(t *testing.T) {
 		Stopped:               true,
 		Failed:                second,
 		Dropped:               []string{first},
+		PublicationLeft:       []string{},
 		WouldDrop:             []string{},
 		Live:                  []string{},
 		Active:                []string{},

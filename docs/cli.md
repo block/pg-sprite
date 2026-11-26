@@ -633,7 +633,7 @@ database, publications included; `--dry-run` shows what it would drop first:
 
 ```console
 $ pg-sprite reap --dry-run
-would drop (orphans, with their publications): 1
+would drop (orphans, with any publication of the engine's shape): 1
   pgsprite_deadbeef
 live (kept: a checkpoint row in a non-terminal phase names it): 1
   pgsprite_cafebabe
@@ -655,8 +655,10 @@ dry run with exit 1, after the report.
 The slot is dropped before its publication, so a slot whose same-named
 publication `reap` will not drop (one that is not the single-table
 publication pg-sprite makes, such as a `FOR ALL TABLES` one) is gone: the
-pass stops there, lists it last under `dropped` and as `failed`, exits 1,
-and the error names the publication left in place for you to look at.
+pass stops there, lists it last under `dropped`, as `failed`, and under
+`publication left` (`publication_left` in JSON), exits 1, and the error
+says why the publication of that name was left in place for you to look
+at.
 
 A database without the checkpoint table has no row that can show a slot is
 an orphan, so `reap` examines no slot there, drops nothing, and exits 0. A
@@ -677,8 +679,9 @@ removed, or changes meaning.
 | `dry_run` | True for `--dry-run` |
 | `checkpoint_table_exists` | False when the database has no checkpoint table: no slot was examined and every list is empty |
 | `stopped` | True when the pass failed at a slot; the lists hold what was sorted before it, and the command exits 1 |
-| `failed` | The slot the pass stopped at, `""` when it did not stop. Its slot may already be gone: the drop removes the slot before its publication, and a slot the drop reports gone with its publication left is also the last entry of `dropped` |
-| `dropped` | Orphans the run dropped, publications included except for a `failed` slot listed here too; empty in a dry run |
+| `failed` | The slot the pass stopped at, `""` when it did not stop. Its slot may already be gone: the drop removes the slot before its publication, and a slot the drop reports gone with its publication left is also the last entry of `dropped` and the entry of `publication_left` |
+| `dropped` | Orphans the run dropped, publications included except for a slot in `publication_left`; empty in a dry run |
+| `publication_left` | The slot of `dropped` whose same-named publication the drop refused or failed to drop, left in place; at most the `failed` slot, empty in a dry run |
 | `would_drop` | Orphans a real run would drop now; empty in a real run |
 | `live` | Kept: a checkpoint row in a non-terminal phase names each |
 | `active` | Kept: a process holds each |

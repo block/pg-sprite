@@ -3,11 +3,13 @@ package checkpoint_test
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -273,6 +275,38 @@ func TestReapOrphanSlotsReportsASlotDroppedBeforeItsPublicationWasRefused(t *tes
 	require.NoError(t, d.pool.QueryRow(t.Context(),
 		`SELECT count(*) FROM pg_catalog.pg_publication WHERE pubname = $1`, name).Scan(&publications))
 	assert.Equal(t, 1, publications, "the FOR ALL TABLES publication is left")
+}
+
+// A drop that fails before the slot is gone is the mirror case: the slot is
+// still on the server and keeps WAL, so the pass stops at it without
+// listing it as dropped. The drop's replication connection is refused here
+// by the server itself, for a role without the REPLICATION attribute (ST-3).
+func TestReapOrphanSlotsWhoseDropFailsBeforeTheSlotIsGoneListsNothingDropped(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	const name = "pgsprite_ffff0000"
+	_, err := d.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, name)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := d.pool.Exec(context.WithoutCancel(t.Context()), `
+			SELECT pg_drop_replication_slot(slot_name)
+			FROM pg_catalog.pg_replication_slots
+			WHERE slot_name = $1`, name)
+		assert.NoError(t, err)
+	})
+	role := testutil.NewRole(t, d.pool, "LOGIN NOREPLICATION PASSWORD 'reap-test-only'")
+	u, err := url.Parse(d.cfg.URL)
+	require.NoError(t, err)
+	u.User = url.UserPassword(role, "reap-test-only")
+
+	reaped, err := d.store.ReapOrphanSlots(t.Context(), dbconn.Config{URL: u.String()})
+
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "42501", pgErr.Code, "the server refuses a walsender to a role without REPLICATION")
+	assert.NotErrorIs(t, err, decode.ErrSlotDroppedPublicationLeft)
+	assert.Equal(t, checkpoint.Reaped{Failed: name}, reaped, "a slot still on the server is not reported dropped")
+	assert.True(t, slotExists(t, d.pool, name))
 }
 
 // Without the checkpoint table no row can speak for any slot, so the pass

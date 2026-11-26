@@ -22,8 +22,11 @@ var ErrSlotActive = errors.New("replication slot is held by another process")
 // a caller that reports what it removed counts the slot as gone. It is
 // joined with the publication drop's own error, a *ForeignStateError for a
 // publication that is not the route's, so a caller routing on that error
-// still sees it.
-var ErrSlotDroppedPublicationLeft = errors.New("replication slot dropped, publication of its name left in place")
+// still sees it. The publication left wears the slot's name. A slot drop
+// the server accepted whose replication connection then fails to close, or
+// whose confirming catalog read fails, is not this error: the drop returns
+// that failure before the publication is reached, and the slot may be gone.
+var ErrSlotDroppedPublicationLeft = errors.New("no slot of the name remains; publication of its name left in place")
 
 // DropSlot drops the engine's replication slot and publication of the given
 // name from pool's database. The slot is dropped with DROP_REPLICATION_SLOT
@@ -80,7 +83,7 @@ func dropSlotAndPublication(ctx context.Context, cfg dbconn.Config, pool *pgxpoo
 		return err
 	}
 	if err := dropOwnPublication(ctx, pool, name); err != nil {
-		return fmt.Errorf("slot %s: %w: %w", name, ErrSlotDroppedPublicationLeft, err)
+		return fmt.Errorf("%w: %w", ErrSlotDroppedPublicationLeft, err)
 	}
 	return nil
 }
