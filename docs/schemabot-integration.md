@@ -799,9 +799,14 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   verdict's `detail` as presentation until the verdict carries typed guidance too. The
   imperative dry run can itself end in a refusal verdict instead of a report (an unsupported
   statement kind, or routed steps the executor refuses from their shape alone, such as an
-  unnamed index build or a `DETACH PARTITION`): it exits 2 and carries no `format_version`
+  unnamed index build or a `DETACH PARTITION`, or a statement routed to copy-and-swap on a
+  table in a partition or inheritance tree): it exits 2 and carries no `format_version`
   or `fingerprint`, so branch on the exit code and on `format_version` before reading a
-  report.
+  report. For that partition or inheritance tree case `migrate --desired --dry-run` ends,
+  exit 2, in the run's whole-plan refusal result, with the report under `plan`, while
+  `diff --json` does not read the route's preflight and prints the report with the
+  statement's `execute` disposition; an orchestrator that plans through `diff --json` meets
+  the refusal when it applies the plan.
 - **A rename refusal is an operator decision, not a retry.** `RENAME COLUMN` and `RENAME TO`
   refuse as `not-native-safe-rewrite-required` with class `by-design` and `guidance`
   `expand-contract-column` (a column) or `coordinated-table-rename` (a table). Retrying, or

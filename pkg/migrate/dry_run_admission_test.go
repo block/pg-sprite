@@ -61,6 +61,18 @@ func TestAdmitRoutedStepsNeedsTheResolvedSchemaForAnUnqualifiedTarget(t *testing
 	assert.False(t, refused)
 }
 
+// An unqualified copy-and-swap target cannot be read from the catalog
+// without the schema the plan resolved it to, so the partition check
+// returns an error before it reads anything and decides nothing.
+func TestAdmitCopySwapPartitioningNeedsTheResolvedSchemaForAnUnqualifiedTarget(t *testing.T) {
+	st := parseStatement(t, "ALTER TABLE events ALTER COLUMN note TYPE varchar(10)")
+
+	_, refused, err := AdmitCopySwapPartitioning(t.Context(), nil, st, "")
+
+	require.ErrorIs(t, err, errAdmissionSchemaUnknown)
+	assert.False(t, refused)
+}
+
 // IF NOT EXISTS is a permanent design refusal, so it keeps its by-design class.
 func TestAdmitRoutedStepsKeepsTheIfNotExistsClass(t *testing.T) {
 	st := parseStatement(t, "CREATE INDEX IF NOT EXISTS invoices_amount_idx ON billing.invoices (amount)")

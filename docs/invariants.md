@@ -1485,6 +1485,11 @@ runs the same check so a resume of such a shadow stops before the copy
 target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
 enforcement; the size guard and privilege preflight need live facts and stay the apply's.
+`migrate --dry-run` and `migrate --desired --dry-run` read the copy-and-swap shape refusal of a
+table in a partition or inheritance tree through `preflight.CheckCopySwapPartitioning`, which
+`migrate.AdmitCopySwapPartitioning` and `migrate.AdmitPlanCopySwapPartitioning` call: the
+same catalog facts and the same `CheckCopySwapShape` decision, minting no proof, so it too is a
+read-only surface rather than a second enforcement.
 Both front doors run the copy-and-swap checks through `schemachange.CheckCopySwap`, which runs
 `preflight.CheckCopySwap`'s checks with the resume measure, before the route writes anything.
 *Planned enforcement:* all other execution paths in preflight. *Source:*
