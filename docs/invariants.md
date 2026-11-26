@@ -877,7 +877,17 @@ anything (`TestEnsureLeafKeyRefusals/primary_key_over_a_nullable_column`,
 again under the leaf's lock before the statement
 (`TestEnsureLeafKeyRefusals/not_null_dropped_before_the_constraint`), both as
 `partitioned-key-nullable-column`; a writer to the leaf keeps committing through the whole step
-(`TestEnsureLeafKeyWritersKeepCommitting`).
+(`TestEnsureLeafKeyWritersKeepCommitting`). `AddPartitionedKey` then runs the parent's plain
+`ADD CONSTRAINT`, which takes `ACCESS EXCLUSIVE` on the parent and every leaf, in one brief
+transaction: the step's own `LOCK TABLE` on the tree takes those locks first under
+`lock_timeout`, the step defers to another pass a leaf no leaf step covered (the statement would
+build its index under the lock), and after the statement it reads back that every leaf's adopted
+constraint is the one its leaf step recorded on the same index OID, rolling back with an invariant
+violation otherwise, so the window only changes the catalog; a primary key over a column the parent
+allows to be NULL is refused before any leaf is touched
+(`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitionedKeyParentStepLocks`,
+`TestAddPartitionedKeyPrimaryKeyOnline`,
+`TestAddPartitionedKeyRefusals/a_primary_key_over_a_column_the_parent_allows_to_be_NULL`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1550,7 +1560,15 @@ and its attach); the leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE
 detach pending, before it builds, and in the constraint's transaction locks the leaf
 `SHARE UPDATE EXCLUSIVE`, which excludes a detach, before it proves the leaf and the index by
 identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-pending cases,
-`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`).
+`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`). `AddPartitionedKey` admits only a named
+`ADD PRIMARY KEY` or `ADD UNIQUE` on the preflighted partitioned table and renders the parent's
+statement from the admitted kind, name, and columns alone; it refuses a tree holding a partition
+with its detach pending before any leaf step, since a key given to a partition leaving the tree
+would not stay the parent's (`TestAddPartitionedKeyRefusals/a_partition_with_its_detach_pending`);
+under the tree's lock, before that statement, it proves the parent's name still resolves to the
+table it resolved and that every leaf has exactly one constraint of the requested key, attached
+to nothing, which is the constraint and index its leaf step recorded
+(`TestAddPartitionedKeyParentStepFailsClosed`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
