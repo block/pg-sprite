@@ -411,6 +411,13 @@ func verdictText(r verdict.Reason) string {
 // carry one, mirroring the run path's refusal verdict detail; target-fact
 // refusals render their verdictText.
 func refuseText(ps plan.Statement, r verdict.Reason) string {
+	if r == verdict.ReasonUnsupportedPartitionedParent && ps.Kind == schemadiff.ChangeDropIndex &&
+		ps.Execution == planner.ExecutionBlockingIndexDrop {
+		return "PostgreSQL has no concurrent drop for an index of a partitioned table; the drop is this plain DROP INDEX, " +
+			"which takes ACCESS EXCLUSIVE on the parent, every partition, and every partition's index — a run takes it " +
+			"only with --expect-fingerprint, --allow-destructive and --accept-blocking naming the table, and an explicit " +
+			"--statement-timeout longer than --lock-timeout"
+	}
 	if r == verdict.ReasonUnsupportedPartitionedParent && ps.Kind == schemadiff.ChangeDropIndex {
 		return "PostgreSQL has no concurrent drop for an index of a partitioned table; the drop is this plain DROP INDEX, " +
 			"which takes ACCESS EXCLUSIVE on the parent, every partition, and every partition's index — run it with " +

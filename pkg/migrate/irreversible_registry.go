@@ -16,11 +16,13 @@ import (
 // acknowledgement names the resolved SCHEMA.TABLE, so one left on a script
 // cannot reach another table. Desired-state execution takes none of them
 // through Options: it rejects every one before any database work, and
-// Options.WithoutAcknowledgements clears the same set. It takes exactly one
-// acknowledgement of its own, on the request rather than the policy: the
+// Options.WithoutAcknowledgements clears the same set. It takes two
+// acknowledgements of its own, on the request rather than the policy: the
 // destructive one, valid only bound to a pinned plan fingerprint, which lets
-// the destructive statements of that reviewed plan run. A plan holding a
-// destructive statement without it is refused whole. The destructive
+// the destructive statements of that reviewed plan run, and the
+// accept-blocking one, valid only beside both, which lets that plan's drop
+// of a partitioned table's index run as the blocking DROP INDEX. A plan
+// holding a destructive statement without them is refused whole. The destructive
 // operation shapes are not listed here but derived from the planner, the one
 // answer both destructive gates use. TestIrreversibleOperationRegistryIsComplete
 // fails when an acknowledgement, a string or bool field reachable from
@@ -188,6 +190,11 @@ const (
 	// desiredRejectsAck: no plan derives the operation on its own, and the
 	// acknowledgement that would allow it is rejected.
 	desiredRejectsAck desiredHandling = "rejects-ack"
+	// desiredAdmitsAcceptedPinnedPlan: the planner can derive the operation,
+	// and admission refuses any plan holding it, whole, unless the request
+	// pins the reviewed plan's fingerprint and names the table in both its
+	// destructive and its accept-blocking acknowledgements.
+	desiredAdmitsAcceptedPinnedPlan desiredHandling = "admits-accepted-pinned-plan"
 )
 
 // irreversibleOp is one registry entry.
@@ -230,6 +237,13 @@ func irreversibleOps() []irreversibleOp {
 			ack:     ackAcceptBlocking,
 			refusal: verdict.ReasonIndexStatement,
 			desired: desiredRejectsAck,
+		},
+		irreversibleOp{
+			key:     "blocking DROP INDEX of a partitioned table's index",
+			loss:    lossAvailability,
+			ack:     ackAcceptBlocking,
+			refusal: verdict.ReasonUnsupportedPartitionedParent,
+			desired: desiredAdmitsAcceptedPinnedPlan,
 		},
 		irreversibleOp{
 			key:     "blocking REINDEX",

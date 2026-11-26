@@ -36,7 +36,7 @@ func TestBlockingBudgetValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.budget.validate()
+			err := tt.budget.Validate()
 			if tt.ok {
 				require.NoError(t, err)
 				return
