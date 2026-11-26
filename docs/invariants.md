@@ -530,7 +530,7 @@ same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — or under a path pg-sprite builds that lists a user schema — introspection's
 target schema then `public`, the shadow build's source schema then `public` — qualify every
-relation, function, operator, and type with `pg_catalog`.
+relation, function, operator, type, and collation with `pg_catalog`.
 Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
 operator resolution ranks candidates across every schema on the path, so an exact-type overload
 planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
@@ -605,7 +605,7 @@ answer false would read a live row as terminal and let the reaper drop its slot,
 `TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`,
 `TestInspectSlotReadsAnotherDatabasesSlotAsForeignUnderALookalikeEquals`, and
 `TestInspectSlotDoesNotFindAMissingSlotUnderALookalikeEquals` (the two inspection tests
-prove its `name` comparisons; its `text` and `jsonb` operators rest on the text check alone);
+prove its `name` comparisons; its `text` and `jsonb` operators rest on the catalog-qualification check alone);
 the WAL marker (`MarkWAL`), written in a transaction on the caller's pool, and the stream's read
 of `wal_sender_timeout`, on the replication session, whose `search_path` comes from the caller's
 connection settings and the role's and database's and is never repaired, spell their cast and
@@ -616,8 +616,9 @@ the stream, `TestMarkWALReturnsTheServersPositionUnderALookalikeTextType` and
 `TestHeartbeatReadsTheSenderTimeoutUnderALookalikeEquals`; and the text is held by
 `TestSlotReadsQualifyEveryRelationFunctionCastAndOperator`,
 `TestSlotDropReadsQualifyEveryRelationFunctionCastAndOperator`, and
-`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which reject every operator
-character outside `OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
+`TestSlotStatusReadsQualifyEveryRelationFunctionCastAndOperator`, which walk each read's parse
+tree and reject every operator, the keyword comparisons included, not spelled
+`OPERATOR(pg_catalog.…)`), `pkg/applier` (the catch-up's snapshot and
 write-position reads, on the caller's pool every cycle, cast through `pg_catalog.text`: a
 lookalike `text` type on a shadowing path would cut the snapshot into one the drain refuses and
 the write position to `0/1`, below anything the stream has confirmed,
@@ -795,13 +796,18 @@ preflight and before the lock session opens, that `CopySwapOptions.Connection` r
 pool's database (the cluster's system identifier and `current_database()` on both sides), and
 stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
 database does not exclude a run in this one (another-database, another-cluster, unreachable,
-and unidentifiable tests).
+and unidentifiable tests); `pkg/executor` `BuildPartitionedIndex` holds the parent's lock for the
+whole build, confirms from the pool that the backend holding it is in the pool's database
+(`ErrInvariantViolation` otherwise), runs every step under the session's `Bind` context, and
+reports a lost lock as `ErrInvariantViolation` wrapping `dbconn.ErrTableLockLost` whatever the
+cancelled step reported, so a build the loss cancelled never carries a retryable invalid-index
+code (`TestBuildPartitionedIndexReportsALostTableLockAsAnInvariantViolation`).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
 ### LK-2 — Exactly one `ACCESS EXCLUSIVE` window, and every strong lock is bounded
 
-The cutover swap is the only `ACCESS EXCLUSIVE` acquisition in the happy path, and **every**
+The cutover swap is the only `ACCESS EXCLUSIVE` acquisition on a table in the happy path, and **every**
 strong-lock acquisition (swap, catalog flips, trigger install if trigger capture is ever built) runs under
 `lock_timeout` + bounded retry/backoff so the engine never sits at the head of the lock queue
 ([mysql-vs-postgresql § the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue)).
@@ -841,7 +847,17 @@ that ends mid-query closes the connection; `Tracker.CancelBuild` signals the sam
 *Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
 `TestProgressRunsTheBuildReadDetachedFromTheObserver`,
 `TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
-`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`);
+`pkg/executor` `BuildPartitionedIndex` runs every step except a partition's concurrent build in
+its own transaction and refuses the step when the session's `lock_timeout` or `statement_timeout`
+is 0. Its `ALTER INDEX ... ATTACH PARTITION` holds `ACCESS EXCLUSIVE` on the partition's index
+until it commits: `lock_timeout` bounds how long it waits to acquire that lock behind running
+statements on the partition, and `statement_timeout` bounds each statement of the brief
+transaction, so new statements on that partition are held back for at most the transaction's
+statements, from the attach through its read-back and commit
+(`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
+The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
+same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1104,7 +1120,12 @@ keeps the one the row holds, a save with the same proof is accepted, and a save 
 different proof is `ErrInvariantViolation` and leaves the row unchanged, because a different
 shadow is a fresh start and a fresh start goes through `Delete`; `Delete` is the explicit fresh start, and it removes only the row whose
 `Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
-between survives and surfaces as a new `IncompatibleError`. `pkg/schemachange` applies the
+between survives and surfaces as a new `IncompatibleError`. `pkg/migrate` applies (b) at the
+front door, where a native route reads no row: before routing any statement on a table,
+`findStoppedRun` reads the table's row, and a statement other than the stopped run's own,
+compared as parsed, is refused (`copy-and-swap-run-stopped`); a row it cannot judge — another
+format or phase, a store an older engine created, a store the role may not read — holds the
+table while the catalog shows the run's shadow or retained source. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
 `checkResumeRow` — the row must name this table and the derived slot (`resume-row-mismatch`),
 be non-terminal (`resume-row-terminal`), and not be a row whose cutover already began
@@ -1196,9 +1217,14 @@ one does not know keeps its slot (`TestReapOrphanSlotsKeepsASlotARowInAnUnknownP
 is dropped through `DropIdleSlot`, publication and all, which refuses a held slot instead of waiting for its holder — whether a
 slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
 snapshot; a slot a live row names, a slot a process holds, and a name wearing the prefix
-without the engine's shape are reported and left; a database whose checkpoint table does not
+without the engine's name shape or `pgoutput` plugin are reported and left
+(`TestReapOrphanSlotsReportsAnEngineShapedSlotOfAnotherPluginAsForeign`); the pass stops at
+the first failure and names the slot in `Failed`; a database whose checkpoint table does not
 exist is refused with `ErrTableMissing` rather than read as all orphans; two reapers over one
-database take turns at each slot, the one that waited finding the slot gone) + `pkg/applier`
+database take turns at each slot, the one that waited finding the slot gone;
+`Store.PreviewOrphanSlots` sorts the same reads by the same rule under no lock and drops
+nothing, and the `reap` command reports its `ErrTableMissing` refusal as an absent table with no
+slot examined, only when the first read refused) + `pkg/applier`
 `Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it,
 through one `decode.SlotLagWatch` for the run whose grace is `RestartReleaseInterval` plus
 the cycle's `Interval`, which cannot be set above `MaxCatchupInterval` (the release
@@ -1394,7 +1420,8 @@ still draw each identity default from the source's sequence). *Source:*
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
 (~2× the table, plus the slot lag ceiling for a run that decodes WAL, less what a resumed run
-already holds of each, measured from the server), execute-and-introspect
+already holds of each, measured from the server, or nothing for a run that only finishes a
+swap that committed, which may do nothing else), execute-and-introspect
 workspace, lock LK-1 acquired, and the RF-* refusals
 below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
@@ -1407,7 +1434,16 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 caller-measured disk headroom against the shadow copy's requirement plus, for a run that
 decodes WAL, the slot lag ceiling, each less what `pkg/schemachange` `MeasureResumeHeld`
 reads from the server that a resumed run already holds of it, and nothing for a run that
-starts over), chained by type —
+starts over; a resume of a `cutover` row whose swap the catalog shows committed — read as
+`InspectSwapped` reads it — is asked for neither, since it builds no shadow and decodes no
+WAL, and `MeasureResumeHeld` reports it as `SwapCommitted`, while a `cutover` row whose swap
+did not commit is measured as any resume, pinned by
+`TestCheckCopySwapAdmitsFinishingACommittedSwapOnATightVolume` and
+`TestCheckCopySwapStillAsksACutoverRowWhoseSwapDidNotCommitForTheCopy`; the target that
+admission mints reports `FinishesCommittedSwap`, and a `Runner` that finds a row asking for
+more under its lock refuses it as `finish-admission-stale` before it writes, pinned by
+`TestRunRefusesAFinishOnlyTargetOnceTheRowIsDone` and
+`TestRunRefusesAFinishOnlyTargetOnARowWhoseSwapDidNotCommit`), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last; `pkg/schemachange` `CheckCopySwap` runs the chain with the
 resume measure as one call, which `pkg/migrate` calls; and before them `pkg/schemachange` `CheckPool`, which
@@ -1461,7 +1497,16 @@ operations with the shadow as its sole target —
 inside the build's transaction and before the statement runs, a `USING` expression the server
 does not classify as immutable, tried as a stored generated column's expression on the empty
 shadow and rolled back, since the copy, the recopy, and the catch-up evaluate the expression
-again and must get the same answer).
+again and must get the same answer); `pkg/executor` `BuildPartitionedIndex` admits only a
+named `CREATE INDEX` on the preflighted partitioned table, and proves by identity, inside the
+transaction that runs each statement, the table, partition, and index it names: a partition
+replaced under its name or detached from the tree after it was listed, an index swapped under its
+name, or an index created on another table refuses the run, and a concurrent build that landed on
+a replacement table is refused with its index left in place and named for an operator, because
+the build cannot prove the index is its own
+(`TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved` and
+`TestBuildPartitionedIndexTreeChangesDuringARun`, which detaches a partition between its build
+and its attach).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
@@ -1638,10 +1683,20 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   for an eligible policy refusal (AB-3..AB-5). *Source:* [high-level-design § advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one),
   [lock-budgeted passthrough](lock-budgeted-passthrough.md).
 - **RF-6** — A partitioned-parent sequence is refused before its first step when it would build
-  an index, or on PostgreSQL before 18 when it would add a foreign key `NOT VALID`. pg-sprite
-  does not substitute a blocking parent build for the missing partition-aware online flow.
-  *Enforced:* preflight and sequence-executor admission. *Source:* PostgreSQL relation-kind and
-  version capabilities.
+  an index any way but the partition-aware index build, drop an index concurrently (PostgreSQL
+  has no concurrent drop for a partitioned index), or on PostgreSQL before 18 when it would add a
+  foreign key `NOT VALID`. pg-sprite does not run a blocking parent build, and `--force` does not
+  bypass that. A `CREATE INDEX` on a partitioned parent is not refused: it runs as that build
+  (`CREATE INDEX ON ONLY`, then a concurrent build and attach per partition), each step committing
+  on its own. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
+  refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
+  concurrent idiom PostgreSQL rejects for it. *Enforced:* preflight (`RefusesPartitionedParent`,
+  with `RoutesToPartitionedIndexBuild` naming the one shape that is routed instead) and
+  sequence-executor admission, which refuses every index-building step on a parent because the
+  build is its own executor entry point; the concurrent drop by preflight and plan reporting,
+  since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
+  the relation kind, and `GateWithCatalog` in `pkg/migrate` for the imperative `DROP INDEX`.
+  *Source:* PostgreSQL relation-kind and version capabilities.
 - **RF-7** — Every refusal carries exactly one non-zero class from the closed refusal-class
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
@@ -1689,9 +1744,17 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   schema-qualified table; a mismatched acknowledgement is a typed usage error and nothing
   executes. The acknowledgement covers only the data loss: the statement still meets every
   other gate, and an acknowledged run is audited at warn level and carries
-  `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
-  and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
-  reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
+  `allowed_destructive: true` on its verdict. The declarative path takes the acknowledgement
+  on its request only, bound to the reviewed plan's pinned fingerprint ([RF-12](#rf-12)), and
+  without both refuses a destructive plan whole. Each destructive statement of an admitted
+  plan is audited and carries the verdict, and the plan's fingerprint covers the definition
+  of the object it removes and, for a column, what the drop removes with it, which the run
+  reads again under the statement's own lock and refuses to drop if it differs or if
+  something the plan did not list would go with it. A column, constraint, or `NOT NULL` drop then runs through
+  this same gate. An index drop runs as `DROP INDEX CONCURRENTLY`, never holding the table's
+  blocking lock, and so does not pass through `run`: it meets the pin, the acknowledgement,
+  the audit, the verdict, and its own re-read of the index, and no other `run` gate. A planner refusal runs
+  nothing and keeps its own reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
   accepts that refusal, the drop still runs only if `--allow-destructive` names the same
   owning table, and otherwise it is refused with `destructive-change` before anything
   executes, the detail listing the checks that catch an index the application still uses and
@@ -1702,7 +1765,23 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`, returned as an
   `AcknowledgementMismatchError` from `ack_mismatch.go`; `TestEachMismatchIsAnAcknowledgementMismatchError`), `RunDesired`'s admission
-  and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/planner`
+  and the acknowledgement registry with its tests ([RF-12](#rf-12)), `pkg/executor`
+  (`ExecuteDropIndexConcurrently`, which re-reads the index on the session that drops it;
+  `TestExecuteDropIndexConcurrentlyNeverBlocksTheTable`; `refuseDroppedObjectDrift`, which
+  re-reads a dropped column, constraint, or `NOT NULL`, and a column's dependents, under the
+  statement's lock; `refusePartitionedColumnDrop`, which locks a partitioned table's whole tree
+  and refuses a reviewed column drop that would remove a partition key column
+  (`ErrDroppedColumnPartitionKey`) or an object a partition carries of its own on the column
+  (`ErrDroppedColumnPartitionDependent`), and `refuseDropBelow`, which refuses a reviewed
+  column, constraint, or `NOT NULL` drop that reaches an inheritance child (`ErrDroppedObjectHasDescendants`);
+  `TestRunSequenceDroppingRefusesAColumnAPartitionUsesOnItsOwn`; `ErrDroppedIndexDrift` for a refused index drop and
+  `ErrDroppedIndexReplaced` for one that dropped an unreviewed index; `ExecuteDropTable`,
+  the Go API for a table drop no front door runs, which takes the reviewed definition and
+  re-reads the table under its lock, `TestExecuteDropTableRefusesATableThatChanged`),
+  `pkg/migrate` (`executePlan`, which runs no destructive statement that carries no dropped
+  definition), `pkg/schemadiff` (`ReadDroppedObject`, `UnlistedDependents`; `Diff` plans every `NOT NULL`
+  drop ahead of any statement that can rebuild the table), `pkg/plan` (`Fingerprint`, which
+  hashes `Drops` and its dependents), `pkg/planner`
   (`destructiveOp`, which decides every shape in `statement.OpKinds()` explicitly and
   treats an unclassified one as destructive;
   `TestEveryOpKindIsClassifiedForDestructiveness`,
@@ -1718,6 +1797,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestReadIndexUsageSumsAPartitionedIndexsLeafIndexes`,
   `TestCheckLeafStatisticsListedRefusesAnUnlistedLeaf`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
+  `TestRunDesiredAppliesAReviewedDrop`, `TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop`,
+  `TestRunDesiredReviewedIndexDropLeavesWritesUnblocked`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)
   ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),
@@ -1758,11 +1839,24 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   structure or data, availability for a bounded window, or a stopped run's progress. On
   `migrate --alter`, an entry whose acknowledgement is missing is refused with its declared
   reason, except the restart: without `--restart` a stopped run resumes and nothing is
-  discarded, and a leftover no checkpoint records is refused and left standing. An
+  discarded, any other statement on its table is refused (`copy-and-swap-run-stopped`), and a
+  leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
   nothing, typed by its own sentinel so an embedder tells it from any other error.
-  Desired-state execution takes no acknowledgement: `RunDesired` rejects each with its
-  own sentinel before any database work, and `migrate --desired` rejects each flag. A new
+  Desired-state execution takes exactly one acknowledgement, the destructive one, and only
+  bound to a pinned plan fingerprint: `RunDesired` admits a plan holding a destructive
+  statement only when the request pins the reviewed plan's fingerprint and names the desired
+  table in its own destructive acknowledgement (`DesiredRequest.AllowDestructive`), and each
+  destructive statement then runs under that acknowledgement, audited and carrying the
+  verdict as on `migrate --alter` (RF-10). The pin binds what each drop removes, not only
+  its name, since the fingerprint covers the removed object's definition. A pinned plan that
+  also routes a statement to copy-and-swap is refused whole with `destructive-change`, since its
+  drops would commit before copy-and-swap is checked. Without the acknowledgement the plan is refused whole with `destructive-change`; an
+  acknowledgement without the fingerprint, or naming another table, is a usage error before
+  any statement runs, in a dry run and for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The other four, and
+  the destructive acknowledgement in `Options`, are rejected: `RunDesired` returns each one's
+  own sentinel before any database work, and `migrate --desired` rejects each flag, taking
+  `--allow-destructive` only with `--expect-fingerprint`. A new
   string or bool field reachable from `Options`, nested structs and pointers included, not
   declared as no acknowledgement, a
   new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI
@@ -1778,20 +1872,26 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   dropping an index `DropAbandonedIndex` has proven abandoned (`ErrAbandonmentUnproven`
   otherwise), and replacing a table's row-security policies with the declared set (RS-1..RS-5).
   Adding an acknowledgement means: a registry entry in `irreversibleOps` with its loss,
-  refusal, and desired-state decision; a case in `ackKinds` and `rejectDesiredAcks` with its
-  own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel, a case for it in
+  refusal, and desired-state decision (admitted under a pinned plan, or rejected); a case in
+  `ackKinds` and `rejectDesiredAcks` with its own `Err…NotSupported` sentinel; an `Err…Mismatch` sentinel, a case for it in
   `mismatchErr`, and a wrong-target check returning `AcknowledgementMismatchError`;
   a scenario in `irreversibleScenarios`; and a CLI flag with
   the `SCHEMA.TABLE` placeholder plus its sentinel and field in
   `TestEveryAcknowledgementFlagMapsToARegistryEntry`. *Enforced:* `pkg/migrate`
-  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`; `ErrForceNotSupported`,
+  (`irreversibleOps`, `ackKinds`, `rejectDesiredAcks`, `AdmitPlan` and
+  `checkDesiredAllowDestructive` for the one admitted acknowledgement,
+  `CheckDesiredAllowDestructiveTable`, which `RunDesired`, `RunDesiredWithRowSecurity` (before
+  its converged-table return), and the CLI's dry run all apply to the resolved table,
+  `ErrAllowDestructiveNeedsFingerprint`; `ErrForceNotSupported`,
   `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`, `ErrRestartNotSupported`,
   `ErrBlockWritesNotSupported`; `ErrForceMismatch`, `ErrAcceptBlockingMismatch`,
   `ErrAllowDestructiveMismatch`, `ErrRestartMismatch`, `ErrBlockWritesMismatch`, each the
   `Unwrap` of an `AcknowledgementMismatchError` through `mismatchErr`;
   `TestEveryAcknowledgementKindUnwrapsToItsOwnMismatchSentinel`), `pkg/planner` (`DestructiveOpKinds`), `internal/cli`
   (`validateInput`). *Test obligation:* `TestIrreversibleOperationRegistryIsComplete` for the
-  registry's shape and the desired-state rejections;
+  registry's shape, the desired-state rejections, and the one admitted acknowledgement;
+  `TestAdmitPlanDestructiveAcknowledgement` and `TestRunDesiredRefusesAnUnreviewedOrMismatchedDrop`
+  for admission needing the pin, the table, and the acknowledgement together;
   `TestEveryOpKindIsClassifiedForDestructiveness` and
   `TestAnUnclassifiedOpKindIsTreatedAsDestructive` for the destructive shapes the registry
   derives; `TestIrreversibleOperationsAreGated` for each entry's refusal and wrong-target usage
@@ -1799,7 +1899,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   restart's unrecorded leftover left standing;
   `TestEveryAcknowledgementFlagMapsToARegistryEntry` for every `migrate` flag being an
   acknowledgement or declared not one, each acknowledgement flag reaching exactly its own
-  field and sentinel, and every registry acknowledgement having a flag; and
+  field and sentinel, `--allow-destructive` with `--desired` needing `--expect-fingerprint`,
+  and every registry acknowledgement having a flag; and
   `TestAcknowledgementsNamesTheRegistry` and
   `TestOptionsAcknowledgementsNamesWhatThePolicyCarries` for the exported view.
   *Source:* [design principles](design-principles.md#make-mistakes-hard-to-commit).
@@ -1894,7 +1995,7 @@ about **how we write and review the code**.
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
-| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, desired-state execution rejects every acknowledgement, demo refusal smoke |
+| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, desired-state execution rejects every `Options` acknowledgement and takes the destructive one only with a pinned fingerprint, demo refusal smoke |
 | AB-3, AB-4, AB-5, RF-9 | accepted-blocking rollout step 4 | catalog-resolved acknowledgement, mismatch executes nothing, ineligible refusals untouched, grammar rejects `--force`/`--dry-run`/missing budget, accepted verdict identity and exit 3, demo exit-code smoke |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
@@ -1906,5 +2007,5 @@ about **how we write and review the code**.
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | RF-11 | table usage primitive (ahead of any drop path) | per-branch window-edge and partition-aggregation unit tests; recent, lock-holder, version, reset, and partitioned-table integration tests on 14 → 18 |
-| RF-12 | irreversible-operations registry | registry completeness and desired-state rejection unit tests; per-entry refusal and wrong-target integration test; CLI flag-to-entry walk |
+| RF-12 | irreversible-operations registry | registry completeness and desired-state rejection unit tests; per-entry refusal and wrong-target integration test; reviewed desired drop of each destructive kind, its fingerprint and table checks, the definition-binding and drift tests for every dropped object, and the concurrent index drop integration tests; CLI flag-to-entry walk |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

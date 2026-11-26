@@ -39,7 +39,9 @@ sha="$(curl -fsSL "${api}/commits/${ref}" | python3 -c 'import json,sys; print(j
 files="$(curl -fsSL "${api}/contents/${migrations_path}?ref=${sha}" \
     | python3 -c 'import json,sys; print("\n".join(sorted(e["name"] for e in json.load(sys.stdin) if e["name"].endswith(".sql"))))')"
 [ -n "$files" ] || die "no .sql files at ${slug}@${sha:0:12}:${migrations_path}"
-baseline="$(printf '%s\n' "$files" | head -1)"
+# The first name, without piping to head: under pipefail, head exiting early
+# could kill the writer with SIGPIPE on a long listing.
+baseline="${files%%$'\n'*}"
 
 # Each project gets its own host port so harnesses can coexist: start past
 # the highest port any existing project claims, then skip anything already

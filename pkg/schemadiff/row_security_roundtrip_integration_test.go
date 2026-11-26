@@ -29,7 +29,7 @@ func roundTripRowSecurity(t *testing.T, pool *pgxpool.Pool, schema string) {
 	require.NoError(t, err, sql)
 	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err, sql)
-	assert.Equal(t, live, modeltest.Comparable(model), "complete catalog state must round-trip")
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(model), "complete catalog state must round-trip")
 	changes, err := schemadiff.DiffWithRowSecurity(schema, live, model)
 	require.NoError(t, err)
 	assert.Empty(t, changes)

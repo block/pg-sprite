@@ -278,7 +278,8 @@ live schema (introspected)  ─┘                          │
 - **Destructive changes need confirmation.** Dropping a column, constraint, or index —
   anything that loses data or a guarantee (a unique index discards the same uniqueness
   guarantee as a unique constraint) — is never inferred silently from "it's missing in the
-  desired file": desired-state execution refuses a destructive plan whole, and the imperative
+  desired file": desired-state execution refuses a destructive plan whole unless the run pins
+  the reviewed plan's fingerprint and names the table, and the imperative
   front door runs a dropped column, constraint, or `NOT NULL` only when
   `--allow-destructive SCHEMA.TABLE` names the table (RF-10); destructive statements are
   flagged in the plan output either way.
@@ -366,8 +367,8 @@ The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences,
 executes them through `pkg/executor`'s sequence executor under the autocommit-each-step
 contract (brief steps bounded like an optimistic attempt, the validation scan and concurrent
 builds under their own budgets). The one-step `CONCURRENTLY` rewrites the classifier also
-emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: `migrate`'s statement gate
-refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
+emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: the imperative statement gate of
+`migrate --alter` refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
 whole-sequence admission refuses a substituted `DETACH PARTITION CONCURRENTLY` typed before
 anything executes — a cancelled wait leaves recovery states it does not yet own — which
 `migrate` reports as a refusal verdict, not an operational error. When the

@@ -96,8 +96,8 @@ func TestProgressDisplayPlainPrintsOnlyChanges(t *testing.T) {
 	d.finish()
 	assert.Equal(t, strings.Join([]string{
 		"step 0/2  admitting",
-		"step 1/2  copy  1.0%  10/1.0K rows",
-		"step 1/2  copy  10.0%  100/1.0K rows",
+		"step 1/2  copy  1.00%  10/1.0K rows",
+		"step 1/2  copy  10.00%  100/1.0K rows",
 		"step 2/2  validate constraint",
 	}, "\n")+"\n", out.String())
 }

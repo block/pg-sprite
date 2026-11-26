@@ -128,3 +128,39 @@ func TestRefuseCopySwapDiskRefusesANegativeHeldFigure(t *testing.T) {
 		})
 	}
 }
+
+// A run whose stopped run's swap has committed only drops the slot and the
+// retained source, so it is asked for neither the shadow's headroom nor
+// the slot lag ceiling: one free byte admits it, live or quiesced, while a
+// run that still copies is refused at the same figure. The volume must
+// still have been measured, and a negative ceiling is still a wiring
+// error.
+func TestRefuseCopySwapDiskAsksNothingOfACommittedSwap(t *testing.T) {
+	for name, decodes := range map[string]bool{"live": true, "quiesced": false} {
+		t.Run(name, func(t *testing.T) {
+			facts, env := sufficientCopySwapEnvironment()
+			env.LogicalDecoding = decodes
+			env.FreeDiskBytes = 1
+			require.NotNil(t, refuseCopySwapDisk(facts, env), "a run that still copies needs the copy's headroom")
+
+			env.Held = CopySwapHeld{SwapCommitted: true}
+			assert.Nil(t, refuseCopySwapDisk(facts, env), "finishing a committed swap grows nothing")
+
+			env.FreeDiskBytes = 0
+			refusal := refuseCopySwapDisk(facts, env)
+			require.NotNil(t, refusal, "an unmeasured volume is refused whatever the run has left")
+			assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+		})
+	}
+
+	facts, env := sufficientCopySwapEnvironment()
+	env.FreeDiskBytes = 1
+	env.SlotLagCeilingBytes = -1
+	env.Held = CopySwapHeld{SwapCommitted: true}
+	refusal := refuseCopySwapDisk(facts, env)
+	require.NotNil(t, refusal, "a negative ceiling is refused whatever the run has left")
+	assert.Equal(t, CopySwapCauseDiskHeadroom, refusal.Cause)
+
+	env.LogicalDecoding = false
+	assert.Nil(t, refuseCopySwapDisk(facts, env), "a quiesced run counts no ceiling, so its value is not judged")
+}

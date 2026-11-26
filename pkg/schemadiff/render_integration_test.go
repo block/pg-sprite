@@ -63,7 +63,7 @@ func TestRenderRoundTripsLiveTable(t *testing.T) {
 	}
 
 	live, desired, changes := roundTrip(t, pool, schema, "events")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
@@ -102,7 +102,7 @@ func TestRenderNotValidConstraintRendersValidated(t *testing.T) {
 			validated.Constraints[i].NotValid = false
 		}
 	}
-	assert.Equal(t, validated, modeltest.Comparable(desired))
+	assert.Equal(t, modeltest.Comparable(validated), modeltest.Comparable(desired))
 }
 
 // A serial table round-trips through the serial pseudo-type: the rendered
@@ -118,7 +118,7 @@ func TestRenderRoundTripsSerialTable(t *testing.T) {
 	require.NoError(t, err)
 
 	live, desired, changes := roundTrip(t, pool, schema, "t")
-	assert.Equal(t, live, modeltest.Comparable(desired))
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired))
 	assert.Empty(t, changes)
 }
 
@@ -146,16 +146,15 @@ func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
 	}
 
 	live, desired, changes := roundTrip(t, pool, schema, "Order Items")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
-// Partitioned parents and their partitions are introspectable (the
-// statement front door supports in-place changes on them) but refuse to
-// render: the model captures the partition key and attachment exactly so
-// the refusal — and the diff guard against a partitioning mismatch — fire
-// on real catalogs, never silently.
-func TestRenderRefusesLivePartitionedTables(t *testing.T) {
+// Partitions are introspectable (the statement front door supports
+// in-place changes on them) but refuse to render: the model carries the
+// attachment but not the bounds, so the refusal — and the diff guard
+// against a partitioning mismatch — fire on real catalogs, never silently.
+func TestRenderRefusesLivePartition(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
 	defer pool.Close()
@@ -168,12 +167,6 @@ func TestRenderRefusesLivePartitionedTables(t *testing.T) {
 		_, err := pool.Exec(t.Context(), ddl)
 		require.NoError(t, err)
 	}
-
-	parent, err := schemadiff.Introspect(t.Context(), pool, schema, "metrics")
-	require.NoError(t, err)
-	assert.Equal(t, "RANGE (day)", parent.PartitionKey)
-	_, err = schemadiff.Render(parent)
-	require.ErrorIs(t, err, schemadiff.ErrUnrenderablePartition)
 
 	child, err := schemadiff.Introspect(t.Context(), pool, schema, "metrics_p1")
 	require.NoError(t, err)
@@ -252,6 +245,33 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	assert.Equal(t, []string{"orders.orders_user_id_fkey"}, referenced.ReferencedBy)
 	_, err = schemadiff.Render(referenced)
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
+}
+
+// Two schemas can each hold an orders table with a foreign key of the same
+// name. ReferencedBy names both the same way, and IncomingForeignKeys tells
+// them apart by the schema that holds each.
+func TestIntrospectIncomingForeignKeysNameTheirSchema(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	home := testutil.NewSchema(t, pool)
+	other := testutil.NewSchema(t, pool)
+	for _, ddl := range []string{
+		fmt.Sprintf("CREATE TABLE %s.users (id bigint PRIMARY KEY)", home),
+		fmt.Sprintf("CREATE TABLE %s.orders (id bigint PRIMARY KEY, user_id bigint CONSTRAINT orders_user_fkey REFERENCES %s.users)", home, home),
+		fmt.Sprintf("CREATE TABLE %s.orders (id bigint PRIMARY KEY, user_id bigint CONSTRAINT orders_user_fkey REFERENCES %s.users)", other, home),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	users, err := schemadiff.Introspect(t.Context(), pool, home, "users")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"orders.orders_user_fkey", "orders.orders_user_fkey"}, users.ReferencedBy)
+	assert.ElementsMatch(t, []schemadiff.IncomingForeignKey{
+		{Schema: home, Table: "orders", Constraint: "orders_user_fkey"},
+		{Schema: other, Table: "orders", Constraint: "orders_user_fkey"},
+	}, users.IncomingForeignKeys)
 }
 
 // A foreign key on a partitioned referencing table is cloned onto every
@@ -472,7 +492,7 @@ func TestRenderRoundTripsStorageParameters(t *testing.T) {
 
 	live, desired, changes := roundTrip(t, pool, schema, "tuned")
 	assert.Equal(t, []string{"autovacuum_vacuum_scale_factor=0.05", "fillfactor=70", "toast.autovacuum_enabled=false"}, live.Options)
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes)
 
 	rendered, err := schemadiff.Render(live)
@@ -631,7 +651,7 @@ func TestRenderRoundTripsIdentitySequenceOptions(t *testing.T) {
 	live, desired, changes := roundTrip(t, pool, schema, "tickets")
 	assert.Equal(t, &schemadiff.SequenceOptions{Type: "bigint", Start: 1000, Increment: 10, Min: 1, Max: 900000, Cache: 20}, live.Columns[0].Sequence)
 	assert.Nil(t, live.Columns[1].Sequence, "a sequence declared at the defaults records nothing")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes)
 
 	rendered, err := schemadiff.Render(live)

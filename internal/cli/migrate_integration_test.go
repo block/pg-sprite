@@ -68,20 +68,32 @@ func TestMigrateExecutesInstantChange(t *testing.T) {
 	assert.Equal(t, "integer", typ)
 }
 
-// Partitioned parents need a partition-aware online index flow. Until that
-// flow exists, preflight refuses every routed index-building shape while
-// preserving ordinary behavior for leaf partitions and parent ALTERs that
-// do not build indexes.
+// A plain CREATE INDEX on a partitioned parent runs as the partition-aware
+// index build. Every other routed index-building shape on a parent (a
+// constraint, a USING INDEX adoption, or the same index when forced) is
+// refused before any step runs, and leaf partitions and parent ALTERs that
+// do not build indexes behave as they do on any table.
 func TestMigratePartitionedTableAwareness(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	defer pool.Close()
 
-	t.Run("parent explicit concurrent index", func(t *testing.T) {
+	t.Run("parent explicit concurrent index builds per partition", func(t *testing.T) {
 		schema := createPartitionFixture(t, pool)
-		assertPartitionedParentRefusal(t, url, pool, schema,
-			fmt.Sprintf("CREATE INDEX CONCURRENTLY p_v_idx ON %s.p (v)", schema))
+		cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX CONCURRENTLY p_v_idx ON %s.p (v)", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		require.NoError(t, cmd.run(t.Context(), &out))
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		var valid int
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT count(*) FROM pg_index i
+			WHERE i.indrelid IN (to_regclass($1), to_regclass($2)) AND i.indisvalid`,
+			schema+".p", schema+".p1").Scan(&valid))
+		assert.Equal(t, 2, valid, "the parent index and the partition's index are both valid")
 	})
 
 	t.Run("forced parent plain index", func(t *testing.T) {
@@ -1209,7 +1221,9 @@ func TestMigrateChecksPrivilegesAtRoutedTier(t *testing.T) {
 }
 
 // Acceptance (iv): non-ALTER TABLE statements are refused with the safe-idiom
-// pointer and never executed. The gate needs no database at all.
+// pointer and never executed. The gate needs no database at all, except for
+// a single-index DROP INDEX, whose refusal depends on whether the index is
+// partitioned (TestMigrateDropIndexOfPartitionedTable).
 func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1217,14 +1231,14 @@ func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 		reason     verdict.Reason
 		saferIdiom string
 	}{
-		{"drop index", "DROP INDEX i", verdict.ReasonIndexStatement, "DROP INDEX CONCURRENTLY"},
+		{"drop index cascade", "DROP INDEX i CASCADE", verdict.ReasonIndexStatement, ""},
 		{"reindex", "REINDEX TABLE t", verdict.ReasonIndexStatement, "REINDEX ... CONCURRENTLY"},
 		// The already-concurrent forms carry no safer idiom: suggesting the
 		// statement the user submitted would loop a resubmitting automation.
 		// CREATE INDEX (both forms) passes the gate: the blocking form is
 		// substituted with its concurrent build, the concurrent form is
 		// driven directly.
-		{"drop index concurrently", "DROP INDEX CONCURRENTLY i", verdict.ReasonIndexStatement, ""},
+		{"drop several indexes concurrently", "DROP INDEX CONCURRENTLY i, j", verdict.ReasonIndexStatement, ""},
 		{"reindex concurrently", "REINDEX TABLE CONCURRENTLY t", verdict.ReasonIndexStatement, ""},
 		{"alter index", "ALTER INDEX i SET (fillfactor = 90)", verdict.ReasonUnsupportedStatement, ""},
 		{"create table", "CREATE TABLE t (id int)", verdict.ReasonUnsupportedStatement, "pg-sprite diff --desired schema.sql"},

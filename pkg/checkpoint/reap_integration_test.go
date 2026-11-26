@@ -165,6 +165,30 @@ func TestReapOrphanSlotsKeepsASlotARowInAnUnknownPhaseNames(t *testing.T) {
 	assert.True(t, slotExists(t, d.pool, live.Name()))
 }
 
+// LiveRowNamesSlot reads every table's rows by slot name, the read the
+// reaper decides ownership by: a slot a copying row of orders names is
+// live whichever table asks, a name no row names is not, and once the row
+// turns done the slot is no longer a live row's (ST-3).
+func TestLiveRowNamesSlotReadsEveryTablesRows(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	_, slot := d.slotFor(t, "orders")
+	_, unnamed := d.slotFor(t, "ledger")
+	d.claim(t, "orders", slot.Name(), checkpoint.PhaseCopying)
+
+	live, err := d.store.LiveRowNamesSlot(t.Context(), slot.Name())
+	require.NoError(t, err)
+	assert.True(t, live, "a copying row names the slot")
+	live, err = d.store.LiveRowNamesSlot(t.Context(), unnamed.Name())
+	require.NoError(t, err)
+	assert.False(t, live, "no row names the ledger's slot")
+
+	d.claim(t, "orders", slot.Name(), checkpoint.PhaseDone)
+	live, err = d.store.LiveRowNamesSlot(t.Context(), slot.Name())
+	require.NoError(t, err)
+	assert.False(t, live, "a done row does not keep its slot")
+}
+
 // A slot a stream holds is somebody's right now, row or no row: the reaper
 // reports it as active and leaves it, rather than wait out the holder and
 // drop a slot it may be about to claim. A slot of another database on the
@@ -215,6 +239,26 @@ func TestReapOrphanSlotsReportsAPrefixWearingForeignSlot(t *testing.T) {
 	assert.True(t, slotExists(t, d.pool, foreign))
 }
 
+// A slot of the engine's name shape that decodes with another output plugin
+// was made by another tool, since every engine slot decodes with pgoutput:
+// the pass reports it as foreign and leaves it, though no row names it.
+func TestReapOrphanSlotsReportsAnEngineShapedSlotOfAnotherPluginAsForeign(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	const other = "pgsprite_0000beef"
+	_, err := d.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'test_decoding')`, other)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := d.pool.Exec(context.WithoutCancel(t.Context()), `SELECT pg_drop_replication_slot($1)`, other)
+		assert.NoError(t, err)
+	})
+
+	reaped, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.Reaped{Foreign: []string{other}}, reaped)
+	assert.True(t, slotExists(t, d.pool, other))
+}
+
 // Without the checkpoint table no row can speak for any slot, so the pass
 // is refused rather than read every slot as an orphan.
 func TestReapOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
@@ -223,6 +267,70 @@ func TestReapOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
 	_, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
 	require.ErrorIs(t, err, checkpoint.ErrTableMissing)
 	assert.True(t, slotExists(t, d.pool, orphan.Name()), "a refused pass drops nothing")
+}
+
+// The preview sorts one fixture of every kind — an orphan, a slot a live
+// row names, a slot a stream holds, and a prefix-wearing foreign name — into
+// the same lists the pass then reports, with the orphan the preview names
+// as WouldDrop the one the pass drops. The preview itself drops nothing and
+// takes no lock, so every slot is still there after it (ST-3).
+func TestPreviewOrphanSlotsSortsAsTheReaperDoesAndDropsNothing(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	_, orphan := d.slotFor(t, "ledger")
+	_, live := d.slotFor(t, "orders")
+	d.claim(t, "orders", live.Name(), checkpoint.PhaseCopying)
+	heldTarget, held := d.slotFor(t, "events")
+	stream, err := decode.OpenStream(t.Context(), d.cfg, d.pool, heldTarget, held.ConsistentPoint())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, stream.Close(context.WithoutCancel(t.Context()))) })
+	const activeDeadline = 10 * time.Second
+	const activePoll = 20 * time.Millisecond
+	require.Eventually(t, func() bool {
+		status, found, err := decode.InspectSlot(t.Context(), d.pool, held.Name())
+		require.NoError(t, err)
+		return found && status.Active
+	}, activeDeadline, activePoll, "the stream's walsender should hold the slot")
+	const foreign = "pgsprite_backup"
+	_, err = d.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, foreign)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := d.pool.Exec(context.WithoutCancel(t.Context()), `SELECT pg_drop_replication_slot($1)`, foreign)
+		assert.NoError(t, err)
+	})
+
+	preview, err := d.store.PreviewOrphanSlots(t.Context())
+	require.NoError(t, err)
+	want := checkpoint.Reaped{
+		WouldDrop: []string{orphan.Name()},
+		Live:      []string{live.Name()},
+		Active:    []string{held.Name()},
+		Foreign:   []string{foreign},
+	}
+	assert.Equal(t, want, preview)
+	for _, name := range []string{orphan.Name(), live.Name(), held.Name(), foreign} {
+		assert.True(t, slotExists(t, d.pool, name), "the preview drops nothing: %s", name)
+	}
+
+	reaped, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.Reaped{
+		Dropped: preview.WouldDrop,
+		Live:    preview.Live,
+		Active:  preview.Active,
+		Foreign: preview.Foreign,
+	}, reaped, "the pass drops what the preview would drop and keeps what it would keep")
+	assert.False(t, slotExists(t, d.pool, orphan.Name()))
+}
+
+// The preview, like the pass, refuses a database without the checkpoint
+// table rather than read every slot as an orphan.
+func TestPreviewOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	_, orphan := d.slotFor(t, "orders")
+	_, err := d.store.PreviewOrphanSlots(t.Context())
+	require.ErrorIs(t, err, checkpoint.ErrTableMissing)
+	assert.True(t, slotExists(t, d.pool, orphan.Name()))
 }
 
 // reapOutcome is what a reaper pass run in the background came back with.

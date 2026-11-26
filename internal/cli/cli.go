@@ -1,7 +1,8 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
 // status (the optimistic front door), pull, diff, and fmt (the declarative
-// front door), lint and suggest (the offline checker and advisor), and
-// capabilities (the embedded support matrix).
+// front door), lint and suggest (the offline checker and advisor),
+// capabilities (the embedded support matrix), and reap (the orphan-slot
+// reaper).
 package cli
 
 import (
@@ -32,6 +33,7 @@ type CLI struct {
 	Suggest      SuggestCmd      `cmd:"" help:"Recommend safer native forms for risky DDL."`
 	Capabilities CapabilitiesCmd `cmd:"" help:"Print the embedded support matrix."`
 	Status       StatusCmd       `cmd:"" help:"Report the status of a running schema change."`
+	Reap         ReapCmd         `cmd:"" help:"Drop the orphan replication slots and publications that stopped copy-and-swap runs left in the connected database."`
 }
 
 // New returns a command tree for kong.Parse. The version is the same
@@ -128,7 +130,8 @@ type MigrateCmd struct {
 	ValidateTimeout   time.Duration `help:"Overall bound (statement_timeout) for one VALIDATE CONSTRAINT step; expect large tables to need a generous value." default:"30m"`
 	Force             string        `help:"Run the submitted form as-is, overriding a safer-sequence substitution or a rewrite-required/backend-unavailable refusal. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. The forced run is still parsed, preflighted, size-guarded, and budget-bounded; planner refusals (no known safe path) and unsupported statement kinds cannot be forced. Cannot be combined with --desired." placeholder:"SCHEMA.TABLE"`
 	AcceptBlocking    string        `help:"Run one refused blocking index statement as-is, without online safety: a plain single-relation DROP INDEX (not CASCADE), REINDEX INDEX, or REINDEX TABLE. The value is the typed acknowledgement: it must name the schema-qualified table whose lock you accept (the index's owning table) exactly. The statement runs in an engine-owned transaction under --lock-timeout and an explicitly supplied --statement-timeout, which must be longer than --lock-timeout; an exhausted lock budget refuses (exit 2), a cancelled or failed statement fails (exit 1), a commit exits 3. Every other refusal stands. A DROP INDEX also needs --allow-destructive naming the same table, or it is refused (exit 2, reason destructive-change). Cannot be combined with --force, --dry-run, or --desired." placeholder:"SCHEMA.TABLE"`
-	AllowDestructive  string        `help:"Run a statement that discards live data or structure: DROP COLUMN, DROP CONSTRAINT, ALTER COLUMN ... DROP NOT NULL, or a DROP INDEX run under --accept-blocking. Without it such a statement is refused (exit 2, reason destructive-change) before anything runs, on every route it could take. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly (for a DROP INDEX, the index's owning table). It acknowledges only the loss: the statement is still classified, routed, preflighted, size-guarded, and budget-bounded, and a statement that also needs --force or --accept-blocking needs both. With --dry-run the plan is reported as the acknowledged run would take it. Cannot be combined with --desired." name:"allow-destructive" placeholder:"SCHEMA.TABLE"`
+	AllowDestructive  string        `help:"Run a statement that discards live data or structure: DROP COLUMN, DROP CONSTRAINT, ALTER COLUMN ... DROP NOT NULL, or a DROP INDEX run under --accept-blocking. Without it such a statement is refused (exit 2, reason destructive-change) before anything runs, on every route it could take. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly (for a DROP INDEX, the index's owning table). It acknowledges only the loss: the statement is still classified, routed, preflighted, size-guarded, and budget-bounded, and a statement that also needs --force or --accept-blocking needs both. With --dry-run the plan is reported as the acknowledged run would take it. With --desired it names the desired file's table and requires --expect-fingerprint: a plan that drops anything runs only when the run pins the plan you reviewed, and the acknowledgement lifts only that plan's destructive statements; a desired index drop runs as DROP INDEX CONCURRENTLY." name:"allow-destructive" placeholder:"SCHEMA.TABLE"`
+	ExpectFingerprint string        `help:"Pin the reviewed desired-state plan: the run refuses, and executes nothing, unless the plan derived at run time has this fingerprint, the sha256:... value diff --desired prints. With --allow-destructive it is how a desired file that drops live structure runs. Requires --desired." name:"expect-fingerprint" placeholder:"sha256:..."`
 	LockAttempts      int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
 	LockBackoff       time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
@@ -329,3 +332,17 @@ type StatusCmd struct {
 
 // Run implements the status subcommand.
 func (c *StatusCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
+
+// ReapCmd drops the engine's orphan replication slots, publications
+// included, in the connected database: pgsprite_ slots of the engine's name
+// shape that no checkpoint row in a non-terminal phase names and no process
+// holds. Slots of other databases are never read.
+type ReapCmd struct {
+	DBFlags `embed:""`
+
+	DryRun bool `help:"Report which slots a run would drop and which it would keep, and drop nothing. A slot can change hands before a later run: a run then keeps a slot a schema change has claimed or a process holds since."`
+	JSON   bool `help:"Emit the report as JSON."`
+}
+
+// Run implements the reap subcommand.
+func (c *ReapCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }

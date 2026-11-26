@@ -162,12 +162,7 @@ ON CONFLICT (schema_name, table_name) DO UPDATE SET
 	updated_at = EXCLUDED.updated_at,
 	shadow_proof = COALESCE(EXCLUDED.shadow_proof, ` + tableIdent + `.shadow_proof),
 	statement = COALESCE(EXCLUDED.statement, ` + tableIdent + `.statement)
-` + saveGuardSQL
-
-// saveGuardSQL is the condition saveSQL updates an existing row under. The
-// SET list above it assigns rather than compares, and COALESCE is grammar,
-// so the guard holds every comparison the path could otherwise resolve.
-const saveGuardSQL = `WHERE ` + tableIdent + `.format_version OPERATOR(pg_catalog.=) EXCLUDED.format_version
+WHERE ` + tableIdent + `.format_version OPERATOR(pg_catalog.=) EXCLUDED.format_version
 	AND ` + tableIdent + `.source_fingerprint OPERATOR(pg_catalog.=) EXCLUDED.source_fingerprint
 	AND ` + tableIdent + `.target_fingerprint OPERATOR(pg_catalog.=) EXCLUDED.target_fingerprint
 	AND ` + tableIdent + `.phase OPERATOR(pg_catalog.=) ANY($15)

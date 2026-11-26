@@ -29,6 +29,7 @@ func TestPullExportsAllRenderableTablesAndReportsRefusals(t *testing.T) {
 		fmt.Sprintf("CREATE INDEX events_created_at_idx ON %s.events (created_at)", schema),
 		fmt.Sprintf("CREATE TABLE %s.metrics (id bigint, day date) PARTITION BY RANGE (day)", schema),
 		fmt.Sprintf("CREATE TABLE %s.metrics_2026 PARTITION OF %s.metrics FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')", schema, schema),
+		fmt.Sprintf("CREATE UNLOGGED TABLE %s.scratchpad (id bigint PRIMARY KEY)", schema),
 	} {
 		_, err := pool.Exec(t.Context(), ddl)
 		require.NoError(t, err)
@@ -40,17 +41,21 @@ func TestPullExportsAllRenderableTablesAndReportsRefusals(t *testing.T) {
 	err = cmd.run(t.Context(), &out)
 	require.ErrorIs(t, err, verdict.ErrRefused)
 
+	// The partitioned parent is pulled and its partition is not: the
+	// partition is not a table the desired model manages.
 	assert.Contains(t, out.String(), "PULLED  accounts -> ")
 	assert.Contains(t, out.String(), "PULLED  events -> ")
-	assert.Contains(t, out.String(), "REFUSED metrics: render table \"metrics\": partitioned parent")
+	assert.Contains(t, out.String(), "PULLED  metrics -> ")
+	assert.Contains(t, out.String(), "REFUSED scratchpad: render table \"scratchpad\"")
 	assert.NotContains(t, out.String(), "metrics_2026")
-	assert.Contains(t, out.String(), "Summary: 2 pulled, 1 refused, 0 errors")
+	assert.Contains(t, out.String(), "Summary: 3 pulled, 1 refused, 0 errors")
 
 	entries, err := os.ReadDir(outDir)
 	require.NoError(t, err)
-	require.Len(t, entries, 2)
+	require.Len(t, entries, 3)
 	assert.Equal(t, "accounts.sql", entries[0].Name())
 	assert.Equal(t, "events.sql", entries[1].Name())
+	assert.Equal(t, "metrics.sql", entries[2].Name())
 	for _, entry := range entries {
 		raw, err := os.ReadFile(filepath.Join(outDir, entry.Name()))
 		require.NoError(t, err)

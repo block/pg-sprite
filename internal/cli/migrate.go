@@ -42,9 +42,10 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	// Gate before dialing so an unsupported statement kind refuses without
 	// a database connection. Run re-checks the gate — this early check is
 	// an ordering choice, not the safety boundary. An eligible refusal the
-	// operator acknowledged with --accept-blocking is the one gate refusal
-	// that needs the database: Run resolves the locked table and executes.
-	if v, refused := migrate.Gate(st); refused && !c.acceptsRefusal(v) {
+	// operator acknowledged with --accept-blocking needs the database: Run
+	// resolves the locked table and executes. So does a single-index DROP
+	// INDEX, whose refusal depends on whether the index is partitioned.
+	if v, refused := migrate.Gate(st); refused && !c.acceptsRefusal(v) && !migrate.GateReadsCatalog(st) {
 		return c.emit(out, cliSaferIdiom(st, v))
 	}
 
@@ -94,9 +95,10 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 			Concurrent: executor.ConcurrentBudget{Overall: c.IndexBuildTimeout},
 			Validate:   executor.ValidateBudget{LockTimeout: c.LockTimeout, Overall: c.ValidateTimeout},
 		},
-		Retry:  c.retryPolicy(),
-		Logger: logger,
-		Audit:  c.audit(),
+		Retry:      c.retryPolicy(),
+		Logger:     logger,
+		Audit:      c.audit(),
+		Connection: c.Config(),
 		CopySwap: migrate.CopySwapOptions{
 			Enabled:             c.CopyAndSwap,
 			Connection:          c.Config(),

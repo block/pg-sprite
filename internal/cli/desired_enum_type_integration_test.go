@@ -142,6 +142,39 @@ func TestDesiredEnumTypeFileDryRun(t *testing.T) {
 		assert.Equal(t, []string{"new", "shipped"}, live.Labels, "the dry run adds nothing")
 	})
 
+	// The dry run compares --expect-fingerprint as the run does: a pin for
+	// another plan is the run's own refusal, the plan's fingerprint pins it,
+	// and neither adds a label.
+	t.Run("compares the pin as the run does", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.order_status AS ENUM ('new', 'shipped')`, schema))
+		require.NoError(t, err)
+		const file = "CREATE TYPE order_status AS ENUM ('new', 'paid', 'shipped');\n"
+
+		diff := newDiffCmd(t, url, schema, file)
+		diff.JSON = true
+		var diffOut strings.Builder
+		require.NoError(t, diff.run(t.Context(), &diffOut))
+		var reviewed plan.Report
+		require.NoError(t, json.Unmarshal([]byte(diffOut.String()), &reviewed))
+
+		stale := desiredCommand(t, url, schema, file, "--dry-run", "--expect-fingerprint", "sha256:stale")
+		var out strings.Builder
+		require.ErrorIs(t, stale.run(t.Context(), &out), verdict.ErrRefused)
+		var result migrate.DesiredResult
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &result), out.String())
+		assert.Equal(t, verdict.ReasonPlanFingerprintMismatch, result.Reason)
+		assert.Contains(t, result.Detail, reviewed.Fingerprint)
+
+		current := desiredCommand(t, url, schema, file, "--dry-run", "--expect-fingerprint", reviewed.Fingerprint)
+		out.Reset()
+		require.NoError(t, current.run(t.Context(), &out))
+
+		live, err := schemadiff.IntrospectEnumType(t.Context(), pool, schema, "order_status")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"new", "shipped"}, live.Labels, "a dry run adds nothing")
+	})
+
 	t.Run("refuses a file the type cannot converge onto", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.order_status AS ENUM ('new', 'paid')`, schema))

@@ -33,7 +33,7 @@ func TestRunSequenceAsStepReportsEveryStatementAsTheCallersStep(t *testing.T) {
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
 	require.Len(t, steps, 2, "the NOT VALID add, then the validation")
 	rep, err := executor.RunSequenceAsStep(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy(),
-		nil, nil, executor.RunStep{Tracker: tracker, Step: 3})
+		nil, nil, nil, executor.RunStep{Tracker: tracker, Step: 3})
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 2)
 

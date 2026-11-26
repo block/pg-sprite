@@ -183,6 +183,15 @@ const (
 	// point of starting over. The row is left as found for a Run without
 	// the restart to finish.
 	CauseRestartSwapCommitted RefusalCause = "restart-swap-committed"
+	// CauseFinishAdmissionStale means a Run was handed a target the disk
+	// check admitted only to finish a committed swap
+	// (preflight.CopySwapTarget.FinishesCommittedSwap), and the row it
+	// found under its lock asks for more (ST-6): no row, a done row it
+	// would replace, a row it would discard, or a row whose swap did not
+	// commit. That run would build a shadow or resume a copy on a volume
+	// never measured for one, so nothing is written and the caller checks
+	// the environment again.
+	CauseFinishAdmissionStale RefusalCause = "finish-admission-stale"
 	// CauseResumeRowMismatch means the checkpoint row handed to a resume
 	// does not describe the proven target and built shadow (ST-2): it is
 	// keyed on another table, names another shadow or slot, or carries the
@@ -215,7 +224,10 @@ const (
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
 	// of another database. It is neither decoded from nor replaced; an
-	// operator renames or drops it.
+	// operator renames or drops it. A Discard that finds no row refuses
+	// the same way a slot of the table's derived name that a non-terminal
+	// row of another table names, since two tables can derive the same
+	// name: the slot is that run's, and is left for it.
 	CauseResumeSlotForeign RefusalCause = "resume-slot-foreign"
 	// CauseResumeSlotHeld means the row's slot is intact but another
 	// backend holds it (ST-4), so no stream can be opened on it now. The
@@ -291,6 +303,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeTerminal,
 		CauseResumeCutover,
 		CauseRestartSwapCommitted,
+		CauseFinishAdmissionStale,
 		CauseResumeRowMismatch,
 		CauseResumeRowDecoding,
 		CauseShadowUnrecorded,
@@ -312,7 +325,7 @@ func (c RefusalCause) Invariant() string {
 	case CauseLockUnproven, CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed:
 		return "LK-1"
 	case CauseProofEmpty, CauseSourceShape, CauseStatementNewSequence, CauseRelationReplaced,
-		CauseSwapMismatch, CauseCopyShadowMismatch, CauseCopyChunkUnknown:
+		CauseSwapMismatch, CauseCopyShadowMismatch, CauseCopyChunkUnknown, CauseFinishAdmissionStale:
 		return "ST-6"
 	case CauseCopyFrontierBroken:
 		return "CO-4"
@@ -368,7 +381,7 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
 		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
 		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld,
-		CauseRestartSwapCommitted, CauseCopyConversionDrift:
+		CauseRestartSwapCommitted, CauseCopyConversionDrift, CauseFinishAdmissionStale:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewColumn, CauseStatementNewSequence:
 		return refusal.ClassCapabilityBoundary
