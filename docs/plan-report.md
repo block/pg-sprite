@@ -214,7 +214,7 @@ code's full manual path; this contract embeds it, so a new guidance code bumps t
 |---|---|
 | `split-statement` | Split the multi-operation statement into one operation per statement, then plan again. |
 | `add-column-then-constraint` | Add the plain column first, then build the inline constraint as a separate, named ADD CONSTRAINT with its online pattern. |
-| `pre-add-validated-check` | Pre-add a validated CHECK matching the partition bound before attaching. |
+| `pre-add-validated-check` | Pre-add a validated CHECK matching the partition bound on the child, and one excluding it on the `DEFAULT` partition, and build the parent's indexes on the child concurrently (a unique one backing its constraint through `USING INDEX`); attach, then drop the CHECKs. |
 | `not-null-scaffold` | Prove the invariant with a NOT VALID CHECK plus online VALIDATE, then flip NOT NULL. |
 | `name-constraint-then-validate` | Name the constraint, add it NOT VALID, then VALIDATE it online. |
 | `unique-index-then-constraint` | Build the unique index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with ADD CONSTRAINT … USING INDEX. |

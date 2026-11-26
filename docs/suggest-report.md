@@ -112,10 +112,14 @@ with its online pattern.
 
 **Emitted for:** `ATTACH PARTITION`.
 
-The attach scans the child under the parent's lock unless a validated CHECK matching the
-partition bound already exists on the child. Pre-add that CHECK (NOT VALID, then
-VALIDATE), attach, then drop it. The bound-matching CHECK cannot be constructed from the
-statement alone.
+The attach scans the child under `ACCESS EXCLUSIVE` unless a validated CHECK matching the
+partition bound already exists on the child, scans the parent's `DEFAULT` partition unless a
+validated CHECK there excludes the bound, and builds each parent index the child lacks. Pre-add
+both CHECKs (NOT VALID, then VALIDATE), build the parent's indexes on the child with
+`CONCURRENTLY` (a unique one backing its constraint through `ADD CONSTRAINT … USING INDEX`),
+attach, then drop the CHECKs. The CHECKs cannot be constructed from the statement alone. The
+steps are in the
+[online-DDL reference](postgres-online-ddl-reference.md#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build).
 
 ### `not-null-scaffold`
 
