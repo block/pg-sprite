@@ -75,7 +75,9 @@ func TestReadmeWorkflowBadgesNameExistingWorkflows(t *testing.T) {
 
 // The README's maturity badge is the project-level status, and it is preview
 // exactly while some supported capability row is in preview: a change that
-// takes the last preview route to ga changes the badge in the same PR.
+// takes the last preview route to ga changes the badge's word, its color, and
+// the preview notice under the badges in the same PR. The notice is the
+// blockquote whose bold opener starts with "Preview:".
 func TestReadmeMaturityBadgeMatchesTheCapabilityMatrix(t *testing.T) {
 	rows, err := capabilities.Rows()
 	require.NoError(t, err)
@@ -87,8 +89,18 @@ func TestReadmeMaturityBadgeMatchesTheCapabilityMatrix(t *testing.T) {
 		}
 	}
 
-	badge := regexp.MustCompile(`\[!\[Maturity: ([a-z]+)\]\(https://img\.shields\.io/badge/maturity-([a-z]+)-`).FindStringSubmatch(readRepoFile(t, "README.md"))
-	require.Len(t, badge, 3, "the README has a maturity badge")
+	color := map[capabilities.Maturity]string{
+		capabilities.MaturityPreview: "orange",
+		capabilities.MaturityGA:      "brightgreen",
+	}
+
+	readme := readRepoFile(t, "README.md")
+	badge := regexp.MustCompile(`\[!\[Maturity: ([a-z]+)\]\(https://img\.shields\.io/badge/maturity-([a-z]+)-([a-z]+)\)`).FindStringSubmatch(readme)
+	require.Len(t, badge, 4, "the README has a maturity badge")
 	assert.Equal(t, string(want), badge[2], "the badge image")
 	assert.Equal(t, string(want), badge[1], "the badge alt text")
+	assert.Equal(t, color[want], badge[3], "the badge color")
+
+	hasPreviewNotice := regexp.MustCompile(`(?m)^> \*\*Preview:`).MatchString(readme)
+	assert.Equal(t, want == capabilities.MaturityPreview, hasPreviewNotice, "the README's preview notice")
 }
