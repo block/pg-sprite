@@ -244,6 +244,12 @@ func parseDesiredTree(source *desiredSource, stmts []fileStatement) (DesiredSche
 		i, raw := stmt.index, stmt.raw
 		st, err := admitDesiredStatement(source, raw, ds.table, partition)
 		if err != nil {
+			if refusedFirstTable(ds.table, raw, err) {
+				// The file's table is refused, but it is still the file's
+				// table: a later CREATE TABLE is a second one, and the
+				// table's own indexes are not on another table.
+				ds.table = raw.GetStmt().GetCreateStmt().GetRelation().GetRelname()
+			}
 			if err := refused.refuse(i, raw, err); err != nil {
 				return DesiredSchema{}, err
 			}
@@ -287,6 +293,15 @@ func parseDesiredTree(source *desiredSource, stmts []fileStatement) (DesiredSche
 	}
 	ds.statements = executionOrder(ds.statements)
 	return ds, nil
+}
+
+// refusedFirstTable reports whether raw, refused with err, is the file's first
+// CREATE TABLE and is still its table: a partition of another table is not.
+func refusedFirstTable(table string, raw *pganalyze.RawStmt, err error) bool {
+	if table != "" || raw.GetStmt().GetCreateStmt() == nil {
+		return false
+	}
+	return !errors.Is(err, ErrDesiredPartitions)
 }
 
 // admittedIndex is a CREATE INDEX of a desired file, kept with its position

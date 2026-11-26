@@ -65,6 +65,7 @@ func (e *RefusedStatementsError) Unwrap() []error {
 type desiredSource struct {
 	text    string
 	tokens  []*pganalyze.ScanToken
+	scanErr error
 	scanned bool
 }
 
@@ -75,11 +76,16 @@ func newDesiredSource(text string) *desiredSource {
 // locate returns raw's verbatim text and where it starts in the file.
 func (s *desiredSource) locate(raw *pganalyze.RawStmt) (SourceStatement, error) {
 	if !s.scanned {
+		s.scanned = true
 		scan, err := pgquery.Scan(s.text)
 		if err != nil {
-			return SourceStatement{}, fmt.Errorf("scan desired file: %w", err)
+			s.scanErr = fmt.Errorf("scan desired file: %w", err)
+		} else {
+			s.tokens = scan.GetTokens()
 		}
-		s.tokens, s.scanned = scan.GetTokens(), true
+	}
+	if s.scanErr != nil {
+		return SourceStatement{}, s.scanErr
 	}
 	return locate(s.text, s.tokens, raw), nil
 }
@@ -114,11 +120,13 @@ func newRefusalCollector(source *desiredSource) *refusalCollector {
 }
 
 // refuse records why the statement at index (0-based) of the file, raw, is
-// refused. It fails only when the source cannot be scanned to locate it.
+// refused. It fails only when the source cannot be scanned to locate it, and
+// the failure still matches the refusal's cause, so a caller asking why the
+// file was refused gets the same answer.
 func (c *refusalCollector) refuse(index int, raw *pganalyze.RawStmt, cause error) error {
 	at, err := c.source.locate(raw)
 	if err != nil {
-		return fmt.Errorf("statement %d: locate a refused statement: %w", index+1, err)
+		return fmt.Errorf("statement %d: %w (locate the refused statement: %w)", index+1, cause, err)
 	}
 	c.refusals = append(c.refusals, Refusal{
 		Statement: index + 1,

@@ -148,3 +148,51 @@ CREATE INDEX orders_owner ON orders (owner);
 	assert.Equal(t, 1, got.Column)
 	assert.ErrorIs(t, got, ErrWrongIndexTarget)
 }
+
+// A refused statement that does not start a line is located by the column an
+// editor shows, which counts characters, not bytes: the accented letter
+// before the COMMENT is one column, though it is two bytes.
+func TestRefusalColumnCountsCharacters(t *testing.T) {
+	_, err := ParseDesiredFile("CREATE TABLE t (n text DEFAULT 'é'); COMMENT ON TABLE t IS 'x';")
+	refused, ok := errors.AsType[*RefusedStatementsError](err)
+	require.True(t, ok, "%v", err)
+	require.Len(t, refused.Refusals, 1)
+	assert.Equal(t, 2, refused.Refusals[0].Statement)
+	assert.Equal(t, 1, refused.Refusals[0].Line)
+	assert.Equal(t, 38, refused.Refusals[0].Column)
+}
+
+// A file whose first CREATE TABLE is refused still has that table as its
+// table: a later CREATE TABLE is refused as a second table, and an index on
+// the refused table is not refused as an index on another one.
+func TestParseDesiredFileKeepsARefusedTableAsTheFilesTable(t *testing.T) {
+	_, err := ParseDesiredFile("CREATE TABLE public.t (id int);\n" +
+		"CREATE TABLE u (id int);\n" +
+		"CREATE INDEX ON t (id);\n")
+	refused, ok := errors.AsType[*RefusedStatementsError](err)
+	require.True(t, ok, "%v", err)
+	require.Len(t, refused.Refusals, 2, "the qualified table and the second table are refused; the index is not")
+	assert.Equal(t, 1, refused.Refusals[0].Statement)
+	assert.ErrorIs(t, refused.Refusals[0], ErrQualifiedName)
+	assert.Equal(t, 2, refused.Refusals[1].Statement)
+	assert.ErrorIs(t, refused.Refusals[1], ErrMultipleCreateTables)
+	assert.NotErrorIs(t, err, ErrWrongIndexTarget)
+}
+
+// A source that cannot be scanned fails every refusal that needs a location
+// with the one scan failure, and the failure still matches the refusal's
+// cause, so a caller asking why the file was refused gets the same answer.
+func TestRefusalCollectorKeepsTheCauseWhenTheSourceCannotBeScanned(t *testing.T) {
+	source := newDesiredSource("'unterminated")
+	collector := newRefusalCollector(source)
+
+	first := collector.refuse(0, nil, ErrDisallowedStatement)
+	require.Error(t, first)
+	assert.ErrorIs(t, first, ErrDisallowedStatement)
+	assert.Contains(t, first.Error(), "unterminated quoted string")
+
+	scanErr := source.scanErr
+	second := collector.refuse(1, nil, ErrMultipleCreateTables)
+	assert.ErrorIs(t, second, ErrMultipleCreateTables)
+	assert.Same(t, scanErr, source.scanErr, "the source is scanned once")
+}
