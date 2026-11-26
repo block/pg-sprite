@@ -261,8 +261,8 @@ ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lo
 | `CLUSTER` / `VACUUM FULL` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** (`pg_repack`) | Use `pg_repack` |
 | `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief and no scan, but it queues behind long-running queries and then blocks every reader of the parent |
 | `ATTACH PARTITION` | SHARE UPDATE EXCLUSIVE on parent + scan of child | No | Yes | ➖ Native pattern | Add a validated `CHECK` matching the bound on the child first to skip the scan |
-| `DETACH PARTITION` | ACCESS EXCLUSIVE | No | No | ➖ Use `CONCURRENTLY` | |
-| `DETACH PARTITION CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | PG 14+ |
+| `DETACH PARTITION` | ACCESS EXCLUSIVE on parent and partition | No | No | ➖ Use `CONCURRENTLY` | The only detach when the parent has a `DEFAULT` partition |
+| `DETACH PARTITION CONCURRENTLY` | SHARE UPDATE EXCLUSIVE on parent and partition, then ACCESS EXCLUSIVE on the partition alone | No | Yes | ❌ No | PG 14+; two transactions, never in a transaction block; refused when the parent has a `DEFAULT` partition. Between them it waits for every transaction that could still see the partition through the parent (a lock wait, so `lock_timeout` cancels it), and rows routed into the partition's range fail meanwhile; an interrupted run leaves the partition detach-pending until `DETACH PARTITION ... FINALIZE` |
 
 ## The headline takeaway (what the engine must cover)
 
@@ -750,8 +750,8 @@ an unclassified statement is never executed.
 | warning on a plan `--allow-destructive` acknowledged; without it `migrate` refuses the statement as `destructive-change` | per the routing decision | per the routing decision | 2 unless acknowledged |
 
 The change discards live data or structure: `DROP COLUMN`, `DROP TABLE`,
-truncating conversions, a dropped constraint or index, or `DROP NOT NULL`
-(which discards the same guarantee as dropping the equivalent constraint;
+truncating conversions, a dropped constraint or index, a detached partition
+(its rows leave the table), or `DROP NOT NULL` (which discards the same guarantee as dropping the equivalent constraint;
 `DROP DEFAULT` is deliberately not destructive — a default guarantees nothing
 about existing rows and is recreated by a metadata-only statement). Emitted
 alongside the routing decision as a warning so destructive intent is always

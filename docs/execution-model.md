@@ -78,6 +78,23 @@ autocommit-each-step has two shapes in the executor:
   cancelling leaves the build running on the server with no timeout. The
   stop path for a build the client no longer holds is `Tracker.CancelBuild`
   while the call is live, or an operator's `pg_cancel_backend` afterwards.
+- **`ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY` alone (step kind
+  `detach-partition-concurrently`)** also refuses a transaction block and
+  commits two transactions of its own: the first marks the partition
+  detach-pending under `SHARE UPDATE EXCLUSIVE` on the table and the
+  partition, then the statement waits for every transaction that could
+  still see the partition through the table, and the second takes `ACCESS
+  EXCLUSIVE` on the partition alone to finish. It runs on a dedicated
+  session under the brief budgets: `lock_timeout` bounds each lock wait,
+  the wait for older transactions included, and `statement_timeout` the
+  whole statement. Before it runs, a table with a `DEFAULT` partition, which
+  PostgreSQL refuses a concurrent detach for, is refused
+  (`detach-default-partition`), and a partition an earlier run left
+  detach-pending is finished with `DETACH PARTITION ... FINALIZE` instead.
+  A lock budget exhausted before the first transaction commits is retried
+  like a brief step's, and once the partition is detach-pending the retry
+  runs `FINALIZE`. A step that stops with the partition still pending fails
+  with `partition-detach-interrupted`.
 
 Each step's class is the `kind` field of its step report in the JSON
 verdict — the field retry logic branches on. A failed `brief` step means
@@ -356,6 +373,8 @@ concurrently is.
 | `unique-index-partition-key` | yes | A unique index does not contain, among its plain key columns, the partition key of the parent and of every sub-partitioned partition. PostgreSQL checks each partitioned table only when it gets its index, so the build checks every level first; refused before anything is created, as an `unsupported-statement`, `by-design` refusal, in the dry run too; `UniqueIndexPartitionKeyError.Missing` names each table and the columns its key lacks. Add the missing partition key columns to the index's key |
 | `table-lock-unconfirmed` | yes | The pool's role cannot see when the session holding the partitioned index build's table lock started, so the build cannot confirm the lock is its own session's rather than one with the same PID on another server; refused before anything is created. Connect the pool as the role the connection target uses, or grant the pool's role `pg_read_all_stats` |
 | `partition-detach-pending` | yes | The partition tree holds a partition whose `DETACH PARTITION ... CONCURRENTLY` did not finish. The server leaves that partition out when it attaches an index, so the parent's index could never become valid, and out of a parent's column drop, so it would keep its copy of the column; refused before anything is created when the tree is first read, and before a reviewed column drop runs. Finish the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`, then rerun |
+| `detach-default-partition` | yes | A `DETACH PARTITION ... CONCURRENTLY` step's table has a `DEFAULT` partition, and PostgreSQL refuses a concurrent detach there in every supported version; refused before any step runs, as an `unsupported-statement`, `by-design` refusal, in the dry run too. The only detach the table takes is the plain one, which holds `ACCESS EXCLUSIVE` on the table and the partition while it runs: submit it under the force and destructive acknowledgements, or detach the `DEFAULT` partition first |
+| `partition-detach-interrupted` | no | A `DETACH PARTITION ... CONCURRENTLY` step stopped after its first transaction committed: a budget, a cancellation, or a server error ended its wait for older transactions or its second transaction. The partition is detach-pending: queries of the table no longer read it and no row is routed into its range, but it stays in `pg_inherits` (`inhdetachpending`). Running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`, as does running that statement directly |
 | `partitioned-index-tablespace` | yes | The partitioned index statement has a `TABLESPACE` clause. A partition's index is built from the definition the server prints for the parent's index, which never names a tablespace, so the clause would place the parent's index and leave every partition's index in the default tablespace; refused before anything is created |
 | `partitioned-index-unsettled` | no | Partitions kept appearing without an index until the build ran out of passes; everything finished stays attached and a rerun resumes |
 | `empty-sequence` | yes | The sequence had no steps to run |

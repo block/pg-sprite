@@ -366,12 +366,14 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences, and `migrate`
 executes them through `pkg/executor`'s sequence executor under the autocommit-each-step
 contract (brief steps bounded like an optimistic attempt, the validation scan and concurrent
-builds under their own budgets). The one-step `CONCURRENTLY` rewrites the classifier also
-emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: the imperative statement gate of
-`migrate --alter` refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
-whole-sequence admission refuses a substituted `DETACH PARTITION CONCURRENTLY` typed before
-anything executes — a cancelled wait leaves recovery states it does not yet own — which
-`migrate` reports as a refusal verdict, not an operational error. When the
+builds under their own budgets). A substituted `DETACH PARTITION CONCURRENTLY` runs as its
+own step kind on a dedicated session under the brief budgets, and finishes a partition an
+earlier run left detach-pending; on a table with a `DEFAULT` partition, which PostgreSQL
+refuses it for, the whole-sequence admission refuses it from the catalog before anything
+executes. The other one-step `CONCURRENTLY` rewrites the classifier emits (`DROP INDEX`,
+`REINDEX`) are not driven: the imperative statement gate of `migrate --alter` refuses them
+with the safer-idiom pointer, which `migrate` reports as a refusal verdict, not an
+operational error. When the
 planner says a safer sequence is required but cannot construct one, `migrate` refuses
 (`not-native-safe-rewrite-required`) rather than run the blocking form the plan itself
 flagged.

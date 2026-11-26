@@ -43,6 +43,9 @@ type irreversibleScenario struct {
 	// to protect: the scenario plants a shadow no checkpoint records, and
 	// without the acknowledgement the run is refused and leaves it standing.
 	leftover bool
+	// partitioned builds the orders table partitioned by range of id, for
+	// an entry whose statement needs a partition to act on.
+	partitioned bool
 }
 
 // mismatchIs pins a mismatched acknowledgement's usage error to its
@@ -84,6 +87,13 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 			sql:      `ALTER TABLE {schema}.orders ALTER COLUMN note DROP NOT NULL`,
 			options:  allowDestructive,
 			mismatch: mismatchIs(ErrAllowDestructiveMismatch),
+		},
+		// The detached partition's rows leave the table.
+		"shape: " + statement.Op{Kind: statement.OpDetachPartition}.Describe(): {
+			sql:         `ALTER TABLE {schema}.orders DETACH PARTITION {schema}.orders_low`,
+			options:     allowDestructive,
+			mismatch:    mismatchIs(ErrAllowDestructiveMismatch),
+			partitioned: true,
 		},
 		// The blocking drop is accepted, so only the loss is left to
 		// acknowledge.
@@ -193,7 +203,7 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 
 			if op.refusal != "" {
 				t.Run("refused without the acknowledgement", func(t *testing.T) {
-					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL)
+					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitioned)
 					table := schema + ".orders"
 					v, err := Run(t.Context(), pool, parseIrreversible(t, sc.sql, schema), sc.options(cfg, table, ""))
 					require.NoError(t, err, "a refusal is a verdict, not an error")
@@ -206,7 +216,7 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 
 			if sc.leftover {
 				t.Run("a stopped run's leftover stays without the acknowledgement", func(t *testing.T) {
-					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL)
+					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitioned)
 					table := schema + ".orders"
 					shadow := pgx.Identifier{schema, schemachange.ShadowName(schema, "orders")}.Sanitize()
 					_, err := pool.Exec(t.Context(), `CREATE TABLE `+shadow+` (id bigint PRIMARY KEY)`)
@@ -225,7 +235,7 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 			}
 
 			t.Run("a usage error when the acknowledgement names another table", func(t *testing.T) {
-				cfg, pool, schema, before := newIrreversibleFixture(t, serverURL)
+				cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitioned)
 				table := schema + ".orders"
 				v, err := Run(t.Context(), pool, parseIrreversible(t, sc.sql, schema), sc.options(cfg, table, schema+".other"))
 				require.Error(t, err)
@@ -261,8 +271,10 @@ func assertScenarioHasItsShape(t *testing.T, key, sql string) {
 // for each entry to discard, and rows a copy would carry. It returns the
 // connection config, a pool sized for copy-and-swap (a smaller one is
 // refused before any gate runs, as a failure rather than a verdict), the
-// schema, and the table's catalog state.
-func newIrreversibleFixture(t *testing.T, serverURL string) (dbconn.Config, *pgxpool.Pool, string, string) {
+// schema, and the table's catalog state. Partitioned, the table is split by
+// range of id into orders_low and orders_high, and the probe insert lands in
+// orders_high.
+func newIrreversibleFixture(t *testing.T, serverURL string, partitioned bool) (dbconn.Config, *pgxpool.Pool, string, string) {
 	t.Helper()
 	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConnsFloor: CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
@@ -270,17 +282,26 @@ func newIrreversibleFixture(t *testing.T, serverURL string) (dbconn.Config, *pgx
 	t.Cleanup(pool.Close)
 
 	schema := testutil.NewSchema(t, pool)
-	for _, sql := range []string{`
+	partitionBy := ""
+	var partitions []string
+	if partitioned {
+		partitionBy = " PARTITION BY RANGE (id)"
+		partitions = []string{
+			`CREATE TABLE {schema}.orders_low PARTITION OF {schema}.orders FOR VALUES FROM (MINVALUE) TO (500)`,
+			`CREATE TABLE {schema}.orders_high PARTITION OF {schema}.orders FOR VALUES FROM (500) TO (MAXVALUE)`,
+		}
+	}
+	for _, sql := range append(append([]string{`
 		CREATE TABLE {schema}.orders (
 			id   bigint PRIMARY KEY,
 			qty  integer NOT NULL CONSTRAINT orders_qty_positive CHECK (qty > 0),
 			note text NOT NULL
-		)`,
+		)` + partitionBy}, partitions...),
 		`CREATE INDEX orders_qty_idx ON {schema}.orders (qty)`, `
 		INSERT INTO {schema}.orders (id, qty, note)
 		SELECT g, g, 'note ' || g
 		FROM generate_series(1, 100) g`,
-	} {
+	) {
 		_, err := pool.Exec(t.Context(), strings.ReplaceAll(sql, "{schema}", schema))
 		require.NoError(t, err)
 	}

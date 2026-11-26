@@ -11,7 +11,7 @@ the examples at the end of this page.
 `migrate --dry-run --json` emits a refusal verdict instead of a report when the apply would
 refuse the statement before planning it, or refuse its routed steps from their shape alone:
 an unsupported statement kind, an unnamed or `IF NOT EXISTS` index build, a `DETACH
-PARTITION`. `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
+PARTITION` from a table with a `DEFAULT` partition. `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
 file itself is refused before a plan exists: a statement the file may not hold (a type, a data
 change), a second table, partitions of a table, a table shape the planner cannot build, or a
 difference the diff does not converge (storage parameters, persistence, a collation, an identity,

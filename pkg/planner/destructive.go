@@ -8,7 +8,10 @@ import "github.com/block/pg-sprite/pkg/statement"
 // schema was providing — and dropping NOT NULL discards exactly the same
 // guarantee its constraint form would, so it is marked identically — and a
 // dropped index discards a structure that is expensive to rebuild (and,
-// for a unique index, the uniqueness guarantee). Dropping a DEFAULT is
+// for a unique index, the uniqueness guarantee). A detached partition
+// takes its rows out of the table: they stay in a table of their own, but
+// every query of the table stops reading them, and attaching it again scans
+// it under a lock that blocks writes. Dropping a DEFAULT is
 // deliberately not destructive: a default guarantees nothing about
 // existing rows and is recreated by a metadata-only statement.
 //
@@ -44,7 +47,8 @@ func classifyDestructive(kind statement.OpKind) (destructive, classified bool) {
 	case statement.OpDropColumn,
 		statement.OpDropConstraint,
 		statement.OpDropIndex,
-		statement.OpDropNotNull:
+		statement.OpDropNotNull,
+		statement.OpDetachPartition:
 		return true, true
 	case statement.OpUnrecognized,
 		statement.OpCreateTable,
@@ -63,7 +67,6 @@ func classifyDestructive(kind statement.OpKind) (destructive, classified bool) {
 		statement.OpAddConstraint,
 		statement.OpValidateConstraint,
 		statement.OpAttachPartition,
-		statement.OpDetachPartition,
 		statement.OpCreateIndex,
 		statement.OpReindex,
 		statement.OpAddEnumValue:

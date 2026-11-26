@@ -92,6 +92,22 @@ var migrateClaims = map[string]migrateClaim{
 			`CREATE INDEX CONCURRENTLY accounts_state_idx ON %[1]s.accounts (state)`,
 		},
 	},
+	// The plain detach is rewritten to its concurrent form, and both forms
+	// run concurrently; the partition's rows leave the table, so the run
+	// needs the destructive acknowledgement.
+	"detach-partition-concurrently": {
+		setup: `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY
+			) PARTITION BY RANGE (id);
+			CREATE TABLE %[1]s.accounts_low PARTITION OF %[1]s.accounts FOR VALUES FROM (0) TO (1000);
+			CREATE TABLE %[1]s.accounts_high PARTITION OF %[1]s.accounts FOR VALUES FROM (1000) TO (2000)`,
+		statements: []string{
+			`ALTER TABLE %[1]s.accounts DETACH PARTITION %[1]s.accounts_low`,
+			`ALTER TABLE %[1]s.accounts DETACH PARTITION %[1]s.accounts_high CONCURRENTLY`,
+		},
+		destructive: true,
+	},
 	"drop-column": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (
