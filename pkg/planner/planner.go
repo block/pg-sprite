@@ -563,6 +563,14 @@ type Facts struct {
 	// backs, which the rename renames with it; empty when the index backs
 	// none, or when the fact was not read, as in an offline lint.
 	RenamedIndexConstraint string
+	// NotNullHelpers are the columns whose SET NOT NULL helper is already on
+	// the live table: a CHECK (column IS NOT NULL) under the name
+	// NotNullHelperName gives it, left by an earlier run of the online
+	// sequence that stopped before its last step dropped it. The sequence
+	// resumes at the helper's validation instead of adding it again. A
+	// column absent from the map has no such helper, or the fact was not
+	// read, as in an offline lint.
+	NotNullHelpers map[string]bool
 	// Storage reports whether the table has storage of its own: a heap for
 	// an ordinary table or a partition, none for a partitioned parent.
 	// StorageUnread when the fact was not read, as in an offline lint.
@@ -1053,7 +1061,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// an online VALIDATE, then SET NOT NULL is a catalog flip (PG 12+).
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 		if single {
-			d.SaferSQL = setNotNullSequence(st, op.Column)
+			d.SaferSQL = setNotNullSequence(st, op.Column, facts.NotNullHelpers[op.Column])
 		}
 
 	case statement.OpSetTablespace:
@@ -1425,17 +1433,33 @@ func tableIdent(st statement.Statement) string {
 // (step 2) leaves the same scaffold and is safe to re-run. Steps 3 and 4
 // are metadata-only and safe to re-run; a leftover scaffold is removed by
 // running step 4 alone.
-func setNotNullSequence(st statement.Statement, column string) []string {
+//
+// helperLive is set when the scaffold is already on the live table, left by
+// a run that stopped before step 4 (Facts.NotNullHelpers). The sequence then
+// starts at step 2: validating a scaffold that a run already validated
+// checks no rows, and the scaffold checks new writes until step 4 drops it,
+// as it did while that run was in progress.
+func setNotNullSequence(st statement.Statement, column string, helperLive bool) []string {
 	table := tableIdent(st)
-	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null_check", st.Table(), column))
-	con := pgx.Identifier{conName}.Sanitize()
+	con := pgx.Identifier{NotNullHelperName(st.Table(), column)}.Sanitize()
 	col := pgx.Identifier{column}.Sanitize()
-	return []string{
+	steps := []string{
 		fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s IS NOT NULL) NOT VALID", table, con, col),
 		fmt.Sprintf("ALTER TABLE %s VALIDATE CONSTRAINT %s", table, con),
 		fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, col),
 		fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s", table, con),
 	}
+	if helperLive {
+		return steps[1:]
+	}
+	return steps
+}
+
+// NotNullHelperName is the name of the helper CHECK the online SET NOT NULL
+// sequence adds to table for column, fitted to PostgreSQL's identifier
+// limit.
+func NotNullHelperName(table, column string) string {
+	return fitIdentifier(fmt.Sprintf("%s_%s_not_null_check", table, column))
 }
 
 // canBuildUsingIndexSequence reports whether an ADD PRIMARY KEY / UNIQUE
