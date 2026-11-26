@@ -1148,18 +1148,27 @@ func TestNullFillCandidates(t *testing.T) {
 // rewrites, the type or the default, never from how the default is
 // written. A column the server could not prove, or that no proof was run
 // for, keeps the shape rules, and an expression default there fails closed
-// as unverified.
+// as unverified. Only a column with no default or a literal one, proven
+// to add in place without reading rows or running user code, is
+// catalog-only: an expression default is evaluated under the lock, with
+// the session's settings, so the probe's answer does not bound its cost.
 func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 	proven := planner.Facts{AddColumnProofs: map[string]statement.AddColumnProof{
-		"code":    statement.AddColumnTypeRewrites,
-		"strict":  statement.AddColumnTypeRewrites,
-		"scored":  statement.AddColumnTypeRewrites,
-		"id":      statement.AddColumnDefaultRewrites,
-		"created": statement.AddColumnInPlace,
-		"checked": statement.AddColumnInPlace,
-		"age":     statement.AddColumnInPlace,
-		"high":    statement.AddColumnUnproven,
-		"capped":  statement.AddColumnUnproven,
+		"code":     statement.AddColumnTypeRewrites,
+		"strict":   statement.AddColumnTypeRewrites,
+		"scored":   statement.AddColumnTypeRewrites,
+		"id":       statement.AddColumnDefaultRewrites,
+		"created":  statement.AddColumnInPlace,
+		"checked":  statement.AddColumnInPlace,
+		"age":      statement.AddColumnInPlace,
+		"filled":   statement.AddColumnInPlaceScans,
+		"blank":    statement.AddColumnInPlaceScans,
+		"tier":     statement.AddColumnInPlace,
+		"inherits": statement.AddColumnInPlaceRunsUserCode,
+		"once":     statement.AddColumnInPlaceRunsUserCode,
+		"scope":    statement.AddColumnInPlaceRunsUserCode,
+		"high":     statement.AddColumnUnproven,
+		"capped":   statement.AddColumnUnproven,
 	}}
 	cases := []struct {
 		name       string
@@ -1167,19 +1176,121 @@ func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 		route      planner.Route
 		reason     planner.Reason
 		unverified bool
+		catalog    bool
 	}{
-		{"constrained domain with a constant default", "ALTER TABLE t ADD COLUMN code positive_int DEFAULT 1", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
-		{"constrained domain without a default", "ALTER TABLE t ADD COLUMN strict positive_int", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
-		{"constrained domain with a stable default", "ALTER TABLE t ADD COLUMN scored positive_int DEFAULT next_score()", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
-		{"volatile default", "ALTER TABLE t ADD COLUMN id uuid DEFAULT gen_random_uuid()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, false},
-		{"stable default stored in the catalog", "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()", planner.RouteNative, planner.ReasonFastDefault, false},
-		{"stored default with an inline check", "ALTER TABLE t ADD COLUMN checked timestamptz DEFAULT now() CHECK (checked > '2000-01-01')", planner.RouteNative, planner.ReasonSaferIdiom, false},
-		{"plain column", "ALTER TABLE t ADD COLUMN age int", planner.RouteNative, planner.ReasonMetadataOnly, false},
-		{"expression default the server could not prove", "ALTER TABLE t ADD COLUMN high bigint DEFAULT max_id()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, true},
-		{"constant default the server could not prove", "ALTER TABLE t ADD COLUMN capped bounded DEFAULT 5", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, true},
-		{"expression default with no proof run", "ALTER TABLE t ADD COLUMN other timestamptz DEFAULT now()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, true},
-		{"constant default with no proof run", "ALTER TABLE t ADD COLUMN other int DEFAULT 0", planner.RouteNative, planner.ReasonFastDefault, false},
-		{"generated stored whatever the proof says", "ALTER TABLE t ADD COLUMN age int GENERATED ALWAYS AS (1) STORED", planner.RouteCopyAndSwap, planner.ReasonGeneratedStored, false},
+		{
+			name:   "constrained domain with a constant default",
+			sql:    "ALTER TABLE t ADD COLUMN code positive_int DEFAULT 1",
+			route:  planner.RouteCopyAndSwap,
+			reason: planner.ReasonTypeRewrite,
+		},
+		{
+			name:   "constrained domain without a default",
+			sql:    "ALTER TABLE t ADD COLUMN strict positive_int",
+			route:  planner.RouteCopyAndSwap,
+			reason: planner.ReasonTypeRewrite,
+		},
+		{
+			name:   "constrained domain with a stable default",
+			sql:    "ALTER TABLE t ADD COLUMN scored positive_int DEFAULT next_score()",
+			route:  planner.RouteCopyAndSwap,
+			reason: planner.ReasonTypeRewrite,
+		},
+		{
+			name:   "volatile default",
+			sql:    "ALTER TABLE t ADD COLUMN id uuid DEFAULT gen_random_uuid()",
+			route:  planner.RouteCopyAndSwap,
+			reason: planner.ReasonVolatileDefault,
+		},
+		{
+			name:   "stable default stored in the catalog",
+			sql:    "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()",
+			route:  planner.RouteNative,
+			reason: planner.ReasonFastDefault,
+		},
+		{
+			name:    "constant default stored in the catalog",
+			sql:     "ALTER TABLE t ADD COLUMN tier text DEFAULT 'free'",
+			route:   planner.RouteNative,
+			reason:  planner.ReasonFastDefault,
+			catalog: true,
+		},
+		{
+			name:   "column taking its domain's default",
+			sql:    "ALTER TABLE t ADD COLUMN inherits defaulted_text",
+			route:  planner.RouteNative,
+			reason: planner.ReasonMetadataOnly,
+		},
+		{
+			name:   "user function default stored in the catalog",
+			sql:    "ALTER TABLE t ADD COLUMN once int DEFAULT one()",
+			route:  planner.RouteNative,
+			reason: planner.ReasonFastDefault,
+		},
+		{
+			name:   "constant default through a user type",
+			sql:    "ALTER TABLE t ADD COLUMN scope text DEFAULT 'a'::scoped::text",
+			route:  planner.RouteNative,
+			reason: planner.ReasonFastDefault,
+		},
+		{
+			name:   "stored default with an inline check",
+			sql:    "ALTER TABLE t ADD COLUMN checked timestamptz DEFAULT now() CHECK (checked > '2000-01-01')",
+			route:  planner.RouteNative,
+			reason: planner.ReasonSaferIdiom,
+		},
+		{
+			name:    "plain column",
+			sql:     "ALTER TABLE t ADD COLUMN age int",
+			route:   planner.RouteNative,
+			reason:  planner.ReasonMetadataOnly,
+			catalog: true,
+		},
+		{
+			name:       "expression default the server could not prove",
+			sql:        "ALTER TABLE t ADD COLUMN high bigint DEFAULT max_id()",
+			route:      planner.RouteCopyAndSwap,
+			reason:     planner.ReasonVolatileDefault,
+			unverified: true,
+		},
+		{
+			name:       "constant default the server could not prove",
+			sql:        "ALTER TABLE t ADD COLUMN capped bounded DEFAULT 5",
+			route:      planner.RouteCopyAndSwap,
+			reason:     planner.ReasonTypeRewrite,
+			unverified: true,
+		},
+		{
+			name:       "expression default with no proof run",
+			sql:        "ALTER TABLE t ADD COLUMN other timestamptz DEFAULT now()",
+			route:      planner.RouteCopyAndSwap,
+			reason:     planner.ReasonVolatileDefault,
+			unverified: true,
+		},
+		{
+			name:   "constant default with no proof run",
+			sql:    "ALTER TABLE t ADD COLUMN other int DEFAULT 0",
+			route:  planner.RouteNative,
+			reason: planner.ReasonFastDefault,
+		},
+		{
+			name:   "NOT NULL the server checks by reading every row",
+			sql:    "ALTER TABLE t ADD COLUMN filled int NOT NULL",
+			route:  planner.RouteNative,
+			reason: planner.ReasonMetadataOnly,
+		},
+		{
+			name:   "NOT NULL with a default that stores no value",
+			sql:    "ALTER TABLE t ADD COLUMN blank int NOT NULL DEFAULT nullif(1, 1)",
+			route:  planner.RouteNative,
+			reason: planner.ReasonFastDefault,
+		},
+		{
+			name:   "generated stored whatever the proof says",
+			sql:    "ALTER TABLE t ADD COLUMN age int GENERATED ALWAYS AS (1) STORED",
+			route:  planner.RouteCopyAndSwap,
+			reason: planner.ReasonGeneratedStored,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1189,8 +1300,48 @@ func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 			assert.Equal(t, tc.route, plan.Decisions[0].Route)
 			assert.Equal(t, tc.reason, plan.Decisions[0].Reason)
 			assert.Equal(t, tc.unverified, plan.Decisions[0].Unverified)
+			assert.Equal(t, tc.catalog, plan.Decisions[0].ProvenCatalogOnly,
+				"only a column with no default or a literal one, that the server proved neither rewrites, scans the table, nor runs user code, is catalog-only")
 		})
 	}
+}
+
+// Dropping a column, a default, a NOT NULL, or a constraint changes only
+// the catalog: PostgreSQL never rewrites or reads the table and runs no user
+// code for them, so each is marked catalog-only. Setting a default is not
+// marked, since coercing it to a user-defined column type runs that type's
+// input function under the lock. Changing a column's storage options or a
+// table's options is metadata-only too but is not marked, and a cascading
+// drop is refused before any mark.
+func TestClassifyMarksCatalogOnlyKinds(t *testing.T) {
+	cases := []struct {
+		sql     string
+		catalog bool
+	}{
+		{"ALTER TABLE t DROP COLUMN note", true},
+		{"ALTER TABLE t ALTER COLUMN note SET DEFAULT 'x'", false},
+		{"ALTER TABLE t ALTER COLUMN note DROP DEFAULT", true},
+		{"ALTER TABLE t ALTER COLUMN note DROP NOT NULL", true},
+		{"ALTER TABLE t DROP CONSTRAINT t_note_check", true},
+		{"ALTER TABLE t ALTER COLUMN note SET STATISTICS 500", false},
+		{"ALTER TABLE t SET (fillfactor = 90)", false},
+		{"ALTER TABLE t DROP COLUMN note CASCADE", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			plan, err := planner.Classify(tc.sql, planner.Facts{})
+			require.NoError(t, err)
+			require.Len(t, plan.Decisions, 1)
+			assert.Equal(t, tc.catalog, plan.Decisions[0].ProvenCatalogOnly)
+			assert.Equal(t, tc.catalog, planner.ProvenCatalogOnly(plan.Decisions))
+		})
+	}
+
+	mixed, err := planner.Classify("ALTER TABLE t DROP COLUMN note, SET (fillfactor = 90)", planner.Facts{})
+	require.NoError(t, err)
+	assert.False(t, planner.ProvenCatalogOnly(mixed.Decisions),
+		"one unmarked operation leaves the plan unproven")
+	assert.False(t, planner.ProvenCatalogOnly(nil), "no decisions prove nothing")
 }
 
 func TestClassifyParseErrorSurfaces(t *testing.T) {

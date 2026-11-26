@@ -62,8 +62,11 @@ import (
 // part in the fingerprint. Version 24 added the blocking-index-drop
 // execution contract, which a refused drop of a partitioned table's index
 // carries with its plain DROP INDEX as exec_sql, and its part in the
-// fingerprint.
-const FormatVersion = 24
+// fingerprint. Version 25 added the proven_catalog_only decision field.
+// Version 26 runs the add-foreign-key and validate-foreign-key kinds
+// instead of refusing them, and retires the foreign-key create-shape
+// cause: a new table is created with its foreign keys.
+const FormatVersion = 26
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -107,8 +110,11 @@ type Statement struct {
 	Adopts *schemadiff.IndexAdoption `json:"-"`
 	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
 	// validates and the definition it must still have when execution
-	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
-	// out of the JSON for the same reason.
+	// validates it (see schemadiff.Change.Validates). A diff-derived ADD
+	// CONSTRAINT that runs as ADD ... NOT VALID and then VALIDATE
+	// CONSTRAINT carries the definition its add leaves
+	// (schemadiff.Change.AddsNotValid), which its validation step checks.
+	// Nil otherwise, and out of the JSON for the same reason.
 	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Drops is the live object a diff-derived DROP INDEX, DROP CONSTRAINT,
 	// DROP COLUMN, or DROP NOT NULL removes, with the definition the diff

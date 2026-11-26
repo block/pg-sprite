@@ -29,6 +29,18 @@ const (
 	// AddColumnInPlace means the column is added without rewriting the table;
 	// any default it has is stored in the catalog.
 	AddColumnInPlace AddColumnProof = "in-place"
+	// AddColumnInPlaceScans means the column is added without rewriting the
+	// table, but PostgreSQL still reads every row to check the column's NOT
+	// NULL: no default fills the rows the table already has, so the server
+	// must prove none of them exists.
+	AddColumnInPlaceScans AddColumnProof = "in-place-scans"
+	// AddColumnInPlaceRunsUserCode means the column is added without
+	// rewriting the table, but adding it evaluates something defined
+	// outside PostgreSQL's built-in catalog: a domain's default or checks,
+	// or a function, cast, or operator its default resolves to. That code
+	// runs once under the table's lock and can read any table, so the
+	// cost of adding the column is not proven independent of the table.
+	AddColumnInPlaceRunsUserCode AddColumnProof = "in-place-runs-user-code"
 	// AddColumnDefaultRewrites means the table is rewritten to compute the
 	// column's default for every row; the column's type alone adds in
 	// place.

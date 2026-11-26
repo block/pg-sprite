@@ -107,7 +107,8 @@ is a smoke tour of the built binary, not a second test suite.
   error surfaced to the caller. Shadow-table DDL and checkpoint fingerprints are derived by
   execute-and-introspect on the empty shadow and in the transaction-scoped scratch schema,
   never by AST transformation; the executable-SQL AST edit permitted here is retargeting a single statement's
-  one relation name (`pkg/statement` `Qualify`), which changes no semantics (see
+  one relation name (`pkg/statement` `Qualify`), and, for a `CREATE TABLE`, the foreign-key references it
+  carries into the same schema (or stripped back to unqualified form), which changes no semantics (see
   [docs/copy-and-swap-design.md](docs/copy-and-swap-design.md#d1--no-durable-scratch-database)).
   A second executable-SQL edit is permitted for a partitioned table's index build: `OnlyIndex` and
   `PartitionIndex` change one `CREATE INDEX`'s name, target relation, and `ONLY` and `CONCURRENTLY`
