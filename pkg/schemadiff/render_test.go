@@ -64,6 +64,33 @@ func TestRenderSerialColumn(t *testing.T) {
 	}
 }
 
+// A serial on a table whose name needs quoting, as an ORM's capitalized
+// "User" does, renders as serial: the server prints its default with the
+// sequence name quoted.
+func TestRenderSerialColumnOnAQuotedTableName(t *testing.T) {
+	tests := []struct {
+		table, column, def string
+	}{
+		{"User", "id", `nextval('"User_id_seq"'::regclass)`},
+		{"orders", "Id", `nextval('"orders_Id_seq"'::regclass)`},
+		{"line items", "id", `nextval('"line items_id_seq"'::regclass)`},
+		{`say "hi"`, "id", `nextval('"say ""hi""_id_seq"'::regclass)`},
+		{"o'brien", "id", `nextval('"o''brien_id_seq"'::regclass)`},
+		{"2fa", "id", `nextval('"2fa_id_seq"'::regclass)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.table, func(t *testing.T) {
+			m := Model{Table: tt.table, Columns: []Column{{
+				Name: tt.column, Type: "integer", NotNull: true,
+				Default: tt.def, SequenceDefault: true, SequenceOwned: true,
+			}}}
+			out, err := Render(m)
+			require.NoError(t, err)
+			assert.Contains(t, out, `"`+tt.column+`" serial NOT NULL`)
+		})
+	}
+}
+
 // Sequence-backed defaults that are not the canonical serial form fail
 // closed: a rendered file could never recreate the sequence they reference.
 func TestRenderRefusesUnrenderableSequenceDefaults(t *testing.T) {
@@ -78,6 +105,14 @@ func TestRenderRefusesUnrenderableSequenceDefaults(t *testing.T) {
 		{"standalone sequence with the serial-style name", Column{
 			Name: "id", Type: "bigint", NotNull: true,
 			Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true, SequenceOwned: false,
+		}},
+		{"owned sequence whose name the server would quote, printed unquoted", Column{
+			Name: "Id", Type: "bigint", NotNull: true,
+			Default: "nextval('events_Id_seq'::regclass)", SequenceDefault: true, SequenceOwned: true,
+		}},
+		{"owned sequence with a plain name, printed quoted", Column{
+			Name: "id", Type: "bigint", NotNull: true,
+			Default: `nextval('"events_id_seq"'::regclass)`, SequenceDefault: true, SequenceOwned: true,
 		}},
 		{"owned sequence with a non-serial name", Column{
 			Name: "id", Type: "bigint", NotNull: true,
