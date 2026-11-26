@@ -36,6 +36,13 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	if v.Detail != "" {
 		fmt.Fprintf(&b, "\n  %s    %s", pal.bold("detail:"), v.Detail)
 	}
+	for i, refused := range v.RefusedStatements {
+		label := pal.bold("refused:")
+		if i > 0 {
+			label = "        "
+		}
+		fmt.Fprintf(&b, "\n  %s   %s", label, refused)
+	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("safer:"), v.SaferIdiom)
 	}

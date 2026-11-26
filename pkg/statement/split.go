@@ -3,6 +3,7 @@ package statement
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
@@ -77,7 +78,7 @@ func locate(sql string, tokens []*pganalyze.ScanToken, raw *pganalyze.RawStmt) S
 	return SourceStatement{
 		SQL:    sql[begin:end],
 		Line:   1 + strings.Count(sql[:begin], "\n"),
-		Column: begin - lastNewline,
+		Column: utf8.RuneCountInString(sql[lastNewline+1:begin]) + 1,
 	}
 }
 

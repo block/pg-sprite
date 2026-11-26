@@ -102,7 +102,7 @@ func (e *SecondTableError) Unwrap() []error {
 
 // disallowedStatement returns the refusal for raw, a statement of the
 // desired file source that the front door does not admit.
-func disallowedStatement(source string, raw *pganalyze.RawStmt) error {
+func disallowedStatement(source *desiredSource, raw *pganalyze.RawStmt) error {
 	sql, kind, err := refusedStatement(source, raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDisallowedStatement, err)
@@ -116,12 +116,12 @@ func disallowedStatement(source string, raw *pganalyze.RawStmt) error {
 // statements apart: a RENAME VALUE whose old label is empty deparses as an
 // ADD VALUE. The text is the canonical one unless it classifies differently,
 // in which case it is the source text.
-func refusedStatement(source string, raw *pganalyze.RawStmt) (string, Kind, error) {
-	scan, err := pgquery.Scan(source)
+func refusedStatement(source *desiredSource, raw *pganalyze.RawStmt) (string, Kind, error) {
+	at, err := source.locate(raw)
 	if err != nil {
-		return "", KindOther, fmt.Errorf("scan desired file: %w", err)
+		return "", KindOther, err
 	}
-	verbatim := locate(source, scan.GetTokens(), raw).SQL
+	verbatim := at.SQL
 	written, err := ParseOne(verbatim)
 	if err != nil {
 		return "", KindOther, fmt.Errorf("classify %s: %w", verbatim, err)
@@ -222,48 +222,94 @@ func (ds DesiredSchema) WithExtensionSchemas(schemas ...string) (DesiredSchema, 
 func ParseDesired(sql string) (DesiredSchema, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredSchema{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
+		return DesiredSchema{}, parseFailure(sql, err)
 	}
-	return parseDesiredTree(sql, tree)
+	return parseDesiredTree(newDesiredSource(sql), fileStatements(tree))
 }
 
-// parseDesiredTree applies ParseDesired's admission rules to tree, the parse
-// of source.
-func parseDesiredTree(source string, tree *pganalyze.ParseResult) (DesiredSchema, error) {
-	if len(tree.GetStmts()) == 0 {
+// parseDesiredTree applies ParseDesired's admission rules to stmts, statements
+// of source, and names each refusal at the statement's place in source.
+func parseDesiredTree(source *desiredSource, stmts []fileStatement) (DesiredSchema, error) {
+	if len(stmts) == 0 {
 		return DesiredSchema{}, ErrEmptyDesired
 	}
 	var ds DesiredSchema
 	partition := false
-	for i, raw := range tree.GetStmts() {
+	refused := newRefusalCollector(source)
+	// indexes holds each admitted CREATE INDEX's position in the file, so an
+	// index on another table is refused where it stands once the file's
+	// table is known: an index may precede its table.
+	var indexes []admittedIndex
+	for _, stmt := range stmts {
+		i, raw := stmt.index, stmt.raw
 		st, err := admitDesiredStatement(source, raw, ds.table, partition)
 		if err != nil {
-			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
+			if refusedFirstTable(ds.table, raw, err) {
+				// The file's table is refused, but it is still the file's
+				// table: a later CREATE TABLE is a second one, and the
+				// table's own indexes are not on another table.
+				ds.table = raw.GetStmt().GetCreateStmt().GetRelation().GetRelname()
+			}
+			if err := refused.refuse(i, raw, err); err != nil {
+				return DesiredSchema{}, err
+			}
+			continue
 		}
 		if st.kind == KindCreateTable {
 			ds.table = st.table
 			partition = isPartition(raw.GetStmt().GetCreateStmt())
 			ds.foreignKeys = len(foreignKeyConstraints(raw.GetStmt().GetCreateStmt())) > 0
 			if ds.referenced, err = referencedTables(raw.GetStmt().GetCreateStmt()); err != nil {
-				return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
+				if err := refused.refuse(i, raw, err); err != nil {
+					return DesiredSchema{}, err
+				}
+				continue
 			}
 		}
 		if st.sql, err = deparseOne(raw.GetStmt()); err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
+		if st.kind == KindCreateIndex {
+			indexes = append(indexes, admittedIndex{index: i, raw: raw, table: st.table})
+		}
 		ds.statements = append(ds.statements, st)
+	}
+	if ds.table != "" {
+		for _, idx := range indexes {
+			if idx.table == ds.table {
+				continue
+			}
+			cause := fmt.Errorf("%w: index on %q, desired table is %q", ErrWrongIndexTarget, idx.table, ds.table)
+			if err := refused.refuse(idx.index, idx.raw, cause); err != nil {
+				return DesiredSchema{}, err
+			}
+		}
+	}
+	if err := refused.err(); err != nil {
+		return DesiredSchema{}, err
 	}
 	if ds.table == "" {
 		return DesiredSchema{}, ErrNoCreateTable
 	}
-	for _, st := range ds.statements {
-		if st.kind == KindCreateIndex && st.table != ds.table {
-			return DesiredSchema{}, fmt.Errorf("%w: index on %q, desired table is %q",
-				ErrWrongIndexTarget, st.table, ds.table)
-		}
-	}
 	ds.statements = executionOrder(ds.statements)
 	return ds, nil
+}
+
+// refusedFirstTable reports whether raw, refused with err, is the file's first
+// CREATE TABLE and is still its table: a partition of another table is not.
+func refusedFirstTable(table string, raw *pganalyze.RawStmt, err error) bool {
+	if table != "" || raw.GetStmt().GetCreateStmt() == nil {
+		return false
+	}
+	return !errors.Is(err, ErrDesiredPartitions)
+}
+
+// admittedIndex is a CREATE INDEX of a desired file, kept with its position
+// so a refusal of it can name where it stands.
+type admittedIndex struct {
+	index int
+	raw   *pganalyze.RawStmt
+	table string
 }
 
 // executionOrder hoists the CREATE TABLE to the front, keeping the indexes
@@ -290,7 +336,7 @@ func executionOrder(statements []Statement) []Statement {
 // statement of source, and returns its kind and target. seenTable is the CREATE TABLE
 // target admitted so far, empty when none, and seenPartition reports
 // whether that CREATE TABLE is a partition.
-func admitDesiredStatement(source string, raw *pganalyze.RawStmt, seenTable string, seenPartition bool) (Statement, error) {
+func admitDesiredStatement(source *desiredSource, raw *pganalyze.RawStmt, seenTable string, seenPartition bool) (Statement, error) {
 	node := raw.GetStmt()
 	switch {
 	case node.GetCreateStmt() != nil:
