@@ -14,10 +14,13 @@ import (
 
 // Reaped is what one pass of ReapOrphanSlots, or one PreviewOrphanSlots,
 // found among the engine slots of the store's database, every slot it
-// reached in exactly one list or in Failed.
+// reached in exactly one list or in Failed, save the slot a drop took
+// before leaving its publication, which is in Dropped and Failed both.
 type Reaped struct {
 	// Dropped slots had no checkpoint row, or a terminal one, and no holder:
 	// orphans, dropped with their publications. Only ReapOrphanSlots fills it.
+	// A pass that stops because a slot's publication was left after the
+	// slot's drop lists that slot last, and its error names the publication.
 	Dropped []string
 	// WouldDrop slots are the orphans a pass would go on to drop now. Only
 	// PreviewOrphanSlots fills it; nothing in it was dropped.
@@ -25,7 +28,8 @@ type Reaped struct {
 	// Failed is the orphan the pass stopped at when its lock, its row's
 	// re-read, or its drop failed, and empty otherwise. The slot may be
 	// gone: the drop removes the slot before its publication, and a drop the
-	// server accepted can fail on the client's side.
+	// server accepted can fail on the client's side. A slot the drop reports
+	// gone with its publication left is in Dropped too.
 	Failed string
 	// Live slots are named by a checkpoint row in a non-terminal phase: a
 	// schema change in flight or resumable owns each.
@@ -103,9 +107,11 @@ type candidateSlot struct {
 // and slots that wear the prefix without the engine's name shape or output
 // plugin, are reported and left as found. The drops stop at the first
 // failure, reporting what was dropped before it and naming the slot it
-// stopped at in Failed. Two reapers over one database take turns at each
-// slot; the one that waited finds the slot gone and reports the drop as its
-// own too.
+// stopped at in Failed; a slot dropped whose publication the drop then
+// refused or failed to drop (decode.ErrSlotDroppedPublicationLeft) is in
+// Dropped too, since it is gone, and the error names the publication left.
+// Two reapers over one database take turns at each slot; the one that
+// waited finds the slot gone and reports the drop as its own too.
 //
 // A database where Ensure has never run has no rows to speak for its
 // slots, so the pass is refused with ErrTableMissing rather than read every
@@ -207,6 +213,12 @@ func (s *Store) dropIfStillOrphan(ctx context.Context, cfg dbconn.Config, name s
 			reaped.Active = append(reaped.Active, name)
 			return nil
 		}
+		if errors.Is(err, decode.ErrSlotDroppedPublicationLeft) {
+			// The slot is gone and the report says so; the publication the
+			// drop left is the operator's to look at, so the pass stops.
+			reaped.Dropped = append(reaped.Dropped, name)
+			return fmt.Errorf("reap orphan slot %s: %w", name, err)
+		}
 		if err != nil {
 			return fmt.Errorf("reap orphan slot %s: %w", name, err)
 		}
@@ -250,6 +262,23 @@ func (s *Store) liveRowSlots(ctx context.Context, names []string) (map[string]bo
 		live[name] = true
 	}
 	return live, nil
+}
+
+// LiveRowNamesSlot reports whether a checkpoint row in a non-terminal
+// phase, of any table, names the slot: the read the reaper decides a
+// slot's ownership by (ST-3). A slot's name is a hash of its table's name,
+// so two tables can derive the same one, and only a read over every row
+// says whether the slot of one table's derived name is another table's
+// run's. A caller about to drop the slot reads it under the engine's lock
+// on the slot's name (WithSlotLock), as the reaper does, so no run claims
+// the slot between the read and the drop. A database where Ensure has
+// never run is refused with ErrTableMissing.
+func (s *Store) LiveRowNamesSlot(ctx context.Context, name string) (bool, error) {
+	live, err := s.liveRowSlots(ctx, []string{name})
+	if err != nil {
+		return false, err
+	}
+	return live[name], nil
 }
 
 // slotNames lists the candidates' names in order.

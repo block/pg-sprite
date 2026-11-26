@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -30,8 +31,9 @@ func (c *MigrateCmd) validateInput() error {
 		if c.Force != "" {
 			return errors.New("--force cannot be combined with --desired")
 		}
-		if c.AcceptBlocking != "" {
-			return errors.New("--accept-blocking cannot be combined with --desired")
+		if c.AcceptBlocking != "" && (c.ExpectFingerprint == "" || c.AllowDestructive == "") {
+			return errors.New("--accept-blocking with --desired requires --expect-fingerprint and --allow-destructive: it accepts the blocking lock " +
+				"of a reviewed plan's drop of a partitioned table's index, and nothing else; review the plan with diff --desired, then pass its fingerprint")
 		}
 		if c.Restart != "" {
 			return errors.New("--restart cannot be combined with --desired: the plan, not the operator, decides which run the acknowledgement would discard; run the stopped statement with migrate --alter --copy-and-swap --restart instead")
@@ -47,11 +49,13 @@ func (c *MigrateCmd) validateInput() error {
 }
 
 // desiredOptions is the run policy for a desired-state run. Its destructive
-// acknowledgement travels on the request, bound to the pinned plan, never in
-// the policy, which desired-state execution rejects it from.
+// and accept-blocking acknowledgements travel on the request, bound to the
+// pinned plan, never in the policy, which desired-state execution rejects
+// them from.
 func (c *MigrateCmd) desiredOptions(logger *slog.Logger) migrate.Options {
 	opts := c.options(logger)
 	opts.AllowDestructive = ""
+	opts.AcceptBlocking = ""
 	return opts
 }
 
@@ -85,7 +89,9 @@ func (c *MigrateCmd) writeDesiredPreview(out io.Writer, report plan.Report) erro
 		return c.finishDesired(out, stale, nil)
 	}
 	if c.liftsDestructiveRefusal(report) {
-		if refusal, ok := refusedEvenWhenPinned(report); !ok {
+		// A dry run cannot carry --accept-blocking, so a plan that needs it
+		// shows the refusal the run without it gives, which names the flag.
+		if refusal, ok := refusedEvenWhenPinned(report, false); !ok {
 			return c.finishDesired(out, refusal, nil)
 		}
 	}
@@ -96,16 +102,25 @@ func (c *MigrateCmd) writeDesiredPreview(out io.Writer, report plan.Report) erro
 		return reportErr
 	}
 	w := &stickyWriter{out: out, pal: c.palette(out), started: true}
-	if refusal, ok := refusedEvenWhenPinned(report); !ok {
+	if refusal, ok := refusedEvenWhenPinned(report, true); !ok {
 		w.diag("note", "", "pinning this plan does not let it run: "+refusal.Detail)
 		if w.err != nil {
 			return w.err
 		}
 		return reportErr
 	}
+	table := report.Schema + "." + report.Table
 	w.diag("note", "", "a run refuses a plan that discards live structure unless it pins the reviewed plan and names the table; to run this plan, add to the command:")
-	w.printf("  --expect-fingerprint %s --allow-destructive %s.%s\n", pinnable, report.Schema, report.Table)
-	w.diag("note", "", "with both flags this dry run previews the plan the run would execute")
+	if hasBlockingIndexDrop(report) {
+		w.printf("  --expect-fingerprint %s --allow-destructive %s --accept-blocking %s --statement-timeout DURATION\n", pinnable, table, table)
+		w.diag("note", "", "the plan drops an index of a partitioned table, which PostgreSQL cannot drop concurrently: the plain DROP INDEX takes "+
+			"ACCESS EXCLUSIVE on "+table+", every partition, and every partition's index for as long as it runs, under --lock-timeout "+
+			"and the --statement-timeout you state, which must be longer")
+		w.diag("note", "", "--accept-blocking applies to a run alone: a dry run cannot carry it, so with the other flags it shows the refusal a run without it gives")
+	} else {
+		w.printf("  --expect-fingerprint %s --allow-destructive %s\n", pinnable, table)
+		w.diag("note", "", "with both flags this dry run previews the plan the run would execute")
+	}
 	if w.err != nil {
 		return w.err
 	}
@@ -128,18 +143,29 @@ func (c *MigrateCmd) liftsDestructiveRefusal(report plan.Report) bool {
 
 // refusedEvenWhenPinned reports the refusal a run gives a destructive plan
 // that the pin and the acknowledgement cannot lift, such as a drop beside a
-// copy-and-swap statement, a partitioned parent's index drop, or a statement
-// with no safe path. The dry run prints that refusal, as the run would,
-// instead of the flags, which would only lead to it.
-func refusedEvenWhenPinned(report plan.Report) (migrate.DesiredResult, bool) {
+// copy-and-swap statement, or a statement with no safe path; with
+// acceptBlocking the run also accepts the blocking lock of a partitioned
+// table's index drop, and without it that drop is refused too. The dry run
+// prints that refusal, as the run would, instead of the flags, which would
+// only lead to it.
+func refusedEvenWhenPinned(report plan.Report, acceptBlocking bool) (migrate.DesiredResult, bool) {
 	if !hasDestructive(report) {
 		return migrate.DesiredResult{}, true
 	}
-	res, ok := migrate.AdmitPlan(migrate.DesiredRequest{
-		ExpectedFingerprint: report.Fingerprint,
-		AllowDestructive:    report.Schema + "." + report.Table,
-	}, report)
-	return res, ok
+	table := report.Schema + "." + report.Table
+	req := migrate.DesiredRequest{ExpectedFingerprint: report.Fingerprint, AllowDestructive: table}
+	if acceptBlocking {
+		req.AcceptBlocking = table
+	}
+	return migrate.AdmitPlan(req, report)
+}
+
+// hasBlockingIndexDrop reports whether the plan drops an index of a
+// partitioned table, which runs only under the accepted blocking lock.
+func hasBlockingIndexDrop(report plan.Report) bool {
+	return slices.ContainsFunc(report.Statements, func(ps plan.Statement) bool {
+		return ps.Execution == planner.ExecutionBlockingIndexDrop
+	})
 }
 
 func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
@@ -191,6 +217,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		Desired:             desired,
 		ExpectedFingerprint: c.ExpectFingerprint,
 		AllowDestructive:    c.AllowDestructive,
+		AcceptBlocking:      c.AcceptBlocking,
 	}, opts)
 	stopProgress()
 	return c.finishDesired(out, result, runErr)
@@ -242,10 +269,14 @@ func (c *MigrateCmd) finishDesired(out io.Writer, result migrate.DesiredResult, 
 	if runErr != nil {
 		return runErr
 	}
-	if result.Outcome == verdict.OutcomeRefused {
+	switch result.Outcome {
+	case verdict.OutcomeRefused:
 		return verdict.ErrRefused
+	case verdict.OutcomeExecutedWithoutOnlineSafety:
+		return verdict.ErrAcceptedBlocking
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (c *MigrateCmd) writeDesiredResult(out io.Writer, result migrate.DesiredResult) error {

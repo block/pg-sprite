@@ -449,6 +449,19 @@ func TestManualPathStatesStepsForEveryGuidance(t *testing.T) {
 	assert.Equal(t, "not-a-guidance", suggest.ManualPath("not-a-guidance"))
 }
 
+// The attach steps name all three proofs that let ATTACH PARTITION skip
+// its work: the bound on the child, the exclusion on the DEFAULT
+// partition, and the parent's indexes, a unique one backing its
+// constraint, since this is the text the CLI's help: line and a refusal
+// verdict carry.
+func TestManualPathForAttachPartitionNamesEveryProof(t *testing.T) {
+	steps := suggest.ManualPath(suggest.GuidancePrevalidatedCheck)
+	assert.Contains(t, steps, "validated CHECK matching the partition bound on the child")
+	assert.Contains(t, steps, "one excluding it on the DEFAULT partition")
+	assert.Contains(t, steps, "build the parent's indexes on the child concurrently")
+	assert.Contains(t, steps, "USING INDEX")
+}
+
 // The guidance vocabulary is a closed set a consumer validates against, and
 // the tests that range over Guidances() cover only what it lists, so the
 // list is pinned: a code dropped from it, or added without a format_version

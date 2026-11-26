@@ -30,6 +30,7 @@ func TestFactsFromExtractsColumnTypes(t *testing.T) {
 			"code": "text",
 		},
 		ColumnCollations: map[string]string{"code": `pg_catalog."C"`},
+		Storage:          planner.StorageHeap,
 	}, planner.FactsFrom(live))
 }
 
@@ -46,6 +47,108 @@ func TestFactsFromExtractsReplicaIdentity(t *testing.T) {
 		ReplicaIdentity: keys,
 	}
 	assert.Equal(t, keys, planner.FactsFrom(live).ReplicaIdentity)
+}
+
+// FactsFrom marks a table with a partition key as a partitioned parent, so
+// an operation the server runs differently on one, such as SET TABLESPACE,
+// is judged from the same fact on every front door. A partition has no key
+// of its own and, like an ordinary table, has a heap.
+func TestFactsFromExtractsStorage(t *testing.T) {
+	parent := schemadiff.Model{
+		Columns:      []schemadiff.Column{{Name: "created_at", Type: "timestamp with time zone"}},
+		PartitionKey: "RANGE (created_at)",
+	}
+	partition := schemadiff.Model{
+		Columns:     []schemadiff.Column{{Name: "created_at", Type: "timestamp with time zone"}},
+		IsPartition: true,
+	}
+	ordinary := schemadiff.Model{
+		Columns: []schemadiff.Column{{Name: "created_at", Type: "timestamp with time zone"}},
+	}
+	assert.Equal(t, planner.StoragePartitionedParent, planner.FactsFrom(parent).Storage)
+	assert.Equal(t, planner.StorageHeap, planner.FactsFrom(partition).Storage)
+	assert.Equal(t, planner.StorageHeap, planner.FactsFrom(ordinary).Storage)
+}
+
+// SET TABLESPACE moves an ordinary table's heap, a copy under ACCESS
+// EXCLUSIVE for as long as it takes, so it routes to copy-and-swap. A
+// partitioned parent has no heap: the server records the tablespace as
+// the default for partitions created later, under a brief ACCESS EXCLUSIVE
+// on the parent alone, and moves no partition, so it is metadata-only.
+func TestClassifySetTablespaceOnAPartitionedParentIsMetadataOnly(t *testing.T) {
+	const sql = "ALTER TABLE app.events SET TABLESPACE archive"
+
+	parent, err := planner.Classify(sql, planner.Facts{Storage: planner.StoragePartitionedParent})
+	require.NoError(t, err)
+	require.Len(t, parent.Decisions, 1)
+	assert.Equal(t, planner.RouteNative, parent.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonMetadataOnly, parent.Decisions[0].Reason)
+	assert.False(t, parent.Decisions[0].Unverified)
+	assert.Empty(t, parent.Decisions[0].SaferSQL, "the statement runs as written")
+
+	heap, err := planner.Classify(sql, planner.Facts{Storage: planner.StorageHeap})
+	require.NoError(t, err)
+	require.Len(t, heap.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, heap.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonRelocation, heap.Decisions[0].Reason)
+	assert.False(t, heap.Decisions[0].Unverified, "a heap read live is a proven move")
+}
+
+// Without the storage fact, as in an offline lint, the planner cannot tell
+// a heap from a partitioned parent: it fails closed to the move and marks
+// the decision unverified, since the same statement may be metadata-only.
+func TestClassifySetTablespaceWithoutStorageIsAnUnverifiedRelocation(t *testing.T) {
+	plan, err := planner.Classify("ALTER TABLE app.events SET TABLESPACE archive", planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, plan.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonRelocation, plan.Decisions[0].Reason)
+	assert.True(t, plan.Decisions[0].Unverified)
+}
+
+// ALTER TABLE ONLY ... SET TABLESPACE on a partitioned parent is the same
+// catalog change as the plain form: the subcommand never recurses.
+func TestClassifySetTablespaceOnlyOnAPartitionedParentIsMetadataOnly(t *testing.T) {
+	plan, err := planner.Classify("ALTER TABLE ONLY app.events SET TABLESPACE archive",
+		planner.Facts{Storage: planner.StoragePartitionedParent})
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.RouteNative, plan.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+}
+
+// ALTER TABLE ALL IN TABLESPACE moves every table in a tablespace, heaps
+// included, so the partitioned-parent fact of one table cannot make it
+// metadata-only: it is refused.
+func TestClassifyAlterTableAllInTablespaceIsRefused(t *testing.T) {
+	plan, err := planner.Classify("ALTER TABLE ALL IN TABLESPACE pg_default SET TABLESPACE archive",
+		planner.Facts{Storage: planner.StoragePartitionedParent})
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.RouteRefuse, plan.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonUnsupportedOperation, plan.Decisions[0].Reason)
+}
+
+// ALTER INDEX ... SET TABLESPACE rebuilds the index's storage in the new
+// tablespace; the imperative front door does not take it.
+func TestClassifyAlterIndexSetTablespaceIsRefused(t *testing.T) {
+	plan, err := planner.Classify("ALTER INDEX app.events_pkey SET TABLESPACE archive",
+		planner.Facts{Storage: planner.StoragePartitionedParent})
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.RouteRefuse, plan.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonUnsupportedOperation, plan.Decisions[0].Reason)
+}
+
+// ALTER MATERIALIZED VIEW ... SET TABLESPACE moves the view's heap; the
+// imperative front door does not take it.
+func TestClassifyAlterMaterializedViewSetTablespaceIsRefused(t *testing.T) {
+	plan, err := planner.Classify("ALTER MATERIALIZED VIEW app.daily_totals SET TABLESPACE archive",
+		planner.Facts{Storage: planner.StoragePartitionedParent})
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.RouteRefuse, plan.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonUnsupportedOperation, plan.Decisions[0].Reason)
 }
 
 // Dropping what REPLICA IDENTITY USING INDEX keys on leaves the table with
