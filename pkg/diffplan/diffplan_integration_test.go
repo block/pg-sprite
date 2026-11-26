@@ -3,8 +3,10 @@ package diffplan_test
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,7 +95,11 @@ func TestPlanDerivesOrderedRoutedPlan(t *testing.T) {
 		"the same desired state against the same live table plans deterministically")
 }
 
-func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
+// A desired index on a partitioned parent plans as the partition-aware index
+// build: the one step is the CREATE INDEX itself, carried with the
+// partitioned-index-build execution, not a concurrent build the parent cannot
+// run and not a refusal. The partitions are listed when the build runs.
+func TestPlanRoutesPartitionedParentIndexToThePartitionedBuild(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -108,15 +114,132 @@ func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
 			"CREATE INDEX events_name_idx ON events (name);")
 	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
 	require.NoError(t, err)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, planner.ExecutionPartitionedIndexBuild, st.Execution)
+	assert.Equal(t, []string{st.SQL}, st.ExecSQL)
+	assert.Contains(t, st.SQL, "events_name_idx")
+	assert.NotContains(t, strings.ToUpper(st.SQL), "CONCURRENTLY")
+	for _, decision := range st.Decisions {
+		if len(decision.SaferSQL) > 0 {
+			assert.Equal(t, []string{st.SQL}, decision.SaferSQL)
+			assert.Equal(t, planner.ExecutionPartitionedIndexBuild, decision.SaferSQLExecution)
+		}
+	}
+}
+
+// A desired index with an invalid live entry of the same definition on the
+// parent, the leftover of a partition-by-partition build that did not finish,
+// plans the same CREATE INDEX again, which the build resumes.
+func TestPlanResumesAnUnfinishedPartitionedParentIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %[1]s.events (id bigint, name text) PARTITION BY RANGE (id); "+
+			"CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100); "+
+			"CREATE INDEX events_name_idx ON ONLY %[1]s.events (name)", schema))
+	require.NoError(t, err)
+	ds := parseDesired(t,
+		"CREATE TABLE events (id bigint, name text) PARTITION BY RANGE (id);\n"+
+			"CREATE INDEX events_name_idx ON events (name);")
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+	require.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, planner.ExecutionPartitionedIndexBuild, report.Statements[0].Execution)
+	assert.Contains(t, report.Statements[0].SQL, "events_name_idx")
+}
+
+// Dropping an index of a partitioned parent plans the plain DROP INDEX as
+// refused by design, with no concurrent rewrite: PostgreSQL rejects DROP
+// INDEX CONCURRENTLY for a partitioned index, so the only drop there is the
+// plain one, which the bounded blocking path may run.
+func TestPlanRefusesConcurrentDropOfPartitionedParentIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint,
+			name text
+		) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100);
+		CREATE INDEX events_name_idx ON %[1]s.events (name);`, schema))
+	require.NoError(t, err)
+
+	// The desired state omits events_name_idx.
+	ds := parseDesired(t, `
+		CREATE TABLE events (
+			id bigint,
+			name text
+		) PARTITION BY RANGE (id);`)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+
+	require.Len(t, report.Statements, 1)
+	ch := report.Statements[0]
+	assert.Equal(t, fmt.Sprintf("DROP INDEX %s.events_name_idx", schema), ch.SQL)
+	assert.Equal(t, schemadiff.ChangeDropIndex, ch.Kind)
+	assert.True(t, ch.Destructive)
+	assert.Equal(t, router.DispositionRefuse, ch.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, ch.Reason)
+	assert.Equal(t, verdict.ClassByDesign, ch.Class)
+	require.NotNil(t, ch.BlockingPassthroughEligible)
+	assert.True(t, *ch.BlockingPassthroughEligible, "the plain drop may run under the bounded blocking path")
+	assert.Empty(t, ch.ExecSQL, "no DROP INDEX CONCURRENTLY is offered")
+	for _, decision := range ch.Decisions {
+		assert.Empty(t, decision.SaferSQL)
+	}
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
+
+	// The refusal is by design because the server has no concurrent drop
+	// here: the statement it withdrew fails with SQLSTATE 0A000
+	// (feature_not_supported) on the server under test.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP INDEX CONCURRENTLY %s.events_name_idx", schema))
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "0A000", pgErr.Code)
+}
+
+// The control: dropping an index of a plain table keeps the concurrent drop
+// as the safer sequence, the online idiom PostgreSQL accepts there.
+func TestPlanDropsPlainTableIndexConcurrently(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint,
+			name text
+		);
+		CREATE INDEX events_name_idx ON %[1]s.events (name);`, schema))
+	require.NoError(t, err)
+
+	// The desired state omits events_name_idx.
+	ds := parseDesired(t, `
+		CREATE TABLE events (
+			id bigint,
+			name text
+		);`)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+
 	require.Len(t, report.Statements, 1)
-	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Statements[0].Reason)
-	assert.Empty(t, report.Statements[0].ExecSQL)
-	for _, decision := range report.Statements[0].Decisions {
-		assert.Empty(t, decision.SaferSQL)
-		assert.Empty(t, decision.SaferSQLExecution)
-	}
+	ch := report.Statements[0]
+	assert.Equal(t, fmt.Sprintf("DROP INDEX %s.events_name_idx", schema), ch.SQL)
+	assert.Equal(t, router.DispositionExecute, ch.Disposition)
+	assert.Empty(t, ch.Reason)
+	assert.Equal(t, []string{fmt.Sprintf("DROP INDEX CONCURRENTLY %s.events_name_idx", schema)}, ch.ExecSQL)
 }
 
 // A stored generated column whose desired expression differs from the live

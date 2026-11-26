@@ -109,6 +109,10 @@ is a smoke tour of the built binary, not a second test suite.
   never by AST transformation; the executable-SQL AST edit permitted here is retargeting a single statement's
   one relation name (`pkg/statement` `Qualify`), which changes no semantics (see
   [docs/copy-and-swap-design.md](docs/copy-and-swap-design.md#d1--no-durable-scratch-database)).
+  A second executable-SQL edit is permitted for a partitioned table's index build: `OnlyIndex` and
+  `PartitionIndex` change one `CREATE INDEX`'s name, target relation, and `ONLY` and `CONCURRENTLY`
+  flags, and nothing in its key, expressions, or predicate (see
+  [docs/partitioned-index-build-design.md](docs/partitioned-index-build-design.md)).
   A separate comparison-only exception permits `RowSecurityChange.CanonicalSQLForNamespace` to erase
   only the validated operation target's schema on a fresh parsed tree. The comparison key
   must already include the canonical namespace and table.
@@ -187,7 +191,13 @@ operation and object type, tiered supported / planned / out of scope, with reaso
 README's "What pg-sprite does not do yet" section is the short-form pointer. Any PR that
 adds, removes, or re-scopes a capability — a planner route, a refusal, a verdict outcome,
 a declarative-model boundary — updates all three in the same PR, and every release sweeps
-them against the shipped behavior before tagging.
+them against the shipped behavior before tagging. A supported row's `maturity` (`ga` or
+`preview`) is the answer to "is this generally available?": run
+`pg-sprite capabilities --json` rather than inferring it from the ✅ mark. A row that runs
+only from a later server major names it in `min_server_major`. A PR that takes a route out
+of preview flips its rows to `ga` in the same change, together with `validateMaturity`'s
+rule for that route, its `TestValidateRules` case, `TestPreviewRowsAreTheCopySwapRows`,
+and the route's sentence in `docs/capabilities-contract.md`.
 
 ## Logging and observability
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -166,6 +167,17 @@ func TestCopyAndSwapRunsAQuiescedTableToOneVerdict(t *testing.T) {
 	assert.Empty(t, v.Code)
 	assert.Contains(t, v.Detail, "verified 2500 rows")
 	assert.Contains(t, v.Detail, "the retained source is dropped")
+	// The fence kept every write off the table, so the pass hashed the 2500
+	// seeded rows and had nothing to settle against a stream or leave for
+	// the swap; how many chunks they fell into is the chunker's timing to
+	// decide, and the detail states the same count.
+	require.NotNil(t, v.Verification, "the verdict carries the verification pass's figures")
+	assert.EqualValues(t, 2500, v.Verification.Rows)
+	assert.Positive(t, v.Verification.Chunks)
+	assert.Contains(t, v.Detail, fmt.Sprintf("verified 2500 rows in %d chunks", v.Verification.Chunks))
+	assert.Zero(t, v.Verification.Settled)
+	assert.Zero(t, v.Verification.Unsettled)
+	assert.Zero(t, v.Verification.Carried)
 
 	assert.False(t, f.hasColumn(t, "orders", "note"), "the gated statement's shape is live")
 	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))

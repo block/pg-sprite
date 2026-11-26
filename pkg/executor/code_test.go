@@ -106,6 +106,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
 		{name: "blocking outcome unknown", err: &executor.BlockingOutcomeUnknownError{Err: errors.New("lost")}, want: executor.CodeBlockingOutcomeUnknown},
 		{name: "commit outcome unknown", err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeCommitOutcomeUnknown},
+		{name: "drop outcome unknown", err: &executor.DropOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeDropOutcomeUnknown},
 		{
 			name: "commit outcome unknown at a sequence step carries its own code",
 			err: &executor.SequenceStepError{
@@ -163,8 +164,25 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "partition of", err: executor.ErrPartitionOfUnsupported, want: executor.CodePartitionOfUnsupported},
 		{name: "unsupported create step", err: executor.ErrUnsupportedCreateStep, want: executor.CodeUnsupportedCreateStep},
 		{name: "pool too small", err: executor.ErrPoolTooSmall, want: executor.CodePoolTooSmall},
+		{name: "not create index", err: executor.ErrNotCreateIndex, want: executor.CodeNotCreateIndex},
+		{name: "not partitioned table", err: fmt.Errorf("target app.t: %w", executor.ErrNotPartitionedTable), want: executor.CodeNotPartitionedTable},
+		{name: "partitioned index name taken", err: fmt.Errorf("app.idx: %w", executor.ErrPartitionedIndexNameTaken), want: executor.CodePartitionedIndexNameTaken},
+		{name: "foreign table partition", err: fmt.Errorf("app.t: %w", executor.ErrForeignTablePartition), want: executor.CodeForeignTablePartition},
+		{name: "unique index partition key", err: fmt.Errorf("app.t: %w", executor.ErrUniqueIndexPartitionKey), want: executor.CodeUniqueIndexPartitionKey},
+		{name: "table lock unconfirmed", err: fmt.Errorf("app.t: %w", executor.ErrTableLockUnconfirmed), want: executor.CodeTableLockUnconfirmed},
+		{name: "partition detach pending", err: fmt.Errorf("app.t: %w", executor.ErrPartitionDetachPending), want: executor.CodePartitionDetachPending},
+		{name: "partitioned index tablespace", err: fmt.Errorf("app.idx: %w", executor.ErrPartitionedIndexTablespace), want: executor.CodePartitionedIndexTablespace},
+		{name: "partitioned index unsettled", err: fmt.Errorf("app.t: %w", executor.ErrPartitionedIndexUnsettled), want: executor.CodePartitionedIndexUnsettled},
 		{name: "replica identity drop", err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop), want: executor.CodeReplicaIdentityDrop},
 		{name: "adopted index drift", err: fmt.Errorf("adopt: %w", executor.ErrAdoptedIndexDrift), want: executor.CodeAdoptedIndexDrift},
+		{name: "dropped index drift", err: fmt.Errorf("drop: %w", executor.ErrDroppedIndexDrift), want: executor.CodeDroppedIndexDrift},
+		{name: "dropped index replaced", err: fmt.Errorf("drop: %w", executor.ErrDroppedIndexReplaced), want: executor.CodeDroppedIndexReplaced},
+		{name: "dropped object drift", err: fmt.Errorf("drop: %w", executor.ErrDroppedObjectDrift), want: executor.CodeDroppedObjectDrift},
+		{name: "dropped object has descendants", err: fmt.Errorf("drop: %w", executor.ErrDroppedObjectHasDescendants), want: executor.CodeDroppedObjectHasDescendants},
+		{name: "dropped table has parent", err: fmt.Errorf("drop: %w", executor.ErrDroppedTableHasParent), want: executor.CodeDroppedTableHasParent},
+		{name: "dropped table has dependents", err: fmt.Errorf("drop: %w", executor.ErrDroppedTableHasDependents), want: executor.CodeDroppedTableHasDependents},
+		{name: "dropped column partition key", err: fmt.Errorf("drop: %w", executor.ErrDroppedColumnPartitionKey), want: executor.CodeDroppedColumnPartitionKey},
+		{name: "dropped column partition dependent", err: fmt.Errorf("drop: %w", executor.ErrDroppedColumnPartitionDependent), want: executor.CodeDroppedColumnPartitionDependent},
 		{name: "validated constraint drift", err: fmt.Errorf("validate: %w", executor.ErrValidatedConstraintDrift), want: executor.CodeValidatedConstraintDrift},
 		{name: "renamed index drift", err: fmt.Errorf("rename: %w", executor.ErrRenamedIndexDrift), want: executor.CodeRenamedIndexDrift},
 		{name: "enum type drift", err: fmt.Errorf("add value: %w", executor.ErrEnumTypeDrift), want: executor.CodeEnumTypeDrift},
@@ -212,6 +230,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
 		executor.CodeCommitOutcomeUnknown:            false,
+		executor.CodeDropOutcomeUnknown:              false,
 		executor.CodeRowSecurityRefused:              true,
 		executor.CodeRowSecurityPlanChanged:          true,
 		executor.CodeRowSecurityOutcomeUnknown:       false,
@@ -226,6 +245,15 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeInvalidIndexNotDroppable:        true,
 		executor.CodeInvalidIndexBuilderUnobservable: false,
 		executor.CodeInvalidIndexUnproven:            false,
+		executor.CodeNotCreateIndex:                  true,
+		executor.CodeNotPartitionedTable:             true,
+		executor.CodePartitionedIndexNameTaken:       true,
+		executor.CodeForeignTablePartition:           true,
+		executor.CodeUniqueIndexPartitionKey:         true,
+		executor.CodeTableLockUnconfirmed:            true,
+		executor.CodePartitionDetachPending:          true,
+		executor.CodePartitionedIndexTablespace:      true,
+		executor.CodePartitionedIndexUnsettled:       false,
 		executor.CodeEmptySequence:                   true,
 		executor.CodeUnsupportedSequenceStep:         true,
 		executor.CodeUnsupportedPartitionedParent:    true,
@@ -244,6 +272,14 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodePoolTooSmall:                    true,
 		executor.CodeReplicaIdentityDrop:             true,
 		executor.CodeAdoptedIndexDrift:               true,
+		executor.CodeDroppedIndexDrift:               true,
+		executor.CodeDroppedIndexReplaced:            true,
+		executor.CodeDroppedObjectDrift:              true,
+		executor.CodeDroppedObjectHasDescendants:     true,
+		executor.CodeDroppedTableHasParent:           true,
+		executor.CodeDroppedTableHasDependents:       true,
+		executor.CodeDroppedColumnPartitionKey:       true,
+		executor.CodeDroppedColumnPartitionDependent: true,
 		executor.CodeValidatedConstraintDrift:        true,
 		executor.CodeRenamedIndexDrift:               true,
 		executor.CodeEnumTypeDrift:                   true,
@@ -326,4 +362,21 @@ func TestSequenceReportJSONContractIsStable(t *testing.T) {
 			}
 		]
 	}`, string(got))
+}
+
+// An invariant breach is the fail-closed outcome, so its code outranks every
+// typed failure that carries it.
+func TestOutcomeCodeInvariantViolationOutranksTypedFailures(t *testing.T) {
+	breach := fmt.Errorf("%w: LK-2", executor.ErrInvariantViolation)
+	for name, err := range map[string]error{
+		"invalid index":  &executor.InvalidIndexError{Schema: "s", Index: "i", Build: breach, Cleanup: executor.ErrBuildLeftInvalidIndex},
+		"budget":         fmt.Errorf("%w: %w", &executor.BudgetError{Cause: executor.CauseStatement, Budget: time.Second}, breach),
+		"unknown commit": &executor.CommitOutcomeUnknownError{Err: breach},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, executor.CodeInvariantViolation, executor.OutcomeCode(err))
+		})
+	}
+	invalidErr := &executor.InvalidIndexError{Schema: "s", Index: "i", Build: breach, Cleanup: executor.ErrBuildLeftInvalidIndex}
+	assert.Equal(t, executor.CodeInvariantViolation, invalidErr.Code(), "the typed error's own code agrees with OutcomeCode")
 }

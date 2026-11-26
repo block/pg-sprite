@@ -127,6 +127,16 @@ func BuildIndexConcurrentlyWithProgress(ctx context.Context, pool *pgxpool.Pool,
 }
 
 func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, tracker *progress.Tracker) (IndexBuildReport, error) {
+	return buildIndexConcurrentlyOn(ctx, pool, sql, b, tracker, 0)
+}
+
+// buildIndexConcurrentlyOn is buildIndexConcurrently for a caller that
+// already knows which table the statement must build on. A nonzero
+// expectTableOID is the table's identity: the build refuses when the name in
+// the statement resolves to another table, so a table renamed, detached, or
+// replaced since the caller read the catalog is never indexed under a name it
+// no longer answers to (INV: ST-7).
+func buildIndexConcurrentlyOn(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, tracker *progress.Tracker, expectTableOID uint32) (IndexBuildReport, error) {
 	var rep IndexBuildReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -171,6 +181,12 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	target, err := resolveTarget(ctx, conn, build)
 	if err != nil {
 		return rep, err
+	}
+	// INV: ST-7 — the statement runs against the table the caller proved,
+	// not against whichever table now holds its name.
+	if expectTableOID != 0 && target.tableOID != expectTableOID {
+		return rep, fmt.Errorf("%w: ST-7: %s no longer resolves to table %d, it resolves to table %d",
+			ErrInvariantViolation, qualifiedName(target.schema, target.table), expectTableOID, target.tableOID)
 	}
 	rep.Schema, rep.Index = target.schema, build.index
 
@@ -232,7 +248,7 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	verdictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), verdictTimeout)
 	defer cancel()
 	if buildErr == nil {
-		return verifiedBuildReport(verdictCtx, conn, build, target, elapsed)
+		return verifiedBuildReport(verdictCtx, conn, build, target, expectTableOID, elapsed)
 	}
 	buildErr = asConcurrentBudgetError(ctx, buildErr, b, elapsed, "concurrent index build")
 
@@ -251,20 +267,31 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 // does, is refused by the server), but that is a fact about current server
 // versions, not about this executor's contract. A reported success that
 // cannot be verified fails closed as an *InvalidIndexError.
-func verifiedBuildReport(ctx context.Context, conn *pgxpool.Conn, build concurrentIndexBuild, target indexTarget, elapsed time.Duration) (IndexBuildReport, error) {
+//
+// A nonzero expectTableOID is the identity the caller proved before the
+// build. The statement names its table and the server resolves the name when
+// it runs, which no transaction can pin because a concurrent build cannot
+// run in one, so a table renamed away and replaced under the same name after
+// the proof receives the index. The verification therefore also reads which
+// table the index is on, and an index on any other table is refused
+// (INV: ST-7): see misplacedIndexRefusal.
+func verifiedBuildReport(ctx context.Context, conn *pgxpool.Conn, build concurrentIndexBuild, target indexTarget, expectTableOID uint32, elapsed time.Duration) (IndexBuildReport, error) {
 	rep := IndexBuildReport{Schema: target.schema, Index: build.index}
-	var oid uint32
+	var oid, tableOID uint32
 	var valid bool
 	err := conn.QueryRow(ctx,
-		`SELECT c.oid, i.indisvalid
+		`SELECT c.oid, i.indisvalid, i.indrelid
 		   FROM pg_catalog.pg_index i
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`,
-		target.schema, build.index).Scan(&oid, &valid)
+		target.schema, build.index).Scan(&oid, &valid, &tableOID)
 	if err != nil {
 		return rep, &InvalidIndexError{Schema: target.schema, Index: build.index,
 			Cleanup: fmt.Errorf("verify built index %s.%s: %w", target.schema, build.index, err)}
+	}
+	if expectTableOID != 0 && tableOID != expectTableOID {
+		return rep, misplacedIndexRefusal(build, target, expectTableOID, oid, tableOID)
 	}
 	if !valid {
 		return rep, &InvalidIndexError{Schema: target.schema, Index: build.index, Cleanup: ErrBuildLeftInvalidIndex}
@@ -273,6 +300,18 @@ func verifiedBuildReport(ctx context.Context, conn *pgxpool.Conn, build concurre
 	rep.Duration = elapsed
 	rep.ServerVersion = conn.Conn().PgConn().ParameterStatus("server_version")
 	return rep, nil
+}
+
+// misplacedIndexRefusal refuses a build whose index name resolved, at
+// verification, to an index on a table other than the one the caller proved.
+// The build cannot prove that index is the one it created: another session
+// may have renamed the build's index and given the name to an index of its
+// own. So nothing is dropped, and the refusal names the index and the table
+// it is on for an operator to inspect.
+func misplacedIndexRefusal(build concurrentIndexBuild, target indexTarget, expectTableOID, indexOID, tableOID uint32) error {
+	return fmt.Errorf("%w: ST-7: %s resolved to table %d when the index was built, not to the table %d the caller proved; index %s (%d) on table %d was left in place for an operator to inspect",
+		ErrInvariantViolation, qualifiedName(target.schema, target.table), tableOID, expectTableOID,
+		qualifiedName(target.schema, build.index), indexOID, tableOID)
 }
 
 // failedBuildVerdict decides, read-only, what a failed build left behind: a

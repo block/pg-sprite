@@ -129,16 +129,18 @@ Excerpt, the first rows:
 
 ```console
 $ pg-sprite capabilities
-AREA          OPERATION                     TIER BACKEND        FRONT DOORS    OWNER     STATUS
-column_chang… `ADD COLUMN` (no default, a … t1   native_as_is   m:yes d:yes    —         ✅
-column_chang… `ADD COLUMN` with volatile d… t2   copy_and_swap  m:ref d:ref    —         🟡
-column_chang… `DROP COLUMN`                 t1   native_as_is   m:yes d:yes    —         ✅
-column_chang… `ALTER COLUMN TYPE`, general… t1   copy_and_swap  m:yes d:yes    —         ✅
-column_chang… `RENAME COLUMN` / `RENAME TA… t3   none           m:ref d:n/a    —         ❌
+AREA          OPERATION                     TIER MATURITY BACKEND        FRONT DOORS    OWNER     STATUS
+column_chang… `ADD COLUMN` (no default, a … t1   ga       native_as_is   m:yes d:yes    —         ✅
+column_chang… `ADD COLUMN` with volatile d… t2   —        copy_and_swap  m:ref d:ref    —         🟡
+column_chang… `DROP COLUMN`                 t1   ga       native_as_is   m:yes d:yes    —         ✅
+column_chang… `ALTER COLUMN TYPE`, general… t1   preview  copy_and_swap  m:yes d:yes    —         ✅
+column_chang… `RENAME COLUMN` / `RENAME TA… t3   —        none           m:ref d:n/a    —         ❌
 ```
 
 `m:` is `migrate` and `d:` is the declarative `diff`; `yes` runs, `ref` is
-refused today. The full matrix, with the reason for every row, is
+refused today. `MATURITY` is set on supported rows only: `ga` is generally
+available, and `preview` runs only when the run opts in, such as
+`--copy-and-swap`. The full matrix, with the reason for every row, is
 [capabilities.md](capabilities.md); `--json` prints it for automation.
 
 ## Run a schema change
@@ -386,6 +388,9 @@ note:
 
 plan:
   public.orders (PostgreSQL 16.15) — 2 statements, 2 steps to run, 0 refused
+
+fingerprint:
+  sha256:6f0c1d52e9b3a7a48d1e5c0b92f4a7d3e8c6b1a09d2f7e4c3b5a8d6e1f0c9b2a
 ```
 
 `diff` changes nothing: it builds the file in a scratch schema inside a
@@ -412,9 +417,7 @@ executed-natively: converged: all 2 planned statements committed and a fresh pla
 ```
 
 Each planned statement takes the same route `--alter` would give it, and the
-run ends by planning again to confirm nothing is left. A plan that drops
-something is refused: the declarative door takes no acknowledgements, so
-destructive changes go through `--alter`.
+run ends by planning again to confirm nothing is left.
 
 - A file that also declares the table's row security policies is covered in
   [declarative-row-security.md](declarative-row-security.md).
@@ -426,6 +429,121 @@ destructive changes go through `--alter`.
   remove or move one.
 - Extension types named without a schema, such as `citext` installed in
   `extensions`, need `--extension-schema extensions`.
+
+### Apply a reviewed drop
+
+A plan that drops live structure (a column, a constraint, an index, or a
+`NOT NULL`) is refused whole, and nothing runs, until you review it and say so
+twice: pin the plan you reviewed, and name the table. Here the file no longer
+has the `note` column or the `orders_user_id_idx` index.
+
+```console
+$ pg-sprite diff --desired schema/orders.sql
+statement 1:
+  DROP INDEX public.orders_user_id_idx;
+
+warning[destructive]:
+  this change discards live data or structure
+
+note:
+  pg-sprite migrate will run a safer online sequence instead:
+  1. DROP INDEX CONCURRENTLY public.orders_user_id_idx;
+
+statement 2:
+  ALTER TABLE public.orders DROP note;
+
+warning[destructive]:
+  this change discards live data or structure
+
+plan:
+  public.orders (PostgreSQL 16.15) — 2 statements, 2 steps to run, 0 refused
+
+fingerprint:
+  sha256:6f50cb50959a807f68554bb5529b93b96c4a770fb5e5e5e62f61e024dbeade4f
+```
+
+`migrate --desired` without the flags refuses with `destructive-change` and
+prints the two flags to add. Read the plan, then rerun with its fingerprint and
+the table:
+
+```console
+$ pg-sprite migrate --desired schema/orders.sql \
+    --expect-fingerprint sha256:6f50cb50959a807f68554bb5529b93b96c4a770fb5e5e5e62f61e024dbeade4f \
+    --allow-destructive public.orders
+executed natively
+  table:     public.orders
+  statement: DROP INDEX public.orders_user_id_idx
+  detail:    dropped with DROP INDEX CONCURRENTLY in 0s: public.orders was not locked against reads or writes for the drop
+  allowed:   the statement's data loss was acknowledged (allow-destructive)
+  executed as:
+    1. DROP INDEX CONCURRENTLY public.orders_user_id_idx
+executed natively
+  table:     public.orders
+  statement: ALTER TABLE public.orders DROP note
+  detail:    committed within budgets (lock 3s, statement 30s): the change was effectively instant
+  allowed:   the statement's data loss was acknowledged (allow-destructive)
+executed-natively: converged: all 2 planned statements committed and a fresh plan is empty
+```
+
+A dry run checks the pin the same way, so a stale pin is caught before the
+run. Here the `note` column was dropped and added back as `varchar(40)` after
+the review. The name is the same, the definition is not, so the plan is a
+different one:
+
+```console
+$ pg-sprite migrate --desired schema/orders.sql --dry-run \
+    --expect-fingerprint sha256:6f50cb50959a807f68554bb5529b93b96c4a770fb5e5e5e62f61e024dbeade4f \
+    --allow-destructive public.orders
+refused (plan-fingerprint-mismatch)
+  class:  environmental
+  detail: the plan derived at execution time (fingerprint sha256:aba27004d3d8aa2a04b9dfa1141603305833dfdbda03ab9ba2c5a92c45c39a83) is not the pinned plan (fingerprint sha256:6f50cb50959a807f68554bb5529b93b96c4a770fb5e5e5e62f61e024dbeade4f); the live table or the desired schema changed since the plan was reviewed — re-review the new plan
+```
+
+- `--allow-destructive` is accepted with `--desired` only together with
+  `--expect-fingerprint`; without it the command fails before it connects. The
+  run refuses, and executes nothing, when the plan derived at run time has a
+  different fingerprint (`plan-fingerprint-mismatch`): the table or the file
+  changed since the review, so review the new plan.
+- The acknowledgement lifts only the plan's destructive statements. Every
+  statement except an index drop still takes the route, preflight, and budgets
+  `--alter` would give it. A planned index drop runs as
+  `DROP INDEX CONCURRENTLY` under its own gates instead: the pin, the
+  acknowledgement, the audit, the verdict, and a re-read of the index's
+  definition right before the drop. It skips `--alter`'s size guard, privilege
+  preflight, and partition check.
+- The fingerprint covers what each drop removes, not only its name, so a column
+  dropped and added back with another type, or an index replaced under the same
+  name, is a different plan and the run refuses with `plan-fingerprint-mismatch`.
+- An index drop never blocks the table. Immediately before each drop, the run
+  reads the live object again and refuses, dropping nothing, if it no longer
+  matches the plan (`dropped-index-drift`, `dropped-object-drift`); see
+  [execution-model.md](execution-model.md) for these codes and for
+  `dropped-index-replaced`.
+- A `--allow-destructive` table that is not the resolved table is a usage
+  error in a dry run as well, whatever the plan holds, before the pin is
+  compared or anything is printed.
+- The plan runs in order, and a drop comes before an add. A change that
+  replaces a unique constraint or index leaves a window without the old
+  guarantee. To add first and drop after, run the add and the drop as two
+  `--alter` statements.
+- A plan that fails part-way keeps the statements that already committed. Run
+  `diff --desired` again to review what is left.
+- `--dry-run` prints the fingerprint to pin and executes nothing; with both
+  flags it previews the plan the run would execute. Some plans stay refused
+  with both flags, such as a drop beside a copy-and-swap statement or a drop
+  of a partitioned table's index. For those, the dry run prints the refusal
+  the pinned run gives instead of the flags. In `--json` output on a
+  destructive plan, `fingerprint` covers the refused plan and cannot be
+  pinned: pin `pinnable_fingerprint`, the same value the text output prints.
+  A dry run compares `--expect-fingerprint` as the run does and refuses with
+  `plan-fingerprint-mismatch` on a difference, for a table, a row security
+  file, an enum type file, and a non-destructive plan alike.
+- A policy a row security file no longer lists is dropped without this
+  acknowledgement, and that change takes neither flag. The flags apply to a
+  change to the table definition alone
+  ([declarative-row-security.md](declarative-row-security.md)). A file that
+  declares an enum type takes `--expect-fingerprint` but not
+  `--allow-destructive`, since a label cannot be dropped.
 
 ## Follow a running change
 
@@ -506,13 +624,71 @@ it verifies and swaps. A slot with `active` false belongs to a stopped run: it
 keeps WAL on the server until you resume the run or start it over, as
 [copy-and-swap.md](copy-and-swap.md#stop-resume-and-start-over) describes.
 
+### Drop orphan slots
+
+A slot no checkpoint row in a non-terminal phase names is an orphan: a run
+that ended before its row landed, or one whose cleanup did not finish. It
+keeps WAL like any other slot. `reap` drops the orphans of the connected
+database, publications included; `--dry-run` shows what it would drop first:
+
+```console
+$ pg-sprite reap --dry-run
+would drop (orphans, with their publications): 1
+  pgsprite_deadbeef
+live (kept: a checkpoint row in a non-terminal phase names it): 1
+  pgsprite_cafebabe
+active (kept: a process holds it): 0
+foreign (kept: wears the pgsprite_ prefix without the engine's name shape or output plugin): 1
+  pgsprite_backup
+dry run: nothing was dropped
+```
+
+A slot a live row names, a slot a process holds, and a `pgsprite_` slot the
+engine did not make (another name shape, or an output plugin other than
+`pgoutput`) are kept; slots of other databases are never read. The pass is
+safe while a schema change runs: it reads each orphan's row again right
+before the drop, under the lock a run takes to claim its slot. A dry run that
+would drop opens one replication connection, as each drop does, so a role
+without the `REPLICATION` attribute or a URL that cannot open one fails the
+dry run with exit 1, after the report.
+
+A database without the checkpoint table has no row that can show a slot is
+an orphan, so `reap` examines no slot there, drops nothing, and exits 0. A
+`pgsprite_` slot in such a database still keeps WAL; check
+`pg_replication_slots` for one.
+
+`--json` prints the [reap report](#reap-report).
+
+#### Reap report
+
+`reap --json` prints one object, `format_version` 1. A consumer must reject a
+version it does not know; the version is bumped whenever a field is added,
+removed, or changes meaning.
+
+| Field | Meaning |
+|---|---|
+| `format_version` | The report's shape, 1 |
+| `dry_run` | True for `--dry-run` |
+| `checkpoint_table_exists` | False when the database has no checkpoint table: no slot was examined and every list is empty |
+| `stopped` | True when the pass failed at a slot; the lists hold what was sorted before it, and the command exits 1 |
+| `failed` | The slot the pass stopped at, `""` when it did not stop. Its slot may already be gone: the drop removes the slot before its publication |
+| `dropped` | Orphans the run dropped, publications included; empty in a dry run |
+| `would_drop` | Orphans a real run would drop now; empty in a real run |
+| `live` | Kept: a checkpoint row in a non-terminal phase names each |
+| `active` | Kept: a process holds each |
+| `foreign` | Kept: wears the `pgsprite_` prefix without the engine's name shape or output plugin |
+
+Every list is always an array, never `null`. stdout is empty, with exit 1,
+only when the pass failed before it reached any slot, such as a connection
+or catalog read failure.
+
 A program that embeds pg-sprite as a Go library can poll a run's phase, step,
 and row, checksum, and catch-up counters directly; that snapshot is the
 [progress report contract](progress-report.md).
 
 ## Use the CLI from scripts and agents
 
-`migrate`, `diff`, `status`, `lint`, `suggest`, and `capabilities` take
+`migrate`, `diff`, `status`, `reap`, `lint`, `suggest`, and `capabilities` take
 `--json`. stdout carries only the report; diagnostics go to stderr, and
 `--debug` adds statement-level tracing there.
 
@@ -520,7 +696,7 @@ and row, checksum, and catch-up counters directly; that snapshot is the
 $ pg-sprite migrate --dry-run --json --alter "ALTER TABLE orders ADD COLUMN ref text UNIQUE" > plan.json; echo $?
 2
 $ jq -c '{format_version, table, disposition}' plan.json
-{"format_version":21,"table":"orders","disposition":"rewrite-required"}
+{"format_version": 23,"table":"orders","disposition":"rewrite-required"}
 ```
 
 The exit code answers the question a pipeline asks first, without parsing
@@ -541,6 +717,7 @@ Each JSON shape is versioned:
 - [plan-report.md](plan-report.md) for `migrate --dry-run` and `diff`
 - [lint-report.md](lint-report.md) and [suggest-report.md](suggest-report.md)
 - [capabilities-contract.md](capabilities-contract.md) for `capabilities`
+- [Reap report](#reap-report) above for `reap`
 
 [cli-output-examples.md](cli-output-examples.md) has one captured example of
 every output, and an orchestrator that embeds the engine as a Go library should

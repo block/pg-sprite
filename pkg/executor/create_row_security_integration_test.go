@@ -344,6 +344,27 @@ func TestCreateWithRowSecurityRefusesAnUnsupportedShapeBeforeCreating(t *testing
 	assert.False(t, relationExists(t, f.pool, f.schema, "notes"))
 }
 
+// Row security on a partitioned parent does not cover a query that names a
+// partition, so a wanted partitioned table with row security is refused
+// before any target DDL, though the parent alone renders.
+func TestCreateWithRowSecurityRefusesAPartitionedParentBeforeCreating(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	d := desiredRowSecurity(t, `CREATE TABLE notes (
+     id bigint NOT NULL,
+     region text NOT NULL
+ ) PARTITION BY LIST (region);
+ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;`)
+
+	_, err := executor.PreviewCreateWithRowSecurity(t.Context(), f.pool, f.at, f.cr, d, createWithRowSecurityBudget)
+	require.ErrorIs(t, err, executor.ErrRowSecurityRefused)
+	assert.ErrorIs(t, err, schemadiff.ErrUnrenderablePartitionedRowSecurity)
+	report, err := executor.ExecuteCreateWithRowSecurity(t.Context(), f.pool, f.at, f.cr, d, createWithRowSecurityBudget)
+	require.ErrorIs(t, err, executor.ErrRowSecurityRefused)
+	assert.ErrorIs(t, err, schemadiff.ErrUnrenderablePartitionedRowSecurity)
+	assert.Empty(t, report.Statements)
+	assert.False(t, relationExists(t, f.pool, f.schema, "notes"))
+}
+
 // An event trigger that hands the table to another role while its policy is
 // created cannot make the run commit a table the creation role does not
 // own: the owner is read after every statement, and the run rolls back.

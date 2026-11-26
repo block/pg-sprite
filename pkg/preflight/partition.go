@@ -12,11 +12,17 @@ import (
 type PartitionRefusalCause string
 
 const (
-	// PartitionCauseConcurrentIndexBuild means a step attempts a concurrent
-	// index build on the parent.
+	// PartitionCauseConcurrentIndexBuild means a step list attempts a
+	// concurrent index build on the parent, which PostgreSQL has no
+	// statement for. The front doors send a CREATE INDEX on a partitioned
+	// table to the partition-aware build before this check
+	// (RoutesToPartitionedIndexBuild), so only a step list that bypasses the
+	// routing carries one.
 	PartitionCauseConcurrentIndexBuild PartitionRefusalCause = "parent-concurrent-index-build"
 	// PartitionCauseBlockingIndexBuild means a step would build an index on
-	// the parent while holding ACCESS EXCLUSIVE.
+	// the parent while holding a lock that blocks writes to the whole tree.
+	// A CREATE INDEX reaches it only when the operator forced the submitted
+	// form, which overrides the routing to the partition-aware build.
 	PartitionCauseBlockingIndexBuild PartitionRefusalCause = "parent-blocking-index-build"
 	// PartitionCauseIndexAdoption means a step adopts an existing index as a
 	// primary-key or unique constraint on the parent.
@@ -25,6 +31,9 @@ const (
 	// foreign key, which the server version cannot do on a partitioned
 	// table.
 	PartitionCauseNotValidForeignKey PartitionRefusalCause = "parent-not-valid-foreign-key"
+	// PartitionCauseConcurrentIndexDrop means a step drops an index of the
+	// parent concurrently, which PostgreSQL rejects for a partitioned index.
+	PartitionCauseConcurrentIndexDrop PartitionRefusalCause = "parent-concurrent-index-drop"
 )
 
 // PartitionRefusalCauses returns the closed set of partitioned-parent
@@ -36,16 +45,18 @@ func PartitionRefusalCauses() []PartitionRefusalCause {
 		PartitionCauseBlockingIndexBuild,
 		PartitionCauseIndexAdoption,
 		PartitionCauseNotValidForeignKey,
+		PartitionCauseConcurrentIndexDrop,
 	}
 }
 
 // Class is the routing class of the cause, from docs/refusal-classes.md:
 // what kind of boundary the consumer is looking at. The two index-build
-// causes are a capability boundary — the partition-aware concurrent index
-// flow is a planned engine capability, and refusing the blocking substitute
-// is the policy half of the same gap. Index adoption is by design: no
+// causes are a capability boundary: the partition-aware build is the
+// supported route for an index on a partitioned parent, and these are the
+// forms of the same request it does not run as written. Index adoption is by design: no
 // supported server adopts an index as a constraint on a partitioned parent,
-// so waiting for an engine release waits for nothing. The NOT VALID foreign
+// so waiting for an engine release waits for nothing; the same holds for a
+// concurrent drop of a partitioned index. The NOT VALID foreign
 // key is environmental: the same statement runs on a newer server, so the
 // action that unblocks it is a server upgrade. The class is a triage
 // decision; the cause's row in the document decides what the consumer does
@@ -54,7 +65,7 @@ func (c PartitionRefusalCause) Class() refusal.Class {
 	switch c {
 	case PartitionCauseConcurrentIndexBuild, PartitionCauseBlockingIndexBuild:
 		return refusal.ClassCapabilityBoundary
-	case PartitionCauseIndexAdoption:
+	case PartitionCauseIndexAdoption, PartitionCauseConcurrentIndexDrop:
 		return refusal.ClassByDesign
 	case PartitionCauseNotValidForeignKey:
 		return refusal.ClassEnvironmental
@@ -82,14 +93,39 @@ func (e *UnsupportedPartitionedParentError) Error() string {
 	case PartitionCauseIndexAdoption:
 		return "PostgreSQL does not support ALTER TABLE ... ADD CONSTRAINT ... USING INDEX on partitioned tables in any supported version"
 	case PartitionCauseBlockingIndexBuild:
-		return "PostgreSQL supports a blocking parent-level index build, but pg-sprite refuses to run it under ACCESS EXCLUSIVE; " +
-			"the partition-aware concurrent flow is not yet supported"
+		return "PostgreSQL supports a blocking parent-level index build, but pg-sprite refuses to run it as written because it blocks writes to the whole table; " +
+			"a CREATE INDEX on a partitioned table, without the force override, is built partition by partition instead"
 	case PartitionCauseConcurrentIndexBuild:
-		return "PostgreSQL cannot build parent-level indexes concurrently; pg-sprite does not yet support " +
-			"the partition-aware CREATE INDEX ON ONLY, per-partition CREATE INDEX CONCURRENTLY, and ATTACH PARTITION flow"
+		return "PostgreSQL cannot build parent-level indexes concurrently, so a sequence of steps cannot carry one on a partitioned table; " +
+			"a CREATE INDEX on a partitioned table is built partition by partition instead"
+	case PartitionCauseConcurrentIndexDrop:
+		return "PostgreSQL cannot drop an index of a partitioned table concurrently in any supported version, and a partition's " +
+			"own index cannot be dropped alone; the drop is a plain DROP INDEX, which takes ACCESS EXCLUSIVE on the parent, " +
+			"every partition, and every partition's index — run it through the imperative front door with the blocking lock " +
+			"and the destructive drop both acknowledged for the table"
 	default:
 		return "pg-sprite refuses an unsupported operation on a partitioned table"
 	}
+}
+
+// RoutesToPartitionedIndexBuild reports whether the steps planned for one
+// statement are the one CREATE INDEX that the partition-aware index build
+// carries when the statement's target is a partitioned table: a CREATE
+// INDEX in any form, with or without CONCURRENTLY or ONLY. A front door asks
+// it after it knows the target is partitioned, and runs the build with the
+// statement itself, not with the steps, which are a plain table's substitute
+// (a concurrent build) and would fail on a partitioned one. Any other step
+// list is false. A step that does not parse is an error, as it is for
+// RefusesPartitionedParent.
+func RoutesToPartitionedIndexBuild(execSQL []string) (bool, error) {
+	if len(execSQL) != 1 {
+		return false, nil
+	}
+	st, err := statement.ParseOne(execSQL[0])
+	if err != nil {
+		return false, fmt.Errorf("check partitioned index build routing: %w", err)
+	}
+	return st.Kind() == statement.KindCreateIndex, nil
 }
 
 // CheckPartitionSupport verifies that the execution steps are safe
@@ -121,8 +157,8 @@ func RefusesPartitionedParent(serverMajor int, execSQL []string) (PartitionRefus
 		}
 		// INV: RF-6 — no partitioned-parent sequence starts when pg-sprite
 		// cannot complete it without an ACCESS EXCLUSIVE index build, an
-		// unsupported index adoption, or a server-version-unsupported NOT
-		// VALID foreign key.
+		// unsupported index adoption, a server-version-unsupported NOT
+		// VALID foreign key, or a concurrent drop of a partitioned index.
 		ops, err := statement.ParseOps(sql)
 		if err != nil {
 			return "", fmt.Errorf("check partitioned-parent operations: %w", err)
@@ -135,6 +171,11 @@ func RefusesPartitionedParent(serverMajor int, execSQL []string) (PartitionRefus
 				op.Constraint == statement.ConstraintForeignKey && op.NotValid {
 				return PartitionCauseNotValidForeignKey, nil
 			}
+		}
+		// Every index of a partitioned parent is a partitioned index, which
+		// PostgreSQL refuses to drop concurrently.
+		if st.Kind() == statement.KindDropIndex && st.Concurrent() {
+			return PartitionCauseConcurrentIndexDrop, nil
 		}
 		if st.BuildsIndex() {
 			if st.Concurrent() {
