@@ -127,27 +127,44 @@ func AdmitPartitionedKeyRequest(st statement.Statement, schema string, steps []s
 	})
 }
 
-// AdmitPartitionedKeyColumns is the catalog half of the partitioned key
-// build's admission, for a statement [AdmitPartitionedKeyRequest] admitted: a
-// key that does not include every partition key column of every partitioned
-// table under the target is refused, read from the live catalog on pool, as
-// the build refuses it under its table lock before it creates anything. The
-// build's other checks under its lock (a parent constraint in the way, a
-// nullable primary key column, a sub-partitioned partition) are not part of
-// it, so a dry run does not claim them. The verdict, the boolean, and the
-// error mean what they mean for [AdmitRoutedSteps].
-func AdmitPartitionedKeyColumns(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
-	return admitRouted(st, schema, steps, func(steps []string) error {
+// AdmitPartitionedKeyCatalog is the catalog half of the partitioned key
+// build's admission, for a statement [AdmitPartitionedKeyRequest] admitted,
+// read from the live catalog on pool: a key that does not include every
+// partition key column of every partitioned table under the target, and a
+// tree with a sub-partitioned partition, are refused as the build refuses
+// them under its table lock before it creates anything. The build's checks of
+// the parent (a constraint in the way, a nullable primary key column) are not
+// part of it, so a dry run does not claim them. The verdict, the boolean, and
+// the error mean what they mean for [AdmitRoutedSteps].
+func AdmitPartitionedKeyCatalog(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRoutedAs(st, schema, steps, func(steps []string) error {
 		if len(steps) != 1 {
 			return fmt.Errorf("%w: the partitioned key build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
 		}
 		return executor.AdmitPartitionedKey(ctx, pool, steps[0])
-	})
+	}, partitionedKeyCatalogRefusal)
+}
+
+// partitionedKeyCatalogRefusal classifies a refusal of the partitioned key
+// build's catalog admission: the partition key check is an admission
+// refusal, and the sub-partitioned tree is the build's own catalog refusal.
+func partitionedKeyCatalogRefusal(err error) (verdict.Refusal, bool) {
+	if r, ok := admissionRefusal(err); ok {
+		return r, true
+	}
+	return partitionedKeyRefusal(err)
 }
 
 // admitRouted qualifies the steps of an unqualified st and applies admit to
 // them, returning the refusal verdict [Run] ends in when admit refuses.
 func admitRouted(st statement.Statement, schema string, steps []string, admit func([]string) error) (verdict.Verdict, bool, error) {
+	return admitRoutedAs(st, schema, steps, admit, admissionRefusal)
+}
+
+// admitRoutedAs is admitRouted with the refusals of admit classified by
+// classify instead of the imperative admission sentinels alone.
+func admitRoutedAs(st statement.Statement, schema string, steps []string, admit func([]string) error,
+	classify func(error) (verdict.Refusal, bool)) (verdict.Verdict, bool, error) {
 	unqualified := st.Schema() == "" && st.Table() != ""
 	if unqualified && schema == "" {
 		return verdict.Verdict{}, false, fmt.Errorf("admit routed steps for %s: %w", st.Table(), errAdmissionSchemaUnknown)
@@ -163,7 +180,7 @@ func admitRouted(st statement.Statement, schema string, steps []string, admit fu
 	if admitErr == nil {
 		return verdict.Verdict{}, false, nil
 	}
-	r, ok := admissionRefusal(admitErr)
+	r, ok := classify(admitErr)
 	if !ok {
 		return verdict.Verdict{}, false, fmt.Errorf("admit routed steps for %s: %w", qualified(st), admitErr)
 	}

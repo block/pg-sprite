@@ -255,7 +255,8 @@ func TestMigrateRefusesAPrimaryKeyOverANullableColumnOfAPartitionedTable(t *test
 // The build takes only leaf partitions directly under the parent. The events
 // table's 2026 partition is partitioned again by month, so the key is refused
 // before any partition is touched; supporting it is a capability the engine
-// does not have yet.
+// does not have yet. The dry run reads the same tree and reports the same
+// refusal, so a stored plan never promises a run the apply refuses here.
 func TestMigrateRefusesAKeyOnASubPartitionedTable(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -274,13 +275,14 @@ func TestMigrateRefusesAKeyOnASubPartitionedTable(t *testing.T) {
 		    FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')`, schema))
 	require.NoError(t, err)
 
-	v, err := runKey(t, url, fmt.Sprintf(`ALTER TABLE %s.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`, schema))
-	require.ErrorIs(t, err, verdict.ErrRefused)
-	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
-	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
-	assert.Contains(t, v.Detail, schema+".events_2026")
-	assert.Zero(t, indexCountIn(t, pool, schema), "the refusal built no index")
+	dryRun, applied := admissionRefusalVerdicts(t, url,
+		fmt.Sprintf(`ALTER TABLE %s.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`, schema))
+	assert.Equal(t, verdict.OutcomeRefused, applied.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, applied.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, applied.Class)
+	assert.Equal(t, schema+".events", applied.Table)
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
+	assert.Zero(t, indexCountIn(t, pool, schema), "neither run built an index")
 }
 
 // --force runs the submitted form as written, which on a partitioned table

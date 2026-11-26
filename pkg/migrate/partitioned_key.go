@@ -27,9 +27,9 @@ import (
 // The build's static admission refusals, and the partition key check it makes
 // before it touches anything, are refusals with nothing executed. Its other
 // catalog refusals (the parent stands in the way, a primary key column allows
-// NULL, a sub-partitioned partition) are refusals only when the build gave no
-// partition the key before it stopped; after that they are failed verdicts,
-// because something committed.
+// NULL, a sub-partitioned partition) are refusals only when the build stopped
+// before it began a partition's index build or gave any partition the key;
+// after that they are failed verdicts, because something committed.
 func partitionedKeyBuild(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable,
 	st statement.Statement, opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
 	if err := checkPartitionedIndexConnection(ctx, pool, opts); err != nil {
@@ -73,10 +73,10 @@ func partitionedKeyRefusalVerdict(st statement.Statement, err error, rep executo
 	if !ok {
 		return verdict.Verdict{}, false
 	}
-	// A leaf joins the report only once its key constraint exists, so an
-	// empty list means the build stopped before it gave any partition the
-	// key, at the checks it makes first.
-	if len(rep.Leaves) > 0 {
+	// A leaf joins the report only once its key constraint exists, and a
+	// partition's index build commits before its constraint does, so the
+	// build changed nothing only when it reports neither.
+	if rep.Changed || len(rep.Leaves) > 0 {
 		return verdict.Verdict{}, false
 	}
 	return admissionRefusalVerdict(st, err, r, false), true

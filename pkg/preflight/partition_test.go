@@ -89,7 +89,8 @@ func TestRoutesToPartitionedIndexBuild(t *testing.T) {
 // A lone ADD PRIMARY KEY or ADD UNIQUE over columns is the statement the
 // partitioned key build carries, named or not and whatever clauses it has,
 // so the build's own admission decides the rest. Adopting an index with
-// USING INDEX, any other constraint, and a key with company are not.
+// USING INDEX, any other constraint, and a key with company, before or after
+// it, are not.
 func TestRoutesToPartitionedKeyBuild(t *testing.T) {
 	for _, sql := range []string{
 		"ALTER TABLE s.t ADD CONSTRAINT t_pkey PRIMARY KEY (id, created_at)",
@@ -103,11 +104,13 @@ func TestRoutesToPartitionedKeyBuild(t *testing.T) {
 	}
 
 	for name, sql := range map[string]string{
-		"an index adoption":       "ALTER TABLE s.t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX ix",
-		"a check constraint":      "ALTER TABLE s.t ADD CONSTRAINT t_ck CHECK (id > 0)",
-		"a key with company":      "ALTER TABLE s.t ADD COLUMN c int, ADD CONSTRAINT t_u UNIQUE (id)",
-		"an inline unique column": "ALTER TABLE s.t ADD COLUMN c int UNIQUE",
-		"a CREATE INDEX":          "CREATE UNIQUE INDEX i ON s.t (id)",
+		"an index adoption":         "ALTER TABLE s.t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX ix",
+		"a check constraint":        "ALTER TABLE s.t ADD CONSTRAINT t_ck CHECK (id > 0)",
+		"a key with company":        "ALTER TABLE s.t ADD COLUMN c int, ADD CONSTRAINT t_u UNIQUE (id)",
+		"a key first, with company": "ALTER TABLE s.t ADD CONSTRAINT t_u UNIQUE (id), ADD COLUMN c int",
+		"two keys":                  "ALTER TABLE s.t ADD CONSTRAINT t_u UNIQUE (id), ADD CONSTRAINT t_v UNIQUE (code)",
+		"an inline unique column":   "ALTER TABLE s.t ADD COLUMN c int UNIQUE",
+		"a CREATE INDEX":            "CREATE UNIQUE INDEX i ON s.t (id)",
 	} {
 		routes, err := RoutesToPartitionedKeyBuild(sql)
 		require.NoError(t, err, name)

@@ -168,16 +168,15 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			// A unique index or key must contain the tree's partition keys,
 			// which only the live catalog knows; the build refuses one that
 			// does not before it creates anything, and so does the dry run.
-			catalogAdmit := partitionKeyAdmission(ps.Execution)
-			if catalogAdmit == nil {
-				continue
-			}
-			v, refused, admitErr = catalogAdmit(ctx, pool, st, report.Schema, ps.ExecSQL)
-			if admitErr != nil {
-				return admitErr
-			}
-			if refused {
-				return c.emit(out, v)
+			// The key build also refuses a sub-partitioned tree there.
+			if catalogAdmit := partitionKeyAdmission(ps.Execution); catalogAdmit != nil {
+				v, refused, admitErr = catalogAdmit(ctx, pool, st, report.Schema, ps.ExecSQL)
+				if admitErr != nil {
+					return admitErr
+				}
+				if refused {
+					return c.emit(out, v)
+				}
 			}
 			// A concurrent detach is refused when the table has a DEFAULT
 			// partition, which only the live catalog knows. A detach is
@@ -221,7 +220,7 @@ func partitionKeyAdmission(e planner.Execution) func(context.Context, *pgxpool.P
 	case planner.ExecutionPartitionedIndexBuild:
 		return migrate.AdmitPartitionedUniqueIndex
 	case planner.ExecutionPartitionedKeyBuild:
-		return migrate.AdmitPartitionedKeyColumns
+		return migrate.AdmitPartitionedKeyCatalog
 	default:
 		return nil
 	}

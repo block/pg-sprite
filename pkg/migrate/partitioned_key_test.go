@@ -15,15 +15,18 @@ import (
 // A stopped partitioned key build is a refusal only when nothing was
 // executed. The shape refusals and the partition key check come before the
 // build touches anything, so they always are. The parent, nullable column,
-// and sub-partition checks are refusals while no partition has the key yet,
-// and failed verdicts once one has, since the build reads them again on a
-// later pass. Every other stop, such as a name an occupant holds on a
-// partition, is a failed verdict carrying its code.
+// and sub-partition checks are refusals while the build has changed nothing,
+// and failed verdicts once it has: once a partition has the key, or once a
+// partition's index build began, since that build commits before the
+// partition's constraint does and a column can lose NOT NULL in between.
+// Every other stop, such as a name an occupant holds on a partition, is a
+// failed verdict carrying its code.
 func TestPartitionedKeyRefusalVerdictRefusesOnlyWhatRanNothing(t *testing.T) {
 	st, err := statement.ParseOne("ALTER TABLE billing.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id, placed_at)")
 	require.NoError(t, err)
 	none := executor.PartitionedKeyReport{}
 	oneLeaf := executor.PartitionedKeyReport{Leaves: []executor.PartitionKeyResult{{Table: "orders_2026", Action: executor.PartitionKeyBuilt}}}
+	indexBuilt := executor.PartitionedKeyReport{Changed: true}
 
 	for _, tc := range []struct {
 		name  string
@@ -56,6 +59,7 @@ func TestPartitionedKeyRefusalVerdictRefusesOnlyWhatRanNothing(t *testing.T) {
 	}{
 		{"a sub-partition after a partition got its key", executor.ErrPartitionedKeySubPartitioned, oneLeaf},
 		{"a parent conflict after a partition got its key", executor.ErrPartitionedKeyParentConflict, oneLeaf},
+		{"a nullable column after a partition's index was built", executor.ErrPartitionedKeyNullableColumn, indexBuilt},
 		{"a name taken on a partition", executor.ErrPartitionedKeyNameTaken, none},
 		{"a conflicting partition key", executor.ErrPartitionedKeyConflict, none},
 		{"a foreign table partition", executor.ErrForeignTablePartition, none},

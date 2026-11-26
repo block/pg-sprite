@@ -232,11 +232,11 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 
 // partitionedKeySentinels is the closed set of the partitioned key build's
 // catalog refusals that the imperative front door maps to a refusal verdict
-// when the build returned them before it gave any partition the key
+// when the build returned them before it changed anything
 // (partitionedKeyBuild checks that): the parent stands in the way, a primary
 // key column allows NULL, or a partition is itself partitioned. The build
 // reads these before it touches a partition, and on a later pass too, so the
-// same error after a partition got its key is a failed verdict instead.
+// same error after the build changed a partition is a failed verdict instead.
 func partitionedKeySentinels() []error {
 	return []error{
 		executor.ErrPartitionedKeyParentConflict,

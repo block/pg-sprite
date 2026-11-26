@@ -314,7 +314,9 @@ statement (`preflight.RoutesToPartitionedKeyBuild`), before the plain table's
 `USING INDEX` sequence the planner makes for it meets the partitioned-parent
 refusal; a forced run and `ADD CONSTRAINT ... USING INDEX` still meet that
 refusal. The dry run plans it with the execution `partitioned-key-build` and
-reports the shape and partition key refusals. Desired-state plans (`diff`,
+reports the shape, partition key, and sub-partitioned tree refusals; the
+parent's checks are read only under the build's lock, so for those the dry run
+reports the build and the apply refuses. Desired-state plans (`diff`,
 `migrate --desired`) do not route it yet and refuse the statement. A plain
 `ALTER TABLE parent ADD CONSTRAINT` builds every partition's index under
 `ACCESS EXCLUSIVE`, but it adopts a partition's unattached constraint of the
