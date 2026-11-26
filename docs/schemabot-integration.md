@@ -801,10 +801,15 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   verdict's `detail` as presentation until the verdict carries typed guidance too. The
   imperative dry run can itself end in a refusal verdict instead of a report (an unsupported
   statement kind, or routed steps the executor refuses from their shape alone, such as an
-  unnamed index build, or a `DETACH PARTITION` from a table with a `DEFAULT` partition): it
-  exits 2 and carries no `format_version`
+  unnamed index build, a `DETACH PARTITION` from a table with a `DEFAULT` partition, or a
+  statement routed to copy-and-swap on a table in a partition or inheritance tree): it exits 2
+  and carries no `format_version`
   or `fingerprint`, so branch on the exit code and on `format_version` before reading a
-  report.
+  report. For that partition or inheritance tree case `migrate --desired --dry-run` ends,
+  exit 2, in the run's whole-plan refusal result, with the report under `plan`, while
+  `diff --json` does not read the route's preflight and prints the report with the
+  statement's `execute` disposition; an orchestrator that plans through `diff --json` meets
+  the refusal when it applies the plan.
 - **A rename refusal is an operator decision, not a retry.** `RENAME COLUMN` and `RENAME TO`
   refuse as `not-native-safe-rewrite-required` with class `by-design` and `guidance`
   `expand-contract-column` (a column) or `coordinated-table-rename` (a table). Retrying, or
@@ -933,6 +938,27 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   showed. `RunDesiredWithRowSecurity` takes the same two fields for a change to the table
   definition; a policy a row security file no longer lists is dropped by the atomic row
   security change without them.
+- <a id="desired-blocking-index-drop"></a>**A partitioned table's index drop is a reviewed
+  plan, a named table, and an accepted lock.** PostgreSQL has no concurrent drop for an index
+  of a partitioned table, so the plan keeps that `drop-index` statement refused
+  (`unsupported-partitioned-parent`, class `by-design`, `blocking_passthrough_eligible: true`)
+  and carries the plain `DROP INDEX` as its `exec_sql` with `execution: blocking-index-drop`
+  (`format_version` 24 and later), which the fingerprint covers. `RunDesired` admits it only
+  when `DesiredRequest.AcceptBlocking` names the desired table beside the pin and
+  `AllowDestructive`, and the run's brief budget has a statement timeout longer than its lock
+  timeout; otherwise the plan is refused whole with `destructive-change`, as it was before the
+  field existed, and the detail names the fields. `AcceptBlocking` without the pin or
+  `AllowDestructive` is `migrate.ErrAcceptBlockingNeedsReviewedDrop` before any database work,
+  and one naming another table is `migrate.ErrAcceptBlockingMismatch`. The drop runs in one
+  engine-owned transaction: the parent's `ACCESS EXCLUSIVE` lock (which reaches every
+  partition) under `lock_timeout`, a refusal with cause `lock-budget` and nothing dropped when
+  it runs out; the index read again (`dropped-index-drift` if it changed); the drop under
+  `statement_timeout`; and a read-back that every partition's index went with it. Its verdict
+  is `executed-without-online-safety` with the lifted refusal, and a converged run that
+  committed it ends `executed-without-online-safety` as a whole (the CLI exits 3). SchemaBot
+  does not set the field: like `Options.AcceptBlocking`, it is an operator's acceptance of
+  blocking, which [the passthrough design](lock-budgeted-passthrough.md#orchestrator-exposure)
+  keeps out of an author's reach.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement

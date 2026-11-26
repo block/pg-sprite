@@ -997,7 +997,8 @@ explicit, non-zero `lock_timeout` and a `statement_timeout` longer than it. Tran
 settings override ambient defaults, and an absent, sub-millisecond, or server-unrepresentable
 bound — or a statement bound that is not longer than the lock bound, under which the lock
 budget could never be the operative bound — is refused before a session is acquired.
-*Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
+*Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, and `ExecuteBlockingPartitionedIndexDrop`
+for the desired-state drop of a partitioned table's index). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#engine-owned-session-and-budgets).
 
 ### AB-2 — Lock-budget exhaustion executes nothing
@@ -1009,8 +1010,9 @@ submitted and is reported as a lock refusal or the caller's cancellation, never 
 work. The DDL's own lock requests are then granted at once. An ungranted lock is not retried:
 PostgreSQL aborts that transaction, and the executor returns the typed lock-budget outcome.
 A materialized view, which `LOCK TABLE` cannot name, is the one target whose statement
-acquires its own locks. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, SQLSTATE
-`55P03` and `57014` on the lock request). *Source:*
+acquires its own locks. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking` and
+`ExecuteBlockingPartitionedIndexDrop`, which requests the parent's lock before it reads the
+index again, SQLSTATE `55P03` and `57014` on the lock request). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#failure-and-interruption-semantics).
 
 ### AB-3 — The acknowledgement names the table the statement locks, resolved from the catalog
@@ -1489,6 +1491,11 @@ runs the same check so a resume of such a shadow stops before the copy
 target before the first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
 enforcement; the size guard and privilege preflight need live facts and stay the apply's.
+`migrate --dry-run` and `migrate --desired --dry-run` read the copy-and-swap shape refusal of a
+table in a partition or inheritance tree through `preflight.CheckCopySwapPartitioning`, which
+`migrate.AdmitCopySwapPartitioning` and `migrate.AdmitPlanCopySwapPartitioning` call: the
+same catalog facts and the same `CheckCopySwapShape` decision, minting no proof, so it too is a
+read-only surface rather than a second enforcement.
 Both front doors run the copy-and-swap checks through `schemachange.CheckCopySwap`, which runs
 `preflight.CheckCopySwap`'s checks with the resume measure, before the route writes anything.
 *Planned enforcement:* all other execution paths in preflight. *Source:*
@@ -1711,7 +1718,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   (`CREATE INDEX ON ONLY`, then a concurrent build and attach per partition), each step committing
   on its own. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
   refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
-  concurrent idiom PostgreSQL rejects for it. *Enforced:* preflight (`RefusesPartitionedParent`,
+  concurrent idiom PostgreSQL rejects for it. The plan keeps a desired-state drop of a
+  partitioned index refused; a desired-state run lifts only that refusal, running the plain
+  `DROP INDEX` under the acknowledgements and pin [RF-12](#rf-12) records. *Enforced:* preflight (`RefusesPartitionedParent`,
   with `RoutesToPartitionedIndexBuild` naming the one shape that is routed instead) and
   sequence-executor admission, which refuses every index-building step on a parent because the
   build is its own executor entry point; the concurrent drop by preflight and plan reporting,
@@ -1864,8 +1873,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   leftover no checkpoint records is refused and left standing. An
   acknowledgement that names any table but the resolved target is a usage error that executes
   nothing, typed by its own sentinel so an embedder tells it from any other error.
-  Desired-state execution takes exactly one acknowledgement, the destructive one, and only
-  bound to a pinned plan fingerprint: `RunDesired` admits a plan holding a destructive
+  Desired-state execution takes two acknowledgements of its own, each bound to a pinned plan
+  fingerprint. The destructive one: `RunDesired` admits a plan holding a destructive
   statement only when the request pins the reviewed plan's fingerprint and names the desired
   table in its own destructive acknowledgement (`DesiredRequest.AllowDestructive`), and each
   destructive statement then runs under that acknowledgement, audited and carrying the
@@ -1874,10 +1883,15 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   also routes a statement to copy-and-swap is refused whole with `destructive-change`, since its
   drops would commit before copy-and-swap is checked. Without the acknowledgement the plan is refused whole with `destructive-change`; an
   acknowledgement without the fingerprint, or naming another table, is a usage error before
-  any statement runs, in a dry run and for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The other four, and
-  the destructive acknowledgement in `Options`, are rejected: `RunDesired` returns each one's
-  own sentinel before any database work, and `migrate --desired` rejects each flag, taking
-  `--allow-destructive` only with `--expect-fingerprint`. A new
+  any statement runs, in a dry run and for a table that is already converged as well; a stale fingerprint is refused as a changed plan. The accept-blocking one
+  (`DesiredRequest.AcceptBlocking`, `--accept-blocking` with `--desired`) lifts exactly one
+  refusal, a pinned plan's drop of a partitioned table's index carrying the
+  `blocking-index-drop` execution, and only beside the pin and the destructive acknowledgement
+  naming the same table; without it that plan is refused whole with `destructive-change`, and
+  without the other two it is a usage error before any database work. The other acknowledgements
+  in `Options`, the destructive and accept-blocking ones included, are rejected: `RunDesired` returns each one's
+  own sentinel before any database work, and `migrate --desired` rejects each other flag, taking
+  `--allow-destructive` only with `--expect-fingerprint` and `--accept-blocking` only beside both. A new
   string or bool field reachable from `Options`, nested structs and pointers included, not
   declared as no acknowledgement, a
   new destructive shape, or a new `migrate` flag not declared as no acknowledgement fails CI

@@ -43,9 +43,40 @@ type irreversibleScenario struct {
 	// to protect: the scenario plants a shadow no checkpoint records, and
 	// without the acknowledgement the run is refused and leaves it standing.
 	leftover bool
-	// partitioned builds the orders table partitioned by range of id, for
-	// an entry whose statement needs a partition to act on.
-	partitioned bool
+	// partitionedOrders builds the orders table partitioned by range of id,
+	// for an entry whose statement needs a partition to act on.
+	partitionedOrders bool
+	// partitionedEvents marks an entry whose statement targets the
+	// partitioned events table, which the scenario creates beside the
+	// orders table (two partitions, the index events_kind_idx on the
+	// parent), and whose index tree must still stand after the refusal.
+	partitionedEvents bool
+}
+
+// newPartitionedEvents creates the range-partitioned events table with
+// two partitions and the index events_kind_idx on the parent.
+func newPartitionedEvents(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	for _, sql := range []string{
+		`CREATE TABLE {schema}.events (id bigint NOT NULL, kind text NOT NULL, created_at date NOT NULL) PARTITION BY RANGE (created_at)`,
+		`CREATE TABLE {schema}.events_2026_10 PARTITION OF {schema}.events FOR VALUES FROM ('2026-10-01') TO ('2026-11-01')`,
+		`CREATE TABLE {schema}.events_2026_11 PARTITION OF {schema}.events FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')`,
+		`CREATE INDEX events_kind_idx ON {schema}.events (kind)`,
+	} {
+		_, err := pool.Exec(t.Context(), strings.ReplaceAll(sql, "{schema}", schema))
+		require.NoError(t, err)
+	}
+}
+
+// assertEventsIndexTreeStands requires the parent index and both partition
+// indexes of the events table to still exist.
+func assertEventsIndexTreeStands(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	var n int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND tablename LIKE 'events%' AND indexdef LIKE '%(kind)'`,
+		schema).Scan(&n))
+	assert.Equal(t, 3, n, "the parent index and both partition indexes still stand")
 }
 
 // mismatchIs pins a mismatched acknowledgement's usage error to its
@@ -90,10 +121,10 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 		},
 		// The detached partition's rows leave the table.
 		"shape: " + statement.Op{Kind: statement.OpDetachPartition}.Describe(): {
-			sql:         `ALTER TABLE {schema}.orders DETACH PARTITION {schema}.orders_low`,
-			options:     allowDestructive,
-			mismatch:    mismatchIs(ErrAllowDestructiveMismatch),
-			partitioned: true,
+			sql:               `ALTER TABLE {schema}.orders DETACH PARTITION {schema}.orders_low`,
+			options:           allowDestructive,
+			mismatch:          mismatchIs(ErrAllowDestructiveMismatch),
+			partitionedOrders: true,
 		},
 		// The blocking drop is accepted, so only the loss is left to
 		// acknowledge.
@@ -117,6 +148,22 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				return opts
 			},
 			mismatch: mismatchIs(ErrAcceptBlockingMismatch),
+		},
+		// PostgreSQL has no concurrent drop for a partitioned index, so the
+		// imperative front door refuses it with the partitioned-parent cause
+		// until the lock is accepted; the loss is acknowledged on the events
+		// table, so only the lock is left.
+		"blocking DROP INDEX of a partitioned table's index": {
+			sql: `DROP INDEX {schema}.events_kind_idx`,
+			options: func(_ dbconn.Config, table, ack string) Options {
+				opts := DefaultOptions()
+				opts.AcceptBlocking = ack
+				opts.AllowDestructive = strings.TrimSuffix(table, ".orders") + ".events"
+				return opts
+			},
+			cause:             verdict.Cause(preflight.PartitionCauseConcurrentIndexDrop),
+			mismatch:          mismatchIs(ErrAcceptBlockingMismatch),
+			partitionedEvents: true,
 		},
 		"blocking REINDEX": {
 			sql: `REINDEX INDEX {schema}.orders_qty_idx`,
@@ -203,7 +250,10 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 
 			if op.refusal != "" {
 				t.Run("refused without the acknowledgement", func(t *testing.T) {
-					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitioned)
+					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitionedOrders)
+					if sc.partitionedEvents {
+						newPartitionedEvents(t, pool, schema)
+					}
 					table := schema + ".orders"
 					v, err := Run(t.Context(), pool, parseIrreversible(t, sc.sql, schema), sc.options(cfg, table, ""))
 					require.NoError(t, err, "a refusal is a verdict, not an error")
@@ -211,12 +261,15 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 					assert.Equal(t, op.refusal, v.Reason)
 					assert.Equal(t, sc.cause, v.Cause, "the refusal comes from the entry's own gate")
 					assertNothingExecuted(t, pool, schema, before)
+					if sc.partitionedEvents {
+						assertEventsIndexTreeStands(t, pool, schema)
+					}
 				})
 			}
 
 			if sc.leftover {
 				t.Run("a stopped run's leftover stays without the acknowledgement", func(t *testing.T) {
-					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitioned)
+					cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitionedOrders)
 					table := schema + ".orders"
 					shadow := pgx.Identifier{schema, schemachange.ShadowName(schema, "orders")}.Sanitize()
 					_, err := pool.Exec(t.Context(), `CREATE TABLE `+shadow+` (id bigint PRIMARY KEY)`)
@@ -235,13 +288,19 @@ func TestIrreversibleOperationsAreGated(t *testing.T) {
 			}
 
 			t.Run("a usage error when the acknowledgement names another table", func(t *testing.T) {
-				cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitioned)
+				cfg, pool, schema, before := newIrreversibleFixture(t, serverURL, sc.partitionedOrders)
+				if sc.partitionedEvents {
+					newPartitionedEvents(t, pool, schema)
+				}
 				table := schema + ".orders"
 				v, err := Run(t.Context(), pool, parseIrreversible(t, sc.sql, schema), sc.options(cfg, table, schema+".other"))
 				require.Error(t, err)
 				sc.mismatch(t, err)
 				assert.Equal(t, verdict.Verdict{}, v, "an error before a verdict carries a zero verdict")
 				assertNothingExecuted(t, pool, schema, before)
+				if sc.partitionedEvents {
+					assertEventsIndexTreeStands(t, pool, schema)
+				}
 			})
 		})
 	}

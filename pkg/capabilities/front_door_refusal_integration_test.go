@@ -36,6 +36,21 @@ var migrateRefusals = map[string]migrateClaim{
 			`ALTER TABLE %[1]s.events ATTACH PARTITION %[1]s.events_low FOR VALUES FROM (0) TO (1000)`,
 		},
 	},
+	// A retype of a partitioned table routes to copy-and-swap, which does not
+	// carry a partition tree; the route refuses it whether or not the run
+	// opened it.
+	"partitioned-tables-in-copy-and-swap": {
+		setup: `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				note text,
+				PRIMARY KEY (id)
+			) PARTITION BY RANGE (id);
+			CREATE TABLE %[1]s.events_low PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (1000)`,
+		statements: []string{
+			`ALTER TABLE %[1]s.events ALTER COLUMN note TYPE varchar(10)`,
+		},
+	},
 	// The imperative door does not drive index maintenance: the plain form
 	// names its concurrent idiom, and the concurrent form is run directly.
 	"drop-index": {

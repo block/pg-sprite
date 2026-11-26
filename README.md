@@ -133,7 +133,7 @@ matrix is [capabilities.md](docs/capabilities.md).
 - **Foreign keys** run through `migrate --alter`, not from desired files.
 - **Renames are refused** unless `--force` names the table, since they break running application instances.
 - **Destructive changes** need `--allow-destructive SCHEMA.TABLE`, and desired plans also need `--expect-fingerprint`.
-- **Index maintenance** (`DROP INDEX`, `REINDEX`) runs from `migrate --alter` only as an accepted blocking change ([passthrough](docs/lock-budgeted-passthrough.md)); a desired file drops an index concurrently under `--allow-destructive` and `--expect-fingerprint`.
+- **Index maintenance** (`DROP INDEX`, `REINDEX`) runs from `migrate --alter` only as an accepted blocking change ([passthrough](docs/lock-budgeted-passthrough.md)); a desired file drops an index concurrently under `--allow-destructive` and `--expect-fingerprint`, and a partitioned table's index only as an accepted blocking drop.
 - **Non-table objects** such as views, functions, and triggers are outside the declarative model, apart from adding enum labels.
 - **Tables are never dropped**; that stays with the owner of the whole schema.
 
