@@ -285,12 +285,12 @@ live schema (introspected)  ─┘                          │
   flagged in the plan output either way.
 - **Unsupported constructs are refused, never guessed.** The desired file admits one
   unqualified `CREATE TABLE` plus `CREATE INDEX` statements on it; each rule is a typed error.
-  Foreign keys are planned but never executed: the scratch build first creates an empty
+  For a foreign key, the scratch build first creates an empty
   `LIKE ... INCLUDING INDEXES` copy of each referenced table, so an unqualified reference
   binds to the copy rather than resolving through the search_path to a live table it would
-  lock, and every foreign-key change in the plan is refused with `declarative-foreign-key`.
-  A schema-qualified reference is refused at admission. Executing foreign-key changes needs
-  its own design. Changes
+  lock. An added foreign key runs as `NOT VALID` then `VALIDATE CONSTRAINT`, a new table is
+  created with its foreign keys, and a dropped foreign key is refused with
+  `declarative-foreign-key`. A schema-qualified reference is refused at admission. Changes
   the plan cannot express — identity or generation changes on an existing column, adopting a
   sequence-backed (serial) default whose sequence only existed in the rolled-back scratch
   transaction — are refused as unsupported rather than emitted as an unexecutable plan.
@@ -366,12 +366,14 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences, and `migrate`
 executes them through `pkg/executor`'s sequence executor under the autocommit-each-step
 contract (brief steps bounded like an optimistic attempt, the validation scan and concurrent
-builds under their own budgets). The one-step `CONCURRENTLY` rewrites the classifier also
-emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: the imperative statement gate of
-`migrate --alter` refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
-whole-sequence admission refuses a substituted `DETACH PARTITION CONCURRENTLY` typed before
-anything executes — a cancelled wait leaves recovery states it does not yet own — which
-`migrate` reports as a refusal verdict, not an operational error. When the
+builds under their own budgets). A substituted `DETACH PARTITION CONCURRENTLY` runs as its
+own step kind on a dedicated session under the brief budgets, and finishes a partition an
+earlier run left detach-pending; on a table with a `DEFAULT` partition, which PostgreSQL
+refuses it for, the whole-sequence admission refuses it from the catalog before anything
+executes. The other one-step `CONCURRENTLY` rewrites the classifier emits (`DROP INDEX`,
+`REINDEX`) are not driven: the imperative statement gate of `migrate --alter` refuses them
+with the safer-idiom pointer, which `migrate` reports as a refusal verdict, not an
+operational error. When the
 planner says a safer sequence is required but cannot construct one, `migrate` refuses
 (`not-native-safe-rewrite-required`) rather than run the blocking form the plan itself
 flagged.

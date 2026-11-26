@@ -18,13 +18,14 @@ var (
 	// ErrPartitionedKeyConflict is returned when the leaf already carries a
 	// key constraint the step cannot reconcile with the requested one: two
 	// constraints that each match it, a constraint on the same columns that
-	// differs in kind or definition, one already attached to a parent's
-	// constraint, or, for a primary key, a primary key on other columns. The
-	// parent's constraint could adopt the wrong one, or the server would
-	// refuse a second primary key, so the step adds nothing.
+	// differs in kind or definition or is DEFERRABLE, one already attached to
+	// a parent's constraint, or, for a primary key, a primary key on other
+	// columns. The parent's constraint could adopt the wrong one, or the
+	// server would refuse a second primary key, so the step adds nothing.
 	ErrPartitionedKeyConflict = errors.New("the partition already has a key constraint that conflicts with the requested one")
 	// ErrPartitionedKeyNullableColumn is returned when a primary key is
-	// requested over a column the leaf allows to be NULL. Adding the primary
+	// requested over a column the leaf allows to be NULL, including one whose
+	// not-null constraint is NOT VALID (PostgreSQL 18). Adding the primary
 	// key would set NOT NULL, which scans the whole partition while it holds
 	// ACCESS EXCLUSIVE, so the step refuses before it builds anything.
 	ErrPartitionedKeyNullableColumn = errors.New("a primary key column of the partition allows NULL, and setting NOT NULL would scan it under ACCESS EXCLUSIVE")

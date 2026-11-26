@@ -339,7 +339,10 @@ same definition instead of building one. The flow relies on that:
    that stopped after its last commit leaves.
 3. **The tree** must hold only leaf partitions directly under the parent: a
    foreign table (`foreign-table-partition`) and a sub-partitioned partition
-   (`partitioned-key-sub-partitioned`) are refused.
+   (`partitioned-key-sub-partitioned`) are refused, and so is a partition whose
+   `DETACH PARTITION ... CONCURRENTLY` has not finished
+   (`partition-detach-pending`): it is leaving the tree, so a key given to it
+   would not stay the parent's.
 4. **Each leaf** gets its unique index built concurrently and then
    `ADD CONSTRAINT ... USING INDEX` in a brief transaction (`ensureLeafKey`),
    resumed from whatever the leaf holds.

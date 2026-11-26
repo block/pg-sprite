@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -357,6 +356,15 @@ func TestDryRunTextPartitionedIndexDropNamesThePlainDrop(t *testing.T) {
 		"and every partition's index — run it with pg-sprite migrate --alter, --accept-blocking, "+
 		"and --allow-destructive naming the table")
 	assert.NotContains(t, text, "refused — the target is a partitioned table")
+
+	// A desired plan that discloses the blocking drop names the flags a
+	// pinned desired-state run takes it with.
+	report.Statements[0].Execution = planner.ExecutionBlockingIndexDrop
+	out.Reset()
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text = strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, "every partition's index — a run takes it only with --expect-fingerprint, "+
+		"--allow-destructive and --accept-blocking naming the table, and an explicit --statement-timeout longer than --lock-timeout")
 }
 
 // A decision taken without live facts carries the conservative-classification
@@ -800,16 +808,16 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	assert.NotContains(t, out.String(), "Debian")
 }
 
-// A foreign-key change in a desired-state plan says in words that foreign
-// keys are not applied declaratively, so the reader of the diff knows the
-// change is shown for review only.
+// A foreign-key drop in a desired-state plan says in words that it is not
+// applied declaratively, so the reader of the diff knows the change is shown
+// for review only.
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
 	report := plan.NewReport(plan.SourceDiff)
 	report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
 	report.Disposition = router.DispositionRefuse
 	report.Statements = append(report.Statements, plan.Statement{
-		SQL:         "ALTER TABLE public.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (id)",
-		Kind:        schemadiff.ChangeAddForeignKey,
+		SQL:         "ALTER TABLE public.orders DROP CONSTRAINT orders_user_id_fkey",
+		Kind:        schemadiff.ChangeDropForeignKey,
 		Route:       planner.RouteNative,
 		Disposition: router.DispositionRefuse,
 		Reason:      verdict.ReasonDeclarativeForeignKey,
@@ -820,19 +828,6 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	// The renderer wraps prose; compare with whitespace collapsed.
 	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — foreign keys are not supported for desired-state apply yet; "+
+	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — dropping a foreign key is not supported for desired-state apply yet; "+
 		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
-
-	created := report
-	created.Statements = []plan.Statement{{
-		SQL:         "CREATE TABLE public.shipments (id bigint PRIMARY KEY, order_id bigint NOT NULL REFERENCES orders (id))",
-		Kind:        schemadiff.ChangeCreateTable,
-		Disposition: router.DispositionRefuse,
-		Reason:      verdict.ReasonDeclarativeForeignKey,
-		Class:       verdict.ClassCapabilityBoundary,
-		Cause:       executor.CreateShapeForeignKey,
-	}}
-	out.Reset()
-	require.NoError(t, writeDryRunText(&out, palette{}, created))
-	assert.Contains(t, flat(out.String()), "create the table without the foreign key, then add it with pg-sprite migrate --alter, naming the referenced table with its schema")
 }

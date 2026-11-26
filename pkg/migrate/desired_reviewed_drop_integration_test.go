@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -196,12 +197,17 @@ func TestRunDesiredAppliesAReviewedDrop(t *testing.T) {
 		},
 	}
 	// Every shape the planner marks destructive has a case, so a new one
-	// fails here until a reviewed desired file has run it.
+	// fails here until a reviewed desired file has run it. A desired file
+	// declares one table and none of its partitions, so it cannot express a
+	// partition detach.
 	var covered []statement.OpKind
 	for _, tc := range cases {
 		covered = append(covered, tc.kind)
 	}
-	require.ElementsMatch(t, planner.DestructiveOpKinds(), covered)
+	expressible := slices.DeleteFunc(planner.DestructiveOpKinds(), func(k statement.OpKind) bool {
+		return k == statement.OpDetachPartition
+	})
+	require.ElementsMatch(t, expressible, covered)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, schema := reviewedDropTable(t)

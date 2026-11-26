@@ -10,19 +10,21 @@ import (
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/decode"
 )
 
 // reapFormatVersion identifies the reap report's JSON shape. It is bumped
 // whenever a field is added, removed, or changes meaning; a consumer must
 // reject a version it does not know.
-const reapFormatVersion = 1
+const reapFormatVersion = 2
 
 // reapReport is the reap command's output: every engine-prefixed slot of
 // the connected database the pass reached, in exactly one list or in
-// Failed. Every list is always an array, empty when nothing is in it. A dry
-// run fills WouldDrop and leaves Dropped empty; a real run fills Dropped and
-// leaves WouldDrop empty, so a reader that skips dry_run cannot mistake a
-// preview for a drop.
+// Failed, except that a slot dropped before its publication failed is in
+// Dropped, Failed, and PublicationLeft. Every list is always an array,
+// empty when nothing is in it. A dry run fills WouldDrop and leaves Dropped
+// empty; a real run fills Dropped and leaves WouldDrop empty, so a reader
+// that skips dry_run cannot mistake a preview for a drop.
 type reapReport struct {
 	FormatVersion int  `json:"format_version"`
 	DryRun        bool `json:"dry_run"`
@@ -35,10 +37,17 @@ type reapReport struct {
 	Stopped bool `json:"stopped"`
 	// Failed is the orphan the pass stopped at, empty when it did not stop.
 	// Its slot may be gone: the drop removes the slot before its
-	// publication.
+	// publication. A slot whose drop went through before its publication
+	// was refused or failed to drop is gone, so it is also the last entry of
+	// Dropped and is named in PublicationLeft.
 	Failed string `json:"failed"`
-	// Dropped are the orphan slots the run dropped, publications included.
+	// Dropped are the orphan slots the run dropped, publications included
+	// except for any slot in PublicationLeft.
 	Dropped []string `json:"dropped"`
+	// PublicationLeft names the slot of Dropped whose same-named publication
+	// the drop refused or failed to drop, left in place for the operator; it
+	// holds at most the Failed slot, and is empty in a dry run.
+	PublicationLeft []string `json:"publication_left"`
 	// WouldDrop are the orphan slots a real run would drop now.
 	WouldDrop []string `json:"would_drop"`
 	// Live slots are kept: a checkpoint row in a non-terminal phase names each.
@@ -58,6 +67,7 @@ func newReapReport(dryRun bool, reaped checkpoint.Reaped) reapReport {
 		CheckpointTableExists: true,
 		Failed:                reaped.Failed,
 		Dropped:               orEmpty(reaped.Dropped),
+		PublicationLeft:       []string{},
 		WouldDrop:             orEmpty(reaped.WouldDrop),
 		Live:                  orEmpty(reaped.Live),
 		Active:                orEmpty(reaped.Active),
@@ -112,6 +122,9 @@ func (c *ReapCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	report := newReapReport(c.DryRun, reaped)
 	report.Stopped = reaped.Failed != ""
+	if errors.Is(err, decode.ErrSlotDroppedPublicationLeft) {
+		report.PublicationLeft = []string{reaped.Failed}
+	}
 	if writeErr := c.write(out, report); writeErr != nil {
 		return errors.Join(err, writeErr)
 	}
@@ -168,9 +181,10 @@ func renderReap(report reapReport) string {
 		return b.String()
 	}
 	if report.DryRun {
-		writeReapSection(&b, "would drop (orphans, with their publications)", report.WouldDrop)
+		writeReapSection(&b, "would drop (orphans, with any publication of the engine's shape)", report.WouldDrop)
 	} else {
-		writeReapSection(&b, "dropped (orphans, with their publications)", report.Dropped)
+		writeReapSection(&b, "dropped (orphans, with their publications except any left below)", report.Dropped)
+		writeReapSection(&b, "publication left (its slot dropped above; the publication of its name was refused or failed to drop)", report.PublicationLeft)
 	}
 	writeReapSection(&b, "live (kept: a checkpoint row in a non-terminal phase names it)", report.Live)
 	writeReapSection(&b, "active (kept: a process holds it)", report.Active)

@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,43 @@ func (f leafKeyFixture) leaf(t *testing.T, parent, name string) partitionNode {
 	}
 	require.FailNow(t, "partition not listed", "%s under %s", name, parent)
 	return partitionNode{}
+}
+
+// serverMajor is the major version of the server the fixture runs on.
+func (f leafKeyFixture) serverMajor(t *testing.T) int {
+	t.Helper()
+	major, err := dbconn.ServerMajor(t.Context(), f.pool)
+	require.NoError(t, err)
+	return major
+}
+
+// cancelDetach leaves the partition detach-pending: a reader of the parent
+// holds DETACH PARTITION ... CONCURRENTLY in its wait for older transactions,
+// which its statement_timeout then cancels after the first transaction has
+// committed.
+func (f leafKeyFixture) cancelDetach(t *testing.T, parent, partition string) {
+	t.Helper()
+	holder, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	_, err = holder.Exec(t.Context(), "SELECT count(*) FROM "+pgx.Identifier{f.schema, parent}.Sanitize())
+	require.NoError(t, err)
+	conn, err := f.pool.Acquire(t.Context())
+	require.NoError(t, err)
+	_, err = conn.Exec(t.Context(), "SET statement_timeout = '700ms'")
+	require.NoError(t, err)
+	_, err = conn.Exec(t.Context(), "ALTER TABLE "+pgx.Identifier{f.schema, parent}.Sanitize()+
+		" DETACH PARTITION "+pgx.Identifier{f.schema, partition}.Sanitize()+" CONCURRENTLY")
+	require.Error(t, err, "the detach waits on the reader and is cancelled")
+	_, err = conn.Exec(t.Context(), "RESET statement_timeout")
+	require.NoError(t, err)
+	conn.Release()
+	require.NoError(t, holder.Rollback(t.Context()))
+	var pending bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT inhdetachpending
+		  FROM pg_inherits
+		 WHERE inhrelid = $1::regclass`, pgx.Identifier{f.schema, partition}.Sanitize()).Scan(&pending))
+	require.True(t, pending, "the cancelled detach left the partition detach-pending")
 }
 
 func (f leafKeyFixture) oid(t *testing.T, relation string) uint32 {
@@ -457,6 +495,182 @@ func TestEnsureLeafKeyRefusals(t *testing.T) {
 			require.ErrorIs(t, err, ErrInvariantViolation)
 			assert.Contains(t, err.Error(), "ST-7")
 		})
+
+		// A DEFERRABLE constraint on exactly the key's columns has the same
+		// index definition as the requested key, and the parent's immediate
+		// constraint would still adopt it, leaving that leaf checked only at
+		// commit. The step refuses it as a conflict and adds nothing.
+		t.Run("deferrable constraint on the key's columns", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			leaf := f.leaf(t, "events", "events_2026_01")
+			f.exec(t, `
+				ALTER TABLE %[1]s.events_2026_01
+				    ADD CONSTRAINT events_jan_uq UNIQUE (id, created_at)
+				    DEFERRABLE INITIALLY DEFERRED`)
+
+			_, err := ensureLeafKey(t.Context(), f.pool, eventsUniqueKey, leaf, leafKeyBudget)
+
+			require.ErrorIs(t, err, ErrPartitionedKeyConflict)
+			assert.Equal(t, CodePartitionedKeyConflict, OutcomeCode(err))
+			assert.Equal(t, []string{"events_jan_uq"}, keys(f.keyConstraints(t, "events_2026_01")))
+		})
+
+		// From PostgreSQL 18 a NOT NULL can be added NOT VALID: the column is
+		// marked attnotnull while it still holds a NULL, and ADD CONSTRAINT
+		// ... PRIMARY KEY USING INDEX then fails. The step reads the
+		// constraint's validation and refuses before it builds anything.
+		t.Run("primary key over a NOT VALID not-null column", func(t *testing.T) {
+			f := newFixture(t)
+			if f.serverMajor(t) < 18 {
+				t.Skip("NOT VALID not-null constraints exist from PostgreSQL 18")
+			}
+			f.exec(t, `
+				CREATE TABLE %[1]s.visits (
+				    id         bigint,
+				    created_at timestamptz NOT NULL
+				) PARTITION BY RANGE (created_at)`)
+			f.exec(t, `
+				CREATE TABLE %[1]s.visits_2026_01 PARTITION OF %[1]s.visits
+				    FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')`)
+			f.exec(t, `INSERT INTO %[1]s.visits VALUES (NULL, '2026-01-02'), (2, '2026-01-03')`)
+			f.exec(t, `ALTER TABLE %[1]s.visits_2026_01 ADD CONSTRAINT visits_jan_id_nn NOT NULL id NOT VALID`)
+			leaf := f.leaf(t, "visits", "visits_2026_01")
+			spec := partitionedKeySpec{kind: partitionedPrimaryKey, name: "visits_pkey", columns: []string{"id", "created_at"}}
+
+			_, err := ensureLeafKey(t.Context(), f.pool, spec, leaf, leafKeyBudget)
+
+			require.ErrorIs(t, err, ErrPartitionedKeyNullableColumn)
+			assert.Empty(t, f.indexes(t, "visits_2026_01"), "nothing is built")
+		})
+
+		// The constraint step reads the primary key's columns again under the
+		// leaf's lock: a column that lost its NOT NULL after the decision
+		// would make ADD CONSTRAINT set NOT NULL and scan the leaf under
+		// ACCESS EXCLUSIVE. The constraint step is called directly because
+		// the change has to land between the decision and the statement.
+		t.Run("not null dropped before the constraint", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `
+				CREATE TABLE %[1]s.visits (
+				    id         bigint,
+				    created_at timestamptz NOT NULL
+				) PARTITION BY RANGE (created_at)`)
+			f.exec(t, `
+				CREATE TABLE %[1]s.visits_2026_01 PARTITION OF %[1]s.visits
+				    FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')`)
+			f.exec(t, `ALTER TABLE %[1]s.visits_2026_01 ALTER COLUMN id SET NOT NULL`)
+			f.exec(t, `INSERT INTO %[1]s.visits VALUES (1, '2026-01-02'), (2, '2026-01-03')`)
+			leaf := f.leaf(t, "visits", "visits_2026_01")
+			spec := partitionedKeySpec{kind: partitionedPrimaryKey, name: "visits_pkey", columns: []string{"id", "created_at"}}
+			name := derivedKeyName(spec, leaf)
+			f.exec(t, `CREATE UNIQUE INDEX `+name+` ON %[1]s.visits_2026_01 (id, created_at)`)
+			idx, found, err := relationByName(t.Context(), f.pool, f.schema, name)
+			require.NoError(t, err)
+			require.True(t, found)
+			f.exec(t, `ALTER TABLE %[1]s.visits_2026_01 ALTER COLUMN id DROP NOT NULL`)
+
+			_, err = addLeafKeyConstraint(t.Context(), briefTx{pool: f.pool}, spec, leaf, idx,
+				"unique=true USING btree (id, created_at)")
+
+			require.ErrorIs(t, err, ErrPartitionedKeyNullableColumn)
+			assert.Equal(t, []string{name}, keys(f.indexes(t, "visits_2026_01")), "the index is left in place")
+			assert.Empty(t, f.keyConstraints(t, "visits_2026_01"))
+		})
+
+		// A partition whose DETACH PARTITION CONCURRENTLY was cancelled stays
+		// in pg_inherits with its detach pending, and is leaving the tree. A
+		// leaf listed that way is refused, typed, before anything is read or
+		// built.
+		t.Run("leaf listed with its detach pending", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			f.cancelDetach(t, "events", "events_2026_01")
+			leaf := f.leaf(t, "events", "events_2026_01")
+			require.True(t, leaf.detachPending)
+
+			_, err := ensureLeafKey(t.Context(), f.pool, eventsPrimaryKey, leaf, leafKeyBudget)
+
+			require.ErrorIs(t, err, ErrPartitionDetachPending)
+			assert.Equal(t, CodePartitionDetachPending, OutcomeCode(err))
+			assert.Empty(t, f.indexes(t, "events_2026_01"), "nothing is built")
+		})
+
+		// A detach that begins after the leaf was listed is caught by the
+		// step's proof that the leaf is still in the tree, which counts only
+		// a partition with no detach pending.
+		t.Run("detach begun after the listing", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			leaf := f.leaf(t, "events", "events_2026_01")
+			require.False(t, leaf.detachPending)
+			f.cancelDetach(t, "events", "events_2026_01")
+
+			_, err := ensureLeafKey(t.Context(), f.pool, eventsPrimaryKey, leaf, leafKeyBudget)
+
+			require.ErrorIs(t, err, ErrInvariantViolation)
+			assert.Empty(t, f.indexes(t, "events_2026_01"), "nothing is built")
+		})
+	})
+}
+
+// The constraint step locks the leaf SHARE UPDATE EXCLUSIVE before it proves
+// the leaf is in the tree, and holds it to the end of its transaction, so no
+// DETACH PARTITION can take the leaf out of the tree between the proof and
+// the statement. A reader on the leaf holds the step's ADD CONSTRAINT back;
+// while it waits, the step's session holds the granted lock. The reader then
+// ends and the step finishes.
+func TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree(t *testing.T) {
+	withLeafKeyServer(t, func(t *testing.T, newFixture func(t *testing.T) leafKeyFixture) {
+		f := newFixture(t)
+		f.events(t)
+		leaf := f.leaf(t, "events", "events_2026_01")
+		name := derivedKeyName(eventsPrimaryKey, leaf)
+		f.exec(t, `CREATE UNIQUE INDEX `+name+` ON %[1]s.events_2026_01 (id, created_at)`)
+		idx, found, err := relationByName(t.Context(), f.pool, f.schema, name)
+		require.NoError(t, err)
+		require.True(t, found)
+
+		reader, err := f.pool.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() {
+			if err := reader.Rollback(context.WithoutCancel(t.Context())); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+				t.Errorf("roll back the reader: %v", err)
+			}
+		}()
+		var readerPID int32
+		require.NoError(t, reader.QueryRow(t.Context(), `SELECT pg_backend_pid()`).Scan(&readerPID))
+		_, err = reader.Exec(t.Context(), fmt.Sprintf(`SELECT count(*) FROM %s.events_2026_01`, f.schema))
+		require.NoError(t, err)
+
+		var (
+			wg      sync.WaitGroup
+			stepErr error
+		)
+		wg.Go(func() {
+			_, stepErr = addLeafKeyConstraint(t.Context(), briefTx{pool: f.pool}, eventsPrimaryKey, leaf, idx,
+				"unique=true USING btree (id, created_at)")
+		})
+
+		const lockSeenWithin = 2 * time.Second
+		assert.Eventually(t, func() bool {
+			var held bool
+			err := f.pool.QueryRow(t.Context(), `
+				SELECT EXISTS (
+				    SELECT 1 FROM pg_locks
+				     WHERE relation = $1
+				       AND mode = 'ShareUpdateExclusiveLock'
+				       AND granted
+				       AND pid <> $2)`, leaf.oid, readerPID).Scan(&held)
+			return err == nil && held
+		}, lockSeenWithin, 20*time.Millisecond, "the step's session holds SHARE UPDATE EXCLUSIVE on the leaf while its ADD CONSTRAINT waits")
+		require.NoError(t, reader.Rollback(t.Context()))
+		wg.Wait()
+
+		require.NoError(t, stepErr)
+		constraint, ok := f.keyConstraints(t, "events_2026_01")[name]
+		require.True(t, ok, "the step gives the leaf its constraint once the reader ends")
+		assert.Equal(t, idx.oid, constraint.indexOID)
 	})
 }
 

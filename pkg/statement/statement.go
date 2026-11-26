@@ -111,6 +111,9 @@ type Statement struct {
 	enumNeighbor  string
 	cascades      bool
 	buildsIndex   bool
+	// finalizesDetach is true for an ALTER TABLE with a DETACH
+	// PARTITION ... FINALIZE subcommand.
+	finalizesDetach bool
 }
 
 // IndexTarget identifies whether an index-maintenance statement's scope
@@ -318,6 +321,7 @@ func ParseOne(sql string) (Statement, error) {
 		st.schema = alter.GetRelation().GetSchemaname()
 		st.table = alter.GetRelation().GetRelname()
 		st.buildsIndex = alterBuildsIndex(alter)
+		st.finalizesDetach = alterFinalizesDetach(alter)
 	case node.GetCreateStmt() != nil:
 		rel := node.GetCreateStmt().GetRelation()
 		st.kind = KindCreateTable

@@ -110,7 +110,7 @@ func TestExecutePlanRefusesADropWhoseObjectChangedAfterTheRead(t *testing.T) {
 			replan := func(ctx context.Context) (plan.Report, error) {
 				return diffplan.Plan(ctx, pool, diffplan.Request{Schema: schema, Desired: ds})
 			}
-			res, err := executePlan(t.Context(), pool, report, opts, schema+".t", replan)
+			res, err := executePlan(t.Context(), pool, report, opts, schema+".t", "", replan)
 			require.ErrorIs(t, err, tc.drift)
 			assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
 			require.NotEmpty(t, res.Verdicts)

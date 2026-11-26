@@ -699,19 +699,37 @@ func sequenceRowComplete(start, increment, minValue, maxValue, cache *int64, cyc
 func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndexDefs bool) ([]Constraint, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT conname, pg_catalog.pg_get_constraintdef(oid),
-		       contype OPERATOR(pg_catalog.=) 'f', contype OPERATOR(pg_catalog.=) 'p',
-		       CASE WHEN $2 AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
-		            THEN pg_catalog.pg_get_indexdef(conindid) ELSE '' END,
-		       condeferrable, condeferred, NOT convalidated,
-		       contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
+		SELECT con.conname, pg_catalog.pg_get_constraintdef(con.oid),
+		       con.contype OPERATOR(pg_catalog.=) 'f', con.contype OPERATOR(pg_catalog.=) 'p',
+		       CASE WHEN $2 AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
+		            THEN pg_catalog.pg_get_indexdef(con.conindid) ELSE '' END,
+		       con.condeferrable, con.condeferred, NOT con.convalidated,
+		       con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
 		           AND EXISTS (SELECT 1 FROM pg_catalog.pg_index ix
-		                       WHERE ix.indexrelid OPERATOR(pg_catalog.=) conindid AND NOT ix.indisvalid)
-		FROM pg_catalog.pg_constraint
-		WHERE conrelid OPERATOR(pg_catalog.=) $1
-		  AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'c', 'f', 'x']::pg_catalog."char"[])
-		  AND conislocal
-		ORDER BY conname`, oid, keyIndexDefs)
+		                       WHERE ix.indexrelid OPERATOR(pg_catalog.=) con.conindid AND NOT ix.indisvalid),
+		       con.contype OPERATOR(pg_catalog.=) 'f'
+		           AND ref.relnamespace OPERATOR(pg_catalog.<>) own.relnamespace,
+		       con.contype OPERATOR(pg_catalog.=) 'f'
+		           AND con.confrelid OPERATOR(pg_catalog.=) con.conrelid
+		           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+		                           WHERE k.conrelid OPERATOR(pg_catalog.=) con.conrelid
+		                             AND k.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
+		                             AND NOT k.condeferrable
+		                             AND k.conkey OPERATOR(pg_catalog.@>) con.confkey
+		                             AND k.conkey OPERATOR(pg_catalog.<@) con.confkey),
+		       CASE WHEN con.contype OPERATOR(pg_catalog.=) 'f' THEN ref.relname::pg_catalog.text ELSE '' END,
+		       ARRAY(SELECT a.attname::pg_catalog.text
+		             FROM pg_catalog.unnest(con.confkey) WITH ORDINALITY AS k(attnum, n)
+		             JOIN pg_catalog.pg_attribute AS a
+		               ON a.attrelid OPERATOR(pg_catalog.=) con.confrelid AND a.attnum OPERATOR(pg_catalog.=) k.attnum
+		             ORDER BY k.n)
+		FROM pg_catalog.pg_constraint AS con
+		JOIN pg_catalog.pg_class AS own ON own.oid OPERATOR(pg_catalog.=) con.conrelid
+		LEFT JOIN pg_catalog.pg_class AS ref ON ref.oid OPERATOR(pg_catalog.=) con.confrelid
+		WHERE con.conrelid OPERATOR(pg_catalog.=) $1
+		  AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'c', 'f', 'x']::pg_catalog."char"[])
+		  AND con.conislocal
+		ORDER BY con.conname`, oid, keyIndexDefs)
 	if err != nil {
 		return nil, fmt.Errorf("query constraints: %w", err)
 	}
@@ -719,8 +737,13 @@ func introspectConstraints(ctx context.Context, tx Querier, oid uint32, keyIndex
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid, &c.IndexInvalid); err != nil {
+		var refTable string
+		var refColumns []string
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid, &c.IndexInvalid, &c.ReferencesOtherSchema, &c.SelfReferencesStandaloneIndex, &refTable, &refColumns); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
+		}
+		if c.ForeignKey {
+			c.References = &ForeignKeyReference{Table: refTable, Columns: refColumns}
 		}
 		if c.IndexDef != "" {
 			if c.IndexDef, err = statement.Qualify(c.IndexDef, ""); err != nil {

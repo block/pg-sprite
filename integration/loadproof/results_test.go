@@ -27,13 +27,18 @@ import (
 // and versions, and a failed run's record is where its forensics start.
 // Durations are reported, never asserted.
 type results struct {
-	Passed        bool        `json:"passed"`
-	StartedAt     time.Time   `json:"started_at"`
-	RunMillis     int64       `json:"run_ms"`
-	ServerVersion string      `json:"server_version"`
-	Binary        binaryInfo  `json:"binary"`
-	Load          loadInfo    `json:"load"`
-	Phases        []phaseInfo `json:"phases"`
+	Passed        bool      `json:"passed"`
+	StartedAt     time.Time `json:"started_at"`
+	RunMillis     int64     `json:"run_ms"`
+	ServerVersion string    `json:"server_version"`
+	// Binary is the binary under proof; the library proof runs none.
+	Binary *binaryInfo `json:"binary,omitempty"`
+	Load   loadInfo    `json:"load"`
+	Phases []phaseInfo `json:"phases"`
+	// Attempts are the library proof's calls to migrate.Run, in order:
+	// each one a host cancelled, and the one that ran to its verdict. The
+	// binary's proof makes one call and records none.
+	Attempts []attemptInfo `json:"attempts,omitempty"`
 	// SlotName is the replication slot the run used, so a leftover slot
 	// after a failed run can be found.
 	SlotName         string `json:"slot_name,omitempty"`
@@ -107,10 +112,13 @@ const (
 )
 
 func newResults(c config) *results {
-	return &results{
-		Binary: binaryInfo{Path: c.Binary},
-		Load:   loadInfo{SeededRows: c.Rows, Workers: c.Workers, RatePerSecond: c.RatePerSecond, HotRowFraction: c.HotRowFraction, FailuresByCode: map[string]int{}},
+	r := &results{
+		Load: loadInfo{SeededRows: c.Rows, Workers: c.Workers, RatePerSecond: c.RatePerSecond, HotRowFraction: c.HotRowFraction, FailuresByCode: map[string]int{}},
 	}
+	if c.Binary != "" {
+		r.Binary = &binaryInfo{Path: c.Binary}
+	}
+	return r
 }
 
 // recordWatch folds what the poll saw into the results, with phase

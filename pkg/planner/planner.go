@@ -252,6 +252,13 @@ const (
 	// leaves an invalid parent index and the partition indexes built so far;
 	// running the same statement again resumes from them.
 	ExecutionPartitionedIndexBuild Execution = "partitioned-index-build"
+	// ExecutionBlockingIndexDrop: the one step is the plain DROP INDEX of a
+	// partitioned table's index, which PostgreSQL cannot drop concurrently.
+	// It takes ACCESS EXCLUSIVE on the parent, every partition, and every
+	// partition's index for as long as it runs, so the statement stays
+	// refused and runs only when the operator accepts that lock, in one
+	// engine-owned transaction under explicit lock and statement budgets.
+	ExecutionBlockingIndexDrop Execution = "blocking-index-drop"
 	// ExecutionPartitionedKeyBuild: the one step is an ALTER TABLE ... ADD
 	// PRIMARY KEY or ADD UNIQUE on a partitioned table, and it runs as the
 	// partitioned key build, not as the statement: each partition's unique
@@ -271,7 +278,7 @@ const (
 // format_version bump, and a consumer that meets an unrecognized value must
 // treat the sequence as unknown and refuse to run it.
 func Executions() []Execution {
-	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionPartitionedKeyBuild}
+	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionBlockingIndexDrop, ExecutionPartitionedKeyBuild}
 }
 
 // Decision is the classification of one operation.
@@ -301,6 +308,20 @@ type Decision struct {
 	// of the change: with facts (a live introspection or a supplied
 	// column type) the same operation may classify as native.
 	Unverified bool `json:"unverified,omitempty"`
+	// ProvenCatalogOnly marks an operation PostgreSQL runs on the catalog
+	// alone, never rewriting or reading the table's rows, so its cost does
+	// not grow with the table. Unlike Reason metadata-only, which is the
+	// planner's classification, it is set only where that is certain: for
+	// DROP COLUMN, DROP DEFAULT, DROP NOT NULL, and DROP CONSTRAINT, which
+	// PostgreSQL defines that way, and for an ADD COLUMN the server's probe
+	// proved adds in place without a scan. SET DEFAULT is not marked: the
+	// server coerces the new default to the column's type under the lock,
+	// and for a user-defined type that runs the type's input function. Absent means
+	// not established, not that the operation reads rows. An event trigger
+	// is outside the proof: its code runs under the statement's lock
+	// whatever the table's size, bounded by the attempt's budget like any
+	// other statement.
+	ProvenCatalogOnly bool `json:"proven_catalog_only,omitempty"`
 	// SaferSQL is the ordered safer native sequence, present only for
 	// safer-idiom decisions where the planner could construct it. It is a
 	// safer form of the submitted statement, not a semantic equivalent: it
@@ -554,7 +575,25 @@ type Facts struct {
 	// backs, which the rename renames with it; empty when the index backs
 	// none, or when the fact was not read, as in an offline lint.
 	RenamedIndexConstraint string
+	// Storage reports whether the table has storage of its own: a heap for
+	// an ordinary table or a partition, none for a partitioned parent.
+	// StorageUnread when the fact was not read, as in an offline lint.
+	Storage TableStorage
 }
+
+// TableStorage is what a live read says about a table's own storage.
+type TableStorage uint8
+
+const (
+	// StorageUnread means the fact was not read, as in an offline lint.
+	StorageUnread TableStorage = iota
+	// StorageHeap is an ordinary table or a partition, whose rows live in
+	// a heap of its own.
+	StorageHeap
+	// StoragePartitionedParent is a partitioned parent, which has no
+	// storage of its own; its rows live in its partitions.
+	StoragePartitionedParent
+)
 
 // FactsFrom extracts the facts a live introspection model provides: the
 // canonical type of every live column, the collation of every column that
@@ -571,7 +610,12 @@ func FactsFrom(live schemadiff.Model) Facts {
 			collations[col.Name] = col.Collation
 		}
 	}
-	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
+	storage := StorageHeap
+	if live.PartitionKey != "" {
+		storage = StoragePartitionedParent
+	}
+	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity,
+		Storage: storage}
 }
 
 // ColumnDependents maps a column to the objects that depend on it, read
@@ -687,6 +731,42 @@ func fillsNotNullWithNull(op statement.Op, facts Facts) bool {
 // column, or "" when no proof was run.
 func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
 	return facts.AddColumnProofs[op.Column]
+}
+
+// addsInPlace reports whether the server proved the column adds without
+// rewriting the table, whether or not it then scans it to check a NOT
+// NULL.
+func addsInPlace(proof statement.AddColumnProof) bool {
+	return proof == statement.AddColumnInPlace || proof == statement.AddColumnInPlaceScans ||
+		proof == statement.AddColumnInPlaceRunsUserCode
+}
+
+// addsOnCatalogAlone reports whether adding op's column is proven to cost
+// the same on a table of any size. The probe must prove it adds in place,
+// evaluating nothing a user defined (statement.AddColumnInPlace), and the
+// default, if any, must be a literal. A default expression is evaluated
+// once under the table's lock, and its value can depend on the session,
+// such as a setting the probe ran with and the statement does not, so
+// what the probe saw is not proof of what the statement will do.
+func addsOnCatalogAlone(op statement.Op, facts Facts) bool {
+	literalOrNone := op.Default == statement.DefaultNone || op.Default == statement.DefaultConstant
+	return literalOrNone && addColumnProof(op, facts) == statement.AddColumnInPlace
+}
+
+// ProvenCatalogOnly reports whether every decision is an operation
+// PostgreSQL is certain to run on the catalog alone (see
+// Decision.ProvenCatalogOnly), so running them costs the same on a table of
+// any size. An empty plan proves nothing and reports false.
+func ProvenCatalogOnly(decisions []Decision) bool {
+	if len(decisions) == 0 {
+		return false
+	}
+	for _, d := range decisions {
+		if !d.ProvenCatalogOnly {
+			return false
+		}
+	}
+	return true
 }
 
 // unprovenRewriteReason names the only cause the statement's shape leaves
@@ -908,7 +988,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
 		case addColumnProof(op, facts) == statement.AddColumnUnproven:
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
-		case op.Default == statement.DefaultExpression && addColumnProof(op, facts) != statement.AddColumnInPlace:
+		case op.Default == statement.DefaultExpression && !addsInPlace(addColumnProof(op, facts)):
 			// No proof was run, as in an offline lint: the default may be
 			// computed for every row.
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, ReasonVolatileDefault, true
@@ -924,14 +1004,33 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			// A constant, or an expression the server proved it stores
 			// in the catalog.
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		default:
 			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		}
 
-	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,
-		statement.OpDropNotNull,
-		statement.OpSetColumnOptions, statement.OpSetRelOptions,
-		statement.OpSetSchema, statement.OpDropConstraint:
+	case statement.OpDropColumn, statement.OpDropDefault,
+		statement.OpDropNotNull, statement.OpDropConstraint:
+		// PostgreSQL never touches the table's rows for these and runs no
+		// user code: a dropped column is only marked dropped, a dropped
+		// default applies to rows written later, and dropping a NOT NULL
+		// or a constraint has nothing to check. An index the drop takes
+		// with it is removed as a file, not read.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		d.ProvenCatalogOnly = true
+
+	case statement.OpSetDefault:
+		// The new default applies to rows written later, so no row is
+		// read. It is still not proven catalog-only: the server coerces
+		// the expression to the column's type under the lock, and for a
+		// user-defined base type that runs the type's input function,
+		// which can read any table. The planner has no fact that rules
+		// that out, so the statement stays size-guarded.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+
+	case statement.OpSetColumnOptions, statement.OpSetRelOptions,
+		statement.OpSetSchema:
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 
 	case statement.OpRenameColumn, statement.OpRenameTable:
@@ -970,7 +1069,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		}
 
 	case statement.OpSetTablespace:
-		d.Route, d.Reason = RouteCopyAndSwap, ReasonRelocation
+		d.Route, d.Reason, d.Unverified = classifySetTablespace(facts.Storage)
 
 	case statement.OpAddConstraint:
 		d = classifyAddConstraint(op, st, sql, single)
@@ -984,9 +1083,9 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
 
 	case statement.OpAttachPartition:
-		// Native pattern: pre-add a validated CHECK matching the bound on
-		// the child to skip the attach-time scan. The planner cannot
-		// construct that CHECK, so it routes native without a rewrite.
+		// Native pattern, stated by suggest.GuidancePrevalidatedCheck. The
+		// planner cannot construct its CHECKs from the statement, so it
+		// routes native without a rewrite.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 
 	case statement.OpDetachPartition:
@@ -1097,6 +1196,24 @@ func constraintNaming(facts Facts) statement.ConstraintNaming {
 		}
 	}
 	return naming
+}
+
+// classifySetTablespace routes SET TABLESPACE by the table's storage. A
+// heap moves to the new tablespace, a rewrite-scale copy under ACCESS
+// EXCLUSIVE. A partitioned parent has no heap to move: the server records
+// the tablespace as the default for partitions created later, under a
+// brief ACCESS EXCLUSIVE on the parent alone, and moves no existing
+// partition or index. Unread storage fails closed to the move, and says so.
+func classifySetTablespace(storage TableStorage) (Route, Reason, bool) {
+	switch storage {
+	case StoragePartitionedParent:
+		return RouteNative, ReasonMetadataOnly, false
+	case StorageHeap:
+		return RouteCopyAndSwap, ReasonRelocation, false
+	case StorageUnread:
+		return RouteCopyAndSwap, ReasonRelocation, true
+	}
+	return RouteCopyAndSwap, ReasonRelocation, true
 }
 
 // classifyTypeChange routes ALTER COLUMN TYPE: binary-coercible changes are

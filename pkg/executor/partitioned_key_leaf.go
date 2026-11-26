@@ -116,7 +116,8 @@ type leafKeyResult struct {
 //
 // The constraint takes the index's name, so ADD CONSTRAINT ... USING INDEX
 // renames nothing. Anything else under the derived name, a conflicting
-// constraint, and a primary key over a nullable column are refused, typed,
+// constraint, a primary key over a nullable column, and a partition listed
+// with its detach pending are refused, typed,
 // before anything is created; nothing the step did not create is dropped or
 // renamed. The caller holds the parent's advisory table lock (LK-1), and the
 // pool needs the concurrent build's two connections.
@@ -127,6 +128,14 @@ func ensureLeafKey(ctx context.Context, pool *pgxpool.Pool, spec partitionedKeyS
 	if node.relkind != "r" {
 		return leafKeyResult{}, fmt.Errorf("%w: partition %s is of kind %q, and the key step takes a leaf partition",
 			ErrInvariantViolation, node.qualified(), node.relkind)
+	}
+	// A partition whose DETACH PARTITION CONCURRENTLY has begun is leaving
+	// the tree: a key given to it would not stay the parent's. A detach that
+	// begins after the listing is refused by the proofs below, which count
+	// only a partition with no detach pending (INV: ST-7).
+	if node.detachPending {
+		return leafKeyResult{}, fmt.Errorf("%w: %s; finish the detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then rerun",
+			ErrPartitionDetachPending, node.qualified())
 	}
 	tx := briefTx{pool: pool}
 	name := derivedPartitionIndexName(spec.name, node.oid)
@@ -290,7 +299,10 @@ func addLeafKeyConstraint(ctx context.Context, tx briefTx, spec partitionedKeySp
 			}
 			// The statement names the index and the server resolves the name,
 			// so the index under it must still be the one decided on, and
-			// still fit the constraint (INV: ST-7).
+			// still fit the constraint (INV: ST-7). This proof, the index
+			// re-check, and the read-back after the statement are defense in
+			// depth: with the parent's advisory lock and the leaf's lock held,
+			// only a change made outside the engine's locking can fail them.
 			if err := proveIdentity(ctx, tx, idx, node.oid); err != nil {
 				return err
 			}
