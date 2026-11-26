@@ -18,16 +18,18 @@ import (
 )
 
 // ErrConnectionRequired is returned by [Run] and [RunDesired] when a
-// statement is a CREATE INDEX on a partitioned table and Options.Connection is
-// unset. The partitioned index build takes the parent's table lock on a
-// dedicated session of its own, so it needs the connection the pool was dialed
-// with, not the pool alone; a library caller that builds Options by hand wires
-// it, the CLI always does. It is a sentinel so an embedder can tell the missing
-// wiring apart from an operational failure with [errors.Is]. Nothing has been
-// executed when it is returned: [RunDesired] checks it for the whole plan
-// before its first statement, and [Run] before the statement's first step.
+// statement is a CREATE INDEX on a partitioned table, or by [Run] when it is
+// an ADD PRIMARY KEY or ADD UNIQUE on one, and Options.Connection is unset.
+// The partitioned index and key builds take the parent's table lock on a
+// dedicated session of their own, so they need the connection the pool was
+// dialed with, not the pool alone; a library caller that builds Options by
+// hand wires it, the CLI always does. It is a sentinel so an embedder can tell
+// the missing wiring apart from an operational failure with [errors.Is].
+// Nothing has been executed when it is returned: [RunDesired] checks it for
+// the whole plan before its first statement, and [Run] before the statement's
+// first step.
 var ErrConnectionRequired = errors.New(
-	"Options.Connection must name the database the pool was dialed with; the partitioned index build opens its table lock session from it")
+	"Options.Connection must name the database the pool was dialed with; the partitioned index and key builds open their table lock session from it")
 
 // PartitionedIndexConnectionMismatchError is returned by [Run] and
 // [RunDesired] when Options.Connection reaches a database other than the one

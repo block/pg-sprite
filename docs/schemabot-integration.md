@@ -741,10 +741,14 @@ so "what persists" below is also what the rerun builds on. Route each outcome by
 `executor.AddPartitionedKey` (and `AddPartitionedKeyAsStep`) adds an online `PRIMARY KEY` or
 `UNIQUE` to a partitioned table under the table's advisory lock. It first gives every partition
 its own key constraint (a concurrent unique index build, then `ADD CONSTRAINT ... USING INDEX`),
-then adds the parent's constraint, which adopts them, in one brief transaction. No planner or CLI
-route reaches it yet; a library caller calls it directly. It stops at the first error and keeps
-every partition's finished key constraint, and **running the same statement again resumes from
-them**. The codes it shares with the partitioned index build (`pool-too-small`,
+then adds the parent's constraint, which adopts them, in one brief transaction. `migrate --alter`
+(`migrate.Run`) routes a lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table to
+it ([below](#outcomes-of-a-partitioned-key-build-1)); desired-state plans do not yet, and a
+library caller may call it directly. It stops at the first error and keeps every partition's
+finished key constraint, and **running the same statement again resumes from them**. The report
+it returns with an error says what the stop left: `leaves` lists the partitions that got their
+constraint, and `changed` is true once a partition's concurrent index build began, which can
+leave an index without its constraint. The codes it shares with the partitioned index build (`pool-too-small`,
 `not-partitioned-table`, `unique-index-partition-key`, `foreign-table-partition`,
 `partition-detach-pending`, `table-lock-unconfirmed`, `invariant-violation`, `invalid-index-*`,
 `commit-outcome-unknown`, `budget-lock-exceeded`, `budget-statement-exceeded`, `execution-failed`,
@@ -794,6 +798,45 @@ checks again when it runs.
 An adapter that enumerates `executor.Codes()` exhaustively must map every row above; the set
 is the contract, and [execution-model](execution-model.md#outcome-codes) is its canonical
 list. The design is in [partitioned-index-build-design](partitioned-index-build-design.md).
+
+## Outcomes of a partitioned key build
+
+A lone `ALTER TABLE ... ADD CONSTRAINT name {PRIMARY KEY | UNIQUE} (columns)` on a partitioned
+table that reaches `migrate.Run` runs as `executor.AddPartitionedKey`: each partition's unique
+index is built concurrently and given the constraint, then the parent's `ADD CONSTRAINT` adopts
+them in one brief transaction. The `migrate --dry-run` plan statement carries
+`execution: partitioned-key-build` (plan `format_version` 27). It needs `migrate.Options.Connection`
+for its table lock session exactly as the partitioned index build does, with the same two wiring
+errors. `migrate.RunDesired` does not route it yet: a desired-state plan refuses the statement
+with `unsupported-partitioned-parent`, cause `parent-concurrent-index-build`. A forced run meets
+cause `parent-blocking-index-build`, and `ADD CONSTRAINT ... USING INDEX` meets
+`parent-index-adoption`, as before.
+
+The build stops at the first error and keeps every partition constraint it finished; **running
+the same statement again resumes from there.** `migrate.Run` maps its stops as follows; every
+refusal row executed nothing and exits 2:
+
+| Executor code | Verdict | Orchestrator action |
+| --- | --- | --- |
+| `not-add-key-constraint`, `partitioned-key-unsupported-shape` | refused, `unsupported-statement`, `capability-boundary`; the dry run reports it too | The statement is not a lone named key over plain distinct columns (an unnamed constraint, `INCLUDE`, `NULLS NOT DISTINCT`, `DEFERRABLE`, `WITH (...)`, `USING INDEX TABLESPACE`, `NOT VALID`, `ONLY`, or a repeated column); change the statement |
+| `unique-index-missing-partition-key` | refused, `unsupported-statement`, `by-design`; the dry run reports it too | The key lacks a partition key column; PostgreSQL rejects it, so add the columns to the key |
+| `partitioned-key-parent-conflict`, `partitioned-key-nullable-column` | refused, `unsupported-statement`, `environmental`, when returned before the build changed anything; otherwise failed with the code. The dry run does not read these: it reports `execute` with `partitioned-key-build`, and the apply refuses | The parent already has a primary key, another object under the name, or a primary key column allows `NULL`; change the table (drop or rename the occupant, `SET NOT NULL` first), then rerun |
+| `partitioned-key-sub-partitioned` | refused, `unsupported-statement`, `capability-boundary`, when returned before the build changed anything; otherwise failed with the code. The dry run reports the refusal too | A partition is itself partitioned, which the build does not take yet |
+| `partitioned-key-name-taken`, `partitioned-key-conflict`, `foreign-table-partition`, `partition-detach-pending` | failed with the code; the dry run does not read these and reports `execute` | Something on a partition stands in the way (an occupant of the derived name, a conflicting or `DEFERRABLE` key, a foreign table, a `DETACH PARTITION ... CONCURRENTLY` left unfinished); an operator removes it or finishes the detach with `FINALIZE`, then the same statement resumes |
+| `partitioned-key-unsettled` | failed with the code | Partitions kept appearing; retry the same statement |
+| `not-partitioned-table`, `invariant-violation`, `invalid-index-*`, `commit-outcome-unknown`, `budget-*`, `*dbconn.TableLockHeldError` | failed, as for the partitioned index build above | Route as in [the partitioned index build table](#outcomes-of-a-partitioned-index-build) |
+
+"Before the build changed anything" means before any partition got the key and before any
+partition's concurrent index build began: that build commits before the partition's constraint
+does, so a stop between the two leaves an index without its constraint, and the verdict is
+failed. Whether a stop is refused or failed is therefore a matter of timing, not of a different
+fault. A failed verdict never claims nothing changed: earlier partitions' constraints, or a
+partition's index without its constraint, may have committed, so inspect the constraints and
+indexes of the table and its partitions, then rerun; the rerun reuses a built index. An `execute`
+plan for a partitioned key is not a guarantee the apply runs: the parent's checks are read only
+under the build's lock.
+The codes are in [execution-model](execution-model.md#outcome-codes); the design is in
+[partitioned-index-build-design](partitioned-index-build-design.md#primary-key-and-unique-constraints).
 
 ## Execution-mode verdicts and direct execution
 

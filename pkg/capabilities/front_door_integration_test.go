@@ -249,6 +249,22 @@ var migrateClaims = map[string]migrateClaim{
 			`ALTER TABLE %[1]s.events SET TABLESPACE pg_default`,
 		},
 	},
+	// The key runs as the partitioned key build: each partition's unique
+	// index concurrently, then the parent's ADD CONSTRAINT adopts them.
+	"add-primary-key-add-unique-on-a-partitioned-parent": {
+		setup: `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				code text,
+				created_at date NOT NULL
+			) PARTITION BY RANGE (created_at);
+			CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
+			CREATE TABLE %[1]s.events_2 PARTITION OF %[1]s.events FOR VALUES FROM ('2026-02-01') TO ('2026-03-01')`,
+		statements: []string{
+			`ALTER TABLE %[1]s.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`,
+			`ALTER TABLE %[1]s.events ADD CONSTRAINT events_code_key UNIQUE (code, created_at)`,
+		},
+	},
 	"drop-constraint": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (
