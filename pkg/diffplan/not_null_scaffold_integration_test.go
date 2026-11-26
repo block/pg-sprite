@@ -27,22 +27,64 @@ func TestPlanSetNotNullRecordsTheHelperItValidates(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		column     string
+		live       string
+		desired    string
 		constraint string
 		def        string
 	}{
-		{name: "a plain column", column: "email", constraint: "orders_email_not_null_check", def: "CHECK ((email IS NOT NULL)) NOT VALID"},
-		{name: "a mixed-case column", column: `"Email"`, constraint: "orders_Email_not_null_check", def: `CHECK (("Email" IS NOT NULL)) NOT VALID`},
-		{name: "a keyword column", column: `"order"`, constraint: "orders_order_not_null_check", def: `CHECK (("order" IS NOT NULL)) NOT VALID`},
+		{
+			name: "a plain column",
+			live: `
+				CREATE TABLE %s.orders (
+					id bigint PRIMARY KEY,
+					email text
+				)`,
+			desired: `
+				CREATE TABLE orders (
+					id bigint PRIMARY KEY,
+					email text NOT NULL
+				);`,
+			constraint: "orders_email_not_null_check",
+			def:        "CHECK ((email IS NOT NULL)) NOT VALID",
+		},
+		{
+			name: "a mixed-case column",
+			live: `
+				CREATE TABLE %s.orders (
+					id bigint PRIMARY KEY,
+					"Email" text
+				)`,
+			desired: `
+				CREATE TABLE orders (
+					id bigint PRIMARY KEY,
+					"Email" text NOT NULL
+				);`,
+			constraint: "orders_Email_not_null_check",
+			def:        `CHECK (("Email" IS NOT NULL)) NOT VALID`,
+		},
+		{
+			name: "a keyword column",
+			live: `
+				CREATE TABLE %s.orders (
+					id bigint PRIMARY KEY,
+					"order" text
+				)`,
+			desired: `
+				CREATE TABLE orders (
+					id bigint PRIMARY KEY,
+					"order" text NOT NULL
+				);`,
+			constraint: "orders_order_not_null_check",
+			def:        `CHECK (("order" IS NOT NULL)) NOT VALID`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			schema := testutil.NewSchema(t, pool)
-			_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.orders (id bigint PRIMARY KEY, %s text)", schema, tt.column))
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(tt.live, schema))
 			require.NoError(t, err)
 
-			report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t,
-				fmt.Sprintf("CREATE TABLE orders (id bigint PRIMARY KEY, %s text NOT NULL);", tt.column))})
+			report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t, tt.desired)})
 			require.NoError(t, err)
 
 			require.Len(t, report.Statements, 1)

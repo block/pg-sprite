@@ -58,24 +58,42 @@ func notNullScaffold(ps plan.Statement) (constraint, column string, ok bool, err
 	if err != nil {
 		return "", "", false, err
 	}
-	if source == nil || source.Kind != statement.OpSetNotNull || len(ps.ExecSQL) < 2 {
+	if !isSetNotNull(source) || len(ps.ExecSQL) < 2 {
 		return "", "", false, nil
 	}
 	add, err := singleOp(ps.ExecSQL[0])
 	if err != nil {
 		return "", "", false, err
 	}
-	if add == nil || add.Kind != statement.OpAddConstraint || add.Constraint != statement.ConstraintCheck || !add.NotValid {
+	if !isNotValidCheckAdd(add) {
 		return "", "", false, nil
 	}
 	validate, err := singleOp(ps.ExecSQL[1])
 	if err != nil {
 		return "", "", false, err
 	}
-	if validate == nil || validate.Kind != statement.OpValidateConstraint || validate.Name != add.Name {
+	if !validatesConstraint(validate, add.Name) {
 		return "", "", false, nil
 	}
 	return add.Name, source.Column, true, nil
+}
+
+// isSetNotNull reports whether op is an ALTER COLUMN ... SET NOT NULL.
+func isSetNotNull(op *statement.Op) bool {
+	return op != nil && op.Kind == statement.OpSetNotNull
+}
+
+// isNotValidCheckAdd reports whether op adds a CHECK constraint NOT VALID.
+func isNotValidCheckAdd(op *statement.Op) bool {
+	if op == nil || op.Kind != statement.OpAddConstraint {
+		return false
+	}
+	return op.Constraint == statement.ConstraintCheck && op.NotValid
+}
+
+// validatesConstraint reports whether op validates the constraint named name.
+func validatesConstraint(op *statement.Op, name string) bool {
+	return op != nil && op.Kind == statement.OpValidateConstraint && op.Name == name
 }
 
 // singleOp returns the one operation sql carries, or nil when it carries
