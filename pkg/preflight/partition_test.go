@@ -85,6 +85,60 @@ func TestRoutesToPartitionedIndexBuild(t *testing.T) {
 	require.Error(t, err)
 }
 
+// A lone ADD FOREIGN KEY without NOT VALID is the statement the partitioned
+// foreign key build carries before PostgreSQL 18, named or not and whatever
+// clauses it has, so the build's own admission decides the rest. From 18 the
+// planner's NOT VALID then VALIDATE runs on a partitioned table, so nothing
+// routes there. A submitted NOT VALID foreign key, another constraint, and a
+// foreign key with company do not route.
+func TestRoutesToPartitionedForeignKeyBuild(t *testing.T) {
+	const named = `
+		ALTER TABLE app.events
+		    ADD CONSTRAINT events_account_fk
+		    FOREIGN KEY (account_id) REFERENCES app.accounts (id)`
+	for _, sql := range []string{
+		named,
+		`ALTER TABLE app.events ADD FOREIGN KEY (account_id) REFERENCES app.accounts (id)`,
+		`
+		ALTER TABLE app.events
+		    ADD CONSTRAINT events_account_fk
+		    FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region)
+		    ON DELETE SET NULL (account_id)`,
+	} {
+		for _, major := range []int{14, 15, 16, 17} {
+			routes, err := RoutesToPartitionedForeignKeyBuild(major, sql)
+			require.NoError(t, err, sql)
+			assert.True(t, routes, "PostgreSQL %d: %s", major, sql)
+		}
+	}
+
+	routes, err := RoutesToPartitionedForeignKeyBuild(18, named)
+	require.NoError(t, err)
+	assert.False(t, routes, "PostgreSQL 18 runs NOT VALID then VALIDATE on a partitioned table")
+
+	for name, sql := range map[string]string{
+		"a NOT VALID foreign key": `
+			ALTER TABLE app.events
+			    ADD CONSTRAINT events_account_fk
+			    FOREIGN KEY (account_id) REFERENCES app.accounts (id)
+			    NOT VALID`,
+		"a check constraint": `ALTER TABLE app.events ADD CONSTRAINT events_ck CHECK (account_id > 0)`,
+		"a foreign key with company": `
+			ALTER TABLE app.events
+			    ADD COLUMN note text,
+			    ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts (id)`,
+		"an inline foreign key column": `ALTER TABLE app.events ADD COLUMN owner_id bigint REFERENCES app.accounts (id)`,
+		"a CREATE INDEX":               `CREATE INDEX events_account_idx ON app.events (account_id)`,
+	} {
+		routes, err := RoutesToPartitionedForeignKeyBuild(16, sql)
+		require.NoError(t, err, name)
+		assert.False(t, routes, name)
+	}
+
+	_, err = RoutesToPartitionedForeignKeyBuild(16, "ALTER TABLE")
+	require.Error(t, err)
+}
+
 // RF-6: the routing is only an exemption from refusal for the front doors
 // that run the partitioned index build. Every step list the routing names is
 // still refused by the static policy, so a path that runs the steps instead

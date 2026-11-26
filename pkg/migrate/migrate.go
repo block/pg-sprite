@@ -127,9 +127,10 @@ type Options struct {
 
 	// Connection is the connection target the run opens dedicated sessions
 	// from when a statement needs one the pool cannot supply: a CREATE INDEX
-	// on a partitioned table takes the parent's table lock on a session of its
-	// own. It must reach the database the pool was dialed with, which the run
-	// proves before it opens anything; a run that needs it and finds it unset
+	// on a partitioned table, or an ADD FOREIGN KEY on one before PostgreSQL
+	// 18, takes the parent's table lock on a session of its own. It must
+	// reach the database the pool was dialed with, which the run proves
+	// before it opens anything; a run that needs it and finds it unset
 	// returns [ErrConnectionRequired]. The CLI always sets it. A statement
 	// that needs no dedicated session never reads it.
 	Connection dbconn.Config
@@ -620,16 +621,22 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		return verdict.Verdict{}, err
 	}
 	// A CREATE INDEX on a partitioned table runs as the partition-aware
-	// index build, which no step list can carry; a forced submitted form is
-	// the operator's override of that routing and meets the partitioned-parent
-	// refusal like any other step list.
-	buildsPartitioned := false
+	// index build, and an ADD FOREIGN KEY before PostgreSQL 18 as the
+	// partitioned foreign key build, which no step list can carry; the
+	// foreign key is routed on the submitted statement, because the
+	// planner's steps for it are a plain table's NOT VALID then VALIDATE. A
+	// forced submitted form is the operator's override of that routing and
+	// meets the partitioned-parent policy like any other step list.
+	buildsPartitioned, buildsForeignKey := false, false
 	if pt.Partitioned() && !forced {
 		if buildsPartitioned, err = preflight.RoutesToPartitionedIndexBuild(execSQL); err != nil {
 			return verdict.Verdict{}, err
 		}
+		if buildsForeignKey, err = preflight.RoutesToPartitionedForeignKeyBuild(serverMajor, st.SQL()); err != nil {
+			return verdict.Verdict{}, err
+		}
 	}
-	if !buildsPartitioned {
+	if !buildsPartitioned && !buildsForeignKey {
 		if err := preflight.CheckPartitionSupport(pt, serverMajor, execSQL); err != nil {
 			if partitionErr, ok := errors.AsType[*preflight.UnsupportedPartitionedParentError](err); ok {
 				return partitionedParentVerdict(st, partitionErr, forced)
@@ -660,6 +667,9 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 
 	if buildsPartitioned {
 		return partitionedIndexBuild(ctx, pool, pt, st, opts, step, logger)
+	}
+	if buildsForeignKey {
+		return partitionedForeignKeyBuild(ctx, pool, pt, st, opts, step, logger)
 	}
 
 	retry := opts.retry()

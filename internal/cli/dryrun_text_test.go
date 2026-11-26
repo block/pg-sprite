@@ -133,6 +133,35 @@ func TestDryRunTextPartitionedIndexBuild(t *testing.T) {
 	assert.NotContains(t, text, "runs as written")
 }
 
+// A dry run of a foreign key on a partitioned table names the partitioned
+// foreign key build: the statement does not run as written, the parent's
+// step holds ACCESS EXCLUSIVE on the referenced table, and the note says how
+// an interrupted run continues.
+func TestDryRunTextPartitionedForeignKeyBuild(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "events", "16.10"
+	report.Disposition = router.DispositionExecute
+	sql := `ALTER TABLE "app"."events" ADD CONSTRAINT "events_account_fk" FOREIGN KEY ("account_id") REFERENCES "app"."accounts" ("id")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionPartitionedForeignKeyBuild,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	flat := strings.Join(strings.Fields(text), " ")
+	assert.Contains(t, flat, "will add the foreign key partition by partition instead of running the statement")
+	assert.Contains(t, flat, "holds ACCESS EXCLUSIVE on the referenced table")
+	assert.Contains(t, flat, "an interrupted run is resumed by running the same statement again")
+	assert.Contains(t, text, "plan:\n  app.events (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	assert.NotContains(t, text, "runs as written")
+}
+
 // A copy-and-swap route the engine carries renders as one step: no literal
 // SQL is listed, the note says what the run does, and the apply footer
 // invites the real run.

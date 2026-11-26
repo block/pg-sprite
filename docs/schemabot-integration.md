@@ -767,6 +767,41 @@ An adapter that enumerates `executor.Codes()` exhaustively must map every row ab
 is the contract, and [execution-model](execution-model.md#outcome-codes) is its canonical
 list. The design is in [partitioned-index-build-design](partitioned-index-build-design.md).
 
+## Outcomes of a partitioned foreign key build
+
+On PostgreSQL 14–17, a lone `ALTER TABLE ... ADD CONSTRAINT name FOREIGN KEY (columns)
+REFERENCES schema.table (columns)` on a partitioned table that reaches `migrate.Run` runs as
+`executor.AddPartitionedForeignKey`: each partition is given the foreign key `NOT VALID` and
+validated while writes continue, then the parent's `ADD CONSTRAINT` adopts them in one brief
+transaction that also holds `ACCESS EXCLUSIVE` on the referenced table. The `migrate --dry-run`
+plan statement carries `execution: partitioned-foreign-key-build` (plan `format_version` 28). It
+needs `migrate.Options.Connection` for its table lock session exactly as the partitioned index
+build does, with the same two wiring errors. On PostgreSQL 18 the same statement runs as the
+ordinary `NOT VALID` then `VALIDATE` sequence. `migrate.RunDesired` does not route it: a desired
+file's foreign keys are refused with `declarative-foreign-key`. A forced run runs the plain
+statement as written, and a submitted `NOT VALID` meets `unsupported-partitioned-parent`, cause
+`parent-not-valid-foreign-key`, as before.
+
+The build stops at the first error and keeps every partition foreign key it finished; **running
+the same statement again resumes from there.** `migrate.Run` maps its stops as follows; every
+refusal row executed nothing and exits 2:
+
+| Executor code | Verdict | Orchestrator action |
+| --- | --- | --- |
+| `not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape` | refused, `unsupported-statement`, `capability-boundary`; the dry run reports it too | The statement is not a lone named foreign key the build can carry to every partition (an unnamed constraint, an unqualified referenced table, no referenced column list, an `ON DELETE` column list, `ONLY`, or a repeated column); change the statement |
+| `partitioned-foreign-key-parent-conflict` | refused, `unsupported-statement`, `environmental`, when returned before any partition got the foreign key; otherwise failed with the code | The parent already has another constraint under the name, or the same foreign key under another name; drop or rename it, then rerun |
+| `partitioned-foreign-key-referenced-table`, `partitioned-foreign-key-sub-partitioned` | refused, `unsupported-statement`, `capability-boundary`, when returned before any partition got the foreign key; otherwise failed with the code | The referenced table is partitioned, foreign, a view, or inside the tree, or a partition is itself partitioned, which the build does not take yet |
+| `partitioned-foreign-key-name-taken`, `partitioned-foreign-key-conflict`, `foreign-table-partition`, `partition-detach-pending` | failed with the code | Something on a partition stands in the way (another constraint under the derived name, more than one matching foreign key, a foreign table, an unfinished detach); an operator removes it, then the same statement resumes |
+| `execution-failed` with `sqlstate` `23503` | failed | A partition's rows break the foreign key; `server_error` names the partition. Correct the rows, then rerun; the partitions already validated are not redone |
+| `partitioned-foreign-key-unsettled` | failed with the code | Partitions kept appearing; retry the same statement |
+| `partitioned-foreign-key-not-valid-supported` | failed with the code | The server is PostgreSQL 18 or later, which `migrate.Run` does not route to the build; it appears only if the server changed between the routing and the build. Rerun, and the ordinary route runs |
+| `not-partitioned-table`, `invariant-violation`, `commit-outcome-unknown`, `budget-*`, `*dbconn.TableLockHeldError` | failed, as for the partitioned index build above | Route as in [the partitioned index build table](#outcomes-of-a-partitioned-index-build) |
+
+A failed verdict never claims nothing changed: earlier partitions' foreign keys may have
+committed, so inspect the foreign keys of the table and its partitions, then rerun. The codes are
+in [execution-model](execution-model.md#outcome-codes); the design is in
+[partitioned-foreign-key-design](partitioned-foreign-key-design.md).
+
 ## Execution-mode verdicts and direct execution
 
 SchemaBot records a per-statement **execution-mode verdict** on each planned `TableChange`:

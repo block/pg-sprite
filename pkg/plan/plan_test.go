@@ -257,6 +257,71 @@ func TestRoutePartitionedParentRoutesCreateIndexAndRefusesTheRest(t *testing.T) 
 	})
 }
 
+// An ADD FOREIGN KEY on a partitioned table, which the planner substitutes
+// with a plain table's NOT VALID then VALIDATE, routes to the partitioned
+// foreign key build before PostgreSQL 18: its one step becomes the statement
+// and its execution partitioned-foreign-key-build, and RoutePartitionedParent
+// then leaves it executable. Without the routing the same report is refused,
+// which is what a declarative plan, which does not route foreign keys, still
+// gets. On 18 nothing routes and the substitute runs as planned.
+func TestRoutePartitionedForeignKeyBuildsRoutesAForeignKeyThatWouldBeRefused(t *testing.T) {
+	const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts (id)`
+	steps := []string{
+		`ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts (id) NOT VALID`,
+		`ALTER TABLE app.events VALIDATE CONSTRAINT events_account_fk`,
+	}
+	fkReport := func() plan.Report {
+		return plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   steps,
+			Execution: planner.ExecutionAutocommit,
+		}}}
+	}
+
+	t.Run("routed before 18", func(t *testing.T) {
+		r := fkReport()
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		st := r.Statements[0]
+		assert.Equal(t, router.DispositionExecute, st.Disposition)
+		assert.Equal(t, []string{sql}, st.ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, st.Execution)
+		assert.Equal(t, []string{sql}, st.Decisions[0].SaferSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, st.Decisions[0].SaferSQLExecution)
+	})
+
+	t.Run("not routed before 18 is refused", func(t *testing.T) {
+		r := fkReport()
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	})
+
+	t.Run("on 18 the substitute runs", func(t *testing.T) {
+		r := fkReport()
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 18))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 18))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, steps, r.Statements[0].ExecSQL)
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	})
+
+	t.Run("a refused statement is left refused", func(t *testing.T) {
+		r := fkReport()
+		r.Statements[0].Disposition = router.DispositionRewriteRequired
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 16))
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	})
+}
+
 // The partition refusal's class is a property of the cause: an index-adoption
 // refusal is by-design, a pre-18 NOT VALID foreign key is environmental. A
 // registry keyed on the reason alone could not tell them apart.
@@ -603,7 +668,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 23,
+		"format_version": 28,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -661,7 +726,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 23,
+		"format_version": 28,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -686,7 +751,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 23,
+		"format_version": 28,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -774,6 +839,27 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 	rewritten.ExecSQL = []string{"CREATE INDEX CONCURRENTLY i ON t (c)"}
 	assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{rewritten, b}),
 		"exec_sql is what runs: identity changes with it")
+}
+
+// An ADD FOREIGN KEY that runs as the partitioned foreign key build is not
+// the same plan as the statement run literally, which validates every
+// partition while it blocks writes to the whole tree.
+func TestFingerprintCoversPartitionedForeignKeyBuildExecution(t *testing.T) {
+	const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts (id)`
+	literal := plan.Statement{
+		SQL:         sql,
+		ExecSQL:     []string{sql},
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+	}
+	partitioned := literal
+	partitioned.Execution = planner.ExecutionPartitionedForeignKeyBuild
+
+	assert.NotEqual(t,
+		plan.Fingerprint([]plan.Statement{literal}),
+		plan.Fingerprint([]plan.Statement{partitioned}),
+		"the partitioned foreign key build is not the literal ADD FOREIGN KEY")
 }
 
 // A CREATE INDEX on a partitioned table runs as the partition-by-partition

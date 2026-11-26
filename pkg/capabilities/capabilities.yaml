@@ -206,6 +206,19 @@ rows:
       migrate: supported
       diff: supported
     reason_notes: "Supported on version 18 and later; refused on 14–17 with an environmental class"
+  - id: add-foreign-key-on-a-partitioned-parent
+    area: "constraints"
+    operation: "`ADD FOREIGN KEY` on a **partitioned parent**"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_planned_flow"
+    maturity: "ga"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: refused
+    refusal_reason: declarative-foreign-key
+    reason_notes: "PostgreSQL 14–17 refuse `ADD FOREIGN KEY ... NOT VALID` on a partitioned table, and the plain statement validates every partition under `SHARE ROW EXCLUSIVE` on the whole tree, so on those versions `migrate --alter` runs a lone named `ADD CONSTRAINT name FOREIGN KEY (columns) REFERENCES schema.table (columns)` on a partitioned parent as the partitioned foreign key build: each partition is given the foreign key `NOT VALID` in a brief transaction and validated under `SHARE UPDATE EXCLUSIVE` while writes continue, then the parent's plain `ADD CONSTRAINT` adopts every partition's in one brief transaction that validates nothing and holds `ACCESS EXCLUSIVE` on the referenced table for its duration. The partitions are listed when the run executes, each step commits on its own, an advisory lock refuses a second pg-sprite run on the same table, and the same statement run again resumes from the partition foreign keys already finished. Refused before anything is added, with `unsupported-statement`: an unnamed foreign key, an unqualified referenced table, or one with an `ON DELETE` column list or `ONLY` (`capability-boundary`, in `--dry-run` too); a parent that already has another constraint under the name or the same foreign key under another name (`environmental`); a partitioned, foreign, or view referenced table, or a tree with a sub-partitioned partition (`capability-boundary`). Rows that break the foreign key fail the run (`execution-failed`, `sqlstate` `23503`, the server error naming the partition), and nothing is adopted. On PostgreSQL 18 the ordinary `NOT VALID` then `VALIDATE` sequence runs instead (previous row). `--force` runs the plain statement as written under the brief budgets. A desired file's foreign keys are refused (`declarative-foreign-key`). See [partitioned-foreign-key-design.md](partitioned-foreign-key-design.md)"
   - id: exclude-constraints-and-unrecognized-constraint-forms
     area: "constraints"
     operation: "`EXCLUDE` constraints (and unrecognized constraint forms)"

@@ -206,6 +206,24 @@ var migrateClaims = map[string]migrateClaim{
 			`ALTER TABLE %[1]s.events ADD CONSTRAINT events_owner_fk FOREIGN KEY (owner_id) REFERENCES %[1]s.owners (id) NOT VALID`,
 		},
 	},
+	// Before PostgreSQL 18 the foreign key runs as the partitioned foreign key
+	// build; from 18 as the ordinary NOT VALID then VALIDATE sequence.
+	"add-foreign-key-on-a-partitioned-parent": {
+		setup: `
+			CREATE TABLE %[1]s.owners (
+				id bigint PRIMARY KEY
+			);
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				owner_id bigint,
+				PRIMARY KEY (id)
+			) PARTITION BY RANGE (id);
+			CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100);
+			CREATE TABLE %[1]s.events_2 PARTITION OF %[1]s.events FOR VALUES FROM (100) TO (200)`,
+		statements: []string{
+			`ALTER TABLE %[1]s.events ADD CONSTRAINT events_owner_fk FOREIGN KEY (owner_id) REFERENCES %[1]s.owners (id)`,
+		},
+	},
 	"index-build-on-a-partitioned-parent": {
 		setup: `
 			CREATE TABLE %[1]s.events (

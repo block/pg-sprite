@@ -56,6 +56,10 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 		r, ok := admissionRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"admission:" + err.Error(), r, ok})
 	}
+	for _, err := range partitionedForeignKeySentinels() {
+		r, ok := partitionedForeignKeyRefusal(fmt.Errorf("wrapped: %w", err))
+		keys = append(keys, classifiedKey{"partitioned-foreign-key:" + err.Error(), r, ok})
+	}
 	for _, err := range desiredShapeSentinels() {
 		r, ok := desiredShapeRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"desired-shape:" + err.Error(), r, ok})
@@ -151,6 +155,8 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 		"copy-swap-preflight:" + string(preflight.CopySwapCauseDiskHeadroom),
 		"shadow:" + string(schemachange.CauseStatementConversion),
 		"admission:" + executor.ErrIfNotExistsUnsupported.Error(),
+		"admission:" + executor.ErrPartitionedForeignKeyUnsupportedShape.Error(),
+		"partitioned-foreign-key:" + executor.ErrPartitionedForeignKeyParentConflict.Error(),
 		"create-admission:" + executor.ErrDuplicateCreateName.Error(),
 		"desired-file:disallowed " + statement.KindCatalogWork.String(),
 		"desired-file:second-table/partition=true",

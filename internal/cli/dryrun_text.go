@@ -222,6 +222,11 @@ func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner, desiredTabl
 		w.diag("note", "", "the partitions are listed when the run starts, each step commits on its own, and an interrupted run is resumed by running the same statement again")
 		return 1
 	}
+	if ps.Execution == planner.ExecutionPartitionedForeignKeyBuild {
+		w.diag("note", "", runner+" will add the foreign key partition by partition instead of running the statement: give each partition the foreign key NOT VALID and validate it while writes continue, then run the parent's ADD CONSTRAINT, which adopts them in one brief transaction that validates nothing and holds ACCESS EXCLUSIVE on the referenced table")
+		w.diag("note", "", "the partitions are listed when the run starts, each step commits on its own, and an interrupted run is resumed by running the same statement again")
+		return 1
+	}
 	if substituted(ps) {
 		w.diag("note", "", runner+" will run a safer online sequence instead:")
 		for n, sql := range ps.ExecSQL {
