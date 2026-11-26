@@ -95,18 +95,15 @@ func TestCheckStoppedAtRefusesAnAttemptTheHostDidNotStop(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func key(n int64) *int64 { return new(n) }
-
 // A call after a stop mid-copy resumed when it kept the stopped call's
 // shadow and its first copying save is at or above the stopped watermark.
 func TestCheckResumedAcceptsACopyThatCarriedOn(t *testing.T) {
-	stopped := attemptInfo{Attempt: 1, ShadowOID: 16500, WatermarkAtStop: key(2002)}
+	stopped := attemptInfo{Attempt: 1, ShadowOID: 16500, WatermarkAtStop: new(int64(2002))}
 	for name, first := range map[string]int64{"at the stop": 2002, "beyond the stop": 9000, "complete": math.MaxInt64} {
 		t.Run(name, func(t *testing.T) {
 			resumed := attemptInfo{Attempt: 2, ShadowOID: 16500, Saves: []saveInfo{
 				{Phase: checkpoint.PhaseCopying.String(), Watermark: new(first)},
-				{Phase: checkpoint.PhaseVerifying.String(), Watermark: key(math.MaxInt64)},
+				{Phase: checkpoint.PhaseVerifying.String(), Watermark: new(int64(math.MaxInt64))},
 			}}
 			assert.NoError(t, checkResumed(stopMidCopy, stopped, resumed))
 		})
@@ -117,14 +114,14 @@ func TestCheckResumedAcceptsACopyThatCarriedOn(t *testing.T) {
 // shadow, a first copying save that lands nothing as a fresh row's does,
 // one below the stopped watermark, or no copying save at all.
 func TestCheckResumedRefusesACopyThatStartedOver(t *testing.T) {
-	stopped := attemptInfo{Attempt: 1, ShadowOID: 16500, WatermarkAtStop: key(2002)}
+	stopped := attemptInfo{Attempt: 1, ShadowOID: 16500, WatermarkAtStop: new(int64(2002))}
 	copying := checkpoint.PhaseCopying.String()
-	verifying := saveInfo{Phase: checkpoint.PhaseVerifying.String(), Watermark: key(math.MaxInt64)}
+	verifying := saveInfo{Phase: checkpoint.PhaseVerifying.String(), Watermark: new(int64(math.MaxInt64))}
 	cases := map[string]attemptInfo{
-		"a new shadow": {Attempt: 2, ShadowOID: 16600, Saves: []saveInfo{{Phase: copying, Watermark: key(9000)}, verifying}},
+		"a new shadow": {Attempt: 2, ShadowOID: 16600, Saves: []saveInfo{{Phase: copying, Watermark: new(int64(9000))}, verifying}},
 		"a fresh row":  {Attempt: 2, ShadowOID: 16500, Saves: []saveInfo{{Phase: copying}, verifying}},
 		"below the stop": {Attempt: 2, ShadowOID: 16500, Saves: []saveInfo{
-			{Phase: copying, Watermark: key(400)}, verifying}},
+			{Phase: copying, Watermark: new(int64(400))}, verifying}},
 		"no copying save": {Attempt: 2, ShadowOID: 16500, Saves: []saveInfo{verifying}},
 	}
 	for name, resumed := range cases {
@@ -139,13 +136,13 @@ func TestCheckResumedRefusesACopyThatStartedOver(t *testing.T) {
 // table, is refused.
 func TestCheckResumedHoldsAVerifyStopOutOfCopying(t *testing.T) {
 	stopped := attemptInfo{Attempt: 2, ShadowOID: 16500}
-	verifying := saveInfo{Phase: checkpoint.PhaseVerifying.String(), Watermark: key(math.MaxInt64)}
-	done := saveInfo{Phase: checkpoint.PhaseDone.String(), Watermark: key(math.MaxInt64)}
+	verifying := saveInfo{Phase: checkpoint.PhaseVerifying.String(), Watermark: new(int64(math.MaxInt64))}
+	done := saveInfo{Phase: checkpoint.PhaseDone.String(), Watermark: new(int64(math.MaxInt64))}
 	resumed := attemptInfo{Attempt: 3, ShadowOID: 16500, Saves: []saveInfo{verifying, done}}
 	require.NoError(t, checkResumed(stopMidVerify, stopped, resumed))
 
 	copiedAgain := attemptInfo{Attempt: 3, ShadowOID: 16500, Saves: []saveInfo{
-		{Phase: checkpoint.PhaseCopying.String(), Watermark: key(math.MaxInt64)}, verifying, done}}
+		{Phase: checkpoint.PhaseCopying.String(), Watermark: new(int64(math.MaxInt64))}, verifying, done}}
 	require.ErrorIs(t, checkResumed(stopMidVerify, stopped, copiedAgain), errNotResumed)
 
 	otherTable := attemptInfo{Attempt: 3, ShadowOID: 16600, Saves: []saveInfo{verifying, done}}
