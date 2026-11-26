@@ -592,3 +592,37 @@ func TestRunAcceptBlockingRefusesReindexOnPartitionedParent(t *testing.T) {
 	assert.False(t, v.BlockingPassthrough)
 	assert.True(t, indexExists(t, pool, schema, "events_day_idx"))
 }
+
+// Dropping an index of a partitioned parent has no concurrent form, so the
+// accepted plain drop is the path the partitioned-index refusal names: it
+// runs under both acknowledgements, reports the run as executed without
+// online safety, and removes each partition's attached index with the
+// parent's.
+func TestRunAcceptBlockingDropsAPartitionedParentIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id int,
+			day date,
+			name text
+		) PARTITION BY RANGE (day);
+		CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+			FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+		CREATE INDEX events_name_idx ON %[1]s.events (name)`, schema))
+	require.NoError(t, err)
+	require.True(t, indexExists(t, pool, schema, "events_2026_name_idx"), "the partition carries the attached index")
+
+	v, err := migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("DROP INDEX %s.events_name_idx", schema)),
+		acceptBlockingOptions(schema+".events"))
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedWithoutOnlineSafety, v.Outcome)
+	assert.True(t, v.BlockingPassthrough)
+	assert.Equal(t, schema+".events", v.Table)
+	assert.False(t, indexExists(t, pool, schema, "events_name_idx"))
+	assert.False(t, indexExists(t, pool, schema, "events_2026_name_idx"), "the partition's attached index goes with it")
+}

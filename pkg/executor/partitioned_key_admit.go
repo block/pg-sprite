@@ -28,10 +28,10 @@ func AdmitPartitionedKey(ctx context.Context, pool *pgxpool.Pool, sql string) er
 		if err != nil {
 			return err
 		}
-		keys, err := listPartitionKeys(ctx, q, target.tableOID)
+		tree, err := listPartitionTree(ctx, q, target.tableOID)
 		if err != nil {
 			return err
 		}
-		return checkUniquePartitionKeys(qualifiedName(target.schema, spec.name), spec.columns, keys)
+		return readUncoveredPartitionKeys(ctx, q, target.schema, spec.name, spec.columns, keyedTables(target, tree))
 	})
 }

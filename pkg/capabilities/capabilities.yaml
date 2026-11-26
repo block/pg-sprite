@@ -5,6 +5,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -76,17 +77,19 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive** in the plan report. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table (`migrate --desired` refuses a destructive plan whole); dropping a column and adding it back in one statement is refused with the `alter-column-type-in-place` guidance. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches. Refused with `dependent-policy`, naming the policies, when a row-level security policy reads the column, on a table the drop reaches or on another table through a subquery. Refused with `dependent-trigger`, `dependent-generated-column`, or `partition-key`, naming the objects, when a trigger's `UPDATE OF` list or `WHEN` condition names the column, a generated column reads it, or it is in a partition key, on a table the drop reaches. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop the views and policies that read the column"
+    reason_notes: "Metadata-only; flagged **destructive** in the plan report. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table (`migrate --desired` refuses a destructive plan whole unless `--expect-fingerprint` pins the reviewed plan and `--allow-destructive` names the table); dropping a column and adding it back in one statement is refused with the `alter-column-type-in-place` guidance. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches. Refused with `dependent-policy`, naming the policies, when a row-level security policy reads the column, on a table the drop reaches or on another table through a subquery. Refused with `dependent-trigger`, `dependent-generated-column`, or `partition-key`, naming the objects, when a trigger's `UPDATE OF` list or `WHEN` condition names the column, a generated column reads it, or it is in a partition key, on a table the drop reaches. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop the views and policies that read the column. A `migrate --desired` drop reads the object again under the table's lock and refuses with `dropped-object-drift`, dropping nothing, if its definition is not the one the reviewed plan carried. On a partitioned table it drops the column from the parent and every partition, sub-partitions included, after locking the whole tree: it refuses with `dropped-column-partition-key` when the column is in the partition key of the parent or of a sub-partitioned partition, and with `dropped-column-partition-dependent`, naming each object, when a partition carries an index, CHECK or foreign key, statistics object, sequence, or other object of its own on the column, which the parent's plan did not review; copies of the parent's indexes and constraints go with the parent's. On a table with inheritance children it refuses with `dropped-object-has-descendants`. `migrate --alter` makes no such partition check beyond the planner's `partition-key` refusal: the statement the operator wrote drops a partition's own objects on the column, as it drops the table's own."
   - id: alter-column-type-binary-coercible-proven-against-live-column-facts
     area: "column_changes"
     operation: "`ALTER COLUMN TYPE`, binary-coercible (proven against live column facts)"
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -98,6 +101,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "copy_and_swap"
+    maturity: "preview"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -109,17 +113,19 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only. `DROP NOT NULL` is flagged **destructive**: `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table"
+    reason_notes: "Metadata-only. `DROP NOT NULL` is flagged **destructive**: `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table, and `migrate --desired` runs it only when `--expect-fingerprint` also pins the reviewed plan. A `migrate --desired` drop reads the object again under the table's lock and refuses with `dropped-object-drift`, dropping nothing, if its definition is not the one the reviewed plan carried. A `migrate --desired` `DROP NOT NULL` on a partitioned table with partitions, or on a table with inheritance children, refuses with `dropped-object-has-descendants`: a partition can hold a `NOT NULL` of its own on the column, which the plan did not review."
   - id: set-not-null
     area: "column_changes"
     operation: "`SET NOT NULL`"
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -156,6 +162,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -167,6 +174,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_planned_flow"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -179,6 +187,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -190,6 +199,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -201,6 +211,8 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_safer_sequence"
+    maturity: "ga"
+    min_server_major: 18
     online_safety_problem: true
     online_safety_detail: "server version 18 or later"
     front_doors:
@@ -226,17 +238,19 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive**. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under; under `REPLICA IDENTITY DEFAULT` that is the primary key, while a publication publishes the table's updates or deletes. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop other tables' foreign keys on the constraint"
+    reason_notes: "Metadata-only; flagged **destructive**. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table, and `migrate --desired` runs it only when `--expect-fingerprint` also pins the reviewed plan. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under; under `REPLICA IDENTITY DEFAULT` that is the primary key, while a publication publishes the table's updates or deletes. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop other tables' foreign keys on the constraint. A `migrate --desired` drop reads the object again under the table's lock and refuses with `dropped-object-drift`, dropping nothing, if its definition is not the one the reviewed plan carried. On a partitioned table it drops the constraint from the parent and every partition, which hold it only as an inherited or cloned copy (a foreign key's clones included); on a table with inheritance children it refuses with `dropped-object-has-descendants`."
   - id: create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin
     area: "indexes"
     operation: "`CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN"
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -249,12 +263,12 @@ rows:
     status_mark: "❌"
     engine_path: "none"
     online_safety_problem: true
-    online_safety_detail: "the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive"
+    online_safety_detail: "`migrate --alter` does not drive the online `CONCURRENTLY` form; `migrate --desired` drives it only for a pinned, acknowledged plan"
     front_doors:
       migrate: refused
       diff: supported
     refusal_reason: index-statement
-    reason_notes: "`migrate` never runs this statement online-safely: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A single-index plain `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` plus `--allow-destructive SCHEMA.TABLE` for the loss (exit 3, never 0; without the second acknowledgement it is refused with `destructive-change`); `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. `diff` reports an index to remove as a **destructive** `DROP INDEX` and hints to run it through `migrate --alter`, which ends in this `index-statement` refusal — run `DROP INDEX CONCURRENTLY` directly instead. `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`. `plan` and `lint` refuse `DROP INDEX … CASCADE` with `cascading-drop`, since `DROP INDEX CONCURRENTLY` does not accept `CASCADE`"
+    reason_notes: "`migrate --alter` never runs this statement online-safely: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. `migrate --desired` runs an index drop its plan derived as `DROP INDEX CONCURRENTLY`, never holding the table's lock, when `--expect-fingerprint` pins the reviewed plan and `--allow-destructive` names the table; it reads the index again on the dropping session and refuses with the permanent `dropped-index-drift` code, dropping nothing, if the index is gone, invalid, now backs a constraint, or no longer has the definition the plan carried, and refuses the replica identity index. A single-index plain `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` plus `--allow-destructive SCHEMA.TABLE` for the loss (exit 3, never 0; without the second acknowledgement it is refused with `destructive-change`); `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. `diff` reports an index to remove as a **destructive** `DROP INDEX` and its note that `migrate` will run `DROP INDEX CONCURRENTLY` holds for `migrate --desired` under the pin and acknowledgement above, not for `migrate --alter`. `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`. `plan` and `lint` refuse `DROP INDEX … CASCADE` with `cascading-drop`, since `DROP INDEX CONCURRENTLY` does not accept `CASCADE`. An index of a partitioned table has no concurrent form: PostgreSQL rejects `DROP INDEX CONCURRENTLY` for it in every supported version, and a partition's own index cannot be dropped alone. `diff` therefore refuses such a drop with `unsupported-partitioned-parent` (class `by-design`, `blocking_passthrough_eligible: true`; preflight cause `parent-concurrent-index-drop`), and offers no concurrent rewrite, and `migrate --desired` never runs it. `migrate --alter` reads the index's kind from the catalog before it refuses a single-index `DROP INDEX` (and so does its `--dry-run`): for a partitioned index both the plain and the `CONCURRENTLY` form are refused with that same reason and cause, with no `safer_idiom`, and the detail names the bounded path. The drop is the plain `DROP INDEX` under `migrate --alter --accept-blocking SCHEMA.TABLE --allow-destructive SCHEMA.TABLE` (exit 3), which takes `ACCESS EXCLUSIVE` on the parent, every partition, and every partition's index for as long as the drop runs, and its verdict says so; the `CONCURRENTLY` form stays refused under those flags. A partition's index attached under a parent index is refused in either form, flags or not, as `unsupported-statement` (class `by-design`), naming the root partitioned index to drop instead. When the index it comes down to is owned by a primary key, unique, or exclusion constraint, the drop is refused the same way, naming the `ALTER TABLE ... DROP CONSTRAINT` that removes it"
   - id: reindex
     area: "indexes"
     operation: "`REINDEX`"
@@ -274,6 +288,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -285,11 +300,12 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_planned_flow"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`, so a `CREATE INDEX` on a partitioned parent runs as the partition-aware build: `CREATE INDEX ON ONLY` the parent, then `CREATE INDEX CONCURRENTLY` on each partition, then `ATTACH PARTITION`. The partitions are listed when the run executes, each step commits on its own, the parent's `ON ONLY` step blocks writers for one catalog insert, and an advisory lock refuses a second pg-sprite run on the same table. The same statement run again resumes from the invalid parent index and the partition indexes already built, and `migrate --desired` plans that same `CREATE INDEX` when the live parent carries an invalid index with the desired definition. It needs a named index and no `IF NOT EXISTS`, and a unique index must include every partition key column of every partitioned table in the tree, as PostgreSQL requires: one that does not is refused before anything is created, in the dry run too. The blocking form is never run as submitted: `--force` does not bypass that, and `--accept-blocking` does not reach it. See [partitioned-index-build-design.md](partitioned-index-build-design.md)"
+    reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`, so a `CREATE INDEX` on a partitioned parent runs as the partition-aware build: `CREATE INDEX ON ONLY` the parent, then `CREATE INDEX CONCURRENTLY` on each partition, then `ATTACH PARTITION`. The partitions are listed when the run executes, each step commits on its own, the parent's `ON ONLY` step blocks writers for one catalog insert, and an advisory lock refuses a second pg-sprite run on the same table. The same statement run again resumes from the invalid parent index and the partition indexes already built, and `migrate --desired` plans that same `CREATE INDEX` when the live parent carries an invalid index with the desired definition. It needs a named index, no `IF NOT EXISTS`, and no `TABLESPACE`, which would place the parent's index and not the partitions'; a unique index must contain the partition key of every partitioned table in the tree; one that does not is refused (`unsupported-statement`, `by-design`) before anything is created, in `--dry-run` too. The blocking form is never run as submitted: `--force` does not bypass that, and `--accept-blocking` does not reach it. See [partitioned-index-build-design.md](partitioned-index-build-design.md)"
   - id: add-constraint-using-index-on-a-partitioned-parent
     area: "indexes"
     operation: "`ADD CONSTRAINT ... USING INDEX` on a partitioned parent"
@@ -342,15 +358,15 @@ rows:
   - id: partitioned-parents-in-the-declarative-model
     area: "partitioned_tables"
     operation: "Partitioned parents in the **declarative model**"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: unsupported-statement
-    reason_notes: "Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong"
+      migrate: supported
+      diff: supported
+    reason_notes: "The model carries the parent's partition key. `pull` exports a parent as `CREATE TABLE ... PARTITION BY` with its indexes as plain `CREATE INDEX` statements on the parent (no `ON ONLY`), and `diff` of that file against the same parent plans no changes; `migrate --desired` runs a parent's in-place changes and creates a missing `PARTITION BY` parent. A different partition key is a typed refusal, and a new index on an existing parent runs as the partitioned index build, under the restrictions of the index-build row. Partitions, their bounds, and the partition topology are not modeled and stay owned outside the desired file: `pull` skips partitions and a desired file for one is refused. Export refuses a parent whose index is not attached on every partition, and a parent with row security"
   - id: partitioned-tables-in-copy-and-swap
     area: "partitioned_tables"
     operation: "Partitioned tables in **copy-and-swap**"
@@ -369,6 +385,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -380,6 +397,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -391,6 +409,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -500,6 +519,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     online_safety_detail: "a `REFERENCES` clause would take a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, but the create path refuses a `CREATE TABLE` that declares one, so no live table is locked"
     front_doors:
@@ -512,6 +532,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -523,22 +544,24 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "An enum column is an ordinary column to both front doors: adding one (with a constant default it is catalog-only), changing its default, and indexing it run natively, and a desired file can create a table with one. A desired file names an enum in the table's schema or `public` bare; introspection renders the live column through `format_type`, so the file and the live table compare equal and a rerun plans nothing. The enum type is created with owner tooling; after that its labels can be declared in a desired enum type file, or added with `ALTER TYPE ... ADD VALUE`. Retyping a column to or from an enum rewrites the table and runs on copy-and-swap"
+    reason_notes: "An enum column is an ordinary column to both front doors: adding one (with a constant default it is catalog-only), changing its default, and indexing it run natively, and a desired file can create a table with one. A desired file names an enum in the table's schema or `public` bare; introspection renders the live column through `format_type`, so the file and the live table compare equal and a rerun plans nothing. The enum type is created with owner tooling; after that its labels can be declared in a desired enum type file, or added with `ALTER TYPE ... ADD VALUE`. Retyping a column to or from an enum rewrites the table and runs on copy-and-swap (preview, opt-in)"
   - id: alter-type-add-value
     area: "types_and_non_table_objects"
     operation: "`ALTER TYPE ... ADD VALUE`"
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only: the statement writes one `pg_enum` row under a lock on the type alone, so no table that uses the type is locked, scanned, or rewritten, and reads and writes on those tables carry on while it runs. It waits only for another session altering the same type, under the brief budgets with lock-timeout retry. `BEFORE`, `AFTER`, and `IF NOT EXISTS` run as written; a position next to the empty label is refused as `unsupported-statement`, since the parse tree cannot carry it. `migrate` resolves the type on the session `search_path`, checks that it is an enum, that the role has `USAGE` on a schema the name spells, and that the role is a member of the type's owning role (else `insufficient-privileges`), pins the attempt's `search_path` to the type's schema, and confirms before the commit that every label the transaction wrote belongs to that type, or, when `IF NOT EXISTS` wrote nothing, that the name still resolves to it, since `ALTER TYPE ... RENAME` does not wait for the lock and another session can move the name meanwhile (else the permanent `enum-type-drift` code, nothing added). Sessions can use the new value once it commits. `--force`, `--allow-destructive`, and the copy-and-swap acknowledgements do not apply. A desired enum type file holds one unqualified `CREATE TYPE ... AS ENUM`; `diff` plans an `ADD VALUE` (kind `add-enum-value`) for each label it lists that the live type lacks, `BEFORE` the next live label for an insert ahead of one, and `migrate --desired` runs each through the same checks, then re-plans to confirm nothing is left. Labels must be distinct and non-empty"
+    reason_notes: "Metadata-only: the statement writes one `pg_enum` row under a lock on the type alone, so no table that uses the type is locked, scanned, or rewritten, and reads and writes on those tables carry on while it runs. It waits only for another session altering the same type, under the brief budgets with lock-timeout retry. `BEFORE`, `AFTER`, and `IF NOT EXISTS` run as written; a position next to the empty label is refused as `unsupported-statement`, since the parse tree cannot carry it. `migrate` resolves the type on the session `search_path`, checks that it is an enum, that the role has `USAGE` on a schema the name spells, and that the role is a member of the type's owning role (else `insufficient-privileges`), pins the attempt's `search_path` to the type's schema, and confirms before the commit that every label the transaction wrote belongs to that type, or, when `IF NOT EXISTS` wrote nothing, that the name still resolves to it, since `ALTER TYPE ... RENAME` does not wait for the lock and another session can move the name meanwhile (else the permanent `enum-type-drift` code, nothing added). A statement that meets a label the type already carries, or a `BEFORE` or `AFTER` label the type no longer carries, returns the permanent `enum-label-exists` or `enum-neighbor-missing` code, nothing added. Sessions can use the new value once it commits. `--force`, `--allow-destructive`, and the copy-and-swap acknowledgements do not apply. A desired enum type file holds one unqualified `CREATE TYPE ... AS ENUM`; `diff` plans an `ADD VALUE` (kind `add-enum-value`) for each label it lists that the live type lacks, `BEFORE` the next live label for an insert ahead of one, and `migrate --desired` runs each through the same checks, then re-plans to confirm nothing is left. Labels must be distinct and non-empty"
   - id: enum-value-rename-removal
     area: "types_and_non_table_objects"
     operation: "Enum value rename / removal"
@@ -648,6 +671,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
       migrate: supported
@@ -692,7 +716,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned)"
+    reason_notes: "Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it: the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. A whole-schema owner that has reviewed the drop runs it through the Go API, `executor.ExecuteDropTable`, which drops the table only if it still has the reviewed definition; see [Deliberately operator-owned](#deliberately-operator-owned)"
   - id: data-backfills-update-delete-batches-dml-of-any-kind
     area: "data_and_whole_table_operations"
     operation: "Data backfills, `UPDATE`/`DELETE` batches, DML of any kind"
@@ -712,6 +736,7 @@ rows:
     tier: "t1"
     status_mark: "✅"
     engine_path: "copy_and_swap"
+    maturity: "preview"
     online_safety_problem: true
     front_doors:
       migrate: supported

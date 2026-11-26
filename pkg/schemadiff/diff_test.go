@@ -266,10 +266,12 @@ func TestDiffColumnAlterations(t *testing.T) {
 	desired.Columns[1] = Column{Name: "name", Type: "text", NotNull: false, Default: "'unnamed'::text"}
 	changes, err := Diff("public", base(), desired)
 	require.NoError(t, err)
+	// The NOT NULL drop comes first: it is a drop, and a rewrite the type
+	// change may run would change the attribute number its definition names.
 	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" ALTER COLUMN "name" DROP NOT NULL`,
 		`ALTER TABLE "public"."events" ALTER COLUMN "name" TYPE text`,
 		`ALTER TABLE "public"."events" ALTER COLUMN "name" SET DEFAULT 'unnamed'::text`,
-		`ALTER TABLE "public"."events" ALTER COLUMN "name" DROP NOT NULL`,
 	}, sqls(changes))
 }
 
@@ -715,4 +717,69 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeCreateIndex,
 		ChangeAddEnumValue,
 	}, ChangeKinds())
+}
+
+// Every NOT NULL drop runs with the drops, after the column drops and before
+// anything that alters, adds or rewrites: a rewrite renumbers the table's
+// columns, and a NOT NULL drop is reviewed by the column number it has when
+// the plan is derived. This holds for a NOT NULL on a column other than the
+// one a later statement retypes.
+func TestDiffDropsNotNullsAfterColumnDropsAndBeforeAlters(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns,
+		Column{Name: "legacy", Type: "integer"},
+		Column{Name: "qty", Type: "integer", NotNull: true})
+
+	desired := base()
+	desired.Columns[1] = Column{Name: "name", Type: "text", NotNull: true}
+	desired.Columns = append(desired.Columns,
+		Column{Name: "qty", Type: "integer"},
+		Column{Name: "email", Type: "text"})
+
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP COLUMN "legacy"`,
+		`ALTER TABLE "public"."events" ALTER COLUMN "qty" DROP NOT NULL`,
+		`ALTER TABLE "public"."events" ADD COLUMN "email" text`,
+		`ALTER TABLE "public"."events" ALTER COLUMN "name" TYPE text`,
+	}, sqls(changes))
+	require.NotNil(t, changes[1].Drops)
+	assert.Equal(t, DroppedNotNull, changes[1].Drops.Kind)
+}
+
+// A dropped column's reviewed definition names its collation, and the plan
+// lists what the drop removes with it: the objects that depend on the column,
+// in the order the introspection returned them.
+func TestDiffDropColumnCarriesCollationAndDependents(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns, Column{
+		Name: "legacy", Type: "text", Collation: `"C"`, AttNum: 3,
+		Dependents: []Dependent{
+			{Kind: "index", Name: "events_legacy_idx", Def: "CREATE INDEX events_legacy_idx ON public.events USING btree (legacy)"},
+			{Kind: "owned sequence", Name: "public.events_legacy_seq"},
+		},
+	})
+
+	changes, err := Diff("public", live, base())
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	require.NotNil(t, changes[0].Drops)
+	assert.Equal(t, DroppedColumn, changes[0].Drops.Kind)
+	assert.Contains(t, changes[0].Drops.Definition, `COLLATE "C"`)
+	assert.Equal(t, []string{
+		"index events_legacy_idx: CREATE INDEX events_legacy_idx ON public.events USING btree (legacy)",
+		"owned sequence public.events_legacy_seq",
+	}, changes[0].Drops.Dependents)
+}
+
+// A dependent the plan did not list is one the reviewer has not seen; one the
+// plan listed that has since gone is not.
+func TestUnlistedDependents(t *testing.T) {
+	planned := []string{"index a", "constraint b"}
+	assert.Empty(t, UnlistedDependents(planned, []string{"constraint b"}), "a dependent gone since planning is fine")
+	assert.Empty(t, UnlistedDependents(planned, nil))
+	assert.Equal(t, []string{"index c"}, UnlistedDependents(planned, []string{"index a", "index c"}))
+	assert.Equal(t, []string{"constraint b: CHECK (x > 1)"}, UnlistedDependents(planned, []string{"constraint b: CHECK (x > 1)"}),
+		"a dependent whose definition changed is a new one")
 }

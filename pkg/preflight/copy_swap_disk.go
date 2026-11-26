@@ -9,8 +9,9 @@ import (
 // what the run still needs on the volume, or nil when it does: the shadow
 // copy's headroom and, for a run that decodes WAL, the slot lag ceiling
 // beside it, each less what a stopped run being resumed already holds of
-// it (CopySwapEnvironment.Held). An unmeasured volume, a negative held
-// figure, and a negative ceiling are refused before any size is compared.
+// it (CopySwapEnvironment.Held), and nothing for a run whose stopped run's
+// swap has committed. An unmeasured volume, a negative held figure, and a
+// negative ceiling are refused before any size is compared.
 func refuseCopySwapDisk(f copySwapEnvironmentFacts, env CopySwapEnvironment) *CopySwapEnvironmentError {
 	if env.FreeDiskBytes <= 0 {
 		return &CopySwapEnvironmentError{
@@ -24,6 +25,18 @@ func refuseCopySwapDisk(f copySwapEnvironmentFacts, env CopySwapEnvironment) *Co
 			Detail: fmt.Sprintf("a resumed run was reported to hold %d bytes of shadow and %d bytes of retained WAL; a size the server measured is never negative",
 				env.Held.ShadowBytes, env.Held.RetainedWALBytes),
 		}
+	}
+	if env.Held.SwapCommitted {
+		// INV: ST-6 — a run whose stopped run's swap committed only drops
+		// the slot and the retained source and records the change done.
+		// It builds no shadow, so no copy headroom is asked. Nor is the
+		// slot lag ceiling: that term is WAL a catch-up lets its slot
+		// retain while it decodes, and this run opens no stream and
+		// enforces no ceiling. The WAL the slot already retains is on the
+		// volume, excluded from the measured free figure, and the run
+		// frees it with the slot, so the run grows nothing a copy would.
+		_, refusal := slotLagCeiling(env)
+		return refusal
 	}
 	shadow := f.totalBytes * copySwapDiskHeadroomFactor
 	// INV: ST-6 — the shadow a resumed run already built is space the
@@ -45,15 +58,9 @@ func refuseCopySwapDisk(f copySwapEnvironmentFacts, env CopySwapEnvironment) *Co
 		}
 		return nil
 	}
-	ceiling := env.SlotLagCeilingBytes
-	if ceiling < 0 {
-		return &CopySwapEnvironmentError{
-			Cause:  CopySwapCauseDiskHeadroom,
-			Detail: fmt.Sprintf("the slot lag ceiling is %d bytes; a live run must count the ceiling its catch-up enforces, zero for the default", ceiling),
-		}
-	}
-	if ceiling == 0 {
-		ceiling = DefaultSlotLagCeiling
+	ceiling, refusal := slotLagCeiling(env)
+	if refusal != nil {
+		return refusal
 	}
 	// INV: ST-6 — the WAL a resumed run's slot already retains is on the
 	// volume and counts toward the ceiling, so only the rest of the
@@ -79,6 +86,27 @@ func refuseCopySwapDisk(f copySwapEnvironmentFacts, env CopySwapEnvironment) *Co
 		}
 	}
 	return nil
+}
+
+// slotLagCeiling is the ceiling a run that decodes WAL counts, the default
+// for zero, or a refusal of a negative one, which is a caller's wiring
+// error whatever the run has left to do. A quiesced run holds no slot and
+// counts no ceiling, so its value is not judged.
+func slotLagCeiling(env CopySwapEnvironment) (int64, *CopySwapEnvironmentError) {
+	if !env.LogicalDecoding {
+		return 0, nil
+	}
+	ceiling := env.SlotLagCeilingBytes
+	if ceiling < 0 {
+		return 0, &CopySwapEnvironmentError{
+			Cause:  CopySwapCauseDiskHeadroom,
+			Detail: fmt.Sprintf("the slot lag ceiling is %d bytes; a live run must count the ceiling its catch-up enforces, zero for the default", ceiling),
+		}
+	}
+	if ceiling == 0 {
+		return DefaultSlotLagCeiling, nil
+	}
+	return ceiling, nil
 }
 
 // remainingNeed is the sum of the shadow's and the WAL's remaining needs

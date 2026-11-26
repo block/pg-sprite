@@ -15,7 +15,7 @@ import (
 )
 
 func validRow() Row {
-	return Row{ID: "example", Area: AreaColumnChanges, Operation: "example", Tier: TierOne, StatusMark: StatusSupported, EnginePath: PathNativeAsIs, OnlineSafetyProblem: true, FrontDoors: FrontDoors{Migrate: DoorSupported, Diff: DoorSupported}, ReasonNotes: "notes"}
+	return Row{ID: "example", Area: AreaColumnChanges, Operation: "example", Tier: TierOne, StatusMark: StatusSupported, EnginePath: PathNativeAsIs, Maturity: MaturityGA, OnlineSafetyProblem: true, FrontDoors: FrontDoors{Migrate: DoorSupported, Diff: DoorSupported}, ReasonNotes: "notes"}
 }
 
 func TestEmbeddedCapabilitiesValidate(t *testing.T) {
@@ -50,6 +50,25 @@ func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
 	}
 }
 
+// Consumers ask "what is generally available?" by filtering on maturity, so
+// the preview set is pinned by id: a copy-and-swap row published as ga, or a
+// native row slipped into preview, changes what an automated caller is told
+// needs no preview opt-in. Each row still needs its own safety flags.
+func TestPreviewRowsAreTheCopySwapRows(t *testing.T) {
+	rows, err := Rows()
+	require.NoError(t, err)
+	var preview []string
+	for _, r := range rows {
+		if r.Maturity == MaturityPreview {
+			preview = append(preview, r.ID)
+		}
+	}
+	assert.ElementsMatch(t, []string{
+		"alter-column-type-general-or-with-using",
+		"column-transform-expressions-during-a-copy-and-swap-rewrite",
+	}, preview, "the preview set changed: taking copy-and-swap out of preview also changes validateMaturity's copy-and-swap rule, its TestValidateRules case, this list, and the copy_and_swap sentence in docs/capabilities-contract.md")
+}
+
 func TestLoadRejectsInvalidYAML(t *testing.T) {
 	_, err := Load([]byte("rows: ["))
 	assert.ErrorContains(t, err, "parse capabilities YAML")
@@ -70,9 +89,28 @@ func TestValidateRules(t *testing.T) {
 			r.Tier = TierThree
 			r.StatusMark = StatusOtherTool
 			r.EnginePath = PathNativeAsIs
+			r.Maturity = ""
 			r.OnlineSafetyProblem = false
 			r.OwningToolClass = "owner"
 		},
+		"T1 names a maturity":      func(r *Row) { r.Maturity = "" },
+		"known maturity":           func(r *Row) { r.Maturity = "beta" },
+		"copy-and-swap is preview": func(r *Row) { r.EnginePath = PathCopyAndSwap },
+		"maturity only on T1": func(r *Row) {
+			r.Tier = TierTwo
+			r.StatusMark = StatusPlanned
+			r.FrontDoors = FrontDoors{Migrate: DoorRefused, Diff: DoorRefused}
+			r.RefusalReason = verdict.ReasonBackendUnavailable
+		},
+		"min server major only on T1": func(r *Row) {
+			r.Tier = TierTwo
+			r.StatusMark = StatusPlanned
+			r.Maturity = ""
+			r.MinServerMajor = 18
+			r.FrontDoors = FrontDoors{Migrate: DoorRefused, Diff: DoorRefused}
+			r.RefusalReason = verdict.ReasonBackendUnavailable
+		},
+		"min server major later than the oldest supported": func(r *Row) { r.MinServerMajor = 14 },
 		"none only on T3":            func(r *Row) { r.EnginePath = PathNone },
 		"No names owner":             func(r *Row) { r.OnlineSafetyProblem = false },
 		"Yes omits owner":            func(r *Row) { r.OwningToolClass = "owner" },
@@ -107,6 +145,7 @@ func TestValidateNamesTheFieldAndValue(t *testing.T) {
 		"engine path":  {func(r *Row) { r.EnginePath = "native" }, `engine_path "native" is not one of`},
 		"diff door":    {func(r *Row) { r.FrontDoors.Diff = "refuse" }, `front_doors.diff "refuse" is not one of`},
 		"migrate door": {func(r *Row) { r.FrontDoors.Migrate = "ok" }, `front_doors.migrate "ok" is not one of`},
+		"maturity":     {func(r *Row) { r.Maturity = "beta" }, `maturity "beta" is not one of`},
 		"refusal reason": {func(r *Row) {
 			r.FrontDoors.Diff = DoorRefused
 			r.RefusalReason = "unsupported-partition"

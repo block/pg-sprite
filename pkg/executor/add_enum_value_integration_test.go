@@ -14,6 +14,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // The engine resolves the enum type an ADD VALUE names, checks it, and only
@@ -25,7 +26,10 @@ import (
 // whether the statement wrote the label to the other type, wrote it there
 // while the checked type already carried it, found it on the other type
 // under IF NOT EXISTS and wrote nothing, or found it there while the
-// checked type carried it too.
+// checked type carried it too. The same holds when the server rejects the
+// statement on the other type, for a label already there or a BEFORE label
+// missing there: the checked type, read by OID, shows neither, so the
+// outcome is drift, not a fact about the checked type.
 func TestExecuteEnumValueAddRefusesANameMovedToAnotherType(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -57,6 +61,22 @@ func TestExecuteEnumValueAddRefusesANameMovedToAnotherType(t *testing.T) {
 			other:     []string{"sunny", "calm"},
 			statement: "ALTER TYPE %s.mood ADD VALUE IF NOT EXISTS 'calm'",
 		},
+		{
+			// The server rejects the statement for a label already
+			// present, but on the other type: the checked type lacks it.
+			name:      "the other type already carries the label",
+			checked:   []string{"happy", "sad"},
+			other:     []string{"sunny", "calm"},
+			statement: "ALTER TYPE %s.mood ADD VALUE 'calm'",
+		},
+		{
+			// The server rejects the statement for a missing BEFORE
+			// label, but on the other type: the checked type carries it.
+			name:      "the other type lacks the label the value is placed next to",
+			checked:   []string{"happy", "sad"},
+			other:     []string{"sunny"},
+			statement: "ALTER TYPE %s.mood ADD VALUE 'calm' BEFORE 'sad'",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, schema := newPool(t)
@@ -85,6 +105,63 @@ func TestExecuteEnumValueAddRefusesANameMovedToAnotherType(t *testing.T) {
 			assert.Equal(t, tc.other, labelsOf(t, pool, other), "the other type is unchanged")
 		})
 	}
+}
+
+// Another change adds the label after the statement was planned. The
+// server rejects ALTER TYPE app.mood ADD VALUE 'calm' with duplicate_object,
+// the checked type carries 'calm', so the outcome is the permanent
+// enum-label-exists and nothing is added.
+func TestExecuteEnumValueAddRefusesALabelTheTypeAlreadyCarries(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.mood AS ENUM ('happy', 'calm', 'sad')`, schema))
+	require.NoError(t, err)
+	st := mustParse(t, fmt.Sprintf("ALTER TYPE %s.mood ADD VALUE 'calm'", schema))
+
+	err = executeEnumValueAddOnce(t, pool, st)
+	require.ErrorIs(t, err, executor.ErrEnumLabelExists)
+	assert.Equal(t, executor.CodeEnumLabelExists, executor.OutcomeCode(err))
+	assert.True(t, executor.OutcomeCode(err).Permanent(), "the same statement meets the same label on every attempt")
+	assert.ErrorContains(t, err, `label "calm"`)
+	assert.Equal(t, []string{"happy", "calm", "sad"}, enumLabels(t, pool, st), "nothing was added")
+}
+
+// Another change renames the label a planned statement places its value
+// BEFORE. The server rejects ALTER TYPE app.mood ADD VALUE 'calm' BEFORE
+// 'sad' with invalid_parameter_value, the checked type no longer carries
+// 'sad', so the outcome is the permanent enum-neighbor-missing and nothing
+// is added.
+func TestExecuteEnumValueAddRefusesAPlacementLabelTheTypeNoLongerCarries(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TYPE %[1]s.mood AS ENUM ('happy', 'sad');
+		ALTER TYPE %[1]s.mood RENAME VALUE 'sad' TO 'blue'`, schema))
+	require.NoError(t, err)
+	st := mustParse(t, fmt.Sprintf("ALTER TYPE %s.mood ADD VALUE 'calm' BEFORE 'sad'", schema))
+
+	err = executeEnumValueAddOnce(t, pool, st)
+	require.ErrorIs(t, err, executor.ErrEnumNeighborMissing)
+	assert.Equal(t, executor.CodeEnumNeighborMissing, executor.OutcomeCode(err))
+	assert.True(t, executor.OutcomeCode(err).Permanent(), "the same statement meets the same missing label on every attempt")
+	assert.ErrorContains(t, err, `label "sad"`)
+	assert.Equal(t, []string{"happy", "blue"}, enumLabels(t, pool, st), "nothing was added")
+}
+
+// executeEnumValueAddOnce checks the type st names and runs st once.
+func executeEnumValueAddOnce(t *testing.T, pool *pgxpool.Pool, st statement.Statement) error {
+	t.Helper()
+	et, err := preflight.CheckEnumTarget(t.Context(), pool, st.EnumType())
+	require.NoError(t, err)
+	budget := executor.Budget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
+	retry := executor.RetryPolicy{MaxAttempts: 1, InitialBackoff: 100 * time.Millisecond, MaxBackoff: time.Second}
+	return executor.ExecuteEnumValueAdd(t.Context(), pool, et, st, budget, retry)
+}
+
+// enumLabels returns the labels of the enum type st names, in sort order.
+func enumLabels(t *testing.T, pool *pgxpool.Pool, st statement.Statement) []string {
+	t.Helper()
+	et, err := preflight.CheckEnumTarget(t.Context(), pool, st.EnumType())
+	require.NoError(t, err)
+	return labelsOf(t, pool, et.OID())
 }
 
 // The name can also move while an attempt is waiting. Another session holds

@@ -47,7 +47,7 @@ func keyOptions(url string) migrate.Options {
 	return opts
 }
 
-func constraintCount(t *testing.T, pool *pgxpool.Pool, schema, name string) int {
+func constraintsPrefixed(t *testing.T, pool *pgxpool.Pool, schema, name string) int {
 	t.Helper()
 	var n int
 	require.NoError(t, pool.QueryRow(t.Context(), `
@@ -71,7 +71,7 @@ func TestRunRoutesAPartitionedPrimaryKeyToTheKeyBuild(t *testing.T) {
 	assert.Equal(t, schema+".orders", v.Table)
 	assert.False(t, v.Forced)
 	assert.Contains(t, v.Detail, "2 partitions, 2 built")
-	assert.Equal(t, 3, constraintCount(t, pool, schema, "orders_pkey"),
+	assert.Equal(t, 3, constraintsPrefixed(t, pool, schema, "orders_pkey"),
 		"the parent's constraint and one per partition")
 }
 
@@ -85,7 +85,7 @@ func TestRunStopsBeforeThePartitionedKeyBuildWithoutAConnection(t *testing.T) {
 	v, err := migrate.Run(t.Context(), pool, st, runOptions())
 	require.ErrorIs(t, err, migrate.ErrConnectionRequired)
 	assert.Zero(t, v, "nothing was executed, so there is no verdict")
-	assert.Zero(t, constraintCount(t, pool, schema, "orders_pkey"))
+	assert.Zero(t, constraintsPrefixed(t, pool, schema, "orders_pkey"))
 }
 
 // A parent that already has a primary key on other columns stands in the
@@ -103,7 +103,7 @@ func TestRunRefusesAPartitionedKeyWhenTheParentHasAPrimaryKey(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
 	assert.Equal(t, verdict.ClassEnvironmental, v.Class)
-	assert.Zero(t, constraintCount(t, pool, schema, "orders_pkey"), "nothing was built")
+	assert.Zero(t, constraintsPrefixed(t, pool, schema, "orders_pkey"), "nothing was built")
 }
 
 // A table occupying the name the first partition's index needs is an

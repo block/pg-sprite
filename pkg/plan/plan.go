@@ -52,10 +52,16 @@ import (
 // Version 19 added the extension_schemas field and its part in the
 // fingerprint. Version 20 added the add-enum-value change kind and the type
 // field, for a plan of a desired enum type file. Version 21 added the
-// partitioned-index-build execution contract and its part in the
-// fingerprint. Version 22 added the partitioned-key-build execution contract
-// and its part in the fingerprint.
-const FormatVersion = 22
+// add-integer-primary-key guidance code, which a
+// copy-and-swap-pk-unsupported refusal verdict for a keyless table
+// carries; no report emits it, but the report embeds the whole guidance
+// vocabulary. Version 22 added the statement-level
+// drops field and its part in the fingerprint, and the report-level
+// pinnable_fingerprint field.
+// Version 23 added the partitioned-index-build execution contract and its
+// part in the fingerprint. Version 24 added the partitioned-key-build
+// execution contract and its part in the fingerprint.
+const FormatVersion = 24
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -102,6 +108,12 @@ type Statement struct {
 	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
 	// out of the JSON for the same reason.
 	Validates *schemadiff.ConstraintValidation `json:"-"`
+	// Drops is the live object a diff-derived DROP INDEX, DROP CONSTRAINT,
+	// DROP COLUMN, or DROP NOT NULL removes, with the definition the diff
+	// read (see schemadiff.Change.Drops). A reviewer sees what the dropped
+	// name stood for, the fingerprint covers it, and execution refuses when
+	// the object has changed since. Absent on every other statement.
+	Drops *schemadiff.DroppedObject `json:"drops,omitempty"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
@@ -205,6 +217,13 @@ type Report struct {
 	// reviewer approves is the plan that executes" is enforced across
 	// storage and forwarding.
 	Fingerprint string `json:"fingerprint"`
+	// PinnableFingerprint is set only on a desired-state preview that
+	// withdrew a plan holding a destructive statement (RefuseDestructive):
+	// the identity the plan had before the withdrawal, which is the value a
+	// run pins with the acknowledgement to execute it. Fingerprint then
+	// identifies the withdrawn, refused plan, which no run executes.
+	// Explanatory: excluded from the fingerprint.
+	PinnableFingerprint string `json:"pinnable_fingerprint,omitempty"`
 	// ExtensionSchemas are the schemas the desired file's unqualified names
 	// also resolved against (statement.DesiredSchema.WithExtensionSchemas),
 	// in the order they were searched. A table that does not exist yet is
@@ -236,9 +255,9 @@ type Report struct {
 // it runs. Every other statement is checked against
 // preflight.RefusesPartitionedParent and refused by its cause, so the
 // unsupported shapes (index adoption, a NOT VALID foreign key before version
-// 18) stay refused. A statement RoutePartitionedKeyBuilds already routed is
-// left as it is. A report on a table that is not partitioned must not pass
-// through here.
+// 18, a concurrent drop of the parent's index) stay refused. A statement
+// RoutePartitionedKeyBuilds already routed is left as it is. A report on a
+// table that is not partitioned must not pass through here.
 func RoutePartitionedParent(report *Report, serverMajor int) error {
 	causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
 	for i := range report.Statements {
@@ -535,7 +554,9 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 
 // Fingerprint computes the plan's stable identity: "sha256:" plus the hex
 // digest over what would execute — each statement's canonical SQL, route,
-// backend, disposition, and exec_sql, in plan order. Explanatory fields
+// backend, disposition, and exec_sql, in plan order, and for a statement
+// that drops an object, the kind, name, and definition of what it drops
+// after a file separator. Explanatory fields
 // (decisions, kind, destructive, reason, cause, guidance) are excluded, so
 // a reworded reason does not change identity but a rerouted or resequenced
 // plan does. A statement that runs as the partitioned index build or the
@@ -563,6 +584,15 @@ func Fingerprint(statements []Statement, extensionSchemas ...string) string {
 		}
 		if hashedExecution(st.Execution) {
 			writeField(h, string(st.Execution))
+		}
+		if st.Drops != nil {
+			h.Write([]byte{0x1c}) // file separator: the dropped object follows
+			writeField(h, string(st.Drops.Kind))
+			writeField(h, st.Drops.Name)
+			writeField(h, st.Drops.Definition)
+			for _, dep := range st.Drops.Dependents {
+				writeField(h, dep)
+			}
 		}
 		h.Write([]byte{0x1e}) // record separator: one per statement
 	}

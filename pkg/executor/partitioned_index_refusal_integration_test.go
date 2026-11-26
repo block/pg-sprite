@@ -2,6 +2,7 @@ package executor_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -68,6 +69,110 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 
 			require.ErrorIs(t, err, executor.ErrForeignTablePartition)
 			f.requireNothingBuilt(t, "orders", partitions...)
+		})
+
+		// A DETACH PARTITION CONCURRENTLY that was interrupted leaves its
+		// partition in the tree, and the server leaves that partition out
+		// when it attaches an index, so the parent's index could never
+		// become valid. The refusal names the partition and comes before the
+		// parent's index exists. The test marks the detach pending in the
+		// catalog, which is the state an interrupted detach leaves.
+		t.Run("a tree with a partition whose detach did not finish", func(t *testing.T) {
+			f := newFixture(t)
+			partitions := f.ordersByRegion(t)
+			f.exec(t, `UPDATE pg_catalog.pg_inherits SET inhdetachpending = true WHERE inhrelid = '%s.orders_us'::regclass`, f.schema)
+
+			_, err := f.buildErr(t, "orders", fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema))
+
+			require.ErrorIs(t, err, executor.ErrPartitionDetachPending)
+			assert.Equal(t, executor.CodePartitionDetachPending, executor.OutcomeCode(err))
+			assert.Contains(t, err.Error(), f.schema+".orders_us")
+			f.requireNothingBuilt(t, "orders", partitions...)
+		})
+
+		// PostgreSQL checks a unique index against each partitioned table's
+		// partition key only when that table gets its index, so a key that
+		// misses a level below the parent would fail part-way through the
+		// tree. The build checks every level first and creates nothing.
+		t.Run("a unique index that misses a partition key below the parent", func(t *testing.T) {
+			for name, c := range map[string]struct {
+				subKey string
+				// missing is what the refusal names for events_2024; its Schema is
+				// the fixture's, filled in below.
+				missing executor.MissingPartitionKey
+				// covering is a unique key that contains every level's
+				// partition key; empty when no key can.
+				covering string
+			}{
+				"a column": {
+					subKey:   "LIST (region)",
+					missing:  executor.MissingPartitionKey{Table: "events_2024", Columns: []string{"region"}},
+					covering: "(id, ts, region)",
+				},
+				"an expression": {
+					subKey:  "LIST (lower(region))",
+					missing: executor.MissingPartitionKey{Table: "events_2024", Expression: true},
+				},
+			} {
+				t.Run(name, func(t *testing.T) {
+					f := newFixture(t)
+					f.exec(t, `CREATE TABLE %s.events (
+	id bigint NOT NULL,
+	region text NOT NULL,
+	ts date NOT NULL
+) PARTITION BY RANGE (ts)`, f.schema)
+					f.exec(t, `CREATE TABLE %[1]s.events_2023 PARTITION OF %[1]s.events
+	FOR VALUES FROM ('2023-01-01') TO ('2024-01-01')`, f.schema)
+					f.exec(t, `CREATE TABLE %[1]s.events_2024 PARTITION OF %[1]s.events
+	FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+	PARTITION BY `+c.subKey, f.schema)
+					f.exec(t, `CREATE TABLE %[1]s.events_2024_eu PARTITION OF %[1]s.events_2024
+	FOR VALUES IN ('eu')`, f.schema)
+					partitions := []string{"events_2023", "events_2024", "events_2024_eu"}
+
+					_, err := f.buildErr(t, "events", fmt.Sprintf("CREATE UNIQUE INDEX idx_events_id ON %s.events (id, ts)", f.schema))
+
+					require.ErrorIs(t, err, executor.ErrUniqueIndexPartitionKey)
+					keyErr, ok := errors.AsType[*executor.UniqueIndexPartitionKeyError](err)
+					require.True(t, ok, "got %v", err)
+					c.missing.Schema = f.schema
+					assert.Equal(t, &executor.UniqueIndexPartitionKeyError{
+						Schema:  f.schema,
+						Index:   "idx_events_id",
+						Missing: []executor.MissingPartitionKey{c.missing},
+					}, keyErr, "only the sub-partitioned partition's key is missing; the parent's ts is in the index")
+					f.requireNothingBuilt(t, "events", partitions...)
+					if c.covering == "" {
+						return
+					}
+					f.build(t, "events", fmt.Sprintf("CREATE UNIQUE INDEX idx_events_id ON %s.events %s", f.schema, c.covering))
+					f.requireCovered(t, "events", "idx_events_id", "events_2023", "events_2024")
+					f.requireCovered(t, "events_2024", f.derived(t, "idx_events_id", "events_2024"), "events_2024_eu")
+				})
+			}
+		})
+
+		// A multi-column partition key is read from the catalog in key order,
+		// so the refusal names the columns the index lacks in that order,
+		// not by name or column number.
+		t.Run("a unique index that misses two columns of a multi-column key", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `CREATE TABLE %s.readings (
+	id bigint NOT NULL,
+	region text NOT NULL,
+	ts date NOT NULL
+) PARTITION BY RANGE (ts, region)`, f.schema)
+			f.exec(t, `CREATE TABLE %[1]s.readings_2024 PARTITION OF %[1]s.readings
+	FOR VALUES FROM ('2024-01-01', 'a') TO ('2025-01-01', 'a')`, f.schema)
+
+			_, err := f.buildErr(t, "readings", fmt.Sprintf("CREATE UNIQUE INDEX idx_readings_id ON %s.readings (id)", f.schema))
+
+			keyErr, ok := errors.AsType[*executor.UniqueIndexPartitionKeyError](err)
+			require.True(t, ok, "got %v", err)
+			assert.Equal(t, []executor.MissingPartitionKey{
+				{Schema: f.schema, Table: "readings", Columns: []string{"ts", "region"}},
+			}, keyErr.Missing)
+			f.requireNothingBuilt(t, "readings", "readings_2024")
 		})
 
 		// Each of these holds a name the build needs. None is renamed,
@@ -160,6 +265,7 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 					_, err := f.buildErr(t, "orders", fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema))
 
 					require.ErrorIs(t, err, executor.ErrPartitionedIndexNameTaken)
+					assert.Empty(t, f.attachedTo(t, "orders_eu", "idx_orders_total"), "orders_eu has no index attached to idx_orders_total")
 					if c.held != nil {
 						assert.Equal(t, before, f.indexesOn(t, c.heldTable)[c.held(derivedEU)], "the occupant must be left as it was")
 					}
@@ -210,7 +316,7 @@ func TestBuildPartitionedIndexRefusesWhatItCannotBuild(t *testing.T) {
 			_, err := executor.BuildPartitionedIndex(t.Context(), f.cfg, f.pool, mustPreflight(t, f.pool, f.schema, "orders"),
 				fmt.Sprintf("CREATE INDEX idx_orders_total ON %s.orders (total)", f.schema), executor.ConcurrentBudget{})
 
-			require.Error(t, err)
+			require.ErrorIs(t, err, executor.ErrUnboundedBudget)
 			f.requireNothingBuilt(t, "orders", partitions...)
 		})
 

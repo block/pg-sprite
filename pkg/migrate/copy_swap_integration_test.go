@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -166,6 +167,17 @@ func TestCopyAndSwapRunsAQuiescedTableToOneVerdict(t *testing.T) {
 	assert.Empty(t, v.Code)
 	assert.Contains(t, v.Detail, "verified 2500 rows")
 	assert.Contains(t, v.Detail, "the retained source is dropped")
+	// The fence kept every write off the table, so the pass hashed the 2500
+	// seeded rows and had nothing to settle against a stream or leave for
+	// the swap; how many chunks they fell into is the chunker's timing to
+	// decide, and the detail states the same count.
+	require.NotNil(t, v.Verification, "the verdict carries the verification pass's figures")
+	assert.EqualValues(t, 2500, v.Verification.Rows)
+	assert.Positive(t, v.Verification.Chunks)
+	assert.Contains(t, v.Detail, fmt.Sprintf("verified 2500 rows in %d chunks", v.Verification.Chunks))
+	assert.Zero(t, v.Verification.Settled)
+	assert.Zero(t, v.Verification.Unsettled)
+	assert.Zero(t, v.Verification.Carried)
 
 	assert.False(t, f.hasColumn(t, "orders", "note"), "the gated statement's shape is live")
 	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
@@ -220,6 +232,49 @@ func TestCopyAndSwapRefusesAnUnsupportedShapeWithItsCause(t *testing.T) {
 	assert.Equal(t, "copy-and-swap-refused", wire.Reason)
 	assert.Equal(t, "capability-boundary", wire.Class)
 	assert.Equal(t, "copy-and-swap-unlogged", wire.Cause)
+}
+
+// A table with no primary key is refused under the key cause, and the
+// verdict's JSON carries the add-integer-primary-key guidance: adding a key
+// online is the way to a copy-and-swap run. A uuid-keyed table is refused
+// under the same cause with no guidance, since a table has one primary key
+// and no online route replaces it.
+func TestCopyAndSwapKeyRefusalCarriesGuidanceOnlyForAKeylessTable(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.exec(t, `
+		CREATE TABLE {schema}.audit_log (
+			note   text,
+			amount integer
+		)`)
+	f.exec(t, `
+		CREATE TABLE {schema}.sessions (
+			id     uuid PRIMARY KEY,
+			amount integer
+		)`)
+
+	type wire struct {
+		Cause    string `json:"cause"`
+		Guidance string `json:"guidance"`
+	}
+	refusalOf := func(t *testing.T, sql string) wire {
+		t.Helper()
+		v, err := f.run(t, sql, f.options())
+		require.NoError(t, err, "a refusal is a verdict, not an error")
+		require.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		encoded, err := v.JSON()
+		require.NoError(t, err)
+		var w wire
+		require.NoError(t, json.Unmarshal([]byte(encoded), &w))
+		return w
+	}
+
+	keyless := refusalOf(t, `ALTER TABLE {schema}.audit_log ALTER COLUMN amount TYPE bigint`)
+	assert.Equal(t, "copy-and-swap-pk-unsupported", keyless.Cause)
+	assert.Equal(t, "add-integer-primary-key", keyless.Guidance)
+
+	uuidKeyed := refusalOf(t, `ALTER TABLE {schema}.sessions ALTER COLUMN amount TYPE bigint`)
+	assert.Equal(t, "copy-and-swap-pk-unsupported", uuidKeyed.Cause)
+	assert.Empty(t, uuidKeyed.Guidance)
 }
 
 // The environment the operator describes is checked before the shadow is

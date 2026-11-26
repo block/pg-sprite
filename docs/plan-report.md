@@ -29,14 +29,14 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **22**: version 22 added the `partitioned-key-build` execution contract, which an `ALTER TABLE ... ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table carries in a `migrate --dry-run` plan in place of its refusal and which the fingerprint covers; version 21 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **24**: version 24 added the `partitioned-key-build` execution contract, which an `ALTER TABLE ... ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table carries in a `migrate --dry-run` plan in place of its refusal and which the fingerprint covers; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
 version 3 added the statement-level `cause` field on greenfield statements the create path
 refuses by shape; version 2 added the statement-level `guidance` field on `rewrite-required`
-statements. The fingerprint definition is unchanged from version 1 for a plan without `extension_schemas`.
+statements. The fingerprint definition is unchanged from version 1 for a plan without `extension_schemas` and without a statement that carries `drops`.
 
 The [lint report](lint-report.md) is a separate contract with its own `format_version`; the
 two version independently. Lint findings embed this contract's Reasons vocabulary — the lint
@@ -71,6 +71,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `class` | string | target-dependent refusal only | Aggregate refusal class (see Classes): how a consumer routes the refusal. Present exactly when `reason` is; a planner-level refusal carries its class on the refused statement instead. |
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the aggregate work pg-sprite has no online-safety reason to run (see Owners). Present exactly when `class` is `no-online-safety-problem`. |
 | `fingerprint` | string | always | The plan's stable identity (see Fingerprint). |
+| `pinnable_fingerprint` | string | desired-state preview refused for being destructive | The fingerprint of the plan before the destructive statements were refused: the value `--expect-fingerprint` pins and a run with `--allow-destructive` accepts. `fingerprint` on that report covers the refused plan and cannot be pinned. Excluded from the fingerprint. |
 | `extension_schemas` | array | `diff` source, when the desired file named extension schemas | The schemas the desired file's unqualified names also resolved against, in search order (`--extension-schema` or `WithExtensionSchemas`). A table that does not exist yet is created from the file's own statements under them. Covered by the fingerprint (see Fingerprint). |
 | `statements` | array | always | The ordered plan; `[]` (never `null`) means nothing to do. |
 | `advisories` | array | `diff` source, existing table, when non-empty | Typed observations the diff made about the live table that produced no statement (see Advisory fields): the invalid indexes it saw and declined to drop. Advisory only — the statements and the `destructive` gate are unaffected, and nothing in it executes. Read it alongside `statements`: an empty plan with an advisory present means there is nothing to run **and** the table is not clean. Absent when there is nothing to report. Also absent for a desired file that declares row security: that review path collects no advisories, so there an absent field does not mean the table has no invalid index. Explanatory: excluded from the fingerprint. |
@@ -98,6 +99,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the work (see Owners). Present exactly when `class` is `no-online-safety-problem`. Explanatory: excluded from the fingerprint. |
 | `blocking_passthrough_eligible` | bool | refusals only | Whether this typed refusal is in the closed accepted-blocking registry. Independent of flags and catalog lookups; explanatory and excluded from the fingerprint. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
+| `drops` | object | `diff` source, statements that drop an index, constraint, column, or `NOT NULL` | The live object the statement removes, read when the plan was made: `kind` (`index`, `constraint`, `column`, or `not-null`), `name`, and `definition` (an index's or constraint's catalog definition; a column's attribute number, type, collation, generation, default, and nullability; for `not-null`, the attribute number and `NOT NULL`), and for a column drop `dependents`: the objects the drop also removes, each as `kind name` with its definition when it has one (`index`, `constraint`, `owned sequence` and `identity sequence` with the sequence's options, or `other`). The fingerprint covers all of it, so a pin binds what the drop removes and not only its name, and a run re-reads it under the statement's own lock and refuses with `dropped-object-drift`, or `dropped-index-drift` for an index, dropping nothing, if the live definition differs or the column has a dependent the plan did not list. A dependent the plan listed that an earlier statement of the plan or another session has since removed does not refuse. A `NOT NULL` drop is planned with the drops, after the column drops and before any statement that alters or adds, so a table rewrite later in the plan cannot renumber the column it names. |
 | `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes: an `execute` statement whose `backend` is `copy-and-swap` runs no literal SQL a consumer could replay — the shadow-table change is one engine step — so a consumer that runs statements itself must hand such a statement back to pg-sprite rather than treat the absence as "nothing to run". |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
 | `guidance` | string | `rewrite-required` only | The typed manual path for a rewrite-required refusal, drawn from the [suggest report's Guidance vocabulary](suggest-report.md#guidance-guidance). The engine will not run the statement; this names what to do instead (`split-statement`, `add-column-then-constraint`, …). Present exactly when `disposition` is `rewrite-required`. Explanatory: excluded from the fingerprint. |
@@ -170,7 +172,7 @@ treat the statement and report as refused.
 | Value | Meaning |
 |---|---|
 | `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
-| `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. |
+| `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. The report carries no partition cause: a `drop-index` statement with this reason is a drop PostgreSQL cannot run concurrently, whose plain form `migrate --alter` runs under `--accept-blocking` and `--allow-destructive` (`blocking_passthrough_eligible` is true), and any other `kind` is an index build or a constraint the parent cannot take online. |
 | `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs `ADD FOREIGN KEY` online. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
@@ -221,6 +223,7 @@ code's full manual path; this contract embeds it, so a new guidance code bumps t
 | `coordinated-table-rename` | Coordinate the table rename with the application deploy that adopts the new name, then run it with `--force` naming the table. |
 | `coordinated-constraint-rename` | The renamed index backs a constraint, which the rename renames: coordinate the rename with the application deploy that stops naming the old constraint (`ON CONFLICT ON CONSTRAINT`, error handling). |
 | `alter-column-type-in-place` | Never on a report statement: a `migrate` refusal verdict with reason `destructive-change` carries it when one ALTER TABLE drops a column and adds it back under the same name. Change the column in place with ALTER COLUMN ... TYPE ... USING ..., which keeps its values. |
+| `add-integer-primary-key` | Never on a report statement: a `migrate` refusal verdict with reason `copy-and-swap-refused` and cause `copy-and-swap-pk-unsupported` carries it when the table has no primary key. Add a single-column integer primary key online, as [primary-keys.md](primary-keys.md#add-a-primary-key-online) shows, then run the change again, which checks the table's other shape facts, such as its replica identity and foreign keys. |
 
 ### Causes (`cause`, greenfield create-shape refusals only)
 
@@ -340,6 +343,12 @@ them hashes exactly as before. A table that does not exist yet is created from t
 file's own statements, whose unqualified type and function names resolve through those
 schemas at apply time, so the same SQL resolved against other schemas is a different plan.
 
+A statement that carries `drops` adds a file separator (`0x1C`) after its `exec_sql`, then
+the dropped object's `kind`, `name`, and `definition`, each followed by a unit separator,
+then each of its `dependents` in order, each followed by a unit separator, before its record
+separator. A drop with no dependents adds nothing for them. The same SQL that drops a different live object, such as an
+index of the same name with another definition, is a different plan.
+
 For a table that does not exist yet, `exec_sql` is the plain canonical build that the
 greenfield create path runs. It never substitutes `CONCURRENTLY` for an index on a table
 born in that run, and the fingerprint therefore commits to the plain build.
@@ -368,7 +377,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 22,
+  "format_version": 24,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -411,7 +420,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 22,
+  "format_version": 24,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -478,7 +487,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 22,
+  "format_version": 24,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

@@ -183,6 +183,12 @@ func partitionedIndexFailureVerdict(st statement.Statement, err error) verdict.V
 			"cannot be established from the client; inspect the indexes of %s and its partitions, then run the same statement again to resume", v.Table)
 		return v
 	}
+	if executor.Code(v.Code).Permanent() {
+		// A permanent cause fails a rerun the same way until it is fixed.
+		v.Detail = fmt.Sprintf("the partitioned index build stopped on a cause that a rerun does not clear (%s); steps before the stop may have committed, "+
+			"so inspect the indexes of %s and its partitions, fix the cause the error names, then run the same statement again to resume from whatever it had built", v.Code, v.Table)
+		return v
+	}
 	v.Detail = fmt.Sprintf("the partitioned index build stopped before it finished; steps before the stop may have committed, "+
 		"so inspect the indexes of %s and its partitions, then run the same statement again to resume from whatever it had built", v.Table)
 	return v

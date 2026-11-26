@@ -98,9 +98,14 @@ $ pg-sprite migrate --copy-and-swap --free-disk 1GiB --json \
   "cause": "copy-and-swap-pk-unsupported",
   "statement": "ALTER TABLE public.events ALTER COLUMN amount TYPE bigint",
   "table": "public.events",
-  "detail": "copy-and-swap refuses the table shape (copy-and-swap-pk-unsupported): the primary key has 0 columns; exactly one is required"
+  "detail": "copy-and-swap refuses the table shape (copy-and-swap-pk-unsupported): the primary key has 0 columns; exactly one is required; to run it through copy-and-swap, add a single-column integer primary key online — over a column that already identifies each row, or over a new bigint column filled from a sequence — then run the change again, which checks the table's other shape facts, such as its replica identity and foreign keys, against copy-and-swap; the steps are at https://github.com/block/pg-sprite/blob/main/docs/primary-keys.md#add-a-primary-key-online (guidance add-integer-primary-key)",
+  "guidance": "add-integer-primary-key"
 }
 ```
+
+The `guidance` field is the typed pointer to the next section, for a host that does not
+show `detail`. A table that has a key of the wrong kind gets no `guidance`, because adding a
+key does not apply to it ([below](#tables-with-a-uuid-text-composite-or-deferrable-key)).
 
 Refusing before the publication matters on a keyless table: under the default replica
 identity, a table published for updates without a key fails every `UPDATE` and `DELETE`

@@ -37,6 +37,14 @@ const (
 type Column struct {
 	// Name is the column name.
 	Name string
+	// AttNum is the column's attribute number (pg_attribute.attnum), which
+	// a column dropped and added again under its name never keeps. Only a
+	// live table is read for it; it never reaches a digest.
+	AttNum int16 `json:"-"`
+	// Dependents are the objects that go with the column when it is
+	// dropped, as a live table's introspection reads them (see Dependent).
+	// Only a live table is read for them; they never reach a digest.
+	Dependents []Dependent `json:"-"`
 	// Type is the canonical type text (format_type), e.g. "character
 	// varying(50)" — never an alias like varchar(50).
 	Type string
@@ -180,6 +188,12 @@ type Constraint struct {
 	// " NOT VALID". Only a live table carries one: CREATE TABLE ignores NOT
 	// VALID, so a desired constraint is always validated.
 	NotValid bool `json:"-"`
+	// IndexInvalid reports a primary key, unique, or exclusion constraint
+	// whose index the server has not validated (pg_index.indisvalid is
+	// false). On a partitioned parent that is a key added with ALTER TABLE
+	// ONLY whose index is not attached on every partition, so the key is
+	// enforced on none of them.
+	IndexInvalid bool `json:"-"`
 	// DefReplays are the texts a check constraint's Def prints as after
 	// each further replay through the server, when replaying changes it,
 	// and a live text that prints as Def or one of those; see
@@ -341,10 +355,37 @@ type Model struct {
 	// definition and cannot be expressed in a desired file, so the model
 	// carries them only for the renderer to refuse on.
 	ReferencedBy []string
+	// IncomingForeignKeys are the same foreign keys as ReferencedBy, in the
+	// same order, each with the schema of the table that holds it. Two
+	// tables in different schemas can share a name and a constraint name,
+	// so only these tell their foreign keys apart. Read for callers that
+	// act on another table's foreign key, such as one that drops the
+	// referencing table first, and not part of the table's shape.
+	IncomingForeignKeys []IncomingForeignKey `json:"-"`
+	// TableDependents are the objects that depend on the table as a whole
+	// and that DROP TABLE removes with it, such as triggers, rules,
+	// statistics objects, and publication memberships, each named by the
+	// server's description with its definition where the server prints
+	// one, in a stable order. Policies are in RowSecurity, and the
+	// dependents of single columns are on the columns. They are live
+	// facts for a reviewed table drop, not part of the table's declared
+	// shape, so they are left out of the model's JSON.
+	TableDependents []Dependent `json:"-"`
 	// Columns are the table's columns in attribute order.
 	Columns []Column
 	// Constraints are the table constraints, name-sorted.
 	Constraints []Constraint
 	// Indexes are the non-constraint indexes, name-sorted.
 	Indexes []Index
+}
+
+// IncomingForeignKey names a foreign key of another table that references
+// the model's table.
+type IncomingForeignKey struct {
+	// Schema is the schema of the table that holds the foreign key.
+	Schema string
+	// Table is the table that holds the foreign key.
+	Table string
+	// Constraint is the foreign key constraint's name.
+	Constraint string
 }

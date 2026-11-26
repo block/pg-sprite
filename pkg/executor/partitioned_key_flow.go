@@ -100,11 +100,11 @@ func (f *partitionedKeyFlow) resolveTarget(ctx context.Context) error {
 			return fmt.Errorf("%w: %s is not a partitioned table when the catalog is read under the table lock",
 				ErrNotPartitionedTable, qualifiedName(target.schema, target.table))
 		}
-		keys, err := listPartitionKeys(ctx, q, target.tableOID)
+		tree, err := listPartitionTree(ctx, q, target.tableOID)
 		if err != nil {
 			return err
 		}
-		if err := checkUniquePartitionKeys(qualifiedName(target.schema, f.req.spec.name), f.req.spec.columns, keys); err != nil {
+		if err := readUncoveredPartitionKeys(ctx, q, target.schema, f.req.spec.name, f.req.spec.columns, keyedTables(target, tree)); err != nil {
 			return err
 		}
 		f.target = target

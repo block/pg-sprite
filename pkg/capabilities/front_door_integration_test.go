@@ -23,9 +23,6 @@ import (
 type migrateClaim struct {
 	setup      string
 	statements []string
-	// minMajor is the oldest PostgreSQL major the row claims support on;
-	// zero means every supported major.
-	minMajor int
 	// copyAndSwap marks a row whose statements the router sends through
 	// the copy-and-swap backend: the run is given the route's policy (its
 	// connection, disk headroom, and the quiesced declaration, since the
@@ -208,7 +205,6 @@ var migrateClaims = map[string]migrateClaim{
 		statements: []string{
 			`ALTER TABLE %[1]s.events ADD CONSTRAINT events_owner_fk FOREIGN KEY (owner_id) REFERENCES %[1]s.owners (id) NOT VALID`,
 		},
-		minMajor: 18,
 	},
 	"index-build-on-a-partitioned-parent": {
 		setup: `
@@ -268,6 +264,7 @@ var migrateClaims = map[string]migrateClaim{
 // pkg/schemadiff, and internal/cli.
 var declarativeOnlyClaims = []string{
 	"plain-tables-their-indexes",
+	"partitioned-parents-in-the-declarative-model",
 	"greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one",
 	"declarative-row-security-library",
 	"declarative-not-valid-constraint",
@@ -283,16 +280,16 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 	rows, err := capabilities.Rows()
 	require.NoError(t, err)
 
-	var supported []string
+	var supported []capabilities.Row
 	for _, row := range rows {
 		if row.FrontDoors.Migrate == capabilities.DoorSupported {
-			supported = append(supported, row.ID)
+			supported = append(supported, row)
 		}
 	}
-	for _, id := range supported {
-		_, imperative := migrateClaims[id]
-		assert.True(t, imperative || slices.Contains(declarativeOnlyClaims, id),
-			"row %s publishes migrate: supported but has no representative statement in migrateClaims", id)
+	for _, row := range supported {
+		_, imperative := migrateClaims[row.ID]
+		assert.True(t, imperative || slices.Contains(declarativeOnlyClaims, row.ID),
+			"row %s publishes migrate: supported but has no representative statement in migrateClaims", row.ID)
 	}
 
 	url := testutil.StartPostgres(t)
@@ -302,14 +299,16 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 	major, err := dbconn.ServerMajor(t.Context(), pool)
 	require.NoError(t, err)
 
-	for _, id := range supported {
-		claim, ok := migrateClaims[id]
+	for _, row := range supported {
+		claim, ok := migrateClaims[row.ID]
 		if !ok {
 			continue
 		}
-		t.Run(id, func(t *testing.T) {
-			if major < claim.minMajor {
-				t.Skipf("row claims support from PostgreSQL %d; server is %d", claim.minMajor, major)
+		t.Run(row.ID, func(t *testing.T) {
+			// The row's own min_server_major decides the skip, so a row that
+			// drops the field is run, and refused, on an older server.
+			if major < row.MinServerMajor {
+				t.Skipf("row claims support from PostgreSQL %d; server is %d", row.MinServerMajor, major)
 			}
 			schema := testutil.NewSchema(t, pool)
 			_, err := pool.Exec(t.Context(), fmt.Sprintf(claim.setup, schema))

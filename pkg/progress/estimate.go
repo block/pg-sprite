@@ -10,7 +10,7 @@ const (
 	// A step's totals are estimates — the copy's row total is the catalog's
 	// count at its start — so a counter can reach or pass its total while
 	// work remains; the step ending, not the percent, is completion.
-	runningPercentCeiling = 99.9
+	runningPercentCeiling = 99.99
 	// etaMinFraction is the share of a step that must be done before an
 	// ETA is reported: below it the remaining time is the elapsed time
 	// multiplied by more than the step's whole length again, and noise in
@@ -35,7 +35,7 @@ func estimate(s Snapshot) Snapshot {
 	if !ok {
 		return s
 	}
-	percent := min(math.Round(done.fraction*1000)/10, runningPercentCeiling)
+	percent := min(math.Round(done.fraction*10000)/100, runningPercentCeiling)
 	s.Detail.Percent = &percent
 	if eta, ok := remaining(done, s.StepElapsed); ok {
 		s.Detail.ETA = &eta

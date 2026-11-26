@@ -271,6 +271,20 @@ type Result struct {
 	// or the zero Report when the run resumed after the swap had already
 	// committed and so made none.
 	Verification checksum.Report
+	// FinishedEarlierSwap reports that the run resumed a row whose swap
+	// the catalog already showed committed: it copied, verified, and
+	// swapped nothing, and only finished the change an earlier run made
+	// (dropped its slot, settled the retained source, recorded done).
+	FinishedEarlierSwap bool
+	// CarriedCompare is what this run's swap paid, under its ACCESS
+	// EXCLUSIVE lock, to compare the keys its live verification pass left
+	// for it: how many keys, and how long the compare ran inside the lock,
+	// a share of the lock's hold rather than all of it. It is the zero
+	// value for a swap that compared none (a quiesced run, or a live pass
+	// that left no key) and when this run's cutover did not make the swap.
+	// A swap whose commit this run never heard of, and found committed in
+	// the catalog, still reports the compare its attempt ran.
+	CarriedCompare CarriedCompare
 	// OldTableDropped reports whether the retained source is gone when the
 	// run returns: dropped by this run, or found already dropped by the
 	// run that was resumed. It is false under KeepOld.
@@ -446,7 +460,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 	if err != nil {
 		return Result{}, err
 	}
-	result := Result{Shadow: state.proof}
+	result := Result{Shadow: state.proof, FinishedEarlierSwap: state.swapped}
 	if !state.swapped {
 		report, err := r.swap(ctx, pool, lock, target, &state)
 		result.Verification = report
@@ -471,6 +485,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 		// says so.
 		result.Swapped = state.swappedTable.Proof()
 		result.SwapProven = true
+		result.CarriedCompare = state.swappedTable.CarriedCompare()
 	}
 	if !state.oldTableGone {
 		if err := r.settleOldTable(ctx, pool, lock, &state); err != nil {

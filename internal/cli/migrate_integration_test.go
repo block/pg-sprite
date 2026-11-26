@@ -1194,7 +1194,9 @@ func TestMigrateChecksPrivilegesAtRoutedTier(t *testing.T) {
 }
 
 // Acceptance (iv): non-ALTER TABLE statements are refused with the safe-idiom
-// pointer and never executed. The gate needs no database at all.
+// pointer and never executed. The gate needs no database at all, except for
+// a single-index DROP INDEX, whose refusal depends on whether the index is
+// partitioned (TestMigrateDropIndexOfPartitionedTable).
 func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1202,14 +1204,14 @@ func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 		reason     verdict.Reason
 		saferIdiom string
 	}{
-		{"drop index", "DROP INDEX i", verdict.ReasonIndexStatement, "DROP INDEX CONCURRENTLY"},
+		{"drop index cascade", "DROP INDEX i CASCADE", verdict.ReasonIndexStatement, ""},
 		{"reindex", "REINDEX TABLE t", verdict.ReasonIndexStatement, "REINDEX ... CONCURRENTLY"},
 		// The already-concurrent forms carry no safer idiom: suggesting the
 		// statement the user submitted would loop a resubmitting automation.
 		// CREATE INDEX (both forms) passes the gate: the blocking form is
 		// substituted with its concurrent build, the concurrent form is
 		// driven directly.
-		{"drop index concurrently", "DROP INDEX CONCURRENTLY i", verdict.ReasonIndexStatement, ""},
+		{"drop several indexes concurrently", "DROP INDEX CONCURRENTLY i, j", verdict.ReasonIndexStatement, ""},
 		{"reindex concurrently", "REINDEX TABLE CONCURRENTLY t", verdict.ReasonIndexStatement, ""},
 		{"alter index", "ALTER INDEX i SET (fillfactor = 90)", verdict.ReasonUnsupportedStatement, ""},
 		{"create table", "CREATE TABLE t (id int)", verdict.ReasonUnsupportedStatement, "pg-sprite diff --desired schema.sql"},

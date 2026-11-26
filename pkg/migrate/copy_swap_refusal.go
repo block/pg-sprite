@@ -29,6 +29,20 @@ func copySwapNotEnabledRefusal() verdict.Refusal {
 		WithCause(verdict.CauseCopyAndSwapNotEnabled)
 }
 
+// copySwapRunStoppedRefusal: the table has a copy-and-swap run stopped
+// short of done, and the statement is not the one it records, or (on the
+// desired-state door) the plan is empty and has none to run. Running
+// another statement would change the table under the stopped run — before
+// its swap, a source its shadow no longer describes; after it, a table
+// whose retained source and checkpoint row nothing would finish. The state
+// on the server has to change, by finishing or discarding the stopped run,
+// so the class is environmental. Minted on both front doors before
+// anything is executed.
+func copySwapRunStoppedRefusal() verdict.Refusal {
+	return verdict.Environmental(verdict.ReasonCopyAndSwapRefused).
+		WithCause(verdict.CauseCopyAndSwapRunStopped)
+}
+
 // copySwapPreflightRefusal classifies a copy-and-swap preflight cause by the
 // class the cause declares for itself (docs/refusal-classes.md). ok is false
 // for a cause outside preflight.CopySwapRefusalCauses(), which declares no
