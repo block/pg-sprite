@@ -281,7 +281,9 @@ func TestEnsureLeafKeyResume(t *testing.T) {
 			var pgErr *pgconn.PgError
 			require.ErrorAs(t, err, &pgErr)
 			assert.Equal(t, "23505", pgErr.Code)
-			assert.Equal(t, CodeInvalidIndexOwnLeftover, OutcomeCode(err),
+			assert.Equal(t, CodeDataFault, OutcomeCode(err),
+				"the failed build reports the rows it failed on")
+			assert.ErrorIs(t, err, ErrBuildLeftInvalidIndex,
 				"the failed build reports the leftover it left, which the rerun recovers")
 			debris := f.indexes(t, "events_2026_01")[name]
 			assert.False(t, debris.indexValid, "the failed build leaves its invalid index")

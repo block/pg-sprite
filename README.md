@@ -1,14 +1,24 @@
 # pg-sprite
 
-> [!WARNING]
-> **Early release — not production-ready.** This project is under active
-> development. Tagged releases exist, but pre-1.0 there are no stability
-> guarantees and no support. Interfaces, behavior, on-disk/database artifacts,
-> and the CLI surface may all change between releases. Do **not** run this
-> against any database you care about.
+[![CI](https://github.com/block/pg-sprite/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/block/pg-sprite/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
+[![Vulnerability Scan](https://github.com/block/pg-sprite/actions/workflows/vulncheck.yml/badge.svg?branch=main)](https://github.com/block/pg-sprite/actions/workflows/vulncheck.yml?query=branch%3Amain)
+[![Release](https://img.shields.io/github/v/release/block/pg-sprite)](https://github.com/block/pg-sprite/releases/latest)
+[![PostgreSQL tested: 14 | 15 | 16 | 17 | 18](https://img.shields.io/badge/PostgreSQL%20tested-14%20%7C%2015%20%7C%2016%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](docs/postgresql-version-support.md)
+[![Maturity: preview](https://img.shields.io/badge/maturity-preview-orange)](docs/capabilities.md)
+
+> [!IMPORTANT]
+> **Preview: ready to try.** pg-sprite handles everyday changes
+> today, like adding a column, an index, or a constraint, and keeps locks short
+> so your app keeps running. Rewriting a whole table, like changing a column's
+> type, is still in preview and only runs if you pass `--copy-and-swap`.
+> `pg-sprite capabilities --json` lists which changes are generally available
+> (`maturity: ga`) and which are in preview.
+> We're not at 1.0 yet, so commands and output may change between releases,
+> and there's no support guarantee. Read the release notes before you upgrade.
 
 An online schema-change engine for **PostgreSQL** (community, RDS, and
-Aurora; 14+): a decoupled **planner → router → executor** design where the
+Aurora; tested on 14 through 18): a decoupled **planner → router → executor** design where the
 planner classifies each change, the router picks a strategy, and
 interchangeable executors carry it out — the cheap native PostgreSQL idiom
 when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
@@ -32,7 +42,7 @@ and every refusal carries a routing class (and an owner when there is no online-
 problem for the engine to solve); [docs/capabilities.md](docs/capabilities.md) names the tool class that
 owns each job.
 
-**Status: Phases 1, 2.1–2.5, and 3, with copy-and-swap in preview.** The parse boundary, declarative diff,
+**Status: Phases 1, 2.1–2.5, and 3, with copy-and-swap in preview.** The maturity badge above is this project-level status; each capability row carries its own `ga` or `preview` maturity. The parse boundary, declarative diff,
 classifier, router seam, versioned dry-run plan report, offline linter, and
 advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` classifies and
 routes the statement, then executes the routed SQL — the planner's safer native sequence by
@@ -50,7 +60,8 @@ is [docs/vision.md](docs/vision.md); the canonical support matrix — is this
 change supported today, planned, or out of scope — is
 [docs/capabilities.md](docs/capabilities.md).
 The same embedded matrix is queryable for automation with
-`pg-sprite capabilities --json`.
+`pg-sprite capabilities --json`; each supported row's `maturity` says whether it is
+generally available (`ga`) or in preview (`preview`, the run must opt in).
 
 ## What pg-sprite does not do yet
 
@@ -111,11 +122,27 @@ refusal — never a silently wrong or incomplete result:
 - **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
   on a partitioned table runs partition by partition, resuming when the same
   statement is run again; a unique one that lacks a partition key column is
-  refused, as PostgreSQL rejects it. They cannot be expressed in or exported to desired
-  files, and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
-  `--force` names the table ([limitations](docs/limitations.md)).
-- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
-  `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+  refused, as PostgreSQL rejects it. Only a partitioned parent can be expressed in or
+  exported to a desired file — partitions and their bounds stay owned outside
+  it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
+  `--force` names the table ([limitations](docs/limitations.md)). A reviewed
+  `migrate --desired` column or constraint drop on a partitioned parent removes it
+  from every partition; the column drop is refused, dropping nothing, when the column
+  is in a partition key at any level or a partition carries an index, constraint, or
+  statistics object of its own on it. A reviewed `NOT NULL` drop on a partitioned
+  parent is refused, and so is a reviewed column, constraint, or `NOT NULL` drop on
+  a table with inheritance children.
+- **Index maintenance** is not driven by `migrate --alter`: it refuses `DROP INDEX`
+  and `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+  `migrate --desired` does run a planned index drop, as `DROP INDEX CONCURRENTLY`
+  under `--expect-fingerprint` and `--allow-destructive`.
+  An index of a partitioned table has no concurrent drop at all: drop it with
+  the plain `DROP INDEX` under `--accept-blocking SCHEMA.TABLE` and
+  `--allow-destructive SCHEMA.TABLE`, naming the parent, which locks the parent and
+  every partition while it runs
+  ([example](docs/lock-budgeted-passthrough.md#dropping-an-index-of-a-partitioned-table)).
+  A partition's index attached under the parent's is refused in either form; drop
+  the parent's index instead.
 - **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
   instant in the catalog but break every running application instance that
   still uses the old name, and no safer sequence can be built from the
@@ -164,9 +191,14 @@ refusal — never a silently wrong or incomplete result:
   and the refusal lists the checks (`idx_scan` on every replica, foreign
   keys, uniqueness) that catch an index the application still uses, with
   the connected server's own scan count for the index in `index_usage`.
-- **Destructive desired-state plans are refused as a whole** — `migrate --desired`
-  creates missing tables and converges supported changes, but never infers permission
-  to discard live structure. A new primary key or unique constraint over a live
+- **Destructive desired-state plans are refused as a whole unless you pin them** —
+  `migrate --desired` creates missing tables and converges supported changes, but never
+  infers permission to discard live structure. Review the plan with `diff --desired`,
+  then run it with `--expect-fingerprint` (the `sha256:...` value `diff` prints) and
+  `--allow-destructive SCHEMA.TABLE`: the run executes only that plan, and each
+  destructive statement is audited and marked `allowed_destructive: true`. A dropped
+  index runs as `DROP INDEX CONCURRENTLY`. Row security policies are separate: a
+  policy drop in a desired file is already atomic and needs no acknowledgement. A new primary key or unique constraint over a live
   unique index of its name is not destructive: it takes the index over with
   `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
   index changed after planning. Nor is a live check constraint left `NOT VALID`
@@ -189,7 +221,8 @@ refusal — never a silently wrong or incomplete result:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
-  which covers one ordinary table plus its indexes per file. A table may
+  which covers one ordinary table (or one partitioned parent) plus its
+  indexes per file. A table may
   use them: the file names an object outside the table's schema and
   `public` qualified, or names it bare when `--extension-schema` lists
   the schema it lives in. The object's own definition is never managed,
@@ -302,8 +335,10 @@ copy-and-swap run's four copy workers, and two more so its catch-up's flushes
 and its checkpoint saves do not wait behind the copy. A
 `pool_max_conns` in the URL is kept as given, and a copy-and-swap run refuses a
 pool below six before it creates anything (`code: pool-too-small`). Only
-`migrate` without `--dry-run` ever commits a change — every other command is
-read-only or fully offline.
+`migrate` without `--dry-run` ever commits a schema change. The one other
+command that writes to the database is `reap` without `--dry-run`, which drops
+only the engine's orphan replication slots and their publications, never table
+data. Every other command is read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
@@ -312,6 +347,7 @@ read-only or fully offline.
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |
 | `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
+| `reap` | required | Drop the orphan `pgsprite_` replication slots, publications included, that stopped copy-and-swap runs left in the connected database: slots no checkpoint row in a non-terminal phase names and no process holds. Slots a live row names, slots a process holds, and prefix-wearing slots of another name shape or output plugin are reported and kept; other databases' slots are never read. `--dry-run` reports the same sorting and drops nothing; a database where no schema change has run has no checkpoint table, which is reported, not an error |
 | `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone; `--desired` runs the desired-file admission `diff` and `migrate --desired` share and prints the refusal verdict for a file it refuses; planning can still refuse what admission does not inspect |

@@ -59,7 +59,7 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
-	assert.Equal(t, live, modeltest.Comparable(desired),
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired),
 		"live introspection and scratch execute-and-introspect must agree on the canonical model")
 
 	// The key's index definition is read on the scratch side only, where no

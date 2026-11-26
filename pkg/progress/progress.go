@@ -49,6 +49,8 @@ const (
 // field semantics. Adding a phase or operation value is a contract change
 // and bumps this version, even when no field is added or renamed. Adding a
 // field also bumps this version so strict consumers can detect the new shape.
+// The precision of a derived number, such as Detail.Percent, is not part of
+// the contract and changes without a bump.
 const FormatVersion = 8
 
 // Operation is the current operation's execution class.
@@ -124,12 +126,14 @@ type Detail struct {
 	Attempt          int    `json:"attempt,omitempty"`
 	Work             *Work  `json:"work,omitempty"`
 	CurrentLockerPID uint32 `json:"current_locker_pid,omitempty"`
-	// Percent is the running step's completion in [0, 99.9], derived at the
-	// poll from Work: rows against the catalog's row estimate for a copy or
-	// a checksum pass, the server's phase and counters for a concurrent
-	// index build. It is never 100 — the step ending is completion — and
-	// nil when the operation has no measurable total or its total is not
-	// known, so unknown is never reported as zero.
+	// Percent is the running step's completion in [0, 99.99], to two
+	// decimal places, derived at the poll from Work: rows against the
+	// catalog's row estimate for a copy or a checksum pass, the server's
+	// phase and counters for a concurrent index build. It is never 100,
+	// since the step ending is completion, and nil when the operation has
+	// no measurable total or its total is not known, so unknown is never
+	// reported as zero. Its precision is not part of the FormatVersion
+	// contract.
 	Percent *float64 `json:"percent,omitempty"`
 	// ETA is the running step's projected time left, derived at the poll
 	// from Percent's fraction and the step's elapsed time on the tracker's

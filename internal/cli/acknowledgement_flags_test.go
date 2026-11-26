@@ -57,7 +57,11 @@ func stringFieldsSetTo(opts migrate.Options, want string) []string {
 // registry has a flag. Each acknowledgement flag holds a SCHEMA.TABLE and
 // reaches its own acknowledgement and no other policy field: desired-state
 // execution rejects it with that acknowledgement's sentinel, and the CLI
-// itself rejects the flag with --desired before reading the file. A
+// itself rejects the flag with --desired before reading the file. The one
+// exception is the destructive acknowledgement, which a desired-state run
+// takes on its request, bound to a pinned plan fingerprint: the CLI accepts
+// it with --desired only beside --expect-fingerprint and never wires it
+// into the policy desired-state execution rejects it from. A
 // declared non-acknowledgement string or bool flag reaches no
 // acknowledgement. A new flag fails here until it is classified; a new
 // acknowledgement flag needs its sentinel and field below and a registry
@@ -98,6 +102,9 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 		"url", "ca-cert", "lock-timeout", "statement-timeout", "debug",
 		// Output, and what to run.
 		"color", "alter", "desired", "schema", "extension-schema", "dry-run", "json", "progress",
+		// The pin on a desired-state plan: it narrows what a run executes
+		// to the reviewed plan and accepts no loss.
+		"expect-fingerprint",
 		// Native-route policy: the size guard, step bounds, and lock retry.
 		"max-table-size", "index-build-timeout", "validate-timeout",
 		"lock-attempts", "lock-backoff", "lock-backoff-max",
@@ -169,14 +176,31 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 			cli := New("test")
 			k, err := kong.New(cli, kong.Vars{"version": "test"})
 			require.NoError(t, err)
-			_, err = k.Parse([]string{
+			desiredArgs := []string{
 				"migrate",
 				"--url", "postgres://user@localhost:5432/app",
 				"--desired", desired,
 				"--" + f.Name, "public.orders",
-			})
+			}
+			_, err = k.Parse(desiredArgs)
 			require.Error(t, err)
-			assert.Contains(t, err.Error(), "--"+f.Name+" cannot be combined with --desired")
+			if f.Name != "allow-destructive" {
+				assert.Contains(t, err.Error(), "--"+f.Name+" cannot be combined with --desired")
+				return
+			}
+			assert.Contains(t, err.Error(), "--allow-destructive with --desired requires --expect-fingerprint")
+
+			// Beside the pin it is accepted, and reaches the request, not
+			// the policy desired-state execution rejects it from.
+			pinned := New("test")
+			k, err = kong.New(pinned, kong.Vars{"version": "test"})
+			require.NoError(t, err)
+			_, err = k.Parse(append(desiredArgs, "--expect-fingerprint", "sha256:reviewed"))
+			require.NoError(t, err)
+			assert.Equal(t, "public.orders", pinned.Migrate.AllowDestructive)
+			assert.Equal(t, "sha256:reviewed", pinned.Migrate.ExpectFingerprint)
+			assert.Empty(t, pinned.Migrate.desiredOptions(nil).Acknowledgements(),
+				"a desired-state run takes the acknowledgement on its request, never in the policy")
 		})
 	}
 }

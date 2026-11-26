@@ -42,6 +42,11 @@ type SizeError struct {
 	TotalBytes int64
 	// LimitBytes is the threshold that was exceeded.
 	LimitBytes int64
+	// RelTuples is the planner's row estimate, read in the same lookup as
+	// TotalBytes (-1 when the table has never been vacuumed or analyzed),
+	// so a caller that reports the refused table's size can report its rows
+	// too. Reporting only, as on PreflightedTable.
+	RelTuples float64
 }
 
 // Error implements the error interface.
@@ -179,7 +184,7 @@ func CheckTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, l
 		return PreflightedTable{}, fmt.Errorf("%w: %s has relkind %q", ErrNotTable, qualifiedName(schema, table), relkind)
 	}
 	if totalBytes > limitBytes {
-		return PreflightedTable{}, &SizeError{TotalBytes: totalBytes, LimitBytes: limitBytes}
+		return PreflightedTable{}, &SizeError{TotalBytes: totalBytes, LimitBytes: limitBytes, RelTuples: relTuples}
 	}
 	return PreflightedTable{
 		schema: schema, table: table, relkind: relkind, totalBytes: totalBytes, relTuples: relTuples,

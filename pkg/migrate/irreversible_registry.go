@@ -14,12 +14,15 @@ import (
 // retained source once the swap has committed, which ends a rollback window
 // but discards nothing the new table does not carry. Each
 // acknowledgement names the resolved SCHEMA.TABLE, so one left on a script
-// cannot reach another table. Desired-state execution takes none of them:
-// it refuses a plan holding a destructive statement whole, and rejects
-// every acknowledgement before any database work, and
-// Options.WithoutAcknowledgements clears the same set. The destructive operation
-// shapes are not listed here but derived from the planner, the one answer
-// both destructive gates use. TestIrreversibleOperationRegistryIsComplete
+// cannot reach another table. Desired-state execution takes none of them
+// through Options: it rejects every one before any database work, and
+// Options.WithoutAcknowledgements clears the same set. It takes exactly one
+// acknowledgement of its own, on the request rather than the policy: the
+// destructive one, valid only bound to a pinned plan fingerprint, which lets
+// the destructive statements of that reviewed plan run. A plan holding a
+// destructive statement without it is refused whole. The destructive
+// operation shapes are not listed here but derived from the planner, the one
+// answer both destructive gates use. TestIrreversibleOperationRegistryIsComplete
 // fails when an acknowledgement, a string or bool field reachable from
 // Options (nested structs and pointers included) that could carry one, or a
 // destructive shape arrives
@@ -177,9 +180,11 @@ const (
 type desiredHandling string
 
 const (
-	// desiredRefusesPlan: the planner can derive the operation, and
-	// admission refuses any plan holding it, whole.
-	desiredRefusesPlan desiredHandling = "refuses-plan"
+	// desiredAdmitsPinnedPlan: the planner can derive the operation, and
+	// admission refuses any plan holding it, whole, unless the request pins
+	// the reviewed plan's fingerprint and names the table in its destructive
+	// acknowledgement.
+	desiredAdmitsPinnedPlan desiredHandling = "admits-pinned-plan"
 	// desiredRejectsAck: no plan derives the operation on its own, and the
 	// acknowledgement that would allow it is rejected.
 	desiredRejectsAck desiredHandling = "rejects-ack"
@@ -215,7 +220,7 @@ func irreversibleOps() []irreversibleOp {
 			loss:    lossStructure,
 			ack:     ackAllowDestructive,
 			refusal: verdict.ReasonDestructiveChange,
-			desired: desiredRefusesPlan,
+			desired: desiredAdmitsPinnedPlan,
 		})
 	}
 	return append(ops,

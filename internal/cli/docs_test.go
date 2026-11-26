@@ -76,7 +76,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 20, "the doc publishes twenty captured --json outputs")
+	require.Len(t, blocks, 21, "the doc publishes twenty-one captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -148,6 +148,10 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		Table:     "public.users",
 		Detail:    "verified 1000 rows in 2 chunks; the retained source is dropped",
 		SwapLSN:   "0/1A2B3C8",
+		Verification: &verdict.Verification{
+			Rows:   1000,
+			Chunks: 2,
+		},
 	}
 	// A live plan proves the default against the server; clock_timestamp()
 	// is computed per row, so the probe reports the default rewrites.
@@ -191,6 +195,21 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		router.Route([]planner.Plan{dropEmailClassified}).Statements[0], "")
 	require.NoError(t, err)
 	require.True(t, refused)
+
+	// A desired file that no longer has the note column: the dry run ends in
+	// the refused plan, whose fingerprint cannot be pinned, and carries the
+	// one a run pins.
+	ordersFacts := planner.Facts{ColumnTypes: map[string]string{"id": "bigint", "user_id": "bigint", "note": "text"}}
+	dropNote := alterReport(t, "ALTER TABLE public.orders DROP note", "public", "orders", ordersFacts)
+	dropNote.Source = plan.SourceDiff
+	for i := range dropNote.Statements {
+		dropNote.Statements[i].Kind = schemadiff.ChangeDropColumn
+		dropNote.Statements[i].Drops = &schemadiff.DroppedObject{
+			Kind: schemadiff.DroppedColumn, Name: "note", Definition: "attnum 3: text",
+		}
+	}
+	dropNote.Fingerprint = plan.Fingerprint(dropNote.Statements)
+	plan.RefuseDestructive(&dropNote)
 
 	lintReport, err := lint.Check("CREATE INDEX users_email_idx ON users (email);\n" +
 		"ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);\n")
@@ -236,8 +255,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 
 	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, rewriteRequired,
 		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitionedBuild, partitionedBuilt, partitioned,
-		destructiveRefused, destructive,
-		lintReport, partitionsRefused, diff, typeFileRefused, tunedRefused}
+		destructiveRefused, destructive, dropNote, lintReport, partitionsRefused, diff, typeFileRefused, tunedRefused}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
 		require.NoError(t, err)

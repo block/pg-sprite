@@ -286,6 +286,7 @@ func TestRefusedStatementsReportAcceptedBlockingEligibility(t *testing.T) {
 	}{
 		{"blocking parent index", preflight.PartitionCauseBlockingIndexBuild, true},
 		{"concurrent parent index", preflight.PartitionCauseConcurrentIndexBuild, false},
+		{"concurrent parent index drop", preflight.PartitionCauseConcurrentIndexDrop, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := plan.NewReport(plan.SourceAlter)
@@ -546,7 +547,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 21 against this test.
+// omissions. A consumer pins format_version 23 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -602,7 +603,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 21,
+		"format_version": 23,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -660,7 +661,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 21,
+		"format_version": 23,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -685,7 +686,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 21,
+		"format_version": 23,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -805,6 +806,29 @@ func TestFingerprintCoversPartitionedIndexBuildExecution(t *testing.T) {
 		"an autocommit execution is not hashed, so dry-run and run fingerprints that differ only in it agree")
 }
 
+// What a drop removes is part of the plan's identity, name and definition
+// and, for a column, what goes with it: a name that now stands for another
+// object is another plan.
+func TestFingerprintCoversWhatADropRemoves(t *testing.T) {
+	drop := plan.Statement{SQL: "ALTER TABLE t DROP COLUMN legacy", Route: planner.RouteNative,
+		Backend: router.BackendNative, Disposition: router.DispositionExecute,
+		Drops: &schemadiff.DroppedObject{Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "attnum 3: text"}}
+	base := plan.Fingerprint([]plan.Statement{drop})
+	require.NotEqual(t, plan.Fingerprint([]plan.Statement{{SQL: drop.SQL, Route: drop.Route,
+		Backend: drop.Backend, Disposition: drop.Disposition}}), base, "a drop with no definition is another plan")
+
+	for name, changed := range map[string]schemadiff.DroppedObject{
+		"kind":       {Kind: schemadiff.DroppedNotNull, Name: "legacy", Definition: "attnum 3: text"},
+		"name":       {Kind: schemadiff.DroppedColumn, Name: "other", Definition: "attnum 3: text"},
+		"definition": {Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "attnum 4: text"},
+		"dependents": {Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "attnum 3: text", Dependents: []string{"index legacy_idx: CREATE INDEX legacy_idx ON t (legacy)"}},
+	} {
+		other := drop
+		other.Drops = &changed
+		assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{other}), "the dropped object's %s is part of identity", name)
+	}
+}
+
 // The extension schemas a plan was derived with are part of its identity:
 // a table that does not exist yet is created from the file's own SQL, whose
 // unqualified names resolve through them. A plan without them hashes as it
@@ -826,7 +850,7 @@ func TestFingerprintCoversExtensionSchemas(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 21.
+// pinned to format_version 23.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

@@ -67,12 +67,14 @@ func (f *partitionedIndexFlow) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Once the parent's index exists, the server gives every partition
-	// created or attached later an index of its definition, and refuses a
-	// partition whose key it cannot cover, so the tree's keys need checking
-	// only here.
-	if err := f.checkUniqueIndex(ctx); err != nil {
-		return err
+	// Checked once, before the parent's index exists, so a refusal comes
+	// with nothing created. A partition key cannot change, and once the
+	// parent's index exists the server refuses a later partition whose key
+	// the index does not contain.
+	if f.req.unique {
+		if err := f.refuseUncoveredPartitionKeys(ctx, tree); err != nil {
+			return err
+		}
 	}
 	if err := f.ensureParentIndex(ctx); err != nil {
 		return err
@@ -130,8 +132,9 @@ func (f *partitionedIndexFlow) resolveTarget(ctx context.Context) error {
 const relkindSQL = `SELECT c.relkind::pg_catalog.text FROM pg_catalog.pg_class c WHERE c.oid OPERATOR(pg_catalog.=) $1`
 
 // readTree lists the partition tree and refuses it when it holds a foreign
-// table: a foreign table cannot carry an index, and a parent's index never
-// becomes valid while one of its partitions has none. It is read at the start
+// table or a partition whose detach has not finished: neither can have an
+// index attached, and a parent's index never becomes valid while one of its
+// partitions has none. It is read at the start
 // and on every later pass, so a foreign table attached mid-run refuses the run
 // too.
 func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, error) {
@@ -148,9 +151,23 @@ func (f *partitionedIndexFlow) readTree(ctx context.Context) ([]partitionNode, e
 		return nil, fmt.Errorf("%w: %s under %s",
 			ErrForeignTablePartition, strings.Join(foreign, ", "), qualifiedName(f.target.schema, f.target.table))
 	}
+	if pending := detachPendingPartitions(tree); len(pending) > 0 {
+		return nil, fmt.Errorf("%w: %s under %s; finish each detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then rerun",
+			ErrPartitionDetachPending, strings.Join(pending, ", "), qualifiedName(f.target.schema, f.target.table))
+	}
 	f.countNewPartitions(tree)
 	f.rep.Partitions = len(tree)
 	return tree, nil
+}
+
+// refuseUncoveredPartitionKeys refuses a unique index whose plain key columns
+// do not contain the partition key of the parent and of every sub-partitioned
+// partition in tree, with the *UniqueIndexPartitionKeyError that names each
+// table and its missing columns.
+func (f *partitionedIndexFlow) refuseUncoveredPartitionKeys(ctx context.Context, tree []partitionNode) error {
+	return f.tx.read(ctx, "read the partition keys", func(ctx context.Context, q querier) error {
+		return readUncoveredPartitionKeys(ctx, q, f.req.schema, f.req.index, f.req.keyColumns, keyedTables(f.target, tree))
+	})
 }
 
 // countNewPartitions raises the tracker's total by the partitions it has not
@@ -355,9 +372,10 @@ func (f *partitionedIndexFlow) unusedProbeName(ctx context.Context, q querier) (
 }
 
 // verify re-reads the parent's index and reports success only when it is valid:
-// PostgreSQL marks it so once every partition has an index attached, and an
-// index left invalid after the build attached them all is a state this executor
-// does not understand.
+// PostgreSQL marks it so once every partition has an index attached. An index
+// left invalid after the build attached one to every partition it listed means
+// a partition the list did not hold has none, or the catalog is in a state this
+// executor does not understand; either way the build does not report success.
 func (f *partitionedIndexFlow) verify(ctx context.Context) error {
 	return f.tx.read(ctx, "verify the parent index", func(ctx context.Context, q querier) error {
 		parent, found, err := relationByOID(ctx, q, f.parent.oid)
@@ -369,7 +387,8 @@ func (f *partitionedIndexFlow) verify(ctx context.Context) error {
 			return fmt.Errorf("%w: parent index %s no longer has the identity the build resolved", ErrInvariantViolation, name)
 		}
 		if !parent.valid {
-			return fmt.Errorf("%w: parent index %s is invalid although every partition has an attached index",
+			return fmt.Errorf("%w: parent index %s is invalid after the build attached an index to every partition it listed, "+
+				"so a partition created after the list was read has none, or the catalog is in a state the build does not understand",
 				ErrInvariantViolation, name)
 		}
 		if err := q.QueryRow(ctx, `SELECT pg_catalog.current_setting('server_version')`).Scan(&f.rep.ServerVersion); err != nil {
