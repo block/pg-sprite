@@ -252,6 +252,13 @@ const (
 	// leaves an invalid parent index and the partition indexes built so far;
 	// running the same statement again resumes from them.
 	ExecutionPartitionedIndexBuild Execution = "partitioned-index-build"
+	// ExecutionBlockingIndexDrop: the one step is the plain DROP INDEX of a
+	// partitioned table's index, which PostgreSQL cannot drop concurrently.
+	// It takes ACCESS EXCLUSIVE on the parent, every partition, and every
+	// partition's index for as long as it runs, so the statement stays
+	// refused and runs only when the operator accepts that lock, in one
+	// engine-owned transaction under explicit lock and statement budgets.
+	ExecutionBlockingIndexDrop Execution = "blocking-index-drop"
 )
 
 // Executions returns the closed set of Execution values. It is part of the
@@ -259,7 +266,7 @@ const (
 // format_version bump, and a consumer that meets an unrecognized value must
 // treat the sequence as unknown and refuse to run it.
 func Executions() []Execution {
-	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild}
+	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionBlockingIndexDrop}
 }
 
 // Decision is the classification of one operation.
@@ -542,7 +549,25 @@ type Facts struct {
 	// backs, which the rename renames with it; empty when the index backs
 	// none, or when the fact was not read, as in an offline lint.
 	RenamedIndexConstraint string
+	// Storage reports whether the table has storage of its own: a heap for
+	// an ordinary table or a partition, none for a partitioned parent.
+	// StorageUnread when the fact was not read, as in an offline lint.
+	Storage TableStorage
 }
+
+// TableStorage is what a live read says about a table's own storage.
+type TableStorage uint8
+
+const (
+	// StorageUnread means the fact was not read, as in an offline lint.
+	StorageUnread TableStorage = iota
+	// StorageHeap is an ordinary table or a partition, whose rows live in
+	// a heap of its own.
+	StorageHeap
+	// StoragePartitionedParent is a partitioned parent, which has no
+	// storage of its own; its rows live in its partitions.
+	StoragePartitionedParent
+)
 
 // FactsFrom extracts the facts a live introspection model provides: the
 // canonical type of every live column, the collation of every column that
@@ -559,7 +584,12 @@ func FactsFrom(live schemadiff.Model) Facts {
 			collations[col.Name] = col.Collation
 		}
 	}
-	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
+	storage := StorageHeap
+	if live.PartitionKey != "" {
+		storage = StoragePartitionedParent
+	}
+	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity,
+		Storage: storage}
 }
 
 // ColumnDependents maps a column to the objects that depend on it, read
@@ -958,7 +988,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		}
 
 	case statement.OpSetTablespace:
-		d.Route, d.Reason = RouteCopyAndSwap, ReasonRelocation
+		d.Route, d.Reason, d.Unverified = classifySetTablespace(facts.Storage)
 
 	case statement.OpAddConstraint:
 		d = classifyAddConstraint(op, st, sql, single)
@@ -972,9 +1002,9 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
 
 	case statement.OpAttachPartition:
-		// Native pattern: pre-add a validated CHECK matching the bound on
-		// the child to skip the attach-time scan. The planner cannot
-		// construct that CHECK, so it routes native without a rewrite.
+		// Native pattern, stated by suggest.GuidancePrevalidatedCheck. The
+		// planner cannot construct its CHECKs from the statement, so it
+		// routes native without a rewrite.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 
 	case statement.OpDetachPartition:
@@ -1085,6 +1115,24 @@ func constraintNaming(facts Facts) statement.ConstraintNaming {
 		}
 	}
 	return naming
+}
+
+// classifySetTablespace routes SET TABLESPACE by the table's storage. A
+// heap moves to the new tablespace, a rewrite-scale copy under ACCESS
+// EXCLUSIVE. A partitioned parent has no heap to move: the server records
+// the tablespace as the default for partitions created later, under a
+// brief ACCESS EXCLUSIVE on the parent alone, and moves no existing
+// partition or index. Unread storage fails closed to the move, and says so.
+func classifySetTablespace(storage TableStorage) (Route, Reason, bool) {
+	switch storage {
+	case StoragePartitionedParent:
+		return RouteNative, ReasonMetadataOnly, false
+	case StorageHeap:
+		return RouteCopyAndSwap, ReasonRelocation, false
+	case StorageUnread:
+		return RouteCopyAndSwap, ReasonRelocation, true
+	}
+	return RouteCopyAndSwap, ReasonRelocation, true
 }
 
 // classifyTypeChange routes ALTER COLUMN TYPE: binary-coercible changes are

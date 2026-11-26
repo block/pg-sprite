@@ -43,7 +43,8 @@ dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 a verdict, not a plan report — and exit 2. So does an unacknowledged
 destructive statement, and so do statements whose routed
 steps the executor refuses from their shape alone before running anything
-(an unnamed or `IF NOT EXISTS` index build, `DETACH PARTITION`). The dry run
+(an unnamed or `IF NOT EXISTS` index build), or from the catalog (a
+`DETACH PARTITION` beside a `DEFAULT` partition). The dry run
 does not evaluate the apply's size guard or privilege preflight; those need
 live facts the dry run does not gather, and the apply runs them first. So a
 shape refusal on `--dry-run` is the apply's verdict when no earlier apply
@@ -81,8 +82,9 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
 The process status is the part of the contract a shell reads without JSON. Each
 code answers whether anything committed and whether the engine vouches for it
 as online-safe; the section headings below name the code each example exits with.
-The table is restated from the [README](../README.md#exit-codes), which is the
-canonical statement of the ladder; a wording fix lands there first.
+This table is the canonical statement of the ladder; the
+[README](../README.md#exit-codes) restates it in short, and a wording fix lands
+here first.
 
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|
@@ -103,6 +105,37 @@ budget did run and was rolled back, and still exits 2. A gate that treats every
 non-zero status as failure is fail-closed for all three non-zero codes; a caller
 that deliberately permits the passthrough allows 3 explicitly. The rationale is in
 [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md#exit-codes).
+
+`lint --desired` refuses with exit 2 as well. The offline `lint` exits 1 when a
+script has error-severity findings (warnings alone exit 0), and `suggest` exits 0
+on any script it can parse — its findings never gate; only an unreadable or
+unparsable script exits 1.
+
+Two more cases a caller must handle:
+
+- **A lost `COMMIT` is exit 1, not 0, 2, or 3.** When the connection drops or
+  the caller's context ends while a bounded attempt's `COMMIT` is in flight,
+  the change may or may not have landed. Exit 0 and 3 would claim it did and
+  exit 2 would claim it did not; the failed exit says only that the engine
+  cannot vouch for the run, and the verdict's `code` (`commit-outcome-unknown`)
+  and detail tell the operator to inspect the catalog.
+- **Library callers get the same facts typed, not as a status.** An
+  orchestrator that imports `pkg/executor` branches on the verdict's
+  `outcome`, `errors.As` to the executor's typed errors, and
+  `executor.OutcomeCode` — the exit code is the CLI's rendering of those
+  facts, not a surface the library exposes. Check
+  `errors.As(err, new(*executor.CommitOutcomeUnknownError))` or `OutcomeCode`
+  before testing for context errors: a context cancelled during `COMMIT`
+  stays in the error chain, but the outcome is unknown, not a cancellation. The typed contract is in
+  [execution-model.md](execution-model.md#how-a-failure-is-reported).
+
+Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking
+SCHEMA.TABLE --statement-timeout …` on a refused plain `DROP INDEX`,
+`REINDEX INDEX`, or `REINDEX TABLE`, where the value names the table whose
+lock you accept. Why the code is non-zero, and why a
+statement-budget cancellation on that path is exit 1 rather than 2, is in
+[lock-budgeted-passthrough.md](lock-budgeted-passthrough.md#exit-codes);
+every code's JSON shape is below.
 
 ## Codes used in these examples
 
@@ -167,7 +200,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -208,7 +241,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -401,7 +434,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -443,7 +476,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -538,7 +571,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -577,7 +610,7 @@ when it starts.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -673,7 +706,7 @@ cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx' --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -738,7 +771,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -782,7 +815,7 @@ object it removes, and the fingerprint covers it.
 ```console
 $ pg-sprite migrate --desired orders.sql --dry-run --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "diff",
   "schema": "public",
   "table": "orders",
@@ -959,7 +992,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "diff",
   "schema": "public",
   "table": "users",

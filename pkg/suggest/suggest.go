@@ -19,12 +19,13 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-// Version 6 added add-integer-primary-key to the Guidance vocabulary;
+// Version 7 added the no-default-partition caveat; version 6 added
+// add-integer-primary-key to the Guidance vocabulary;
 // version 5 added alter-column-type-in-place; version 4 added
 // coordinated-constraint-rename; version 3 added expand-contract-column
 // and coordinated-table-rename; version 2 added
 // name-constraint-then-validate and unique-index-then-constraint.
-const FormatVersion = 6
+const FormatVersion = 7
 
 // Caveat is a typed condition attached to a recommendation; automation
 // branches on it, never on prose. The caveats are independent — no caveat
@@ -50,6 +51,11 @@ const (
 	// leaves the partition half-detached; it must be finished with
 	// DETACH PARTITION FINALIZE.
 	CaveatDetachFinalizeOnFailure Caveat = "detach-finalize-on-failure"
+	// CaveatNoDefaultPartition: the recommended concurrent detach runs
+	// only when the parent has no DEFAULT partition. PostgreSQL refuses
+	// it outright otherwise, so the blocking form is the only detach
+	// there. The advice is offline and cannot see the parent.
+	CaveatNoDefaultPartition Caveat = "no-default-partition"
 	// CaveatValidationScan: the VALIDATE step still scans every row — the
 	// rewrite trades the lock strength, not the scan.
 	CaveatValidationScan Caveat = "validation-scan"
@@ -72,6 +78,7 @@ func Caveats() []Caveat {
 		CaveatSeparateTransactions,
 		CaveatInvalidIndexOnFailure,
 		CaveatDetachFinalizeOnFailure,
+		CaveatNoDefaultPartition,
 		CaveatValidationScan,
 		CaveatScaffoldConstraintOnFailure,
 	}
@@ -97,11 +104,14 @@ const (
 	// build the constraint with its online pattern as a separate ADD
 	// CONSTRAINT.
 	GuidanceAddColumnThenConstraint Guidance = "add-column-then-constraint"
-	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child under
-	// the parent's lock unless a validated CHECK matching the partition
-	// bound already exists on the child. Pre-add that CHECK (NOT VALID,
-	// then VALIDATE), attach, then drop it. The planner cannot construct
-	// the bound-matching CHECK from the statement alone.
+	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child unless a
+	// validated CHECK matching the partition bound already exists on it,
+	// scans the DEFAULT partition unless a validated CHECK there excludes
+	// the bound, and builds each parent index the child lacks, all under
+	// ACCESS EXCLUSIVE. Pre-add both CHECKs (NOT VALID, then VALIDATE),
+	// build the parent's indexes on the child concurrently, a unique one
+	// backing its constraint, attach, then drop the CHECKs. The planner
+	// cannot construct the CHECKs from the statement alone.
 	GuidancePrevalidatedCheck Guidance = "pre-add-validated-check"
 	// GuidanceNotNullScaffold: prove the invariant with a NOT VALID CHECK
 	// (col IS NOT NULL) plus an online VALIDATE, then the NOT NULL
@@ -201,7 +211,9 @@ func ManualPath(g Guidance) string {
 	case GuidanceAddColumnThenConstraint:
 		return "add the plain column first, then build the constraint as a separate, named ADD CONSTRAINT with its online pattern"
 	case GuidancePrevalidatedCheck:
-		return "pre-add a validated CHECK matching the partition bound on the child, attach, then drop it"
+		return "pre-add a validated CHECK matching the partition bound on the child and one excluding it on the DEFAULT partition, " +
+			"build the parent's indexes on the child concurrently (a unique one backing its constraint through USING INDEX), " +
+			"attach, then drop the CHECKs"
 	case GuidanceNotNullScaffold:
 		return "prove the invariant with a NOT VALID CHECK plus an online VALIDATE, then SET NOT NULL is a catalog flip"
 	case GuidanceNameConstraintThenValidate:
@@ -364,7 +376,7 @@ func rewriteCaveats(op statement.Op) ([]Caveat, error) {
 	case statement.OpCreateIndex, statement.OpDropIndex, statement.OpReindex:
 		return []Caveat{CaveatNonTransactional, CaveatInvalidIndexOnFailure}, nil
 	case statement.OpDetachPartition:
-		return []Caveat{CaveatNonTransactional, CaveatDetachFinalizeOnFailure}, nil
+		return []Caveat{CaveatNonTransactional, CaveatDetachFinalizeOnFailure, CaveatNoDefaultPartition}, nil
 	case statement.OpSetNotNull:
 		return []Caveat{CaveatSeparateTransactions, CaveatValidationScan, CaveatScaffoldConstraintOnFailure}, nil
 	case statement.OpAddConstraint:

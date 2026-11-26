@@ -188,7 +188,9 @@ is a smoke tour of the built binary, not a second test suite.
 [docs/capabilities.md](docs/capabilities.md) is the canonical support matrix (every
 operation and object type, tiered supported / planned / out of scope, with reasons);
 [docs/limitations.md](docs/limitations.md) explains current refusal mechanics, and the
-README's "What pg-sprite does not do yet" section is the short-form pointer. Any PR that
+README's "What pg-sprite does not do yet" section is the short-form pointer: each of its
+bullets summarizes an entry in limitations.md's "Boundaries at a glance", so a change to that
+entry rewrites its README bullet in the same PR. Any PR that
 adds, removes, or re-scopes a capability — a planner route, a refusal, a verdict outcome,
 a declarative-model boundary — updates all three in the same PR, and every release sweeps
 them against the shipped behavior before tagging. A supported row's `maturity` (`ga` or
@@ -197,7 +199,10 @@ them against the shipped behavior before tagging. A supported row's `maturity` (
 only from a later server major names it in `min_server_major`. A PR that takes a route out
 of preview flips its rows to `ga` in the same change, together with `validateMaturity`'s
 rule for that route, its `TestValidateRules` case, `TestPreviewRowsAreTheCopySwapRows`,
-and the route's sentence in `docs/capabilities-contract.md`.
+and the route's sentence in `docs/capabilities-contract.md`. When it is the last route in
+preview, the same change moves the README's maturity badge to `ga`, replaces the
+`> [!IMPORTANT]` preview notice under the badges, and rewrites any other README sentence
+that calls a route preview.
 
 ## Logging and observability
 

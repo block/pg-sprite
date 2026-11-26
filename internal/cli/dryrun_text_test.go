@@ -330,6 +330,15 @@ func TestDryRunTextPartitionedIndexDropNamesThePlainDrop(t *testing.T) {
 		"and every partition's index — run it with pg-sprite migrate --alter, --accept-blocking, "+
 		"and --allow-destructive naming the table")
 	assert.NotContains(t, text, "refused — the target is a partitioned table")
+
+	// A desired plan that discloses the blocking drop names the flags a
+	// pinned desired-state run takes it with.
+	report.Statements[0].Execution = planner.ExecutionBlockingIndexDrop
+	out.Reset()
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text = strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, "every partition's index — a run takes it only with --expect-fingerprint, "+
+		"--allow-destructive and --accept-blocking naming the table, and an explicit --statement-timeout longer than --lock-timeout")
 }
 
 // A decision taken without live facts carries the conservative-classification
