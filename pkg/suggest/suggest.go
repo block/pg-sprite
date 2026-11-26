@@ -19,12 +19,13 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-// Version 6 added add-integer-primary-key to the Guidance vocabulary;
+// Version 7 added the no-default-partition caveat; version 6 added
+// add-integer-primary-key to the Guidance vocabulary;
 // version 5 added alter-column-type-in-place; version 4 added
 // coordinated-constraint-rename; version 3 added expand-contract-column
 // and coordinated-table-rename; version 2 added
 // name-constraint-then-validate and unique-index-then-constraint.
-const FormatVersion = 6
+const FormatVersion = 7
 
 // Caveat is a typed condition attached to a recommendation; automation
 // branches on it, never on prose. The caveats are independent — no caveat
@@ -50,6 +51,11 @@ const (
 	// leaves the partition half-detached; it must be finished with
 	// DETACH PARTITION FINALIZE.
 	CaveatDetachFinalizeOnFailure Caveat = "detach-finalize-on-failure"
+	// CaveatNoDefaultPartition: the recommended concurrent detach runs
+	// only when the parent has no DEFAULT partition. PostgreSQL refuses
+	// it outright otherwise, so the blocking form is the only detach
+	// there. The advice is offline and cannot see the parent.
+	CaveatNoDefaultPartition Caveat = "no-default-partition"
 	// CaveatValidationScan: the VALIDATE step still scans every row — the
 	// rewrite trades the lock strength, not the scan.
 	CaveatValidationScan Caveat = "validation-scan"
@@ -72,6 +78,7 @@ func Caveats() []Caveat {
 		CaveatSeparateTransactions,
 		CaveatInvalidIndexOnFailure,
 		CaveatDetachFinalizeOnFailure,
+		CaveatNoDefaultPartition,
 		CaveatValidationScan,
 		CaveatScaffoldConstraintOnFailure,
 	}
@@ -369,7 +376,7 @@ func rewriteCaveats(op statement.Op) ([]Caveat, error) {
 	case statement.OpCreateIndex, statement.OpDropIndex, statement.OpReindex:
 		return []Caveat{CaveatNonTransactional, CaveatInvalidIndexOnFailure}, nil
 	case statement.OpDetachPartition:
-		return []Caveat{CaveatNonTransactional, CaveatDetachFinalizeOnFailure}, nil
+		return []Caveat{CaveatNonTransactional, CaveatDetachFinalizeOnFailure, CaveatNoDefaultPartition}, nil
 	case statement.OpSetNotNull:
 		return []Caveat{CaveatSeparateTransactions, CaveatValidationScan, CaveatScaffoldConstraintOnFailure}, nil
 	case statement.OpAddConstraint:

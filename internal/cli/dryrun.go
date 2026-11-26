@@ -166,6 +166,18 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 					return c.emit(out, v)
 				}
 			}
+			// A concurrent detach is refused when the table has a DEFAULT
+			// partition, which only the live catalog knows. A detach is
+			// destructive, so it got this far only under the
+			// acknowledgement, which the apply's refusal records.
+			v, refused, admitErr = migrate.AdmitDetachPartition(ctx, pool, st, report.Schema, ps.ExecSQL)
+			if admitErr != nil {
+				return admitErr
+			}
+			if refused {
+				v.AllowedDestructive = ps.Destructive
+				return c.emit(out, v)
+			}
 		}
 	}
 	report.Fingerprint = report.ComputeFingerprint()

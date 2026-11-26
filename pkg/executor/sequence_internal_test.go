@@ -88,6 +88,11 @@ func TestAdmitStepClassifiesShapes(t *testing.T) {
 			sql:  `ALTER TABLE s.t VALIDATE CONSTRAINT c, ADD COLUMN x int`,
 			want: StepBrief,
 		},
+		{
+			name: "a lone concurrent detach runs outside a transaction block",
+			sql:  `ALTER TABLE s.t DETACH PARTITION s.p CONCURRENTLY`,
+			want: StepDetachPartition,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -127,11 +132,6 @@ func TestAdmitStepRefusals(t *testing.T) {
 		{
 			name:    "REINDEX CONCURRENTLY is not driven",
 			sql:     `REINDEX INDEX CONCURRENTLY s.i`,
-			wantErr: ErrUnsupportedSequenceStep,
-		},
-		{
-			name:    "a cancelled DETACH PARTITION CONCURRENTLY leaves detach-pending state",
-			sql:     `ALTER TABLE s.t DETACH PARTITION p CONCURRENTLY`,
 			wantErr: ErrUnsupportedSequenceStep,
 		},
 		{
@@ -190,7 +190,7 @@ func TestAdmitSequenceNamesTheOffendingStep(t *testing.T) {
 func TestAdmitSequenceShapeRefusesWhatAdmissionRefuses(t *testing.T) {
 	steps := []string{
 		`ALTER TABLE s.t ADD CONSTRAINT c CHECK (v > 0) NOT VALID`,
-		`ALTER TABLE s.t DETACH PARTITION p CONCURRENTLY`,
+		`DROP INDEX CONCURRENTLY s.i`,
 	}
 	err := AdmitSequenceShape(steps)
 	require.ErrorIs(t, err, ErrUnsupportedSequenceStep)

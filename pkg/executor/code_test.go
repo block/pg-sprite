@@ -257,6 +257,8 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeEmptySequence:                   true,
 		executor.CodeUnsupportedSequenceStep:         true,
 		executor.CodeUnsupportedPartitionedParent:    true,
+		executor.CodeDetachDefaultPartition:          true,
+		executor.CodeDetachInterrupted:               false,
 		executor.CodeNotConcurrentIndexBuild:         true,
 		executor.CodeUnnamedIndex:                    true,
 		executor.CodeUnqualifiedTable:                true,

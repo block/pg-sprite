@@ -107,6 +107,23 @@ func (b ConcurrentBudget) validate() error {
 // class) resolve exactly as the diff printed them and as a native attempt
 // resolves them, never via the session's ambient search_path.
 func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b ConcurrentBudget, searchPathSchema string) (*pgxpool.Conn, func(), error) {
+	// INV: LK-2 — the CONCURRENTLY exception policy: no per-lock timeout
+	// (a lock_timeout would cancel the statement's snapshot waits and leave
+	// the invalid index this executor exists to prevent); either one overall
+	// statement deadline or caller cancellation bounds the build instead.
+	statementTimeout := b.Overall.Milliseconds()
+	if b.CallerOwned {
+		statementTimeout = 0
+	}
+	return acquireSessionWithBudgets(ctx, pool, 0, statementTimeout, searchPathSchema)
+}
+
+// acquireSessionWithBudgets acquires one pooled session and sets its
+// lock_timeout and statement_timeout to lockMS and statementMS for a
+// statement that refuses to run inside a transaction block, pinning its
+// search_path when searchPathSchema is set, as acquireBudgetedSession
+// describes. The returned release puts the session back as it was.
+func acquireSessionWithBudgets(ctx context.Context, pool *pgxpool.Pool, lockMS, statementMS int64, searchPathSchema string) (*pgxpool.Conn, func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquire session: %w", err)
@@ -129,17 +146,10 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 		}
 	}
 
-	// INV: LK-2 — the CONCURRENTLY exception policy: no per-lock timeout
-	// (a lock_timeout would cancel the statement's snapshot waits and leave
-	// the invalid index this executor exists to prevent); either one overall
-	// statement deadline or caller cancellation bounds the build instead. A bare integer is
-	// milliseconds to PostgreSQL; the settings are applied here regardless
-	// of the pool's defaults.
-	statementTimeout := b.Overall.Milliseconds()
-	if b.CallerOwned {
-		statementTimeout = 0
-	}
-	budgets := "SET lock_timeout = 0; SET statement_timeout = " + strconv.FormatInt(statementTimeout, 10)
+	// A bare integer is milliseconds to PostgreSQL; the settings are
+	// applied here regardless of the pool's defaults.
+	budgets := "SET lock_timeout = " + strconv.FormatInt(lockMS, 10) +
+		"; SET statement_timeout = " + strconv.FormatInt(statementMS, 10)
 	if searchPathSchema != "" {
 		budgets += "; " + dbconn.SessionSearchPath(searchPathSchema, "public")
 	}

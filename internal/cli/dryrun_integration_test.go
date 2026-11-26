@@ -474,24 +474,69 @@ func admissionRefusalVerdicts(t *testing.T, url, alter string) (dryRun, applied 
 	return run(true), run(false)
 }
 
-// The sequence executor refuses DETACH PARTITION CONCURRENTLY — the form the
-// planner substitutes for a plain DETACH PARTITION — before it runs anything,
-// because a cancelled concurrent detach leaves a detach-pending partition the
-// executor does not recover. The dry run must end in that same refusal
-// instead of promising an executable plan the apply would turn down.
-func TestMigrateDryRunRefusesDetachPartitionLikeApply(t *testing.T) {
+// PostgreSQL refuses DETACH PARTITION CONCURRENTLY — the form the planner
+// substitutes for a plain DETACH PARTITION — on a table with a DEFAULT
+// partition, so the apply refuses it from the catalog before it runs
+// anything. The dry run must end in that same refusal instead of promising
+// an executable plan the apply would turn down.
+func TestMigrateDryRunRefusesDetachBesideADefaultPartitionLikeApply(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	defer pool.Close()
 	schema := createPartitionFixture(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %[1]s.p_default PARTITION OF %[1]s.p DEFAULT", schema))
+	require.NoError(t, err)
 
-	dryRun, applied := admissionRefusalVerdicts(t, url,
-		fmt.Sprintf("ALTER TABLE %s.p DETACH PARTITION %s.p1", schema, schema))
+	run := func(dry bool) verdict.Verdict {
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %[1]s.p DETACH PARTITION %[1]s.p1", schema))
+		cmd.DryRun = dry
+		cmd.JSON = true
+		cmd.AllowDestructive = schema + ".p"
+		var out strings.Builder
+		require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		return v
+	}
+	dryRun, applied := run(true), run(false)
 
 	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, dryRun.Reason)
+	assert.Equal(t, verdict.ClassByDesign, dryRun.Class)
 	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
+}
+
+// Without a DEFAULT partition, the dry run of a plain DETACH PARTITION plans
+// the concurrent detach the apply then runs.
+func TestMigrateDryRunPlansTheConcurrentDetachTheApplyRuns(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := createPartitionFixture(t, pool)
+	sql := fmt.Sprintf("ALTER TABLE %[1]s.p DETACH PARTITION %[1]s.p1", schema)
+
+	cmd := newMigrateCmd(url, sql)
+	cmd.DryRun = true
+	cmd.JSON = true
+	cmd.AllowDestructive = schema + ".p"
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var report plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, router.DispositionExecute, report.Statements[0].Disposition)
+	assert.True(t, report.Statements[0].Destructive)
+	assert.Equal(t, []string{sql + " CONCURRENTLY"}, report.Statements[0].ExecSQL)
+
+	cmd.DryRun = false
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Equal(t, report.Statements[0].ExecSQL, v.ExecutedSQL)
 }
 
 // The concurrent index build executor needs a name for the index it builds

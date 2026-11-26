@@ -104,6 +104,14 @@ const (
 	// whose concurrent detach did not finish, so no index can be attached
 	// for it.
 	CodePartitionDetachPending Code = "partition-detach-pending"
+	// CodeDetachDefaultPartition: a DETACH PARTITION ... CONCURRENTLY on a
+	// table that has a DEFAULT partition, which PostgreSQL rejects; nothing
+	// was executed.
+	CodeDetachDefaultPartition Code = "detach-default-partition"
+	// CodeDetachInterrupted: a DETACH PARTITION ... CONCURRENTLY stopped
+	// after its first transaction committed, leaving the partition
+	// detach-pending; running the same statement again finishes it.
+	CodeDetachInterrupted Code = "partition-detach-interrupted"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
@@ -314,6 +322,8 @@ func Codes() []Code {
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
 		CodePartitionDetachPending,
+		CodeDetachDefaultPartition,
+		CodeDetachInterrupted,
 		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
 		CodeEmptySequence,
@@ -379,6 +389,7 @@ func (c Code) Permanent() bool {
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
 		CodePartitionDetachPending,
+		CodeDetachDefaultPartition,
 		CodePartitionedIndexTablespace,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
@@ -500,6 +511,10 @@ func sentinelCode(err error) Code {
 		return CodeTableLockUnconfirmed
 	case errors.Is(err, ErrPartitionDetachPending):
 		return CodePartitionDetachPending
+	case errors.Is(err, ErrDetachDefaultPartition):
+		return CodeDetachDefaultPartition
+	case errors.Is(err, ErrDetachInterrupted):
+		return CodeDetachInterrupted
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):

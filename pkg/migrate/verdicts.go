@@ -31,6 +31,17 @@ import (
 // names, whose refusal [GateWithCatalog] completes from the catalog; [Run]
 // re-checks it regardless.
 func Gate(st statement.Statement) (verdict.Verdict, bool) {
+	if st.FinalizesDetach() {
+		// The statement cannot be reprinted faithfully, so it is refused
+		// before anything reprints it; the detach it finishes is finished
+		// by running the statement that started it again.
+		return verdict.Verdict{
+			Statement: st.SQL(),
+			Detail: "pg-sprite does not run DETACH PARTITION ... FINALIZE as written; running the " +
+				"DETACH PARTITION ... CONCURRENTLY statement that started the detach again finishes it, " +
+				"or run this statement directly against the database",
+		}.WithRefusal(verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)), true
+	}
 	r, refused := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 	if !refused {
 		return verdict.Verdict{}, false
@@ -371,6 +382,12 @@ func failureVerdict(st statement.Statement, err error,
 	}
 	if buildFault {
 		v.Detail += "; " + leftover
+	}
+	if errors.Is(err, executor.ErrDetachInterrupted) {
+		// The step's own first transaction committed, which the generic
+		// wording above denies; the error names the partition and the
+		// statement that finishes it.
+		v.Detail = fmt.Sprintf("sequence step %d of %d: %v", stepErr.Step, stepErr.Total, stepErr.Err)
 	}
 	return v
 }

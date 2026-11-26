@@ -514,7 +514,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" suggest --json risky.sql) || status=$?
         assert_eq "suggest exit" 0 "$status"
-        assert_eq "suggest format_version" 6 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "suggest format_version" 7 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "suggest count" 2 "$(jq -r '.suggestions | length' <<<"$out")"
     else
         "$PGS" suggest risky.sql || echo "(exit $?)"
