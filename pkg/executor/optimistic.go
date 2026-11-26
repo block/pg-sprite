@@ -106,7 +106,8 @@ type RetryPolicy struct {
 	MaxBackoff     time.Duration
 	// HolderWait, when set, is the longest a native attempt waits outside
 	// the lock queue, before it requests its lock, while a transaction
-	// that has held a lock on the table for a while keeps holding it. An
+	// that has held a conflicting lock on the table, or on a partition or
+	// child the statement also locks, for a while keeps holding it. An
 	// attempt that queued behind such a transaction would hold back every
 	// later reader and writer of the table for its whole lock budget. A
 	// holder that outlasts the wait ends the run with a
@@ -351,7 +352,7 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		// INV: LK-2 — the attempt requests its lock only once no
 		// long-lived transaction holds one on the table, so it never sits
 		// at the head of the lock queue behind one.
-		if err := waitOutsideLockQueue(ctx, pool, pt.Schema(), pt.Table(), retry.HolderWait, sleepContext); err != nil {
+		if err := waitOutsideLockQueue(ctx, pool, st, pt.Schema(), pt.Table(), retry.HolderWait, systemHolderWaitClock()); err != nil {
 			return err
 		}
 		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, nil)

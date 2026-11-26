@@ -40,6 +40,17 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeBudgetStatementExceeded,
 		},
 		{
+			name: "lock holder outlasted the holder wait",
+			err:  &executor.LockHolderWaitError{Schema: "public", Table: "orders", PID: 42, Waited: time.Second},
+			want: executor.CodeLockHolderWaitExceeded,
+		},
+		{
+			name: "lock holder wait on a sequence step",
+			err: &executor.SequenceStepError{Err: fmt.Errorf("attempt: %w",
+				&executor.LockHolderWaitError{Schema: "public", Table: "orders", PID: 42, Waited: time.Second})},
+			want: executor.CodeLockHolderWaitExceeded,
+		},
+		{
 			name: "own invalid leftover",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrBuildLeftInvalidIndex},
 			want: executor.CodeInvalidIndexOwnLeftover,
@@ -235,6 +246,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 	want := map[executor.Code]bool{
 		executor.CodeBudgetLockExceeded:              false,
+		executor.CodeLockHolderWaitExceeded:          false,
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
 		executor.CodeCommitOutcomeUnknown:            false,

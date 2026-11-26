@@ -834,8 +834,9 @@ through the table leave it out, rows in its range are refused) and the executor 
 `pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
 native and copy-and-swap executors; a native attempt run with `RetryPolicy.HolderWait` requests its lock only once no transaction
-has held a lock on the table across two reads of `pg_locks`, waiting outside the lock queue meanwhile and
-ending with `LockHolderWaitError`, nothing submitted, when a holder outlasts the wait
+has held a conflicting lock on the table, or on a partition or child the statement also locks, across two
+reads of `pg_locks`, waiting outside the lock queue meanwhile and ending with `LockHolderWaitError`
+(`lock-holder-wait-exceeded`), nothing submitted, when a holder outlasts the wait, which one deadline bounds
 (`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
