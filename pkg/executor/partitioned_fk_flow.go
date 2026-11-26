@@ -59,7 +59,7 @@ func (f *partitionedFKFlow) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	passes, err := settlePasses(ctx, maxPartitionedForeignKeyPasses, func(ctx context.Context, pass int) (bool, error) {
+	passes, err := settlePasses(ctx, maxPartitionedForeignKeyPasses, ErrPartitionedForeignKeyUnsettled, func(ctx context.Context, pass int) (bool, error) {
 		if pass > 1 {
 			var err error
 			if tree, err = f.readTree(ctx); err != nil {
@@ -75,11 +75,9 @@ func (f *partitionedFKFlow) run(ctx context.Context) error {
 		return !added, err
 	})
 	f.rep.Passes = passes
-	if errors.Is(err, ErrPartitionedIndexUnsettled) {
-		// settlePasses reports running out of passes with the partitioned
-		// index build's error; this build's own is the one returned.
+	if errors.Is(err, ErrPartitionedForeignKeyUnsettled) {
 		return fmt.Errorf("%w: %s still had partitions without the foreign key after %d passes",
-			ErrPartitionedForeignKeyUnsettled, qualifiedName(f.req.schema, f.req.table), maxPartitionedForeignKeyPasses)
+			err, qualifiedName(f.req.schema, f.req.table), maxPartitionedForeignKeyPasses)
 	}
 	return err
 }
@@ -150,7 +148,7 @@ func (f *partitionedFKFlow) checkParent(ctx context.Context) (bool, error) {
 		if !found {
 			return nil
 		}
-		partitions, err := requireAdoptedEverywhere(ctx, q, f.target, existing)
+		partitions, err := requireAdoptedFKEverywhere(ctx, q, f.target, existing)
 		if err != nil {
 			return err
 		}
@@ -186,10 +184,10 @@ func decideParentFK(parent string, fk resolvedFK, attnums []int16, fks []catalog
 	return catalogFK{}, false, nil
 }
 
-// requireAdoptedEverywhere proves every partition has a foreign key the
+// requireAdoptedFKEverywhere proves every partition has a foreign key the
 // parent's existing foreign key adopted, and returns how many partitions
 // the tree holds.
-func requireAdoptedEverywhere(ctx context.Context, q querier, target indexTarget, existing catalogFK) (int, error) {
+func requireAdoptedFKEverywhere(ctx context.Context, q querier, target indexTarget, existing catalogFK) (int, error) {
 	tree, err := listPartitionTree(ctx, q, target.tableOID)
 	if err != nil {
 		return 0, err

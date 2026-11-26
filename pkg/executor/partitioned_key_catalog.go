@@ -52,7 +52,7 @@ func readLeafKeyColumns(ctx context.Context, q querier, node partitionNode, name
 		var attNotNull, notNullNotValid bool
 		err := q.QueryRow(ctx, leafKeyColumnSQL, node.oid, name).Scan(&c.attnum, &attNotNull, &notNullNotValid, &c.quoted)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("partition %s has no column %q for the key", node.qualified(), name)
+			return nil, fmt.Errorf("table %s has no column %q for the key", node.qualified(), name)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read key column %q of partition %s: %w", name, node.qualified(), err)
