@@ -163,6 +163,26 @@ const (
 	// CodePartitionedKeyNullableColumn: a primary key was requested over a
 	// column a partition allows to be NULL; nothing was built.
 	CodePartitionedKeyNullableColumn Code = "partitioned-key-nullable-column"
+	// CodeNotAddKeyConstraint: the statement handed to the partitioned key
+	// build is not one ALTER TABLE with a single ADD PRIMARY KEY or ADD
+	// UNIQUE.
+	CodeNotAddKeyConstraint Code = "not-add-key-constraint"
+	// CodePartitionedKeyUnsupportedShape: the partitioned key statement
+	// names no constraint or carries a clause the build cannot carry to
+	// every partition; nothing was created.
+	CodePartitionedKeyUnsupportedShape Code = "partitioned-key-unsupported-shape"
+	// CodePartitionedKeyParentConflict: the partitioned table already has a
+	// constraint under the requested name that is not the requested key, a
+	// relation holds the name its index would take, or a primary key is
+	// requested and it has one; nothing was created.
+	CodePartitionedKeyParentConflict Code = "partitioned-key-parent-conflict"
+	// CodePartitionedKeySubPartitioned: a partition of the target is itself
+	// partitioned, which the partitioned key build does not take; nothing
+	// was created.
+	CodePartitionedKeySubPartitioned Code = "partitioned-key-sub-partitioned"
+	// CodePartitionedKeyUnsettled: partitions kept appearing without the key
+	// constraint until the build ran out of passes; a rerun resumes.
+	CodePartitionedKeyUnsettled Code = "partitioned-key-unsettled"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -382,6 +402,11 @@ func Codes() []Code {
 		CodePartitionedKeyNameTaken,
 		CodePartitionedKeyConflict,
 		CodePartitionedKeyNullableColumn,
+		CodeNotAddKeyConstraint,
+		CodePartitionedKeyUnsupportedShape,
+		CodePartitionedKeyParentConflict,
+		CodePartitionedKeySubPartitioned,
+		CodePartitionedKeyUnsettled,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -458,6 +483,10 @@ func (c Code) Permanent() bool {
 		CodePartitionedKeyNameTaken,
 		CodePartitionedKeyConflict,
 		CodePartitionedKeyNullableColumn,
+		CodeNotAddKeyConstraint,
+		CodePartitionedKeyUnsupportedShape,
+		CodePartitionedKeyParentConflict,
+		CodePartitionedKeySubPartitioned,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -610,6 +639,16 @@ func sentinelCode(err error) Code {
 		return CodePartitionedKeyConflict
 	case errors.Is(err, ErrPartitionedKeyNullableColumn):
 		return CodePartitionedKeyNullableColumn
+	case errors.Is(err, ErrNotAddKeyConstraint):
+		return CodeNotAddKeyConstraint
+	case errors.Is(err, ErrPartitionedKeyUnsupportedShape):
+		return CodePartitionedKeyUnsupportedShape
+	case errors.Is(err, ErrPartitionedKeyParentConflict):
+		return CodePartitionedKeyParentConflict
+	case errors.Is(err, ErrPartitionedKeySubPartitioned):
+		return CodePartitionedKeySubPartitioned
+	case errors.Is(err, ErrPartitionedKeyUnsettled):
+		return CodePartitionedKeyUnsettled
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):
