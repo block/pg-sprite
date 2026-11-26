@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +94,19 @@ type attemptInfo struct {
 	// WatermarkAtStop the key a stopped copy had landed through.
 	RowPhase        string `json:"row_phase"`
 	WatermarkAtStop *int64 `json:"watermark_at_stop,omitempty"`
+	// ShadowOID is the relation the call left the change's new table in:
+	// after a stop, the shadow's; after the swap, the live table's, which
+	// the swap made of the shadow. A call that resumed keeps it; one that
+	// started over built a new shadow under a new OID.
+	ShadowOID uint32 `json:"shadow_oid,omitempty"`
+	// HeldConns is how many of the host's pool connections were still
+	// counted as acquired when the call returned: a connection the cancel
+	// broke stays counted until the pool has finished closing it, which it
+	// does on a goroutine of its own.
+	HeldConns int32 `json:"held_conns"`
+	// CommittedWhileStopped is how many writes the load committed after a
+	// cancelled call returned and before the host's next call started.
+	CommittedWhileStopped int `json:"committed_while_stopped,omitempty"`
 	// LastWork is the last of the tracker's counters the host read before
 	// the call returned.
 	LastWork *progress.Work `json:"last_work,omitempty"`
@@ -102,20 +116,24 @@ type attemptInfo struct {
 }
 
 // saveInfo is a phase OnCheckpoint first saw a save in, relative to the
-// attempt's start.
+// attempt's start, with the watermark that first save carried, when it
+// carried one.
 type saveInfo struct {
-	Phase    string `json:"phase"`
-	AtMillis int64  `json:"at_ms"`
+	Phase     string `json:"phase"`
+	AtMillis  int64  `json:"at_ms"`
+	Watermark *int64 `json:"watermark,omitempty"`
 }
 
 // host is what an importer holds to drive migrate.Run: its own engine
-// pool, the connection it was dialed with, and the statement.
+// pool, the connection it was dialed with, the statement, and the logger
+// it hands the engine's diagnostics to.
 type host struct {
-	pool  *pgxpool.Pool
-	conn  dbconn.Config
-	st    statement.Statement
-	free  int64
-	store *checkpoint.Store
+	pool   *pgxpool.Pool
+	conn   dbconn.Config
+	st     statement.Statement
+	free   int64
+	store  *checkpoint.Store
+	logger *slog.Logger
 }
 
 // newHost dials the engine's pool the way the CLI does: the operator's
@@ -133,17 +151,22 @@ func newHost(t *testing.T, c config, alter string) host {
 	require.NoError(t, err, "LOAD_PROOF_FREE_DISK")
 	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
 	require.NoError(t, err)
-	return host{pool: pool, conn: conn, st: st, free: free, store: store}
+	// The engine's decisions and warnings land in the test's output beside
+	// the attempt log, as the binary's stderr does in the binary proof; the
+	// per-save debug lines are left out, since the record lists the saves.
+	logger := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelInfo}))
+	return host{pool: pool, conn: conn, st: st, free: free, store: store, logger: logger}
 }
 
 // options is what the host hands migrate.Run. It starts from what the CLI
 // sets for `migrate --copy-and-swap --keep-old --free-disk`: the library's
 // DefaultOptions, which the CLI's flag defaults equal, and the same
-// CopySwap fields. Beside them it sets three options only the library
-// exposes — Progress, a tracker the host reads from its own goroutine
-// (the CLI wires one only for its terminal display, never with --json);
-// CopySwap.OnCheckpoint, the host's hook on every checkpoint save; and
-// CopySwap.CheckpointInterval, how often the copy saves its watermark.
+// CopySwap fields, with the host's diagnostics logger. Beside them it sets
+// three options only the library exposes — Progress, a tracker the host
+// reads from its own goroutine (the CLI wires one only for its terminal
+// display, never with --json); CopySwap.OnCheckpoint, the host's hook on
+// every checkpoint save; and CopySwap.CheckpointInterval, how often the
+// copy saves its watermark.
 func (h host) options(tracker *progress.Tracker, onCheckpoint func(context.Context, checkpoint.Checkpoint) error) migrate.Options {
 	opts := migrate.DefaultOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
@@ -155,6 +178,7 @@ func (h host) options(tracker *progress.Tracker, onCheckpoint func(context.Conte
 		OnCheckpoint:       onCheckpoint,
 	}
 	opts.Progress = tracker
+	opts.Logger = h.logger
 	return opts
 }
 
@@ -172,7 +196,12 @@ func (l *saveLog) record(cp checkpoint.Checkpoint) {
 	if n := len(l.saves); n > 0 && l.saves[n-1].Phase == phase {
 		return
 	}
-	l.saves = append(l.saves, saveInfo{Phase: phase, AtMillis: time.Since(l.started).Milliseconds()})
+	save := saveInfo{Phase: phase, AtMillis: time.Since(l.started).Milliseconds()}
+	if cp.Watermark.Valid() {
+		landed := cp.Watermark.Value()
+		save.Watermark = &landed
+	}
+	l.saves = append(l.saves, save)
 }
 
 func (l *saveLog) list() []saveInfo {
@@ -302,6 +331,7 @@ func runAttempt(ctx context.Context, h host, stop stopPoint, started time.Time) 
 		StartedMillis: attemptStart.Sub(started).Milliseconds(),
 		RunMillis:     returned.Sub(attemptStart).Milliseconds(),
 		Saves:         saves.list(),
+		HeldConns:     h.pool.Stat().AcquiredConns(),
 		LastWork:      work.lastWork(),
 		Outcome:       string(v.Outcome),
 		Code:          v.Code,

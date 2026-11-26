@@ -192,7 +192,9 @@ database, asserting on `--json` fields and exit codes only, never on prose.
 The operator-run [corpus replay](../replay/README.md) (`make replay`) drives
 the same binary through a real project's schema-change history and is not
 a CI gate; so is the [load proof](#the-load-proof) (`make load-proof`), which
-drives it through a copy-and-swap under a concurrent write load. *Binds:*
+drives it through a copy-and-swap under a concurrent write load, and its
+[library variant](#the-library-load-proof) (`make load-proof-library`), which
+drives the same change through `migrate.Run`. *Binds:*
 Phase 2 (first executing command). *Source:* pgroll `make examples` CI job; pg_repack driving its CLI through `pg_regress`.
 
 ### TM-9 — The operation must outlive the observer
@@ -369,7 +371,8 @@ It is operator-run, not a CI gate; it is skipped unless `LOAD_PROOF_LIBRARY=1`, 
 target sets, and needs no binary.
 
 The host starts from `migrate.DefaultOptions()` and the copy-and-swap fields the CLI sets for
-`--copy-and-swap --keep-old --free-disk`, on a pool dialed as the CLI dials it, and adds three
+`--copy-and-swap --keep-old --free-disk`, on a pool dialed as the CLI dials it, with
+`Options.Logger` writing the engine's decisions and warnings into the test's output, and adds three
 options only the library exposes: `Options.Progress`, a tracker it reads from its own
 goroutine; `CopySwap.OnCheckpoint`, its hook on every checkpoint save; and
 `CopySwap.CheckpointInterval`, set to a tenth of a second so a cancelled copy resumes from
@@ -384,8 +387,10 @@ close by. It then makes three calls with the same statement:
 
 Before each resume the host waits for the server to let go of the slot the cancelled call
 held, as an importer must, since a resume that meets the slot still held is refused as
-`resume-slot-held`. Nothing is timed: the phases are read from the save and the tracker, and
-each wait is a poll with a named deadline.
+`resume-slot-held`, and for the load to commit a few writes per worker while no call runs,
+so the stopped interval always holds writes that only the kept slot can carry into the new
+table. Nothing is timed: the phases are read from the save and the tracker, and each wait is
+a poll with a named deadline.
 
 A pass proves, beyond what the load proof's oracles prove of the result:
 
@@ -393,6 +398,11 @@ A pass proves, beyond what the load proof's oracles prove of the result:
   carries both `context.Canceled` and the host's cause, and leaves the row in the phase the
   host cancelled in — after the first, in `copying` at the watermark the save recorded — so
   each cancel landed inside its phase, not after it;
+- each call after a stop resumed the stopped run rather than starting over: the shadow it
+  leaves, and in the end the swapped-in table, is the relation the first call built (by OID);
+  the second call's first copying save is at or above the watermark the first stopped at; and
+  the third saves no `copying` row;
+- every call, cancelled or not, gives back every connection it took from the host's pool;
 - the third call returns `executed-via-copy-and-swap` with the swap's WAL position, the
   row is `done`, and no replication slot is left under the name the engine derives for the
   table or the one the row named;
@@ -403,9 +413,15 @@ A pass proves, beyond what the load proof's oracles prove of the result:
 
 The record has the load proof's shape, without `binary`, plus `attempts`: per call, when it
 started and how long it ran, how long the host waited for the slot before it, the phases
-`OnCheckpoint` was handed, the phase it was cancelled in, the row's phase and watermark
-after it, the last tracker counters the host read, and its outcome, code, and error. The
-phase list the checkpoint poll records spans all three calls.
+`OnCheckpoint` was handed with the watermark each first carried, the phase it was cancelled
+in, the row's phase and watermark after it, the shadow's OID, the pool connections still
+counted as acquired when it returned, the writes the load committed before the next call,
+the last tracker counters the host read, and its outcome, code, and error. The phase list
+the checkpoint poll records spans all three calls.
+
+The library proof has been shown to pass at 20,000 and 50,000 rows on a laptop with
+`fsync=off` under the default load, and not yet at the default table size, which needs the
+same host as the load proof's default run.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
 

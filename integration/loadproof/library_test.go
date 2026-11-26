@@ -84,6 +84,11 @@ func checkStoppedAt(ctx context.Context, h host, table testutil.WorkloadTable, s
 	if a.err == nil {
 		return fmt.Errorf("%w: the run finished (%s) before the host's cancel in %s landed; seed more rows (LOAD_PROOF_ROWS)", errNotStopped, v.Outcome, stop.phase())
 	}
+	// The host's cause reaches the error by two roads. In the copy, the
+	// copier wraps the cause into its own error. In the verification pass,
+	// the checksum's read reports the bare cancellation, so the cause comes
+	// from the live capture's catch-up, which ends with it, and whose stop
+	// error the runner joins into the run's (captureOutcome).
 	if !errors.Is(a.err, context.Canceled) || !errors.Is(a.err, stop.cause()) {
 		return fmt.Errorf("%w: the run stopped for another reason than the host's cancel (verdict %s, %s: %s): %w", errNotStopped, v.Outcome, v.Reason, v.Detail, a.err)
 	}
@@ -97,6 +102,9 @@ func checkStoppedAt(ctx context.Context, h host, table testutil.WorkloadTable, s
 	info.RowPhase = cp.Phase.String()
 	if cp.Phase != stop.phase() {
 		return fmt.Errorf("%w: the row stands in %s, not %s, where the host cancelled", errNotStopped, cp.Phase, stop.phase())
+	}
+	if info.ShadowOID, err = relationOID(ctx, h, table.Schema, cp.ShadowTable); err != nil {
+		return fmt.Errorf("read the shadow the stopped run left: %w", err)
 	}
 	if stop != stopMidCopy {
 		return nil
@@ -113,15 +121,57 @@ func checkStoppedAt(ctx context.Context, h host, table testutil.WorkloadTable, s
 // runs to its verdict.
 func hostStops() []stopPoint { return []stopPoint{stopMidCopy, stopMidVerify} }
 
+// errConnsHeld reports a call that left connections of the host's pool
+// acquired, which a host that cancels and calls again on one pool runs
+// short of.
+var errConnsHeld = errors.New("the call left connections of the host's pool acquired")
+
+// connsReturnedDeadline bounds the wait, after a call returns, for the
+// host's pool to count none of its connections as acquired. A connection
+// the cancel broke is closed by the pool on its own goroutine, under the
+// pool's own close timeout, so a connection the call kept is the only one
+// still counted after this.
+const connsReturnedDeadline = 30 * time.Second
+
+// waitForConnsReturned waits until the host's pool counts no connection
+// as acquired.
+func waitForConnsReturned(ctx context.Context, h host) error {
+	giveUp := time.NewTimer(connsReturnedDeadline)
+	defer giveUp.Stop()
+	poll := time.NewTicker(commitPollInterval)
+	defer poll.Stop()
+	for {
+		held := h.pool.Stat().AcquiredConns()
+		if held == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for the host's pool connections to be returned: %w", ctx.Err())
+		case <-giveUp.C:
+			return fmt.Errorf("%w: %d still acquired after %s", errConnsHeld, held, connsReturnedDeadline)
+		case <-poll.C:
+		}
+	}
+}
+
+// stoppedWritesPerWorker is how many writes per load worker the host waits
+// for between a cancelled call and the next, so the interval in which no
+// call runs is never empty of writes.
+const stoppedWritesPerWorker = 3
+
 // runAttempts makes the host's calls to migrate.Run: one cancelled at each
-// of hostStops, each followed, once the server has let go of the slot, by
-// a call with the same statement that resumes from the checkpoint row,
-// the last of them run to its verdict. It records every call in res as it
-// returns and returns the last call made, with an error when a call did
-// not stop where the host cancelled it or the host itself failed; the
-// caller records the run before judging it. An operator's interrupt fails
-// the test at once, so its cleanups run.
-func runAttempts(t *testing.T, ctx, runCtx context.Context, h host, table testutil.WorkloadTable, started time.Time, res *results) (attempt, error) {
+// of hostStops, each followed, once the server has let go of the slot and
+// the load has written while no call runs, by a call with the same
+// statement that resumes from the checkpoint row, the last of them run to
+// its verdict. Each resuming call is held to the run the stop left
+// (checkResumed), and every call to returning the host's connections. It
+// records every call in res as it returns and returns the last call made,
+// with an error when a call did not stop where the host cancelled it, did
+// not resume, held connections, or the host itself failed; the caller
+// records the run before judging it. An operator's interrupt fails the
+// test at once, so its cleanups run.
+func runAttempts(t *testing.T, ctx, runCtx context.Context, h host, table testutil.WorkloadTable, load *testutil.LoadGenerator, workers int, started time.Time, res *results) (attempt, error) {
 	t.Helper()
 	call := func(stop stopPoint, waited time.Duration) (attempt, *attemptInfo, error) {
 		a, hostErr := runAttempt(runCtx, h, stop, started)
@@ -129,25 +179,58 @@ func runAttempts(t *testing.T, ctx, runCtx context.Context, h host, table testut
 		a.info.Attempt = len(res.Attempts) + 1
 		a.info.SlotIdleWaitMillis = waited.Milliseconds()
 		res.Attempts = append(res.Attempts, a.info)
-		return a, &res.Attempts[len(res.Attempts)-1], hostErr
+		info := &res.Attempts[len(res.Attempts)-1]
+		if hostErr != nil {
+			return a, info, hostErr
+		}
+		if err := waitForConnsReturned(runCtx, h); err != nil {
+			return a, info, fmt.Errorf("attempt %d: %w", info.Attempt, err)
+		}
+		return a, info, nil
 	}
-	var waited time.Duration
+	var (
+		waited   time.Duration
+		previous *attemptInfo
+		prevStop stopPoint
+	)
 	for _, stop := range hostStops() {
 		a, info, err := call(stop, waited)
 		if err != nil {
 			return a, err
 		}
+		committedAtReturn := load.Progress().Committed()
 		if err := checkStoppedAt(runCtx, h, table, stop, a, info); err != nil {
 			return a, fmt.Errorf("attempt %d: %w", info.Attempt, err)
+		}
+		if previous != nil {
+			if err := checkResumed(prevStop, *previous, *info); err != nil {
+				return a, err
+			}
 		}
 		t.Logf("attempt %d cancelled in %s after %s; the row stands in %s", info.Attempt, info.CancelledIn,
 			time.Duration(info.RunMillis)*time.Millisecond, info.RowPhase)
 		if waited, err = waitForSlotIdle(runCtx, h, table); err != nil {
 			return a, fmt.Errorf("before attempt %d: %w", info.Attempt+1, err)
 		}
+		if info.CommittedWhileStopped, err = waitForStoppedWrites(runCtx, load, committedAtReturn, stoppedWritesPerWorker*workers); err != nil {
+			return a, fmt.Errorf("before attempt %d: %w", info.Attempt+1, err)
+		}
+		stopped := *info
+		previous, prevStop = &stopped, stop
 	}
-	a, _, err := call(stopNone, waited)
-	return a, err
+	a, info, err := call(stopNone, waited)
+	if err != nil {
+		return a, err
+	}
+	// A last call that did not swap has no new table to compare; the
+	// caller judges it by its verdict.
+	if a.verdict.Outcome != verdict.OutcomeExecutedViaCopyAndSwap {
+		return a, nil
+	}
+	if info.ShadowOID, err = relationOID(runCtx, h, table.Schema, table.Table); err != nil {
+		return a, fmt.Errorf("read the swapped-in table: %w", err)
+	}
+	return a, checkResumed(prevStop, *previous, *info)
 }
 
 // The library proof: the same identity-key retype as TestLoadProof, under
@@ -203,7 +286,7 @@ func TestLoadProofLibrary(t *testing.T) {
 	atStart := load.Progress()
 	started := time.Now()
 	res.StartedAt = started
-	final, attemptsErr := runAttempts(t, ctx, runCtx, h, table, started, res)
+	final, attemptsErr := runAttempts(t, ctx, runCtx, h, table, load, c.Workers, started, res)
 	exited := time.Now()
 	atExit := load.Progress()
 	res.RunMillis = exited.Sub(started).Milliseconds()
