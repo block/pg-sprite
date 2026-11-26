@@ -269,26 +269,34 @@ func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table s
 }
 
 // CheckCopySwapPartitioning returns the refusal CheckCopySwapShape gives
-// schema.table when the first shape fact that puts the table outside v1
-// scope is its place in a partition or inheritance tree: an
-// *UnsupportedCopySwapShapeError carrying CopySwapCausePartitioned. It
-// returns nil for every other shape, supported or not, and mints no proof.
-// It is for a caller that previews the route without running it — a dry
-// run, which proves no privilege and reads no environment — so the preview
-// claims the partition refusal the route's preflight decides, read from the
-// same catalog facts and decided by the same rule, and leaves every other
-// shape fact to that preflight, which reads them again when the route runs.
-// The pool should come from dbconn.NewPool.
+// schema.table when the table is a partitioned parent, a partition, or part
+// of an inheritance tree: an *UnsupportedCopySwapShapeError carrying
+// CopySwapCausePartitioned, or CopySwapCauseUnlogged or
+// CopySwapCauseForceRLS when the table is also UNLOGGED or forces row
+// security, which the shape check decides first. It returns nil for a table
+// outside such a tree, supported or not, and mints no proof. It is for a
+// caller that previews the route without running it — a dry run, which
+// proves no privilege and reads no environment — so the preview gives every
+// table in a partition or inheritance tree the refusal the route's
+// preflight gives it, read from the same catalog facts and decided by the
+// same rule, and leaves every other table to that preflight, which reads
+// the facts again when the route runs. The pool should come from
+// dbconn.NewPool.
 func CheckCopySwapPartitioning(ctx context.Context, pool *pgxpool.Pool, schema, table string) error {
 	facts, err := gatherCopySwapShapeFacts(ctx, pool, schema, table)
 	if err != nil {
 		return err
 	}
-	shapeErr := copySwapShapeError(facts)
-	if CopySwapRefusalCauseOf(shapeErr) != CopySwapCausePartitioned {
+	if !facts.inPartitionOrInheritanceTree() {
 		return nil
 	}
-	return shapeErr
+	return copySwapShapeError(facts)
+}
+
+// inPartitionOrInheritanceTree reports whether the table is a partitioned
+// parent, a partition, or a parent or child in an inheritance tree.
+func (f copySwapShapeFacts) inPartitionOrInheritanceTree() bool {
+	return f.relkind == "p" || f.isPartition || f.inheritsParents > 0 || f.hasSubclass
 }
 
 // RecheckCopySwapShape verifies inside the build transaction that the proven

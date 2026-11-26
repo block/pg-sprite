@@ -101,13 +101,15 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 // copy-and-swap and the table is a partitioned parent, a partition, or part
 // of an inheritance tree, it returns the whole-plan refusal [RunDesired]
 // gives when the route's preflight refuses the table at admission — reason
-// copy-and-swap-refused, cause copy-and-swap-partitioned, the plan carried —
-// read from the live catalog on pool. It is how a desired-state dry run
+// copy-and-swap-refused, cause copy-and-swap-partitioned (or the unlogged or
+// forced row security cause the preflight decides first), the plan
+// carried — read from the live catalog on pool. It is how a desired-state dry run
 // learns that refusal instead of previewing a plan the run turns down; like
 // [AdmitCopySwapPartitioning] it claims nothing else the run's admission
 // decides. A plan with no copy-and-swap statement, which a plan that
 // creates its table never has, is admitted without a read. The boolean is
-// false when it refuses; a non-nil error is a catalog read that could not
+// false when it refuses, as for [AdmitPlan] and the opposite sense of
+// [AdmitCopySwapPartitioning]; a non-nil error is a catalog read that could not
 // finish, and nothing has been decided.
 func AdmitPlanCopySwapPartitioning(ctx context.Context, pool *pgxpool.Pool, report plan.Report) (DesiredResult, bool, error) {
 	first, routed := firstCopySwapStatement(report)

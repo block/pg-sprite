@@ -12,7 +12,8 @@ the examples at the end of this page.
 refuse the statement before planning it, or refuse its routed steps from their shape alone:
 an unsupported statement kind, an unnamed or `IF NOT EXISTS` index build, a `DETACH
 PARTITION`, or a statement routed to copy-and-swap on a partitioned parent, a partition, or a
-member of an inheritance tree (cause `copy-and-swap-partitioned`). `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
+member of an inheritance tree (cause `copy-and-swap-partitioned`, or `copy-and-swap-unlogged` or
+`copy-and-swap-force-rls` when the table is also UNLOGGED or forces row security). `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
 file itself is refused before a plan exists: a statement the file may not hold (a type, a data
 change), a second table, partitions of a table, a table shape the planner cannot build, or a
 difference the diff does not converge (storage parameters, persistence, a collation, an identity,

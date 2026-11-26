@@ -359,7 +359,7 @@ func TestCheckCopySwapShapeRefusesPartitioningAndInheritance(t *testing.T) {
 // nothing for a table outside one: a keyless table, which the shape check
 // refuses for its key, and a supported table alike, since the rest of the
 // shape is the route's preflight to decide.
-func TestCheckCopySwapPartitioningClaimsOnlyThePartitionRefusal(t *testing.T) {
+func TestCheckCopySwapPartitioningClaimsOnlyTablesInATree(t *testing.T) {
 	f := newCopySwapShapeFixture(t)
 	f.exec(t, `
 		CREATE TABLE %s.measurements (
@@ -397,6 +397,49 @@ func TestCheckCopySwapPartitioningClaimsOnlyThePartitionRefusal(t *testing.T) {
 	for _, table := range []string{"keyless", "orders"} {
 		assert.NoError(t, preflight.CheckCopySwapPartitioning(t.Context(), f.pool, f.schema, table), table)
 	}
+}
+
+// A member of a partition or inheritance tree that is also UNLOGGED or
+// forces row security is refused by the shape check for that whole-table
+// fact, which it decides before the tree. The partition check gives a tree
+// member that same refusal, so a dry run of it refuses as the run does;
+// an UNLOGGED table outside any tree is still the route's preflight to
+// refuse.
+func TestCheckCopySwapPartitioningGivesATreeMemberItsEarlierRefusal(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.measurements (
+			id bigint NOT NULL,
+			taken_at date NOT NULL,
+			PRIMARY KEY (id, taken_at)
+		) PARTITION BY RANGE (taken_at)`)
+	f.exec(t, `ALTER TABLE %s.measurements ENABLE ROW LEVEL SECURITY`)
+	f.exec(t, `ALTER TABLE %s.measurements FORCE ROW LEVEL SECURITY`)
+	f.exec(t, `
+		CREATE TABLE %s.base (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
+		CREATE UNLOGGED TABLE %s.derived (
+			extra text
+		) INHERITS (%[1]s.base)`)
+	f.exec(t, `
+		CREATE UNLOGGED TABLE %s.scratch (
+			id bigint PRIMARY KEY
+		)`)
+
+	for table, cause := range map[string]preflight.CopySwapRefusalCause{
+		"measurements": preflight.CopySwapCauseForceRLS,
+		"derived":      preflight.CopySwapCauseUnlogged,
+	} {
+		_, shapeErr := f.check(t, table)
+		requireCopySwapCause(t, shapeErr, cause)
+		err := preflight.CheckCopySwapPartitioning(t.Context(), f.pool, f.schema, table)
+		assert.Equal(t, shapeErr, err, "%s: the partition check must give the shape check's refusal", table)
+	}
+	_, err := f.check(t, "scratch")
+	requireCopySwapCause(t, err, preflight.CopySwapCauseUnlogged)
+	assert.NoError(t, preflight.CheckCopySwapPartitioning(t.Context(), f.pool, f.schema, "scratch"))
 }
 
 // A view or materialized view selecting from the table is an OID-bound

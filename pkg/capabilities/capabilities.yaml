@@ -376,8 +376,8 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: backend-unavailable
-    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned parent, a partition, or a member of an inheritance tree (`copy-and-swap-partitioned`), and `migrate --dry-run` and `migrate --desired --dry-run` end in that same refusal; the plan `diff` prints still routes the change as `execute`, since it does not read the route's preflight"
+    refusal_reason: copy-and-swap-refused
+    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned parent, a partition, or a member of an inheritance tree (`copy-and-swap-partitioned`), and `migrate --dry-run` and `migrate --desired --dry-run` end in that same refusal (`copy-and-swap-unlogged` or `copy-and-swap-force-rls` instead when the table is also UNLOGGED or forces row security, which the preflight decides first); the plan `diff` prints still routes the change as `execute`, since it does not read the route's preflight"
   - id: plain-tables-their-indexes
     area: "declarative_model"
     operation: "Plain tables + their indexes"
