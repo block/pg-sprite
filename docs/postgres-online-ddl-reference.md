@@ -314,8 +314,21 @@ ALTER TABLE events_default DROP CONSTRAINT events_default_not_2027_01;
 - From step 4's `ADD` until step 5 commits, a row written through `events` for the new
   range routes to `events_default` and fails its `CHECK`, and step 4's `VALIDATE` fails if
   `events_default` already holds a row in the range. The recipe is for a range nobody writes
-  to yet, such as next month's partition; for a live range, move its rows out of the
-  `DEFAULT` partition first and expect those writes to fail until the attach.
+  to yet, such as next month's partition.
+- For a live range, moving its rows out of `events_default` before step 4 is not enough
+  while writers stay active: a row written for the range after the move and before the
+  `ADD` lands in `events_default`, and the `VALIDATE` fails. Pause writes for the range
+  first, or run step 4's `ADD … NOT VALID` before the move. From the `ADD` on, inserts for
+  the range and updates to its rows still in `events_default` fail until the attach. Then
+  move the rows in one statement and run the `VALIDATE`:
+
+  ```sql
+  WITH moved AS (
+      DELETE FROM events_default
+      WHERE created_at >= '2027-01-01' AND created_at < '2027-02-01'
+      RETURNING *)
+  INSERT INTO events_2027_01 SELECT * FROM moved;
+  ```
 - The attach adopts an index only when it is equivalent to the parent's: the same columns
   in the same order, operator classes, collations, predicate, `INCLUDE` columns, access
   method, and uniqueness. A near miss is left in place as an extra index and a new one is
