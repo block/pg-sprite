@@ -31,6 +31,8 @@ var (
 type detachTarget struct {
 	parentOID    uint32
 	partitionOID uint32
+	// parent is the table's name as the error messages quote it.
+	parent string
 	// partition is the partition's name as the error messages quote it.
 	partition string
 	// finalizeSQL finishes a detach-pending partition; empty when the
@@ -43,11 +45,12 @@ type detachTarget struct {
 // lock_timeout bounds each lock wait, the wait for older snapshots between
 // its two transactions included, and statement_timeout bounds the whole
 // statement. A partition left detach-pending by an earlier run is finished
-// with DETACH PARTITION ... FINALIZE instead, and finished reports it. A
-// lock budget exhausted before the first transaction commits is retried by
-// retry like any brief step; once the partition is detach-pending a retry
-// runs FINALIZE. A step that stops with the partition still pending returns
-// ErrDetachInterrupted.
+// with DETACH PARTITION ... FINALIZE instead. A lock budget exhausted before
+// the first transaction commits is retried by retry like any brief step;
+// once the partition is detach-pending a retry runs FINALIZE. finished
+// reports that a FINALIZE ended the detach, whether an earlier run or an
+// earlier attempt of this step left the partition pending. A step that
+// stops with the partition still pending returns ErrDetachInterrupted.
 func detachPartitionConcurrently(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) (finished bool, err error) {
 	if err := b.validate(); err != nil {
 		return false, err
@@ -60,7 +63,11 @@ func detachPartitionConcurrently(ctx context.Context, pool *pgxpool.Pool, pt pre
 	if err != nil {
 		return false, err
 	}
-	finished = pending
+	if !pending {
+		if err := target.refuseOtherPending(ctx, pool); err != nil {
+			return false, err
+		}
+	}
 	err = executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
 		sql := st.SQL()
 		if pending {
@@ -68,6 +75,7 @@ func detachPartitionConcurrently(ctx context.Context, pool *pgxpool.Pool, pt pre
 		}
 		runErr := runDetachAttempt(ctx, pool, pt.Schema(), sql, b)
 		if runErr == nil {
+			finished = pending
 			return nil
 		}
 		// The first transaction may have committed before the failure, so
@@ -87,7 +95,9 @@ func detachPartitionConcurrently(ctx context.Context, pool *pgxpool.Pool, pt pre
 	if err != nil && pending {
 		// err is kept as text, so the outcome code names the pending
 		// partition rather than the budget that stopped the wait.
-		return false, fmt.Errorf("%w: %s; finish it with %s, or run the same statement again (%s)",
+		return false, fmt.Errorf("%w: %s; finish it with %s, or run the same statement again. The finish waits "+
+			"for every transaction that could still see the partition through the table, under the lock budget, so "+
+			"while a transaction older than that budget stays open, raise the lock budget or let it end first (%s)",
 			ErrDetachInterrupted, target.partition, target.finalizeSQL, err.Error())
 	}
 	return finished, err
@@ -127,7 +137,7 @@ func resolveDetachTarget(ctx context.Context, pool *pgxpool.Pool, pt preflight.P
 	if partSchema != "" {
 		written = pgx.Identifier{partSchema, partName}
 	}
-	target := detachTarget{partition: written.Sanitize()}
+	target := detachTarget{parent: parent, partition: written.Sanitize()}
 	conn, release, err := acquireSessionWithBudgets(ctx, pool, b.LockTimeout.Milliseconds(), b.StatementTimeout.Milliseconds(), pt.Schema())
 	if err != nil {
 		return detachTarget{}, err
@@ -170,6 +180,37 @@ func (t detachTarget) pending(ctx context.Context, q querier) (bool, error) {
 		return false, fmt.Errorf("read whether %s is detach-pending: %w", t.partition, err)
 	}
 	return pending, nil
+}
+
+// refuseOtherPending refuses with ErrPartitionDetachPending, before
+// anything executes, when another partition of the table is detach-pending:
+// PostgreSQL detaches one partition of a table at a time, so the step would
+// fail inside the server. The error names that partition and the statement
+// that finishes it.
+func (t detachTarget) refuseOtherPending(ctx context.Context, q querier) error {
+	if t.finalizeSQL == "" {
+		return nil
+	}
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	const query = `
+		SELECT pg_catalog.quote_ident(n.nspname) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident(c.relname)
+		  FROM pg_catalog.pg_inherits h
+		  JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) h.inhrelid
+		  JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		 WHERE h.inhparent OPERATOR(pg_catalog.=) $1
+		   AND h.inhrelid OPERATOR(pg_catalog.<>) $2
+		   AND h.inhdetachpending`
+	var other string
+	err := q.QueryRow(ctx, query, t.parentOID, t.partitionOID).Scan(&other)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the detach-pending partitions of %s: %w", t.parent, err)
+	}
+	return fmt.Errorf("%w: %s is detach-pending under %s, and PostgreSQL detaches one partition of a table at a "+
+		"time; finish it with ALTER TABLE %s DETACH PARTITION %s FINALIZE, then detach %s",
+		ErrPartitionDetachPending, other, t.parent, t.parent, other, t.partition)
 }
 
 // AdmitDetachPartition is the catalog half of the admission of a DETACH

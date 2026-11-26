@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,20 +78,27 @@ func partitionState(t *testing.T, pool *pgxpool.Pool, schema, table string) (att
 
 // openReader begins a transaction that reads events and stays open until
 // the returned function ends it. A concurrent detach waits for it after its
-// first transaction commits.
+// first transaction commits. A test that stops before ending the reader
+// ends it in cleanup, so the pool's close does not wait on its connection.
 func openReader(t *testing.T, pool *pgxpool.Pool, schema string) func() {
 	t.Helper()
 	conn, err := pool.Acquire(t.Context())
 	require.NoError(t, err)
-	tx, err := conn.Begin(t.Context())
+	var once sync.Once
+	end := func() {
+		once.Do(func() {
+			defer conn.Release()
+			_, err := conn.Exec(context.WithoutCancel(t.Context()), "COMMIT")
+			assert.NoError(t, err, "end the reader")
+		})
+	}
+	t.Cleanup(end)
+	_, err = conn.Exec(t.Context(), "BEGIN")
 	require.NoError(t, err)
 	var n int
-	require.NoError(t, tx.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.events", schema)).Scan(&n))
+	require.NoError(t, conn.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.events", schema)).Scan(&n))
 	require.Equal(t, 200, n)
-	return func() {
-		require.NoError(t, tx.Commit(context.WithoutCancel(t.Context())))
-		conn.Release()
-	}
+	return end
 }
 
 // waitForDetachToWait waits until a DETACH PARTITION statement is waiting

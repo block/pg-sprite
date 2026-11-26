@@ -91,10 +91,20 @@ autocommit-each-step has two shapes in the executor:
   PostgreSQL refuses a concurrent detach for, is refused
   (`detach-default-partition`), and a partition an earlier run left
   detach-pending is finished with `DETACH PARTITION ... FINALIZE` instead.
-  A lock budget exhausted before the first transaction commits is retried
-  like a brief step's, and once the partition is detach-pending the retry
-  runs `FINALIZE`. A step that stops with the partition still pending fails
-  with `partition-detach-interrupted`.
+  PostgreSQL detaches one partition of a table at a time, so while another
+  partition of the table is detach-pending the step is refused before it
+  runs (`partition-detach-pending`, naming that partition and its
+  `FINALIZE`). A lock budget exhausted before the first transaction commits
+  is retried like a brief step's, and once the partition is detach-pending
+  the retry runs `FINALIZE`. A step that stops with the partition still
+  pending fails with `partition-detach-interrupted`. The rerun waits for
+  older transactions the same way, under the same lock budget, so while a
+  transaction older than that budget stays open, raise `--lock-timeout` or
+  let the transaction end before the rerun. For library callers, the
+  step's report sets `finished_pending_detach` (`StepReport.FinishedPendingDetach`)
+  when a `FINALIZE` ended the detach, whether an earlier run or an earlier
+  attempt of the same step left the partition pending; it is informational,
+  and the verdict does not carry it.
 
 Each step's class is the `kind` field of its step report in the JSON
 verdict — the field retry logic branches on. A failed `brief` step means
@@ -249,6 +259,7 @@ Three mechanisms turn non-atomicity from a hazard into a contract:
    | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | `RebuildAbandonedIndex` removes the entry under proof and re-runs the build — see [invalid-index-recovery.md](invalid-index-recovery.md) | **Only as an explicit recovery call**: the sequence itself never drops; the recovery drops only what it has proven abandoned under the table lock, and refuses an in-flight or another table's entry |
    | `ADD PRIMARY KEY` / `UNIQUE USING INDEX`, failed at the attach (step 2) | A valid unique index; the attach failed, for example on a null in the key column (SQLSTATE `23502`) or its lock budget | Fix the cause, then attach the existing index with `ADD CONSTRAINT <name> PRIMARY KEY USING INDEX <name>` (or `UNIQUE USING INDEX`). Re-running the original statement fails at step 1, because the index already exists | Yes — the attach is a single statement, and it fails rather than doubles if the constraint already exists |
    | `ADD CONSTRAINT ... NOT VALID` + `VALIDATE` | The NOT VALID constraint, enforcing for new writes | Re-run VALIDATE — it is safe to repeat | Yes — VALIDATE is idempotent |
+   | `DETACH PARTITION ... CONCURRENTLY` (1 step), failed with `partition-detach-interrupted` | A detach-pending partition: reads through the table leave it out, and rows in its range are refused | Run the same statement again, which finishes the detach with `DETACH PARTITION ... FINALIZE`; raise the lock budget first while a transaction older than it stays open | Yes, while the code is `partition-detach-interrupted`. A rerun after the detach has finished on the server fails with `execution-failed`, since the partition is no longer the table's |
 
    Nothing resumes automatically — deliberately. The engine never picks up
    another run's leftovers on its own; the retry column is what a human or
@@ -372,9 +383,9 @@ concurrently is.
 | `foreign-table-partition` | yes | The partition tree holds a foreign table, which cannot carry an index, so the parent's index could never become valid; refused before anything is created |
 | `unique-index-partition-key` | yes | A unique index does not contain, among its plain key columns, the partition key of the parent and of every sub-partitioned partition. PostgreSQL checks each partitioned table only when it gets its index, so the build checks every level first; refused before anything is created, as an `unsupported-statement`, `by-design` refusal, in the dry run too; `UniqueIndexPartitionKeyError.Missing` names each table and the columns its key lacks. Add the missing partition key columns to the index's key |
 | `table-lock-unconfirmed` | yes | The pool's role cannot see when the session holding the partitioned index build's table lock started, so the build cannot confirm the lock is its own session's rather than one with the same PID on another server; refused before anything is created. Connect the pool as the role the connection target uses, or grant the pool's role `pg_read_all_stats` |
-| `partition-detach-pending` | yes | The partition tree holds a partition whose `DETACH PARTITION ... CONCURRENTLY` did not finish. The server leaves that partition out when it attaches an index, so the parent's index could never become valid, and out of a parent's column drop, so it would keep its copy of the column; refused before anything is created when the tree is first read, and before a reviewed column drop runs. Finish the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`, then rerun |
+| `partition-detach-pending` | yes | The partition tree holds a partition whose `DETACH PARTITION ... CONCURRENTLY` did not finish. The server leaves that partition out when it attaches an index, so the parent's index could never become valid, and out of a parent's column drop, so it would keep its copy of the column, and a table detaches one partition at a time; refused before anything is created when the tree is first read, before a reviewed column drop runs, and before a concurrent detach of another of the table's partitions runs. Finish the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`, then rerun |
 | `detach-default-partition` | yes | A `DETACH PARTITION ... CONCURRENTLY` step's table has a `DEFAULT` partition, and PostgreSQL refuses a concurrent detach there in every supported version; refused before any step runs, as an `unsupported-statement`, `by-design` refusal, in the dry run too. The only detach the table takes is the plain one, which holds `ACCESS EXCLUSIVE` on the table and the partition while it runs: submit it under the force and destructive acknowledgements, or detach the `DEFAULT` partition first |
-| `partition-detach-interrupted` | no | A `DETACH PARTITION ... CONCURRENTLY` step stopped after its first transaction committed: a budget, a cancellation, or a server error ended its wait for older transactions or its second transaction. The partition is detach-pending: queries of the table no longer read it and no row is routed into its range, but it stays in `pg_inherits` (`inhdetachpending`). Running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`, as does running that statement directly |
+| `partition-detach-interrupted` | no | A `DETACH PARTITION ... CONCURRENTLY` step stopped after its first transaction committed: a budget, a cancellation, or a server error ended its wait for older transactions or its second transaction. The partition is detach-pending: queries of the table no longer read it and no row is routed into its range, but it stays in `pg_inherits` (`inhdetachpending`). Running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`, as does running that statement directly; the finish waits for older transactions under the lock budget too, so raise the lock budget while a transaction older than it stays open |
 | `partitioned-index-tablespace` | yes | The partitioned index statement has a `TABLESPACE` clause. A partition's index is built from the definition the server prints for the parent's index, which never names a tablespace, so the clause would place the parent's index and leave every partition's index in the default tablespace; refused before anything is created |
 | `partitioned-index-unsettled` | no | Partitions kept appearing without an index until the build ran out of passes; everything finished stays attached and a rerun resumes |
 | `empty-sequence` | yes | The sequence had no steps to run |
