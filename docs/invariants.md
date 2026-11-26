@@ -833,11 +833,13 @@ cancelled wait leaves is a detach-pending partition, which the server keeps cons
 through the table leave it out, rows in its range are refused) and the executor detects from
 `pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors; a native attempt run with `RetryPolicy.HolderWait` requests its lock only once no transaction
-has held a conflicting lock on the table, or on a partition or child the statement also locks, across two
-reads of `pg_locks`, waiting outside the lock queue meanwhile and ending with `LockHolderWaitError`
-(`lock-holder-wait-exceeded`), nothing submitted, when a holder outlasts the wait, which one deadline bounds
-(`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+native and copy-and-swap executors; before a native step, a create step that adds a foreign key, or a table drop
+first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
+lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
+`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, and then
+requests its lock under its lock budget either way, so the wait adds at most `HolderWait` to the bound and never
+fails a step (`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
+`TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then

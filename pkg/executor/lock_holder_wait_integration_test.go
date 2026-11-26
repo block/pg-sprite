@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // holderWaitDeadline bounds how long a test waits for a native attempt that
@@ -89,26 +90,40 @@ func hasColumn(t *testing.T, pool *pgxpool.Pool, schema, column string) bool {
 	return exists
 }
 
-// A reader holds a transaction open on the table while ADD COLUMN runs with a
-// holder wait. The attempt waits outside the lock queue instead of queuing
-// behind the reader, so writers keep committing under a lock budget far
-// shorter than the attempt's own, and no ACCESS EXCLUSIVE request is ever
-// seen waiting. Once the reader ends, the column is added.
+// awaitRun waits for a run started in the background to return.
+func awaitRun(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(holderWaitDeadline):
+		require.FailNow(t, "the schema change did not finish after the reader ended")
+		return nil
+	}
+}
+
+// A reader holds a transaction open on the table while ADD COLUMN runs under
+// the default retry policy. The step waits outside the lock queue instead of
+// queueing behind the reader, so writers keep committing under a lock budget
+// far shorter than the step's own and no ACCESS EXCLUSIVE request is ever
+// seen waiting. Progress names the reader the step is waiting for. Once the
+// reader ends, the column is added and the wait leaves progress.
 func TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable(t *testing.T) {
 	pool, schema := newPool(t)
 	createCounterTable(t, pool, schema)
 	pt := mustPreflight(t, pool, schema, "t")
-	reader, _ := openReader(t, pool, schema)
+	reader, readerPID := openReader(t, pool, schema)
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN coupon_code text", schema))
-	// Without the holder wait this attempt would sit in the lock queue for
-	// its whole two-second lock budget, and every write below would fail.
+	// Without the wait this attempt would sit in the lock queue for its
+	// whole two-second lock budget, and every write below would fail.
 	wide := executor.Budget{LockTimeout: 2 * time.Second, StatementTimeout: 5 * time.Second}
-	retry := executor.RetryPolicy{MaxAttempts: 1, HolderWait: holderWaitDeadline}
 	done := make(chan error, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		done <- executor.ExecuteNative(t.Context(), pool, pt, st, wide, retry)
+		done <- executor.ExecuteNativeWithProgress(t.Context(), pool, pt, st, wide, executor.DefaultRetryPolicy(), tracker)
 	})
 	t.Cleanup(workers.Wait)
 
@@ -120,43 +135,49 @@ func TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable(t *testi
 		time.Sleep(100 * time.Millisecond)
 	}
 	assert.False(t, hasColumn(t, pool, schema, "coupon_code"), "the column is added only after the reader ends")
+	snap, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	wait := snap.Detail.LockHolderWait
+	require.NotNil(t, wait, "progress reports the wait")
+	assert.Equal(t, uint32(readerPID), wait.PID)
+	assert.Equal(t, schema+".t", wait.Table)
+	assert.Equal(t, executor.DefaultHolderWait, wait.Limit)
+	assert.Positive(t, wait.Waited)
 
 	require.NoError(t, reader.Rollback(t.Context()))
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(holderWaitDeadline):
-		require.FailNow(t, "the schema change did not finish after the reader ended")
-	}
+	require.NoError(t, awaitRun(t, done))
 	assert.True(t, hasColumn(t, pool, schema, "coupon_code"))
+	snap, err = tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Nil(t, snap.Detail.LockHolderWait, "the wait leaves progress once it ends")
 }
 
-// A reader that keeps its transaction open past the whole holder wait ends
-// the run with a LockHolderWaitError naming the reader's backend. The
-// statement was never submitted, so the table is unchanged.
-func TestExecuteNativeReportsALockHolderThatOutlastsTheWait(t *testing.T) {
+// A reader that keeps its transaction open past the whole wait does not fail
+// the step: the step then requests its lock as it would without the wait, and
+// the lock budget decides, here with today's lock-budget error since the
+// reader is still there. The table is unchanged.
+func TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut(t *testing.T) {
 	pool, schema := newPool(t)
 	createCounterTable(t, pool, schema)
 	pt := mustPreflight(t, pool, schema, "t")
-	_, readerPID := openReader(t, pool, schema)
+	openReader(t, pool, schema)
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN coupon_code text", schema))
 	retry := executor.RetryPolicy{MaxAttempts: 1, HolderWait: time.Second}
+	began := time.Now()
 	err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, retry)
 
-	var holderErr *executor.LockHolderWaitError
-	require.ErrorAs(t, err, &holderErr)
-	assert.Equal(t, readerPID, holderErr.PID)
-	assert.Equal(t, schema, holderErr.Schema)
-	assert.Equal(t, "t", holderErr.Table)
-	assert.GreaterOrEqual(t, holderErr.Waited, retry.HolderWait)
+	var budgetErr *executor.BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
+	assert.GreaterOrEqual(t, time.Since(began), retry.HolderWait+budget.LockTimeout, "the step waited, then spent its lock budget")
 	assert.False(t, hasColumn(t, pool, schema, "coupon_code"))
 }
 
 // Short write transactions keep committing on the table the whole time ADD
-// COLUMN runs with a holder wait. Each holds its lock for far less than the
-// gap between two reads of the table's lock holders, so none is taken for a
-// long holder and the column is added.
+// COLUMN runs under the default retry policy. Each holds its lock for far
+// less than the gap between two reads of the table's lock holders, so none
+// is taken for a long holder and the column is added.
 func TestExecuteNativeHolderWaitLetsShortTransactionsThrough(t *testing.T) {
 	pool, schema := newPool(t)
 	createCounterTable(t, pool, schema)
@@ -178,7 +199,34 @@ func TestExecuteNativeHolderWaitLetsShortTransactionsThrough(t *testing.T) {
 	})
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN coupon_code text", schema))
-	retry := executor.RetryPolicy{MaxAttempts: 1, HolderWait: holderWaitDeadline}
-	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, st, budget, retry))
+	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy()))
 	assert.True(t, hasColumn(t, pool, schema, "coupon_code"))
+}
+
+// A reviewed table drop waits outside the lock queue the same way while a
+// reader holds the table, so writers are not held behind it, and drops the
+// table once the reader ends.
+func TestExecuteDropTableWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable(t *testing.T) {
+	pool, schema := newPool(t)
+	createCounterTable(t, pool, schema)
+	definition := plannedTableDefinition(t, pool, schema, "t")
+	reader, _ := openReader(t, pool, schema)
+
+	wide := executor.Budget{LockTimeout: 2 * time.Second, StatementTimeout: 5 * time.Second}
+	done := make(chan error, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		done <- executor.ExecuteDropTable(t.Context(), pool, schema, "t", definition, wide, executor.DefaultRetryPolicy())
+	})
+	t.Cleanup(workers.Wait)
+
+	for range 5 {
+		require.NoError(t, writeUnderTightLockBudget(t, pool, schema),
+			"a write must not queue behind the drop while it waits for the reader")
+		assert.False(t, queuedExclusiveRequest(t, pool, schema))
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.NoError(t, reader.Rollback(t.Context()))
+	require.NoError(t, awaitRun(t, done))
+	assert.False(t, relationExists(t, pool, schema, "t"))
 }

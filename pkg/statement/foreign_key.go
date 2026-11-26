@@ -87,3 +87,44 @@ func QualifyForeignKeyReferences(sql, schema string) (string, error) {
 	}
 	return deparseOne(node)
 }
+
+// ForeignKeyReferencedTables returns the tables the foreign keys a CREATE
+// TABLE declares, or an ALTER TABLE adds, reference, each as the statement
+// spells it, in statement order without repeats, and none for any other
+// statement. Both grammar forms count: a table constraint FOREIGN KEY and a
+// column's inline REFERENCES. Creating or adding a foreign key locks the
+// referenced table as well as the table it is on.
+func ForeignKeyReferencedTables(sql string) ([]TableName, error) {
+	node, err := parseSingle(sql)
+	if err != nil {
+		return nil, err
+	}
+	var tables []TableName
+	add := func(con *pganalyze.Constraint) {
+		if con == nil || con.GetContype() != pganalyze.ConstrType_CONSTR_FOREIGN || con.GetPktable() == nil {
+			return
+		}
+		ref := TableName{Schema: con.GetPktable().GetSchemaname(), Name: con.GetPktable().GetRelname()}
+		if !slices.Contains(tables, ref) {
+			tables = append(tables, ref)
+		}
+	}
+	if create := node.GetCreateStmt(); create != nil {
+		for _, con := range foreignKeyConstraints(create) {
+			add(con)
+		}
+		return tables, nil
+	}
+	for _, c := range node.GetAlterTableStmt().GetCmds() {
+		cmd := c.GetAlterTableCmd()
+		switch cmd.GetSubtype() {
+		case pganalyze.AlterTableType_AT_AddConstraint:
+			add(cmd.GetDef().GetConstraint())
+		case pganalyze.AlterTableType_AT_AddColumn:
+			for _, inline := range cmd.GetDef().GetColumnDef().GetConstraints() {
+				add(inline.GetConstraint())
+			}
+		}
+	}
+	return tables, nil
+}

@@ -76,6 +76,13 @@ func ExecuteDropTable(ctx context.Context, pool *pgxpool.Pool, schema, table, de
 	if definition == "" {
 		return fmt.Errorf("%w: a table drop needs the definition its plan reviewed", ErrInvariantViolation)
 	}
+	// INV: LK-2 — the drop takes ACCESS EXCLUSIVE on the table and its
+	// descendants, so it requests the lock once no long-lived reader or
+	// writer holds one there, or once HolderWait runs out.
+	held := []lockedTable{{schema: schema, table: table, descendants: true, modes: readAndWriteLockModes()}}
+	if _, err := waitOutsideLockQueue(ctx, pool, held, retry.HolderWait, systemHolderWaitClock(), trackerHolderWaitReport(nil)); err != nil {
+		return fmt.Errorf("drop table: %w", err)
+	}
 	return executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
 		return dropTableAttempt(ctx, pool, schema, table, definition, b)
 	}, sleepContext)

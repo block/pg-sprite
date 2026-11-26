@@ -23,10 +23,6 @@ const (
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
-	// CodeLockHolderWaitExceeded: a transaction held a conflicting lock on
-	// the table for the retry policy's whole HolderWait; the lock was never
-	// requested and nothing was executed.
-	CodeLockHolderWaitExceeded Code = "lock-holder-wait-exceeded"
 	// CodeRowSecurityPlanChanged requires a fresh preview and SQL review before retry.
 	CodeRowSecurityPlanChanged Code = "row-security-plan-changed"
 	// CodeRowSecurityRefused requires a declaration, target, or privilege change.
@@ -332,7 +328,6 @@ func Codes() []Code {
 	return []Code{
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
-		CodeLockHolderWaitExceeded,
 		CodeBlockingOutcomeUnknown,
 		CodeCommitOutcomeUnknown,
 		CodeDropOutcomeUnknown,
@@ -506,9 +501,6 @@ func OutcomeCode(err error) Code {
 	}
 	if budgetErr, ok := errors.AsType[*BudgetError](err); ok {
 		return budgetErr.Code()
-	}
-	if holderErr, ok := errors.AsType[*LockHolderWaitError](err); ok {
-		return holderErr.Code()
 	}
 	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return CodeRowSecurityOutcomeUnknown

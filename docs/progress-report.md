@@ -43,7 +43,7 @@ phase or operation value is a contract change and bumps `format_version`, even i
 is added or renamed.
 
 Adding a field bumps `format_version` so a strict consumer can detect the new shape from the
-version. The current version is **8**: version 2 added `detail.statement`; version 3 added
+version. The current version is **9**: version 2 added `detail.statement`; version 3 added
 `detail.current_locker_pid`, `work.lockers_total`, and `work.lockers_done`; version 4 added
 the `copy` operation and split `work` into two counter families — the server-observed build
 counters and the engine-measured copy counters (`rows_*`, `bytes_*`) — selected by
@@ -53,7 +53,7 @@ version 5 added the `checksum` operation and its engine-measured counter family
 version 6 added the `catch-up` operation and its engine-measured counter family
 (`changes_applied`, `changes_buffered`, `lag_bytes`); version 7 added `work.rows_to_hash` and the
 derived `detail.percent` and `detail.eta_ns` (see [Percent and ETA](#percent-and-eta)); version
-8 added `work.settle_rows_read` and changed nothing else, so a consumer of version 7 reads version 8 unchanged once it accepts the number; every operation's `work` carries the counter, `0` where it does not apply.
+8 added `work.settle_rows_read` and changed nothing else, so a consumer of version 7 reads version 8 unchanged once it accepts the number; every operation's `work` carries the counter, `0` where it does not apply. Version 9 added `detail.lock_holder_wait` and changed nothing else.
 
 The precision of `detail.percent` is not part of the version contract. Within version 8 it
 went from one decimal place to two, and the running ceiling from 99.9 to 99.99, with no
@@ -93,6 +93,7 @@ licenses a consumer to intervene in the change itself.
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
 | `current_locker_pid` | int | while waiting on a locker | PostgreSQL backend PID currently blocking the concurrent build; omitted when none is published. |
+| `lock_holder_wait` | object | while the step waits outside the lock queue | A transaction has held a lock that reads or writes take on a table the step locks, so the step waits before requesting its own lock, rather than queueing every later reader and writer behind itself. `pid` is the holder's backend, `table` the schema-qualified table, `waited_ns` the wait so far, and `limit_ns` the longest the step waits before requesting its lock anyway. Omitted once the holder finishes or the wait ends. |
 | `percent` | number | running `copy`, `checksum` or `concurrent-index-build` step with a known total | The current step's completion, `0` to `99.99`, two decimal places, derived at the poll from `work` — see [Percent and ETA](#percent-and-eta). Never `100`: the step ending is completion. Omitted when the total is unknown, so an absent `percent` means unknown and `0` means progress that rounds to zero; the `work` counters say whether any work has been done. |
 | `eta_ns` | int | with `percent`, once the step has enough signal | Nanoseconds the current step is projected to take still, whole seconds, from its rate so far on the tracker's clock. Omitted whenever `percent` is, until the step has run 5 s and done 1% of its work, and once a counter has reached the estimate it is measured against. |
 | `work` | object | measured work only | Present exactly when something measured the step's work — the server published a progress row for a concurrent build, or the engine reported the copy, checksum or catch-up step's counters; then **every** counter below is present, so a fresh build or an empty copy reports honest zeros rather than an empty object. Which counters mean anything is decided by `operation`, not by `work` being present — see [Work counters](#work-counters). |
@@ -384,7 +385,7 @@ under five seconds, so no ETA yet (`TestSnapshotJSONShape` pins it):
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "phase": "running",
   "step": 2,
   "total_steps": 3,
@@ -430,7 +431,7 @@ pins it):
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "phase": "running",
   "step": 2,
   "total_steps": 4,
@@ -475,7 +476,7 @@ recopied, one of the two reread so far; under five seconds into the step, so no 
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "phase": "running",
   "step": 3,
   "total_steps": 4,
@@ -517,7 +518,7 @@ buffered behind an in-flight chunk, some WAL still to confirm
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "phase": "running",
   "step": 3,
   "total_steps": 4,
