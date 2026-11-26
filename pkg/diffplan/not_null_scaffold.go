@@ -3,10 +3,12 @@ package diffplan
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -73,8 +75,9 @@ type notNullHelper struct {
 }
 
 // notNullScaffold returns the helper of a planned SET NOT NULL whose first two
-// steps add that helper as a NOT VALID CHECK and then validate it. ok is false
-// for any other statement.
+// steps add that helper as a NOT VALID CHECK and then validate it, or whose
+// first step validates a helper an earlier run left on the live table
+// (resumeNotNullHelpers). ok is false for any other statement.
 func notNullScaffold(ps plan.Statement) (helper notNullHelper, ok bool, err error) {
 	source, err := singleOp(ps.SQL)
 	if err != nil {
@@ -83,27 +86,32 @@ func notNullScaffold(ps plan.Statement) (helper notNullHelper, ok bool, err erro
 	if !isSetNotNull(source) || len(ps.ExecSQL) < 2 {
 		return notNullHelper{}, false, nil
 	}
-	add, err := singleOp(ps.ExecSQL[0])
+	first, err := singleOp(ps.ExecSQL[0])
 	if err != nil {
 		return notNullHelper{}, false, err
 	}
-	if !isNotValidCheckAdd(add) {
+	rest := ps.ExecSQL[1:]
+	switch {
+	case isNotValidCheckAdd(first):
+		validate, err := singleOp(ps.ExecSQL[1])
+		if err != nil {
+			return notNullHelper{}, false, err
+		}
+		if !validatesConstraint(validate, first.Name) {
+			return notNullHelper{}, false, nil
+		}
+		rest = ps.ExecSQL[2:]
+	case first != nil && first.Kind == statement.OpValidateConstraint:
+	default:
 		return notNullHelper{}, false, nil
 	}
-	validate, err := singleOp(ps.ExecSQL[1])
-	if err != nil {
-		return notNullHelper{}, false, err
-	}
-	if !validatesConstraint(validate, add.Name) {
-		return notNullHelper{}, false, nil
-	}
-	helper = notNullHelper{constraint: add.Name, column: source.Column}
-	for _, sql := range ps.ExecSQL[2:] {
+	helper = notNullHelper{constraint: first.Name, column: source.Column}
+	for _, sql := range rest {
 		step, err := singleOp(sql)
 		if err != nil {
 			return notNullHelper{}, false, err
 		}
-		if dropsConstraint(step, add.Name) {
+		if dropsConstraint(step, first.Name) {
 			helper.dropped = true
 		}
 	}
@@ -145,4 +153,49 @@ func singleOp(sql string) (*statement.Op, error) {
 		return nil, nil
 	}
 	return &ops[0], nil
+}
+
+// resumeNotNullHelpers finds, for each SET NOT NULL the diff plans, the helper
+// CHECK an earlier run of its online sequence left on the live table: a run
+// stopped after adding the helper and before dropping it, because its
+// validation failed and the run was cancelled or gave up. The diff reads that
+// helper as a live constraint the desired schema lacks and plans its drop, a
+// drop of live structure a reviewer would have to approve, followed by a
+// sequence that adds the same helper again.
+//
+// A live constraint is that helper only when it has the helper's name and
+// exactly the definition the sequence gives it, NOT VALID or validated. Its
+// drop leaves the changes, and the column is returned so the planner resumes
+// the sequence at the helper's validation; the sequence's own last step still
+// drops it. Any other constraint under that name keeps its drop.
+func resumeNotNullHelpers(ctx context.Context, pool *pgxpool.Pool, table string, changes []schemadiff.Change) ([]schemadiff.Change, map[string]bool, error) {
+	var helpers map[string]bool
+	for _, ch := range changes {
+		op, err := singleOp(ch.SQL)
+		if err != nil {
+			return nil, nil, fmt.Errorf("plan derived statement %q: %w", ch.SQL, err)
+		}
+		if !isSetNotNull(op) {
+			continue
+		}
+		name := planner.NotNullHelperName(table, op.Column)
+		var quoted string
+		if err := pool.QueryRow(ctx, "SELECT pg_catalog.quote_ident($1)", op.Column).Scan(&quoted); err != nil {
+			return nil, nil, fmt.Errorf("quote column %s for the definition of helper constraint %s: %w", op.Column, name, err)
+		}
+		validated := "CHECK ((" + quoted + " IS NOT NULL))"
+		drop := slices.IndexFunc(changes, func(other schemadiff.Change) bool {
+			return other.Drops != nil && other.Drops.Kind == schemadiff.DroppedConstraint && other.Drops.Name == name &&
+				(other.Drops.Definition == validated || other.Drops.Definition == validated+" NOT VALID")
+		})
+		if drop < 0 {
+			continue
+		}
+		changes = slices.Delete(slices.Clone(changes), drop, drop+1)
+		if helpers == nil {
+			helpers = make(map[string]bool)
+		}
+		helpers[op.Column] = true
+	}
+	return changes, helpers, nil
 }

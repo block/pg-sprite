@@ -113,6 +113,9 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
+		if changes, facts.NotNullHelpers, err = resumeNotNullHelpers(ctx, pool, ds.Table(), changes); err != nil {
+			return plan.Report{}, err
+		}
 		if err := requireReferencesForAddedKeys(ctx, pool, req.Schema, changes); err != nil {
 			return plan.Report{}, err
 		}
