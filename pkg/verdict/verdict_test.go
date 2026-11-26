@@ -398,7 +398,6 @@ func TestReasonsPinsWireTokens(t *testing.T) {
 		"destructive-change",
 		"plan-fingerprint-mismatch",
 		"create-collision",
-		"declarative-foreign-key",
 		"copy-and-swap-refused",
 	}, got)
 }

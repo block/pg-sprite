@@ -14,13 +14,14 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // A desired file that drops a live foreign key is refused as destructive
-// before the foreign-key check is reached, and the key stays. A declared
+// without the caller's acknowledgement, and the key stays. A declared
 // foreign key that matches the live one plans no change, so the rest of the
 // table's convergence runs.
 func TestRunDesiredKeepsLiveForeignKeys(t *testing.T) {
@@ -155,6 +156,86 @@ func ordersForeignKeyValidated(t *testing.T, pool *pgxpool.Pool, schema string) 
 		schema).Scan(&exists, &validated)
 	require.NoError(t, err)
 	return exists, validated
+}
+
+// A foreign key the desired file no longer declares is dropped once the
+// caller acknowledges the destructive change, as the revert of the change
+// that added it plans. The key stops checking writes, and a plan derived
+// afterwards is empty.
+func TestRunDesiredDropsAForeignKeyTheFileNoLongerDeclares(t *testing.T) {
+	pool, schema := foreignKeySchema(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES %[1]s.users (id));
+		INSERT INTO %[1]s.orders VALUES (10, 1)`, schema))
+	require.NoError(t, err)
+	req := reviewedDestructiveRequest(t, pool, schema, `CREATE TABLE orders (id bigint PRIMARY KEY, user_id bigint NOT NULL);`)
+
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
+	require.Len(t, res.Plan.Statements, 1)
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, res.Plan.Statements[0].Kind)
+	exists, _ := ordersForeignKeyValidated(t, pool, schema)
+	assert.False(t, exists, "the run dropped the key")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.orders VALUES (11, 99)", schema))
+	require.NoError(t, err, "the dropped key no longer checks writes")
+
+	res, err = migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: schema, Desired: req.Desired}, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+	assert.Empty(t, res.Plan.Statements, "the converged table plans no statements")
+}
+
+// reviewedDestructiveRequest plans the desired orders file and returns the
+// request a caller makes after reviewing that plan: pinned to its
+// fingerprint, with the destructive change on orders acknowledged.
+func reviewedDestructiveRequest(t *testing.T, pool *pgxpool.Pool, schema, desired string) migrate.DesiredRequest {
+	t.Helper()
+	ds := parseDesired(t, desired)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+	return migrate.DesiredRequest{
+		Schema:              schema,
+		Desired:             ds,
+		ExpectedFingerprint: report.Fingerprint,
+		AllowDestructive:    schema + ".orders",
+	}
+}
+
+// A foreign key whose definition the desired file changes runs as the drop of
+// the live key, then the add of the new one NOT VALID and its validation, so
+// no step holds a lock that stops writes for longer than the brief budget.
+// The new key is in place and validated, with the changed action.
+func TestRunDesiredChangesAForeignKey(t *testing.T) {
+	pool, schema := foreignKeySchema(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES %[1]s.users (id));
+		INSERT INTO %[1]s.orders VALUES (10, 1), (11, 2)`, schema))
+	require.NoError(t, err)
+	req := reviewedDestructiveRequest(t, pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
+	require.Len(t, res.Plan.Statements, 2)
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, res.Plan.Statements[0].Kind)
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, res.Plan.Statements[1].Kind)
+	exists, validated := ordersForeignKeyValidated(t, pool, schema)
+	assert.True(t, exists)
+	assert.True(t, validated, "the run validates the rows under the new key")
+	var onDelete string
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT confdeltype FROM pg_catalog.pg_constraint
+		WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_user_id_fkey'`, schema).Scan(&onDelete))
+	assert.Equal(t, "c", onDelete, "the new key cascades deletes")
 }
 
 // A foreign key the desired file adds to a live table with rows is applied:

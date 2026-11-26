@@ -440,16 +440,16 @@ rows:
     reason_notes: "A desired file may declare a foreign key to an unqualified table that exists in the target schema, or to its own table. `diff` shows a matching foreign key as no change. A key the file adds to a live table plans as `add-foreign-key` and runs as two autocommitted steps: `ADD CONSTRAINT ... NOT VALID`, a brief `SHARE ROW EXCLUSIVE` lock on both tables that checks no existing row, then `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing. A row that breaks the key fails the validation with the key left `NOT VALID`, still enforced for new writes; once the rows are fixed, the next plan is that one validation. A `CREATE TABLE` that declares a foreign key runs as written, since the new table is empty, under the same brief lock budget as every create. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table. Export refuses both sides by default. A caller that opts in with `RenderOptions.ForeignKeys` gets each table's own foreign keys written out, and must render the referencing tables too, because an incoming FK lives in the referencing table's file. Export still refuses an FK into another schema, an FK from a table to itself whose referenced columns have no immediate primary key or `UNIQUE` constraint (only a standalone unique index, or only a deferrable constraint beside one), and an FK on a table rendered with `RenderOptions.RowSecurity` (`statement.ErrRowSecurityForeignKey`)"
   - id: declarative-foreign-key-drop
     area: "declarative_model"
-    operation: "Foreign keys a desired file no longer declares"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    operation: "Foreign keys a desired file no longer declares, or declares differently"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: declarative-foreign-key
-    reason_notes: "Planned but not executed. `diff` shows a live foreign key the desired file leaves out as a `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan; a drop is also destructive, so it needs `--allow-destructive`. To drop a key now, run the statement through the imperative front door (`migrate --alter`). A changed key plans as a drop and an add, so it is refused the same way"
+      migrate: supported
+      diff: supported
+    reason_notes: "A live foreign key the desired file leaves out plans as a `drop-foreign-key` statement, flagged **destructive**: `migrate --desired` runs it only when `--allow-destructive` names the table and `--expect-fingerprint` pins the reviewed plan. The drop changes only the catalog, but it takes `ACCESS EXCLUSIVE` on both the table and the referenced table, under the brief lock budget, and re-reads the key's definition under that lock, so a key replaced under the name since the plan is refused with `dropped-object-drift`. A changed key plans as the drop and the online add: `ADD CONSTRAINT ... NOT VALID`, then `VALIDATE CONSTRAINT`. Between the drop and the add, writes are not checked against the key; a row written then that breaks the new key fails the validation, which leaves the key `NOT VALID` and still enforced for new writes"
   - id: unlogged-tables
     area: "declarative_model"
     operation: "Unlogged tables"

@@ -389,7 +389,6 @@ func TestDryRunCodesHaveDocAnchors(t *testing.T) {
 		"table-not-found",
 		string(verdict.ReasonUnsupportedStatement),
 		string(verdict.ReasonUnsupportedPartitionedParent),
-		string(verdict.ReasonDeclarativeForeignKey),
 	}
 	for _, r := range planner.Reasons() {
 		codes = append(codes, string(r))
@@ -779,28 +778,4 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	assert.Contains(t, out.String(), "public.users (PostgreSQL 16.14) —")
 	assert.NotContains(t, out.String(), "Debian")
-}
-
-// A foreign-key drop in a desired-state plan says in words that it is not
-// applied declaratively, so the reader of the diff knows the change is shown
-// for review only.
-func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
-	report := plan.NewReport(plan.SourceDiff)
-	report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
-	report.Disposition = router.DispositionRefuse
-	report.Statements = append(report.Statements, plan.Statement{
-		SQL:         "ALTER TABLE public.orders DROP CONSTRAINT orders_user_id_fkey",
-		Kind:        schemadiff.ChangeDropForeignKey,
-		Route:       planner.RouteNative,
-		Disposition: router.DispositionRefuse,
-		Reason:      verdict.ReasonDeclarativeForeignKey,
-		Class:       verdict.ClassCapabilityBoundary,
-	})
-
-	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, palette{}, report))
-	// The renderer wraps prose; compare with whitespace collapsed.
-	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — dropping a foreign key is not supported for desired-state apply yet; "+
-		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
 }

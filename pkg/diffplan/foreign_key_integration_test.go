@@ -18,7 +18,6 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
-	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // foreignKeyPool returns a pool and a fresh schema holding a users table
@@ -46,16 +45,22 @@ func planOrders(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, d
 	return report
 }
 
-// requireForeignKeyRefusal asserts the statement is planned and refused with
-// the declarative foreign-key reason, so the drop is reviewable but never
-// executes.
-func requireForeignKeyRefusal(t *testing.T, st plan.Statement) {
+// requireForeignKeyDrop asserts the statement drops the orders key to users
+// as a destructive, checked drop that runs: the drop carries the definition
+// it read, so the run refuses a key replaced under the name since.
+func requireForeignKeyDrop(t *testing.T, schema string, st plan.Statement) {
 	t.Helper()
-	assert.Equal(t, router.DispositionRefuse, st.Disposition)
-	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, st.Reason)
-	assert.Equal(t, verdict.ClassCapabilityBoundary, st.Class)
-	assert.Empty(t, st.Backend)
-	assert.Empty(t, st.ExecSQL)
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, st.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), st.SQL)
+	assert.True(t, st.Destructive)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, []string{st.SQL}, st.ExecSQL)
+	assert.Equal(t, &schemadiff.DroppedObject{
+		Kind:       schemadiff.DroppedConstraint,
+		Name:       "orders_user_id_fkey",
+		Definition: "FOREIGN KEY (user_id) REFERENCES users(id)",
+	}, st.Drops)
+	assert.Empty(t, st.Reason)
 }
 
 const ordersWithForeignKey = `
@@ -216,8 +221,8 @@ CREATE TABLE %[2]s (
 }
 
 // A live foreign key the desired file no longer declares is planned as a
-// destructive drop and refused with the declarative foreign-key reason.
-func TestPlanUndeclaredLiveForeignKeyIsShownAndRefused(t *testing.T) {
+// destructive drop that runs, as the revert of a change that added it does.
+func TestPlanUndeclaredLiveForeignKeyIsDropped(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -229,11 +234,37 @@ func TestPlanUndeclaredLiveForeignKeyIsShownAndRefused(t *testing.T) {
 	report := planOrders(t, t.Context(), pool, schema, ordersWithoutForeignKey)
 
 	require.Len(t, report.Statements, 1)
-	st := report.Statements[0]
-	assert.Equal(t, schemadiff.ChangeDropForeignKey, st.Kind)
-	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), st.SQL)
-	assert.True(t, st.Destructive)
-	requireForeignKeyRefusal(t, st)
+	requireForeignKeyDrop(t, schema, report.Statements[0])
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+}
+
+// A foreign key whose definition changes plans as the drop of the live key
+// and the online add of the new one: ADD ... NOT VALID, then VALIDATE.
+func TestPlanChangedForeignKeyIsDroppedAndAddedOnline(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id)
+		)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	require.Len(t, report.Statements, 2)
+	requireForeignKeyDrop(t, schema, report.Statements[0])
+	add := report.Statements[1]
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, add.Kind)
+	assert.Equal(t, router.DispositionExecute, add.Disposition)
+	assert.Equal(t, []string{
+		fmt.Sprintf("ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) ON DELETE CASCADE NOT VALID", schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."orders" VALIDATE CONSTRAINT "orders_user_id_fkey"`, schema),
+	}, add.ExecSQL)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // A foreign key whose referenced table does not exist cannot be planned: the
@@ -407,9 +438,9 @@ func TestPlanGreenfieldTableWithForeignKeyIsCreated(t *testing.T) {
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
-// Statements without a foreign key in the same plan still execute; only the
-// foreign-key drop is refused, and admission is all-or-nothing.
-func TestPlanForeignKeyDropRefusalLeavesOtherStatementsRouted(t *testing.T) {
+// A foreign-key drop beside another change routes like the other change, so
+// the whole plan executes.
+func TestPlanForeignKeyDropBesideAnotherChangeExecutes(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -432,8 +463,8 @@ CREATE TABLE orders (
 	require.Contains(t, kinds, schemadiff.ChangeAddColumn)
 	require.Contains(t, kinds, schemadiff.ChangeDropForeignKey)
 	assert.Equal(t, router.DispositionExecute, kinds[schemadiff.ChangeAddColumn].Disposition)
-	requireForeignKeyRefusal(t, kinds[schemadiff.ChangeDropForeignKey])
-	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	requireForeignKeyDrop(t, schema, kinds[schemadiff.ChangeDropForeignKey])
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // A stand-in's indexes never take a name the desired file uses. LIKE ...

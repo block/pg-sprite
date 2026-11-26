@@ -955,22 +955,6 @@ path report this refusal under the same code, and both name the refused
 operation when the classifier recognized which part of the statement it
 cannot route.
 
-### `declarative-foreign-key`
-
-| Verdict | Lock | Scan / rewrite | Dry-run exit |
-|---|---|---|---|
-| refused — never executed | — | — | 2 |
-
-The desired file no longer declares a live foreign key. `diff` shows the
-drop so the change is reviewable, but desired-state execution
-(`migrate --desired`) does not drop foreign keys yet. To drop one, run the
-statement with `pg-sprite migrate --alter --allow-destructive SCHEMA.TABLE`.
-
-A foreign key the desired file adds is not refused: it runs as
-`ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT`, so writes
-keep flowing during the scan, and a new table is created with its foreign
-keys.
-
 ### `table-not-found`
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |

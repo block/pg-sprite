@@ -126,10 +126,6 @@ const (
 	// the plan against the live catalog rather than assuming the
 	// occupant's shape.
 	ReasonCreateCollision Reason = "create-collision"
-	// ReasonDeclarativeForeignKey: the desired-state plan drops a foreign
-	// key, and desired-state execution does not drop foreign keys yet. The
-	// plan still shows the change; the imperative front door runs the drop.
-	ReasonDeclarativeForeignKey Reason = "declarative-foreign-key"
 	// ReasonCopyAndSwapRefused: the change routes to copy-and-swap and the
 	// route's own gates declined it — the preflight found a table shape or
 	// an environment it cannot run against, or the engine refused mid-run
@@ -155,7 +151,6 @@ func Reasons() []Reason {
 		ReasonDestructiveChange,
 		ReasonPlanFingerprintMismatch,
 		ReasonCreateCollision,
-		ReasonDeclarativeForeignKey,
 		ReasonCopyAndSwapRefused,
 	}
 }

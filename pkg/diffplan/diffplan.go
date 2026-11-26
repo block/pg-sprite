@@ -146,7 +146,6 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if err := recordNotNullScaffolds(ctx, pool, report.Statements); err != nil {
 		return plan.Report{}, err
 	}
-	plan.RefuseForeignKeyDrops(&report)
 	if !tableExists {
 		// Shape refusals are stamped first so the disclosure below only
 		// describes the statements that remain executable.

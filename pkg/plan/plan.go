@@ -65,8 +65,10 @@ import (
 // fingerprint. Version 25 added the proven_catalog_only decision field.
 // Version 26 runs the add-foreign-key and validate-foreign-key kinds
 // instead of refusing them, and retires the foreign-key create-shape
-// cause: a new table is created with its foreign keys.
-const FormatVersion = 26
+// cause: a new table is created with its foreign keys. Version 27 runs
+// the drop-foreign-key kind instead of refusing it, and retires the
+// declarative-foreign-key reason, which refused only that kind.
+const FormatVersion = 27
 
 // Source identifies which front door derived the plan.
 type Source string

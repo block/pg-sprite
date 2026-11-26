@@ -43,8 +43,8 @@ const (
 	// ChangeDropConstraint drops a table constraint other than a foreign
 	// key.
 	ChangeDropConstraint ChangeKind = "drop-constraint"
-	// ChangeDropForeignKey drops a foreign-key constraint. Desired-state
-	// execution refuses it: a foreign-key drop is planned, not run.
+	// ChangeDropForeignKey drops a foreign-key constraint. It is
+	// destructive: the constraint stops checking writes to both tables.
 	ChangeDropForeignKey ChangeKind = "drop-foreign-key"
 	// ChangeDropColumn drops a column.
 	ChangeDropColumn ChangeKind = "drop-column"
@@ -812,7 +812,7 @@ func adoptIndexSQL(table string, con Constraint) string {
 }
 
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in
-// their own kind so desired-state execution can refuse them.
+// their own kind so a consumer can gate them apart from other constraints.
 func dropConstraintKind(con Constraint) ChangeKind {
 	if con.ForeignKey {
 		return ChangeDropForeignKey
