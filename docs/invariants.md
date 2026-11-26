@@ -1197,7 +1197,12 @@ sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_contro
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
 drops only a slot `InspectSlot` reads as `Own` (the one ownership rule the drop and resume share; any read error refuses the drop, so the drop needs every function the inspection runs — `TestDropSlotRefusedWhenTheOwnershipReadFails`),
-drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
+drops only a publication of the shape `CreateSlot` makes, reports a publication it refuses or
+fails to drop once the slot is gone as `ErrSlotDroppedPublicationLeft` joined with the
+publication's error, so a caller counts the slot as dropped
+(`TestDropIdleSlotLeavesAForeignPublicationUnderALookalikeEquals`) and a slot drop that fails
+or is refused never carries it (`TestDropSlotRefusesAForeignSlotOfTheName`), and
+is idempotent; `ReplaceSlot`
 drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
 reads two measures of WAL on a primary — retained, what the slot keeps on the volume, and
 unconfirmed, what its consumer has yet to confirm — and reports both unknown on a server in
@@ -1228,7 +1233,11 @@ slot is held is judged at the drop, since `pg_replication_slots` reads shared me
 snapshot; a slot a live row names, a slot a process holds, and a name wearing the prefix
 without the engine's name shape or `pgoutput` plugin are reported and left
 (`TestReapOrphanSlotsReportsAnEngineShapedSlotOfAnotherPluginAsForeign`); the pass stops at
-the first failure and names the slot in `Failed`; a database whose checkpoint table does not
+the first failure and names the slot in `Failed`, a slot the drop took before its publication
+was refused listed in `Dropped` too
+(`TestReapOrphanSlotsReportsASlotDroppedBeforeItsPublicationWasRefused`) and a slot whose drop
+failed before it was gone never listed there
+(`TestReapOrphanSlotsWhoseDropFailsBeforeTheSlotIsGoneListsNothingDropped`); a database whose checkpoint table does not
 exist is refused with `ErrTableMissing` rather than read as all orphans; two reapers over one
 database take turns at each slot, the one that waited finding the slot gone;
 `Store.PreviewOrphanSlots` sorts the same reads by the same rule under no lock and drops

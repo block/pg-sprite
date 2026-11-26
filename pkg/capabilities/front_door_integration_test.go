@@ -235,6 +235,20 @@ var migrateClaims = map[string]migrateClaim{
 			`CREATE INDEX events_name_idx ON %[1]s.events (name)`,
 		},
 	},
+	// pg_default exists on every server, so the claim needs no tablespace
+	// directory; the partitioned parent's SET TABLESPACE is metadata-only
+	// whichever tablespace it names.
+	"set-tablespace-on-a-partitioned-parent": {
+		setup: `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				PRIMARY KEY (id)
+			) PARTITION BY RANGE (id);
+			CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (100)`,
+		statements: []string{
+			`ALTER TABLE %[1]s.events SET TABLESPACE pg_default`,
+		},
+	},
 	"drop-constraint": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (

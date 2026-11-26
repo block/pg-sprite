@@ -368,6 +368,11 @@ no checkpoint row in a non-terminal phase still names it. Slot inspection treats
 A host reaps with the connection config its runs use, on the database they run in. The pass is
 safe to run at any time, including while a schema change is in flight: it keeps every slot a
 live row names or a process holds, and waits on the slot's lock for a run that is claiming one.
+It stops at the first drop that fails and returns the slots sorted so far, and the one it stopped
+at in `Failed`, beside the error. The drop takes the slot before the publication of the same
+name, so a slot whose publication is then refused as not the route's, or fails to drop, is gone
+and in `Dropped` as well as `Failed`, and the error (`decode.ErrSlotDroppedPublicationLeft`,
+joined with the publication's own error) names the publication left for the operator.
 
 ```go
 // reapOrphans drops the engine's orphan slots in the database cfg names.
@@ -385,19 +390,22 @@ func reapOrphans(ctx context.Context, cfg dbconn.Config) error {
 	if errors.Is(err, checkpoint.ErrTableMissing) {
 		return nil // no schema change has run in this database, so it has no engine slots
 	}
+	// A pass that stopped still dropped what it lists, so log the report before the error.
+	slog.Info("reaped orphan slots",
+		"dropped", reaped.Dropped, "failed", reaped.Failed, "live", reaped.Live,
+		"active", reaped.Active, "foreign", reaped.Foreign,
+		"publication_left", errors.Is(err, decode.ErrSlotDroppedPublicationLeft))
 	if err != nil {
 		return fmt.Errorf("reap orphan slots: %w", err)
 	}
-	slog.Info("reaped orphan slots",
-		"dropped", reaped.Dropped, "live", reaped.Live,
-		"active", reaped.Active, "foreign", reaped.Foreign)
 	return nil
 }
 ```
 
-`Dropped` are the orphans it removed with their publications; `Live` and `Active` are kept and
-left for a later pass; `Foreign` names wear the `pgsprite_` prefix without the engine's shape
-and are never dropped.
+`Dropped` are the orphans it removed with their publications, except the last entry of a pass
+that stopped with `decode.ErrSlotDroppedPublicationLeft`, whose publication the error names;
+`Live` and `Active` are kept and left for a later pass; `Foreign` names wear the `pgsprite_`
+prefix without the engine's shape and are never dropped.
 
 **Why.** A slot is durable cluster state that can retain unbounded WAL unless ownership and a
 hard limit are explicit — and because it is cluster state, ownership must be established per

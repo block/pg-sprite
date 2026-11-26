@@ -155,7 +155,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Physical relocation is a rewrite; routes to copy-and-swap, which does not carry a tablespace move yet"
+    reason_notes: "Physical relocation is a rewrite; routes to copy-and-swap, which does not carry a tablespace move yet. A partitioned parent has no storage to move: see the partitioned-parent `SET TABLESPACE` row"
   - id: add-primary-key-add-unique-plain-key-columns
     area: "constraints"
     operation: "`ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns)"
@@ -342,6 +342,18 @@ rows:
       migrate: supported
       diff: not_applicable
     reason_notes: "The plain form is rewritten to `DETACH PARTITION ... CONCURRENTLY`, which takes `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes of the other partitions keep running. It runs outside a transaction block under the brief budgets: `--lock-timeout` bounds each lock wait, the wait for transactions that still read the partition through the table included, and `--statement-timeout` the whole statement. Flagged **destructive**, since the partition's rows leave the table: `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. A detach that stops after its first transaction committed fails with `partition-detach-interrupted` and leaves the partition detach-pending; running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`. PostgreSQL detaches one partition of a table at a time, so while another partition is detach-pending the detach fails with `partition-detach-pending` before anything runs, naming that partition and its `FINALIZE`. PostgreSQL refuses a concurrent detach from a table with a `DEFAULT` partition, so both forms are refused there (`unsupported-statement`, `by-design`, in `--dry-run` too) before anything runs; `--force SCHEMA.TABLE` runs the plain `DETACH PARTITION` as submitted under bounded budgets, taking `ACCESS EXCLUSIVE` on the table and the partition. `DETACH PARTITION ... FINALIZE` itself is refused with `unsupported-statement`: rerun the statement that started the detach. A desired schema cannot express a detach, so `diff` never produces one"
+  - id: set-tablespace-on-a-partitioned-parent
+    area: "partitioned_tables"
+    operation: "`SET TABLESPACE` on a **partitioned parent**"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    maturity: "ga"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: not_applicable
+    reason_notes: "Metadata-only: a partitioned parent has no storage, so PostgreSQL records the tablespace as the default for partitions created later, under a brief `ACCESS EXCLUSIVE` on the parent alone, and moves no existing partition or index. Runs as written under bounded locks. Moving an existing partition is a `SET TABLESPACE` on that partition, a rewrite refused as in the `SET TABLESPACE` row. `ALTER INDEX ... SET TABLESPACE` is not taken by the imperative front door. A desired file does not express a table's tablespace, so `diff` never produces one"
   - id: partitioned-parents-in-the-declarative-model
     area: "partitioned_tables"
     operation: "Partitioned parents in the **declarative model**"
