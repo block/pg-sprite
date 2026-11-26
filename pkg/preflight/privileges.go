@@ -32,9 +32,9 @@ const (
 	// masquerades as "table not found".
 	TierConnect Tier = iota
 	// TierAlterInPlace covers owner-gated in-place ALTER TABLE (the
-	// instant and fast native paths), ALTER INDEX ... RENAME TO, and
-	// ALTER TYPE ... ADD VALUE: inheritable membership in the role that
-	// owns the table, or the type.
+	// instant and fast native paths), ALTER INDEX ... RENAME TO,
+	// ALTER TYPE ... ADD VALUE, and a reviewed DROP TABLE: inheritable
+	// membership in the role that owns the table, or the type.
 	TierAlterInPlace
 	// TierIndexBuild covers CREATE INDEX [CONCURRENTLY]: CREATE on the
 	// target schema on top of owning-role membership.

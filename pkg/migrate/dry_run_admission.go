@@ -1,8 +1,11 @@
 package migrate
 
 import (
+	"context"
 	"errors"
 	"fmt"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -36,6 +39,43 @@ var errAdmissionSchemaUnknown = errors.New("an unqualified statement needs the s
 // and statement the way [Run]'s does: the table in schema, and the statement
 // re-emitted qualified. A qualified st ignores schema.
 func AdmitRoutedSteps(st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRouted(st, schema, steps, executor.AdmitSequenceShape)
+}
+
+// AdmitPartitionedIndexRequest is [AdmitRoutedSteps] for a statement routed
+// to the partitioned index build, whose one step is the CREATE INDEX itself:
+// it runs the build's own static admission, so an unnamed or IF NOT EXISTS
+// index is refused in the dry run as it is in the run.
+func AdmitPartitionedIndexRequest(st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRouted(st, schema, steps, func(steps []string) error {
+		if len(steps) != 1 {
+			return fmt.Errorf("%w: the partitioned index build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
+		}
+		return executor.AdmitPartitionedIndexShape(steps[0])
+	})
+}
+
+// AdmitPartitionedUniqueIndex is the catalog half of the partitioned index
+// build's admission, for a statement [AdmitPartitionedIndexRequest] admitted:
+// a unique index whose plain key columns do not contain the partition key of
+// the target and of every sub-partitioned partition is refused, read from the
+// live catalog on pool, as the build refuses it under its table lock before
+// it creates anything. A host that plans through the library calls it with a
+// pool from pkg/dbconn to learn that refusal without running the build. The
+// verdict, the boolean, and the error mean what they mean for
+// [AdmitRoutedSteps].
+func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRouted(st, schema, steps, func(steps []string) error {
+		if len(steps) != 1 {
+			return fmt.Errorf("%w: the partitioned index build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
+		}
+		return executor.AdmitPartitionedUniqueIndex(ctx, pool, steps[0])
+	})
+}
+
+// admitRouted qualifies the steps of an unqualified st and applies admit to
+// them, returning the refusal verdict [Run] ends in when admit refuses.
+func admitRouted(st statement.Statement, schema string, steps []string, admit func([]string) error) (verdict.Verdict, bool, error) {
 	unqualified := st.Schema() == "" && st.Table() != ""
 	if unqualified && schema == "" {
 		return verdict.Verdict{}, false, fmt.Errorf("admit routed steps for %s: %w", st.Table(), errAdmissionSchemaUnknown)
@@ -47,7 +87,7 @@ func AdmitRoutedSteps(st statement.Statement, schema string, steps []string) (ve
 			return verdict.Verdict{}, false, err
 		}
 	}
-	admitErr := executor.AdmitSequenceShape(admitted)
+	admitErr := admit(admitted)
 	if admitErr == nil {
 		return verdict.Verdict{}, false, nil
 	}

@@ -617,7 +617,9 @@ func (c *Catchup) checkSlot(ctx context.Context, pool *pgxpool.Pool) error {
 			&decode.SlotLostError{Slot: c.stream.Slot()})
 	}
 	// INV: ST-3 — the ceiling is judged every cycle, fail closed.
-	if err := c.slotLag.Judge(status, c.opts.Clock.Now()); err != nil {
+	now := c.opts.Clock.Now()
+	if err := c.slotLag.Judge(status, now); err != nil {
+		err = recordDeadlocks(err, c.deadlocks, c.retryAt, now)
 		return fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
 	return nil

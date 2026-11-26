@@ -93,6 +93,22 @@ func TestTrackerSequenceStepsAdvanceMonotonically(t *testing.T) {
 	assert.Equal(t, 3, terminal.Step)
 }
 
+// A run that learns its steps while it runs raises the total; a count below
+// one leaves it alone.
+func TestTrackerAddStepsRaisesTheTotalOnly(t *testing.T) {
+	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
+	require.NoError(t, err)
+	tracker.Start(2, progress.OperationBrief)
+
+	tracker.AddSteps(3)
+	tracker.AddSteps(0)
+	tracker.AddSteps(-4)
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 5, snapshot.TotalSteps)
+}
+
 func TestTrackerReportsTerminalState(t *testing.T) {
 	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
 	require.NoError(t, err)
@@ -223,7 +239,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 			"active": true,
 			"attempt": 2,
 			"current_locker_pid": 31337,
-			"percent": 13.8,
+			"percent": 13.75,
 			"work": {
 				"rows_copied": 0,
 				"rows_total": 0,

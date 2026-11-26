@@ -48,12 +48,21 @@ func (s CopySwapShape) LogicalDecoding() bool { return s.logicalDecoding }
 type CopySwapTarget struct {
 	copySwapShape
 	decodesWAL bool
+	finishOnly bool
 }
 
 // DecodesWAL reports whether the environment was verified for a run that
 // captures changes through a replication slot. A quiesced run's target
 // reports false: no slot was proven available, so none may be created.
 func (t CopySwapTarget) DecodesWAL() bool { return t.decodesWAL }
+
+// FinishesCommittedSwap reports that the disk check admitted the target
+// only to finish a stopped run whose swap committed
+// (CopySwapHeld.SwapCommitted), asking it for no space. A run on such a
+// target may only finish that swap: one that would build a shadow or
+// resume a copy was never measured, so it must check the environment
+// again.
+func (t CopySwapTarget) FinishesCommittedSwap() bool { return t.finishOnly }
 
 // Database returns the catalog-resolved database the target lives in.
 func (s copySwapShape) Database() string { return s.database }

@@ -154,6 +154,9 @@ type Op struct {
 	// IndexTablespace is the USING INDEX TABLESPACE of an ADD PRIMARY KEY
 	// / UNIQUE: where its index is built.
 	IndexTablespace string
+	// Tablespace is the TABLESPACE clause of a CREATE INDEX: where the
+	// index is built. Empty when the statement carries none.
+	Tablespace string
 	// IndexStorageParams are the WITH (...) storage parameters of an ADD
 	// PRIMARY KEY / UNIQUE's index, in statement order.
 	IndexStorageParams []StorageParam
@@ -415,6 +418,7 @@ func ParseOps(sql string) ([]Op, error) {
 			Concurrent:  idx.GetConcurrent(),
 			Unique:      idx.GetUnique(),
 			IfNotExists: idx.GetIfNotExists(),
+			Tablespace:  idx.GetTableSpace(),
 		}}, nil
 	case node.GetDropStmt() != nil:
 		drop := node.GetDropStmt()

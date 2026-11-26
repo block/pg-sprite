@@ -126,7 +126,10 @@ func WithTableLockKeepalive(interval time.Duration) TableLockOption {
 type TableLockSession struct {
 	lock TableLock
 	pid  uint32
-	conn *pgx.Conn
+	// backendStart is the session's pg_stat_activity.backend_start. With pid
+	// it identifies the session from any other connection to the server.
+	backendStart time.Time
+	conn         *pgx.Conn
 
 	stop      chan struct{}
 	done      chan struct{}
@@ -183,11 +186,13 @@ func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, opt
 	var objID int32
 	var held bool
 	var pid uint32
+	var backendStart time.Time
 	// INV: LK-1 — the server derives and attempts the key atomically on the
 	// dedicated session, so no unprotected window follows a client-side hash.
 	err = conn.QueryRow(ctx, `SELECT `+tableLockObjIDSQL+`,
-		pg_try_advisory_lock($3, `+tableLockObjIDSQL+`), pg_backend_pid()`,
-		schema, table, TableLockClassID).Scan(&objID, &held, &pid)
+		pg_try_advisory_lock($3, `+tableLockObjIDSQL+`), pg_backend_pid(),
+		(SELECT a.backend_start FROM pg_catalog.pg_stat_activity a WHERE a.pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid())`,
+		schema, table, TableLockClassID).Scan(&objID, &held, &pid, &backendStart)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("acquire table lock for %s: %w", qualified, err), conn.Close(ctx))
 	}
@@ -211,7 +216,7 @@ func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, opt
 	}
 
 	s := &TableLockSession{
-		lock: TableLock{schema: schema, table: table, key: key}, pid: pid, conn: conn,
+		lock: TableLock{schema: schema, table: table, key: key}, pid: pid, backendStart: backendStart, conn: conn,
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	s.wg.Go(func() { s.monitor(context.WithoutCancel(ctx), opts) })
@@ -337,6 +342,12 @@ func (s *TableLockSession) Lock() TableLock { return s.lock }
 
 // BackendPID returns the dedicated session's backend PID.
 func (s *TableLockSession) BackendPID() uint32 { return s.pid }
+
+// BackendStart returns when the dedicated session's backend started, as
+// pg_stat_activity reports it. A PID is unique only within one server, so a
+// caller proving from another connection that it reaches the lock's server
+// matches the holder's PID and BackendStart together.
+func (s *TableLockSession) BackendStart() time.Time { return s.backendStart }
 
 // Bind derives a context from parent that is also cancelled when this
 // session ends: with Err as the cause when the lock is lost, and with

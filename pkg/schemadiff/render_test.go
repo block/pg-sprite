@@ -102,19 +102,70 @@ func TestRenderRefusesUnrenderableSequenceDefaults(t *testing.T) {
 	}
 }
 
-// Partitioned parents and partitions refuse to render: the model carries no
-// partition bounds or topology, so a rendered file would be a silently
-// wrong baseline.
-func TestRenderRefusesPartitionedTables(t *testing.T) {
-	parent := base()
-	parent.PartitionKey = "RANGE (id)"
-	_, err := Render(parent)
-	require.ErrorIs(t, err, ErrUnrenderablePartition)
-
+// A partition refuses to render: the model carries no partition bounds or
+// topology, so a rendered file would be a silently wrong baseline.
+func TestRenderRefusesPartition(t *testing.T) {
 	child := base()
 	child.IsPartition = true
-	_, err = Render(child)
+	_, err := Render(child)
 	require.ErrorIs(t, err, ErrUnrenderablePartition)
+}
+
+// A partitioned parent renders its PARTITION BY clause after the column
+// list, and its index — which the server prints ON ONLY — on the whole
+// table, the way a desired file declares it.
+func TestRenderPartitionedParentGolden(t *testing.T) {
+	m := base()
+	m.PartitionKey = "RANGE (id)"
+	m.Indexes = []Index{{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON ONLY events USING btree (name)"}}
+
+	out, err := Render(m)
+	require.NoError(t, err)
+	assert.Equal(t, `CREATE TABLE "events" (
+    "id" bigint NOT NULL,
+    "name" character varying(50) NOT NULL,
+    CONSTRAINT "events_pkey" PRIMARY KEY (id)
+) PARTITION BY RANGE (id);
+
+CREATE INDEX events_name_idx ON events USING btree (name);
+`, out)
+}
+
+// An invalid index on a partitioned parent is one some partition has no
+// attached index for. The diff compares a parent's indexes by name and
+// definition alone, so rendering it would present the partial index as
+// complete; the renderer refuses instead.
+func TestRenderRefusesPartitionedParentWithUnattachedIndex(t *testing.T) {
+	m := base()
+	m.PartitionKey = "RANGE (id)"
+	m.Indexes = []Index{{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON ONLY events USING btree (name)", Invalid: true}}
+
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableUnattachedIndex)
+}
+
+// A sub-partitioned partition is itself partitioned, so it can carry an
+// unattached index too; it is still a partition and refuses as one.
+func TestRenderRefusesSubPartitionedPartitionWithUnattachedIndex(t *testing.T) {
+	m := base()
+	m.IsPartition = true
+	m.PartitionKey = "RANGE (id)"
+	m.Indexes = []Index{{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON ONLY events USING btree (name)", Invalid: true}}
+
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderablePartition)
+}
+
+// Row security on a partitioned parent does not cover a query that names a
+// partition, and the row security executors refuse the parent, so its
+// export is refused.
+func TestRenderWithRowSecurityRefusesPartitionedParent(t *testing.T) {
+	m := base()
+	m.PartitionKey = "RANGE (id)"
+	m.RowSecurity = RowSecurity{Enabled: true}
+
+	_, err := RenderWithRowSecurity(m)
+	require.ErrorIs(t, err, ErrUnrenderablePartitionedRowSecurity)
 }
 
 func TestRenderRefusesClassicInheritance(t *testing.T) {

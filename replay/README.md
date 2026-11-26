@@ -26,8 +26,7 @@ of a real service's schema-change workload lands in each support tier (see
   the history keeps advancing. The class follows the authoritative contract in
   [docs/refusal-classes.md](../docs/refusal-classes.md), so the summary separates:
   - **capability boundary** — pg-sprite is expected to handle this
-    eventually: partitioned-parent indexes, multi-op rewrites and other
-    copy-and-swap territory.
+    eventually: multi-op rewrites and other copy-and-swap territory.
   - **no online-safety problem** — bootstrap DDL on objects nothing reads yet
     (`CREATE TABLE`): correctly refused because there is no concurrent-access
     problem for an online engine to solve. The verdict names the owner that
