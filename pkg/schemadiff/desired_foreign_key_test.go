@@ -22,7 +22,7 @@ import (
 // either read without its qualifier fails here.
 func TestDesiredForeignKeyReadsQualifyEveryRelationAndOperator(t *testing.T) {
 	queries := selectLiterals(t, "desired_foreign_key.go")
-	require.Len(t, queries, 2, "desired_foreign_key.go holds the stand-in index read and the binding proof")
+	require.Len(t, queries, 3, "desired_foreign_key.go holds the REFERENCES check, the stand-in index read, and the binding proof")
 
 	relation := regexp.MustCompile(`(?i)\b(?:FROM|JOIN)\s+(\S+)`)
 	for _, query := range queries {

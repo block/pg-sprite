@@ -41,7 +41,12 @@ type BlockingBudget struct {
 	StatementTimeout time.Duration
 }
 
-func (b BlockingBudget) validate() error {
+// Validate reports whether the budget can bound an accepted blocking
+// statement: both limits non-zero and representable, and the statement
+// limit longer than the lock limit. A caller that runs several statements
+// checks it before the first, so a budget the blocking one would refuse
+// stops the run before anything commits.
+func (b BlockingBudget) Validate() error {
 	// INV: AB-1 — both limits are non-zero, representable, and ordered
 	// before a session is acquired; whole milliseconds avoid PostgreSQL's
 	// zero/off truncation.
@@ -108,7 +113,7 @@ func ExecuteAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string
 }
 
 func executeAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string, table pgx.Identifier, b BlockingBudget, clock progress.Clock) (rep BlockingReport, err error) {
-	if err := b.validate(); err != nil {
+	if err := b.Validate(); err != nil {
 		return rep, err
 	}
 	st, err := statement.ParseOne(sql)

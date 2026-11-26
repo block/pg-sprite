@@ -69,4 +69,21 @@ func TestSizeGuardAppliesPerReason(t *testing.T) {
 	}}
 	assert.True(t, sizeGuardApplies(mixed, false),
 		"a mixed plan containing any blind attempt stays size-guarded")
+
+	// Exempt: every decision is proven catalog-only, so what executes
+	// cannot rewrite or read the table.
+	catalogOnly := planner.Plan{Decisions: []planner.Decision{
+		{Reason: planner.ReasonMetadataOnly, ProvenCatalogOnly: true},
+		{Reason: planner.ReasonFastDefault, ProvenCatalogOnly: true},
+	}}
+	assert.False(t, sizeGuardApplies(catalogOnly, false),
+		"a plan of proven catalog-only operations is exempt")
+
+	// One unproven decision keeps the whole run guarded.
+	partlyProven := planner.Plan{Decisions: []planner.Decision{
+		{Reason: planner.ReasonMetadataOnly, ProvenCatalogOnly: true},
+		{Reason: planner.ReasonMetadataOnly},
+	}}
+	assert.True(t, sizeGuardApplies(partlyProven, false),
+		"a plan with any operation not proven catalog-only stays size-guarded")
 }

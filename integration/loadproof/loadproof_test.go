@@ -11,6 +11,10 @@
 // skipped unless LOAD_PROOF=1; `make load-proof` builds the binary and runs
 // it against the compose database, and the same variables point it at any
 // other server with logical decoding on (see docs/testing.md).
+// TestLoadProofLibrary drives the same change in-process through
+// migrate.Run, cancelling and resuming it as an importer does; it is
+// skipped unless LOAD_PROOF_LIBRARY=1, which `make load-proof-library`
+// sets.
 package loadproof_test
 
 import (
@@ -86,19 +90,29 @@ func readConfig(t *testing.T) config {
 	if os.Getenv("LOAD_PROOF") != "1" {
 		t.Skip("set LOAD_PROOF=1 to run the load proof; `make load-proof` sets everything")
 	}
+	c := readTarget(t, defaultResults)
+	c.Binary = os.Getenv("LOAD_PROOF_BIN")
+	require.NotEmpty(t, c.Binary, "set LOAD_PROOF_BIN to a freshly built pg-sprite binary")
+	return c
+}
+
+// readTarget reads what both proofs share — the database, the table's
+// size, the load, the free space, and where the record goes, with results
+// as its default — and logs the target it names, failing on a value it
+// cannot use or a remote host the operator has not declared disposable.
+func readTarget(t *testing.T, results string) config {
+	t.Helper()
 	c := config{
 		DSN:            os.Getenv("LOAD_PROOF_DSN"),
-		Binary:         os.Getenv("LOAD_PROOF_BIN"),
 		Rows:           envInt(t, "LOAD_PROOF_ROWS", defaultRows),
 		Workers:        envInt(t, "LOAD_PROOF_WORKERS", defaultWorkers),
 		RatePerSecond:  envInt(t, "LOAD_PROOF_RATE", defaultRatePerSecond),
 		HotRowFraction: envFloat(t, "LOAD_PROOF_HOT", defaultHotRowFraction),
 		FreeDisk:       os.Getenv("LOAD_PROOF_FREE_DISK"),
 		AllowRemote:    os.Getenv("LOAD_PROOF_ALLOW_REMOTE") == "1",
-		Results:        envOr("LOAD_PROOF_RESULTS", defaultResults),
+		Results:        envOr("LOAD_PROOF_RESULTS", results),
 	}
 	require.NotEmpty(t, c.DSN, "set LOAD_PROOF_DSN to a database with wal_level=logical")
-	require.NotEmpty(t, c.Binary, "set LOAD_PROOF_BIN to a freshly built pg-sprite binary")
 	require.Positive(t, c.Rows, "LOAD_PROOF_ROWS")
 	require.NotEmpty(t, c.FreeDisk, "set LOAD_PROOF_FREE_DISK to the free space on the database's data volume (for example 40GiB); the copy builds a second full table beside the source, and the preflight refuses the run when the figure cannot hold it")
 	target, err := pgconn.ParseConfig(c.DSN)

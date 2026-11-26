@@ -184,6 +184,22 @@ func TestEveryAcknowledgementFlagMapsToARegistryEntry(t *testing.T) {
 			}
 			_, err = k.Parse(desiredArgs)
 			require.Error(t, err)
+			if f.Name == "accept-blocking" {
+				assert.Contains(t, err.Error(), "--accept-blocking with --desired requires --expect-fingerprint and --allow-destructive")
+
+				// Beside the pin and the destructive acknowledgement it is
+				// accepted, and reaches the request, not the policy.
+				pinned := New("test")
+				k, err = kong.New(pinned, kong.Vars{"version": "test"})
+				require.NoError(t, err)
+				_, err = k.Parse(append(desiredArgs, "--expect-fingerprint", "sha256:reviewed",
+					"--allow-destructive", "public.orders", "--statement-timeout", "10m"))
+				require.NoError(t, err)
+				assert.Equal(t, "public.orders", pinned.Migrate.AcceptBlocking)
+				assert.Empty(t, pinned.Migrate.desiredOptions(nil).Acknowledgements(),
+					"a desired-state run takes the acknowledgement on its request, never in the policy")
+				return
+			}
 			if f.Name != "allow-destructive" {
 				assert.Contains(t, err.Error(), "--"+f.Name+" cannot be combined with --desired")
 				return

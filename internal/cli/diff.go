@@ -211,6 +211,12 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 				return fmt.Errorf("write plan: %w", err)
 			}
 		}
+		if ps.Execution == planner.ExecutionBlockingIndexDrop {
+			if _, err := fmt.Fprintln(out, "-- PostgreSQL has no concurrent drop for this index; this plain drop locks the table, every partition, "+
+				"and every partition's index, and pg-sprite migrate --desired runs it only with --accept-blocking beside the pin and --allow-destructive"); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
+		}
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}

@@ -4,3 +4,4 @@ coverage.out
 .idea/
 .vscode/
 integration/loadproof/results.json
+integration/loadproof/results-library.json
