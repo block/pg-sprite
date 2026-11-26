@@ -11,27 +11,33 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// recordNotNullScaffoldValidations sets Validates on each planned SET NOT
-// NULL that runs as the online sequence: ADD CONSTRAINT of a helper CHECK
-// (column IS NOT NULL) NOT VALID, its VALIDATE CONSTRAINT, SET NOT NULL, and
-// DROP CONSTRAINT. The validation step then checks the helper still has the
-// definition its add left, as it does for any constraint the plan adds NOT
-// VALID, so a validation that resumes after a failure never validates a
-// constraint someone else put under the helper's name. It also lets a caller
-// that gates validations on the plan's record see that this one validates
-// the plan's own helper.
+// recordNotNullScaffolds records the helper of each planned SET NOT NULL that
+// runs as the online sequence: ADD CONSTRAINT of a helper CHECK (column IS
+// NOT NULL) NOT VALID, its VALIDATE CONSTRAINT, SET NOT NULL, and DROP
+// CONSTRAINT.
 //
-// The definition is the one pg_get_constraintdef prints for the helper.
+// Validates gets the helper with the definition its add leaves, as any
+// constraint the plan adds NOT VALID does. The validation step then checks
+// that the helper still has that definition, so a validation that resumes
+// after a failure never validates a constraint someone else put under the
+// helper's name. It also lets a caller that gates validations on the plan's
+// record see that this one validates the plan's own helper.
+//
+// DropsHelper gets the helper with the definition it has once validated, when
+// a later step of the sequence drops it. A caller that runs each step on its
+// own checks the drop against it, as it checks any drop the plan records.
+//
+// Both definitions are the ones pg_get_constraintdef prints for the helper.
 // PostgreSQL deparses the column reference with the same quoting rule as
 // quote_ident, which the server applies here so a keyword or mixed-case
 // column name renders exactly as the catalog will.
-func recordNotNullScaffoldValidations(ctx context.Context, pool *pgxpool.Pool, statements []plan.Statement) error {
+func recordNotNullScaffolds(ctx context.Context, pool *pgxpool.Pool, statements []plan.Statement) error {
 	for i := range statements {
 		ps := &statements[i]
 		if ps.Validates != nil {
 			continue
 		}
-		constraint, column, ok, err := notNullScaffold(*ps)
+		scaffold, ok, err := notNullScaffold(*ps)
 		if err != nil {
 			return fmt.Errorf("plan derived statement %q: %w", ps.SQL, err)
 		}
@@ -39,43 +45,69 @@ func recordNotNullScaffoldValidations(ctx context.Context, pool *pgxpool.Pool, s
 			continue
 		}
 		var quoted string
-		if err := pool.QueryRow(ctx, "SELECT pg_catalog.quote_ident($1)", column).Scan(&quoted); err != nil {
-			return fmt.Errorf("quote column %s for the definition of helper constraint %s: %w", column, constraint, err)
+		if err := pool.QueryRow(ctx, "SELECT pg_catalog.quote_ident($1)", scaffold.column).Scan(&quoted); err != nil {
+			return fmt.Errorf("quote column %s for the definition of helper constraint %s: %w", scaffold.column, scaffold.constraint, err)
 		}
+		validated := "CHECK ((" + quoted + " IS NOT NULL))"
 		ps.Validates = &schemadiff.ConstraintValidation{
-			Constraint: constraint,
-			Def:        "CHECK ((" + quoted + " IS NOT NULL)) NOT VALID",
+			Constraint: scaffold.constraint,
+			Def:        validated + " NOT VALID",
+		}
+		if scaffold.dropped {
+			ps.DropsHelper = &schemadiff.DroppedObject{
+				Kind:       schemadiff.DroppedConstraint,
+				Name:       scaffold.constraint,
+				Definition: validated,
+			}
 		}
 	}
 	return nil
 }
 
-// notNullScaffold returns the helper constraint and the column of a planned
-// SET NOT NULL whose first two steps add that helper as a NOT VALID CHECK and
-// then validate it. ok is false for any other statement.
-func notNullScaffold(ps plan.Statement) (constraint, column string, ok bool, err error) {
+// notNullHelper is the helper constraint of a planned SET NOT NULL, the
+// column it checks, and whether a later step of the sequence drops it.
+type notNullHelper struct {
+	constraint string
+	column     string
+	dropped    bool
+}
+
+// notNullScaffold returns the helper of a planned SET NOT NULL whose first two
+// steps add that helper as a NOT VALID CHECK and then validate it. ok is false
+// for any other statement.
+func notNullScaffold(ps plan.Statement) (helper notNullHelper, ok bool, err error) {
 	source, err := singleOp(ps.SQL)
 	if err != nil {
-		return "", "", false, err
+		return notNullHelper{}, false, err
 	}
 	if !isSetNotNull(source) || len(ps.ExecSQL) < 2 {
-		return "", "", false, nil
+		return notNullHelper{}, false, nil
 	}
 	add, err := singleOp(ps.ExecSQL[0])
 	if err != nil {
-		return "", "", false, err
+		return notNullHelper{}, false, err
 	}
 	if !isNotValidCheckAdd(add) {
-		return "", "", false, nil
+		return notNullHelper{}, false, nil
 	}
 	validate, err := singleOp(ps.ExecSQL[1])
 	if err != nil {
-		return "", "", false, err
+		return notNullHelper{}, false, err
 	}
 	if !validatesConstraint(validate, add.Name) {
-		return "", "", false, nil
+		return notNullHelper{}, false, nil
 	}
-	return add.Name, source.Column, true, nil
+	helper = notNullHelper{constraint: add.Name, column: source.Column}
+	for _, sql := range ps.ExecSQL[2:] {
+		step, err := singleOp(sql)
+		if err != nil {
+			return notNullHelper{}, false, err
+		}
+		if dropsConstraint(step, add.Name) {
+			helper.dropped = true
+		}
+	}
+	return helper, true, nil
 }
 
 // isSetNotNull reports whether op is an ALTER COLUMN ... SET NOT NULL.
@@ -94,6 +126,12 @@ func isNotValidCheckAdd(op *statement.Op) bool {
 // validatesConstraint reports whether op validates the constraint named name.
 func validatesConstraint(op *statement.Op, name string) bool {
 	return op != nil && op.Kind == statement.OpValidateConstraint && op.Name == name
+}
+
+// dropsConstraint reports whether op drops the constraint named name, without
+// CASCADE.
+func dropsConstraint(op *statement.Op, name string) bool {
+	return op != nil && op.Kind == statement.OpDropConstraint && op.Name == name && !op.Cascade
 }
 
 // singleOp returns the one operation sql carries, or nil when it carries
