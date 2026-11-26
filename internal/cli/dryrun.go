@@ -25,9 +25,12 @@ import (
 // destructive-change gate, unless --allow-destructive names the table, and
 // the executor's shape admission of the routed steps, once they are known, when
 // no earlier apply check refuses first, and the partitioned index build's
-// check of a unique index against the tree's partition keys. The checks that need the apply's
+// check of a unique index against the tree's partition keys, and the
+// copy-and-swap route's refusal of a table in a partition or inheritance
+// tree. The checks that need the apply's
 // live facts — the size guard and the privilege preflight, which the apply
-// runs before admission — are not run. Introspecting the
+// runs before admission, and the rest of the copy-and-swap preflight — are
+// not run. Introspecting the
 // target table sharpens type-change classification; a missing table means
 // zero facts and a strictly more conservative plan.
 func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
@@ -127,6 +130,19 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			if ps.Disposition != router.DispositionExecute {
 				continue
 			}
+			// The copy-and-swap route's preflight refuses a table in a
+			// partition or inheritance tree before it builds anything,
+			// and so does the dry run, from the same catalog facts.
+			if ps.Backend == router.BackendCopyAndSwap {
+				v, refused, admitErr := migrate.AdmitCopySwapPartitioning(ctx, pool, st, report.Schema)
+				if admitErr != nil {
+					return admitErr
+				}
+				if refused {
+					return c.emit(out, v)
+				}
+				continue
+			}
 			// Only the native route's steps run through the sequence
 			// executor; a copy-and-swap statement has none, since the
 			// engine builds its shadow from the statement itself.
@@ -158,6 +174,18 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 				if refused {
 					return c.emit(out, v)
 				}
+			}
+			// A concurrent detach is refused when the table has a DEFAULT
+			// partition, which only the live catalog knows. A detach is
+			// destructive, so it got this far only under the
+			// acknowledgement, which the apply's refusal records.
+			v, refused, admitErr = migrate.AdmitDetachPartition(ctx, pool, st, report.Schema, ps.ExecSQL)
+			if admitErr != nil {
+				return admitErr
+			}
+			if refused {
+				v.AllowedDestructive = ps.Destructive
+				return c.emit(out, v)
 			}
 		}
 	}

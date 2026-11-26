@@ -43,7 +43,8 @@ dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 a verdict, not a plan report — and exit 2. So does an unacknowledged
 destructive statement, and so do statements whose routed
 steps the executor refuses from their shape alone before running anything
-(an unnamed or `IF NOT EXISTS` index build, `DETACH PARTITION`). The dry run
+(an unnamed or `IF NOT EXISTS` index build), or from the catalog (a
+`DETACH PARTITION` beside a `DEFAULT` partition). The dry run
 does not evaluate the apply's size guard or privilege preflight; those need
 live facts the dry run does not gather, and the apply runs them first. So a
 shape refusal on `--dry-run` is the apply's verdict when no earlier apply
@@ -81,8 +82,9 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
 The process status is the part of the contract a shell reads without JSON. Each
 code answers whether anything committed and whether the engine vouches for it
 as online-safe; the section headings below name the code each example exits with.
-The table is restated from the [README](../README.md#exit-codes), which is the
-canonical statement of the ladder; a wording fix lands there first.
+This table is the canonical statement of the ladder; the
+[README](../README.md#exit-codes) restates it in short, and a wording fix lands
+here first.
 
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|
@@ -103,6 +105,37 @@ budget did run and was rolled back, and still exits 2. A gate that treats every
 non-zero status as failure is fail-closed for all three non-zero codes; a caller
 that deliberately permits the passthrough allows 3 explicitly. The rationale is in
 [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md#exit-codes).
+
+`lint --desired` refuses with exit 2 as well. The offline `lint` exits 1 when a
+script has error-severity findings (warnings alone exit 0), and `suggest` exits 0
+on any script it can parse — its findings never gate; only an unreadable or
+unparsable script exits 1.
+
+Two more cases a caller must handle:
+
+- **A lost `COMMIT` is exit 1, not 0, 2, or 3.** When the connection drops or
+  the caller's context ends while a bounded attempt's `COMMIT` is in flight,
+  the change may or may not have landed. Exit 0 and 3 would claim it did and
+  exit 2 would claim it did not; the failed exit says only that the engine
+  cannot vouch for the run, and the verdict's `code` (`commit-outcome-unknown`)
+  and detail tell the operator to inspect the catalog.
+- **Library callers get the same facts typed, not as a status.** An
+  orchestrator that imports `pkg/executor` branches on the verdict's
+  `outcome`, `errors.As` to the executor's typed errors, and
+  `executor.OutcomeCode` — the exit code is the CLI's rendering of those
+  facts, not a surface the library exposes. Check
+  `errors.As(err, new(*executor.CommitOutcomeUnknownError))` or `OutcomeCode`
+  before testing for context errors: a context cancelled during `COMMIT`
+  stays in the error chain, but the outcome is unknown, not a cancellation. The typed contract is in
+  [execution-model.md](execution-model.md#how-a-failure-is-reported).
+
+Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking
+SCHEMA.TABLE --statement-timeout …` on a refused plain `DROP INDEX`,
+`REINDEX INDEX`, or `REINDEX TABLE`, where the value names the table whose
+lock you accept. Why the code is non-zero, and why a
+statement-budget cancellation on that path is exit 1 rather than 2, is in
+[lock-budgeted-passthrough.md](lock-budgeted-passthrough.md#exit-codes);
+every code's JSON shape is below.
 
 ## Codes used in these examples
 
@@ -132,7 +165,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 |---|---|
 | `unsupported-statement` | No safe path is known for the statement — only `ALTER TABLE` and `CREATE INDEX` reach classification — or a greenfield create plan carries a shape the create path refuses (`PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a duplicate claimed relation name; the [plan statement's `cause`](plan-report.md#causes-cause-greenfield-create-shape-refusals-only) names which — a create-shape vocabulary distinct from the verdict's budget `cause` below). These greenfield shapes refuse in the plan and are re-checked at apply. |
 | `index-statement` | Index maintenance (`DROP INDEX`, `REINDEX`) has a native safe idiom (`CONCURRENTLY`) and is never attempted; the verdict's `safer_idiom` names it. |
-| `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not provably metadata-only. |
+| `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not proven catalog-only. |
 | `insufficient-privileges` | The connected role lacks the access the change needs; `detail` names the missing grant for preflight checks (see [engine-role.md](engine-role.md)). RLS admission names the required table ownership or database CREATE privilege and its remedy; permission errors reported by PostgreSQL retain the server diagnostic, which may not identify an exact GRANT. |
 | `unsupported-partitioned-parent` | The statement is a shape PostgreSQL cannot run online on a partitioned parent: adopting an index as a constraint, a `NOT VALID` foreign key before PostgreSQL 18, or a blocking index build. |
 | `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. The same `cause` field carries the partitioned-parent shape under `unsupported-partitioned-parent`; both are refusal causes, unrelated to the plan statement's create-shape `cause`. |
@@ -140,7 +173,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation, an added column whose type rewrites); a type rewrite of an existing column (`ALTER COLUMN TYPE`) executes through the route instead. |
 | `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; a desired-state plan that drops anything is refused whole until the run pins the reviewed plan with `--expect-fingerprint` and names its table with `--allow-destructive` ([Apply a reviewed drop](cli.md#apply-a-reviewed-drop), [execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
-| `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
+| `declarative-foreign-key` | The desired-state plan drops a foreign key. Desired-state execution does not run foreign-key drops yet; the plan still shows the statement, and `migrate --alter` runs it. |
 | `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), a copy-and-swap run stopped on the table keeps any other statement from running (cause `copy-and-swap-run-stopped`, class `environmental` — run the stopped statement again to finish it), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. A table refused with `copy-and-swap-pk-unsupported` because it has no primary key also carries `"guidance": "add-integer-primary-key"`, and its `detail` links the [steps to add one online](primary-keys.md#add-a-primary-key-online). |
 | `create-collision` | The greenfield create plan's table name or a claimed index, constraint-index, or sequence name is occupied. Nothing runs; re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal. Catalog absence checks handle existing occupants. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff. |
 
@@ -187,7 +220,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run -
           "operation": "ADD COLUMN note",
           "destructive": false,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -758,7 +792,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --al
           "operation": "DROP COLUMN email",
           "destructive": true,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -813,7 +848,8 @@ $ pg-sprite migrate --desired orders.sql --dry-run --json
           "operation": "DROP COLUMN note",
           "destructive": true,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ]
     }

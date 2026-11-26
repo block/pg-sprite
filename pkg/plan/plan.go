@@ -59,7 +59,13 @@ import (
 // drops field and its part in the fingerprint, and the report-level
 // pinnable_fingerprint field.
 // Version 23 added the partitioned-index-build execution contract and its
-// part in the fingerprint. Version 28 added the
+// part in the fingerprint. Version 24 added the blocking-index-drop
+// execution contract, which a refused drop of a partitioned table's index
+// carries with its plain DROP INDEX as exec_sql, and its part in the
+// fingerprint. Version 25 added the proven_catalog_only decision field.
+// Version 26 runs the add-foreign-key and validate-foreign-key kinds
+// instead of refusing them, and retires the foreign-key create-shape
+// cause: a new table is created with its foreign keys. Version 28 added the
 // partitioned-foreign-key-build execution contract and its part in the
 // fingerprint.
 const FormatVersion = 28
@@ -106,8 +112,11 @@ type Statement struct {
 	Adopts *schemadiff.IndexAdoption `json:"-"`
 	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
 	// validates and the definition it must still have when execution
-	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
-	// out of the JSON for the same reason.
+	// validates it (see schemadiff.Change.Validates). A diff-derived ADD
+	// CONSTRAINT that runs as ADD ... NOT VALID and then VALIDATE
+	// CONSTRAINT carries the definition its add leaves
+	// (schemadiff.Change.AddsNotValid), which its validation step checks.
+	// Nil otherwise, and out of the JSON for the same reason.
 	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Drops is the live object a diff-derived DROP INDEX, DROP CONSTRAINT,
 	// DROP COLUMN, or DROP NOT NULL removes, with the definition the diff
@@ -154,7 +163,10 @@ type Statement struct {
 	Decisions []planner.Decision `json:"decisions"`
 	// ExecSQL is the ordered SQL the native backend would run — the safer
 	// sequence when the planner constructed one. Empty for non-native
-	// routes.
+	// routes and for refusals, except a refused drop of a partitioned
+	// table's index, which carries its plain DROP INDEX with the execution
+	// blocking-index-drop: the one form a run that accepts the blocking
+	// lock executes.
 	ExecSQL []string `json:"exec_sql,omitempty"`
 	// Execution is the typed execution contract for ExecSQL
 	// (planner.Execution), present exactly when ExecSQL is. A consumer
@@ -256,7 +268,9 @@ type Report struct {
 // it runs. Every other statement is checked against
 // preflight.RefusesPartitionedParent and refused by its cause, so the
 // unsupported shapes (index adoption, a NOT VALID foreign key before version
-// 18, a concurrent drop of the parent's index) stay refused. A statement
+// 18, a concurrent drop of the parent's index) stay refused. A refused
+// diff-derived drop of the parent's index then discloses the one drop
+// PostgreSQL accepts (see discloseBlockingIndexDrop). A statement
 // RoutePartitionedForeignKeyBuilds already routed is left as it is. A report
 // on a table that is not partitioned must not pass through here.
 func RoutePartitionedParent(report *Report, serverMajor int) error {
@@ -278,7 +292,31 @@ func RoutePartitionedParent(report *Report, serverMajor int) error {
 			return err
 		}
 	}
-	return RefuseUnsupportedPartitionedParent(report, causes)
+	if err := RefuseUnsupportedPartitionedParent(report, causes); err != nil {
+		return err
+	}
+	for i := range report.Statements {
+		if causes[i] == preflight.PartitionCauseConcurrentIndexDrop {
+			discloseBlockingIndexDrop(&report.Statements[i])
+		}
+	}
+	return nil
+}
+
+// discloseBlockingIndexDrop gives a refused diff-derived drop of a
+// partitioned table's index the plain DROP INDEX as its one step, with the
+// execution blocking-index-drop. PostgreSQL has no concurrent drop for that
+// index, so the plain drop is the only one there is; the statement stays
+// refused, and the fingerprint covers the step and its execution, so a
+// reviewed plan pins the drop form a run accepting the blocking lock
+// executes. A statement that is not a drop of one reviewed index is left as
+// refused.
+func discloseBlockingIndexDrop(st *Statement) {
+	if st.Kind != schemadiff.ChangeDropIndex || st.Drops == nil || st.Drops.Kind != schemadiff.DroppedIndex {
+		return
+	}
+	st.ExecSQL = []string{st.SQL}
+	st.Execution = planner.ExecutionBlockingIndexDrop
 }
 
 // RoutePartitionedForeignKeyBuilds routes, in a report whose target is a
@@ -565,6 +603,9 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 // partitioned foreign key build also hashes its execution: its exec_sql is
 // the statement as written, and the same text run literally (a CREATE INDEX
 // CONCURRENTLY, an ALTER TABLE ... ADD FOREIGN KEY) is a different plan.
+// A refused drop of a partitioned table's index that carries the
+// blocking-index-drop execution hashes it the same way, so a reviewed plan
+// cannot switch drop forms unnoticed.
 // Every other statement leaves its execution out, so its identity is the one
 // it always had. The exact
 // serialization is part of the contract (docs/plan-report.md) and changes
@@ -584,7 +625,7 @@ func Fingerprint(statements []Statement, extensionSchemas ...string) string {
 		for _, sql := range st.ExecSQL {
 			writeField(h, sql)
 		}
-		if hashedExecution(st.Execution) {
+		if hashesExecution(st.Execution) {
 			writeField(h, string(st.Execution))
 		}
 		if st.Drops != nil {
@@ -615,11 +656,19 @@ func (r Report) ComputeFingerprint() string {
 	return Fingerprint(r.Statements, r.ExtensionSchemas...)
 }
 
-// hashedExecution reports whether the fingerprint covers a statement's
-// execution: only for the partitioned builds, whose exec_sql is the statement
-// as written rather than what the server runs.
-func hashedExecution(e planner.Execution) bool {
-	return e == planner.ExecutionPartitionedIndexBuild || e == planner.ExecutionPartitionedForeignKeyBuild
+// hashesExecution reports whether the fingerprint covers a statement's
+// execution: one whose exec_sql is the statement as written and whose
+// execution decides how it runs — the partitioned index build, the
+// partitioned foreign key build, and the accepted blocking drop of a
+// partitioned table's index. Every other execution is derived from exec_sql
+// and keeps the identity it always had.
+func hashesExecution(e planner.Execution) bool {
+	switch e {
+	case planner.ExecutionPartitionedIndexBuild, planner.ExecutionPartitionedForeignKeyBuild, planner.ExecutionBlockingIndexDrop:
+		return true
+	default:
+		return false
+	}
 }
 
 // writeField hashes one field with a trailing unit separator, so adjacent

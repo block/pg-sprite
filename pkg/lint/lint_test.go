@@ -80,6 +80,20 @@ func TestCheckFlagsUnprovenExpressionDefaultAsPossibleRewrite(t *testing.T) {
 	assert.Equal(t, planner.ReasonVolatileDefault, f.Reason)
 }
 
+// SET TABLESPACE moves a table's heap, but a partitioned parent has none
+// and only records the default for partitions created later. An offline
+// lint cannot tell which the table is, so the finding says the engine
+// would take the heavy path, not that the change rewrites.
+func TestCheckFlagsSetTablespaceAsPossibleRewrite(t *testing.T) {
+	report, err := lint.Check("ALTER TABLE app.events SET TABLESPACE archive")
+	require.NoError(t, err)
+	require.Len(t, report.Findings, 1)
+	f := report.Findings[0]
+	assert.Equal(t, lint.CodePossibleTableRewrite, f.Code)
+	assert.Equal(t, lint.SeverityWarning, f.Severity)
+	assert.Equal(t, planner.ReasonRelocation, f.Reason)
+}
+
 // A USING clause is a rewrite regardless of live facts, so the finding is
 // the proven code, not the fail-closed one.
 func TestCheckFlagsProvenRewriteAsTableRewrite(t *testing.T) {

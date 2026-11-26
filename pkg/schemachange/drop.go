@@ -21,6 +21,12 @@ import (
 // the shadow owns nothing the source needs and a cascade could only reach
 // objects the engine did not create. A missing shadow is ErrShadowNotFound.
 func DropShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) error {
+	return dropShadowOf(ctx, pool, lock, target, opts)
+}
+
+// dropShadowOf is DropShadow for either proof of the table: a discard
+// holds the shape proof alone.
+func dropShadowOf(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, opts Options) error {
 	if err := opts.validate(); err != nil {
 		return err
 	}
@@ -38,7 +44,7 @@ func DropShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockS
 	return nil
 }
 
-func dropShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) error {
+func dropShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, opts Options) error {
 	shadow := ShadowName(target.Schema(), target.Table())
 	tx, err := pool.Begin(ctx)
 	if err != nil {

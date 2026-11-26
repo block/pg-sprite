@@ -21,17 +21,14 @@ func validRow() Row {
 func TestEmbeddedCapabilitiesValidate(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
-	assert.Len(t, rows, 64)
+	assert.Len(t, rows, 66)
 }
 
 // The engine refuses a partitioned parent with its own target-fact reason
 // (partitionedParentVerdict in pkg/migrate, one row per PartitionRefusalCause
 // family), so the rows for those shapes must publish that token, not the
 // planner-level unsupported-statement: a consumer filtering on the reason
-// the engine emits would otherwise find no rows. A foreign key on a
-// partitioned parent is refused only by the declarative door, which refuses
-// every foreign key a desired file adds with declarative-foreign-key, the
-// reason it emits there.
+// the engine emits would otherwise find no rows.
 func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
@@ -43,12 +40,9 @@ func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{
 		"add-constraint-using-index-on-a-partitioned-parent",
+		"add-foreign-key-on-a-partitioned-parent",
 	}, got)
 	for _, r := range rows {
-		if r.ID == "add-foreign-key-on-a-partitioned-parent" {
-			assert.Equal(t, verdict.ReasonDeclarativeForeignKey, r.RefusalReason)
-			continue
-		}
 		if strings.Contains(r.Operation, "partitioned parent") && r.RefusalReason != "" {
 			assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.RefusalReason,
 				"row %s names a partitioned parent but publishes %q", r.ID, r.RefusalReason)

@@ -178,7 +178,7 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			keys = append(keys, op.key)
 		}
 		assert.Contains(t, keys, "copy-and-swap restart")
-		assert.Len(t, ops, len(destructive)+5)
+		assert.Len(t, ops, len(destructive)+6)
 	})
 
 	t.Run("every acknowledgement reads its own field and has its own sentinel", func(t *testing.T) {
@@ -305,11 +305,12 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			ack     ackKind
 			refusal verdict.Reason
 		}{
-			"blocking DROP INDEX":                           {ackAcceptBlocking, verdict.ReasonIndexStatement},
-			"blocking REINDEX":                              {ackAcceptBlocking, verdict.ReasonIndexStatement},
-			"submitted form that blocks the table":          {ackForce, verdict.ReasonRewriteRequired},
-			"copy-and-swap restart":                         {ackRestart, ""},
-			"copy-and-swap with the table's writes blocked": {ackBlockWrites, verdict.ReasonCopyAndSwapRefused},
+			"blocking DROP INDEX":                                {ackAcceptBlocking, verdict.ReasonIndexStatement},
+			"blocking DROP INDEX of a partitioned table's index": {ackAcceptBlocking, verdict.ReasonUnsupportedPartitionedParent},
+			"blocking REINDEX":                                   {ackAcceptBlocking, verdict.ReasonIndexStatement},
+			"submitted form that blocks the table":               {ackForce, verdict.ReasonRewriteRequired},
+			"copy-and-swap restart":                              {ackRestart, ""},
+			"copy-and-swap with the table's writes blocked":      {ackBlockWrites, verdict.ReasonCopyAndSwapRefused},
 		}
 		seen := 0
 		for _, op := range ops {
@@ -349,7 +350,7 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			assert.Contains(t, acks, op.ack, "entry %q", op.key)
 			gated[op.ack] = true
 			assert.Contains(t, []loss{lossStructure, lossAvailability, lossProgress}, op.loss, "entry %q", op.key)
-			assert.Contains(t, []desiredHandling{desiredAdmitsPinnedPlan, desiredRejectsAck}, op.desired, "entry %q", op.key)
+			assert.Contains(t, []desiredHandling{desiredAdmitsPinnedPlan, desiredRejectsAck, desiredAdmitsAcceptedPinnedPlan}, op.desired, "entry %q", op.key)
 			if op.loss == lossProgress {
 				assert.Empty(t, op.refusal, "entry %q: without the acknowledgement the run resumes", op.key)
 				continue
@@ -381,6 +382,10 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			// enum type plan drops nothing, so its request carries none.
 			"DesiredRequest.AllowDestructive":     true,
 			"RowSecurityRequest.AllowDestructive": true,
+			// The accept-blocking acknowledgement, valid only beside the
+			// pin and the destructive acknowledgement, for a partitioned
+			// table's index drop. Only a table file's plan drops one.
+			"DesiredRequest.AcceptBlocking": true,
 		}
 		var names []string
 		for _, req := range []struct {
@@ -398,7 +403,7 @@ func TestIrreversibleOperationRegistryIsComplete(t *testing.T) {
 			}
 		}
 		assert.ElementsMatch(t, []string{
-			"DesiredRequest.Schema", "DesiredRequest.ExpectedFingerprint", "DesiredRequest.AllowDestructive",
+			"DesiredRequest.Schema", "DesiredRequest.ExpectedFingerprint", "DesiredRequest.AllowDestructive", "DesiredRequest.AcceptBlocking",
 			"RowSecurityRequest.Schema", "RowSecurityRequest.ExpectedFingerprint", "RowSecurityRequest.AllowDestructive",
 			"EnumTypeRequest.Schema", "EnumTypeRequest.ExpectedFingerprint",
 		}, names)

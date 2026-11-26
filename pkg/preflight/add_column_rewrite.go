@@ -46,7 +46,10 @@ var ErrAddColumnProbeUnavailable = errors.New("the add-column proof cannot creat
 //
 // Adding the column still evaluates its default once, and its domain's
 // checks, the way the real ALTER does, and a function either one calls can
-// read any table, the live one included. A probe never waits for a lock:
+// read any table, the live one included. A column added in place whose
+// type or default resolves to anything a user defined is reported as
+// statement.AddColumnInPlaceRunsUserCode, so that evaluation is never
+// taken as catalog-only. A probe never waits for a lock:
 // one that cannot be granted at once proves nothing, and the column is
 // reported as statement.AddColumnUnproven. Each probe's savepoint is rolled
 // back as soon as it is read, which releases whatever it locked.
@@ -136,16 +139,24 @@ var errProbeLockNotAvailable = errors.New("the probe could not take a lock at on
 // proveAddColumn reports what the server proves about adding one column:
 // the probe adds it as the statement does, and when that rewrites, a
 // second probe adds the column's type alone to tell which one is the
-// cause. A probe that cannot take a lock at once leaves the column
-// unproven.
+// cause. A column added in place that is NOT NULL with no value for the
+// existing rows is reported as statement.AddColumnInPlaceScans, since the
+// server reads the whole table to check it, and one whose type or default
+// evaluates code a user defined as statement.AddColumnInPlaceRunsUserCode,
+// since that code can read any table. A probe that cannot take a
+// lock at once leaves the column unproven.
 func proveAddColumn(ctx context.Context, tx pgx.Tx, probeTable, column, probe string) (statement.AddColumnProof, error) {
-	rewrites, typeName, err := probeRewrite(ctx, tx, probeTable, column, func(string) string { return probe })
+	added, err := probeRewrite(ctx, tx, probeTable, column, func(string) string { return probe })
 	switch {
 	case errors.Is(err, errProbeLockNotAvailable):
 		return statement.AddColumnUnproven, nil
 	case err != nil:
 		return "", err
-	case !rewrites:
+	case !added.rewrites && added.checksNotNull:
+		return statement.AddColumnInPlaceScans, nil
+	case !added.rewrites && added.runsUserCode:
+		return statement.AddColumnInPlaceRunsUserCode, nil
+	case !added.rewrites:
 		return statement.AddColumnInPlace, nil
 	}
 	// typeName is format_type's rendering of the type the server resolved
@@ -153,34 +164,98 @@ func proveAddColumn(ctx context.Context, tx pgx.Tx, probeTable, column, probe st
 	// search_path, so it names the same type here. A serial or identity
 	// column reads back as its integer type, without the default its
 	// sequence supplies.
-	typeRewrites, _, err := probeRewrite(ctx, tx, probeTable, column, func(probeIdent string) string {
-		return "ALTER TABLE " + probeIdent + " ADD COLUMN " + pgx.Identifier{column}.Sanitize() + " " + typeName
+	typeAlone, err := probeRewrite(ctx, tx, probeTable, column, func(probeIdent string) string {
+		return "ALTER TABLE " + probeIdent + " ADD COLUMN " + pgx.Identifier{column}.Sanitize() + " " + added.typeName
 	})
 	switch {
 	case errors.Is(err, errProbeLockNotAvailable):
 		return statement.AddColumnUnproven, nil
 	case err != nil:
 		return "", fmt.Errorf("add the type of column %q alone: %w", column, err)
-	case typeRewrites:
+	case typeAlone.rewrites:
 		return statement.AddColumnTypeRewrites, nil
 	default:
 		return statement.AddColumnDefaultRewrites, nil
 	}
 }
 
+// probeOutcome is what one probe read back after adding a column to the
+// probe table.
+type probeOutcome struct {
+	// rewrites is true when adding the column replaced the table's storage.
+	rewrites bool
+	// checksNotNull is true when the column is NOT NULL and the server
+	// stored no value for the rows a table already has: on a table with
+	// storage it then reads every row to prove none exists, whether or not
+	// it rewrites.
+	checksNotNull bool
+	// typeName is the type the server resolved for the column.
+	typeName string
+	// runsUserCode is true when the column's type, or anything its stored
+	// default refers to, is defined outside PostgreSQL's built-in catalog
+	// (see runsUserCodeQuery).
+	runsUserCode bool
+}
+
+// firstNormalObjectIDLiteral is PostgreSQL's FirstNormalObjectId: every object
+// initdb creates, the built-in catalog, has a lower OID, and every object
+// created afterwards has this one or higher.
+const firstNormalObjectIDLiteral = "16384"
+
+// runsUserCodeQuery reports whether adding column $2 to the probe table $1
+// evaluated something defined outside the built-in catalog. That is the
+// column's type when it is a user-defined type other than an enum (or an
+// array of one), since a domain brings its own default and checks and a
+// composite or range can carry a domain; and anything the stored default
+// depends on that a user defined, such as a function, operator, cast, or
+// such a type. Built-in functions, operators, and types run fixed code
+// that reads no user table, and an enum's input reads only the catalog.
+// A collation runs no SQL, and the only relation a constant default can
+// depend on is one a regclass literal names, which is resolved from the
+// catalog when the statement is parsed.
+//
+// INV: CO-9 — pg_catalog-qualified like the probe's other reads.
+const runsUserCodeQuery = `WITH col AS (
+	SELECT a.attrelid, a.attnum, a.atttypid FROM pg_catalog.pg_attribute a
+	WHERE a.attrelid OPERATOR(pg_catalog.=) $1::pg_catalog.regclass
+	  AND a.attname OPERATOR(pg_catalog.=) $2
+), refs AS (
+	SELECT 'pg_catalog.pg_type'::pg_catalog.regclass AS refclassid, col.atttypid AS refobjid FROM col
+	UNION ALL
+	SELECT dep.refclassid, dep.refobjid FROM col
+	JOIN pg_catalog.pg_attrdef d ON d.adrelid OPERATOR(pg_catalog.=) col.attrelid
+	  AND d.adnum OPERATOR(pg_catalog.=) col.attnum
+	JOIN pg_catalog.pg_depend dep ON dep.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+	  AND dep.objid OPERATOR(pg_catalog.=) d.oid
+	WHERE dep.refclassid OPERATOR(pg_catalog.<>) 'pg_catalog.pg_class'::pg_catalog.regclass
+	  AND dep.refclassid OPERATOR(pg_catalog.<>) 'pg_catalog.pg_collation'::pg_catalog.regclass
+)
+SELECT EXISTS (
+	SELECT 1 FROM refs r
+	WHERE r.refobjid OPERATOR(pg_catalog.>=) ` + firstNormalObjectIDLiteral + `::pg_catalog.oid
+	  AND NOT EXISTS (
+		SELECT 1 FROM pg_catalog.pg_type t
+		LEFT JOIN pg_catalog.pg_type e ON t.typcategory OPERATOR(pg_catalog.=) 'A'
+		  AND e.oid OPERATOR(pg_catalog.=) t.typelem
+		WHERE r.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_type'::pg_catalog.regclass
+		  AND t.oid OPERATOR(pg_catalog.=) r.refobjid
+		  AND (t.typtype OPERATOR(pg_catalog.=) 'e' OR e.typtype OPERATOR(pg_catalog.=) 'e'
+		       OR e.oid OPERATOR(pg_catalog.<) ` + firstNormalObjectIDLiteral + `::pg_catalog.oid)))`
+
 // probeRewrite runs the ALTER that alter builds for the probe table's
 // qualified name against a fresh probe table, inside a savepoint, and
-// reports whether it replaced the table's storage, with the type the
-// server resolved for column. A lock the probe cannot take at once is
+// reports whether it replaced the table's storage, whether the server
+// must read every row to check the column's NOT NULL, and the type it
+// resolved for column. A lock the probe cannot take at once is
 // errProbeLockNotAvailable. The savepoint is rolled back either way,
 // dropping the probe table and releasing its locks.
-func probeRewrite(ctx context.Context, tx pgx.Tx, probeTable, column string, alter func(probeIdent string) string) (rewrites bool, typeName string, err error) {
+func probeRewrite(ctx context.Context, tx pgx.Tx, probeTable, column string, alter func(probeIdent string) string) (outcome probeOutcome, err error) {
 	probeIdent := pgx.Identifier{"pg_temp", probeTable}.Sanitize()
 	if _, err := tx.Exec(ctx, "SAVEPOINT pgsprite_probe"); err != nil {
-		return false, "", fmt.Errorf("open the probe savepoint: %w", err)
+		return probeOutcome{}, fmt.Errorf("open the probe savepoint: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "CREATE TEMPORARY TABLE "+pgx.Identifier{probeTable}.Sanitize()+" ()"); err != nil {
-		return false, "", probeTableError(err)
+		return probeOutcome{}, probeTableError(err)
 	}
 	// INV: CO-9 — every function, operator, relation, and type in the
 	// probe's reads is pg_catalog-qualified: the probe runs on the
@@ -188,7 +263,7 @@ func probeRewrite(ctx context.Context, tx pgx.Tx, probeTable, column string, alt
 	// otherwise answer the attribute lookup.
 	var before, after uint32
 	if err := tx.QueryRow(ctx, "SELECT pg_catalog.pg_relation_filenode($1::pg_catalog.regclass)", probeIdent).Scan(&before); err != nil {
-		return false, "", fmt.Errorf("read the probe table's storage before adding column %q: %w", column, err)
+		return probeOutcome{}, fmt.Errorf("read the probe table's storage before adding column %q: %w", column, err)
 	}
 	_, err = tx.Exec(ctx, alter(probeIdent))
 	var pgErr *pgconn.PgError
@@ -196,20 +271,29 @@ func probeRewrite(ctx context.Context, tx pgx.Tx, probeTable, column string, alt
 	case errors.As(err, &pgErr) && pgErr.Code == sqlstateLockNotAvailable:
 		err = errProbeLockNotAvailable
 	case err != nil:
-		return false, "", err
+		return probeOutcome{}, err
 	default:
+		// atthasmissing is set when the server stored one value for every
+		// existing row (a fast default). A NOT NULL column without it gets
+		// NULL in those rows, so the server scans the table to prove it
+		// has none; that scan replaces no storage, so the filenode alone
+		// cannot show it.
 		if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_relation_filenode($1::pg_catalog.regclass),
-			(SELECT pg_catalog.format_type(atttypid, atttypmod) FROM pg_catalog.pg_attribute
-			 WHERE attrelid OPERATOR(pg_catalog.=) $1::pg_catalog.regclass
-			   AND attname OPERATOR(pg_catalog.=) $2)`, probeIdent, column).Scan(&after, &typeName); err != nil {
-			return false, "", fmt.Errorf("read the probe table's storage after adding column %q: %w", column, err)
+			pg_catalog.format_type(atttypid, atttypmod), attnotnull AND NOT atthasmissing
+			FROM pg_catalog.pg_attribute
+			WHERE attrelid OPERATOR(pg_catalog.=) $1::pg_catalog.regclass
+			  AND attname OPERATOR(pg_catalog.=) $2`, probeIdent, column).Scan(&after, &outcome.typeName, &outcome.checksNotNull); err != nil {
+			return probeOutcome{}, fmt.Errorf("read the probe table's storage after adding column %q: %w", column, err)
 		}
-		rewrites = before != after
+		outcome.rewrites = before != after
+		if err := tx.QueryRow(ctx, runsUserCodeQuery, probeIdent, column).Scan(&outcome.runsUserCode); err != nil {
+			return probeOutcome{}, fmt.Errorf("read what adding column %q to the probe table evaluates: %w", column, err)
+		}
 	}
 	if _, rollbackErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT pgsprite_probe"); rollbackErr != nil {
-		return false, "", fmt.Errorf("roll back the probe savepoint: %w", rollbackErr)
+		return probeOutcome{}, fmt.Errorf("roll back the probe savepoint: %w", rollbackErr)
 	}
-	return rewrites, typeName, err
+	return outcome, err
 }
 
 // probeTableError separates the server refusing the probe table, which

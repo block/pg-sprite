@@ -73,8 +73,10 @@ by the integration tests in `pkg/executor`:
 - A partitioned, foreign, or view referenced table, or a referenced table inside the tree
   (`partitioned-foreign-key-referenced-table`): the parent's statement would also clone the
   foreign key onto every referenced partition, which the build neither proves nor reads back.
-- Desired-state routing (`diff`, `migrate --desired`): a desired file's foreign keys are refused
-  with `declarative-foreign-key` until desired-state execution runs foreign keys.
+- Desired-state routing (`diff`, `migrate --desired`): a foreign key a desired file adds to a
+  partitioned table plans as the ordinary `NOT VALID` then `VALIDATE` sequence, which
+  PostgreSQL 14–17 refuse, so `diff` refuses it with `unsupported-partitioned-parent`, class
+  `environmental`, and `migrate --desired` refuses the plan.
 
 ## Routing from `migrate --alter`
 

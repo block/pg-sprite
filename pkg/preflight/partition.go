@@ -102,7 +102,8 @@ func (e *UnsupportedPartitionedParentError) Error() string {
 		return "PostgreSQL cannot drop an index of a partitioned table concurrently in any supported version, and a partition's " +
 			"own index cannot be dropped alone; the drop is a plain DROP INDEX, which takes ACCESS EXCLUSIVE on the parent, " +
 			"every partition, and every partition's index — run it through the imperative front door with the blocking lock " +
-			"and the destructive drop both acknowledged for the table"
+			"and the destructive drop both acknowledged for the table, or pin the reviewed desired-state plan and accept " +
+			"the blocking lock for the table"
 	default:
 		return "pg-sprite refuses an unsupported operation on a partitioned table"
 	}

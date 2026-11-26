@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
@@ -183,6 +184,10 @@ func partitionedIndexFailureVerdict(st statement.Statement, err error) verdict.V
 			"cannot be established from the client; inspect the indexes of %s and its partitions, then run the same statement again to resume", v.Table)
 		return v
 	}
+	if detail, dataFault := partitionedIndexDataFaultDetail(v.Table, err); dataFault {
+		v.Detail = detail
+		return v
+	}
 	if executor.Code(v.Code).Permanent() {
 		// A permanent cause fails a rerun the same way until it is fixed.
 		v.Detail = fmt.Sprintf("the partitioned index build stopped on a cause that a rerun does not clear (%s); steps before the stop may have committed, "+
@@ -192,4 +197,41 @@ func partitionedIndexFailureVerdict(st statement.Statement, err error) verdict.V
 	v.Detail = fmt.Sprintf("the partitioned index build stopped before it finished; steps before the stop may have committed, "+
 		"so inspect the indexes of %s and its partitions, then run the same statement again to resume from whatever it had built", v.Table)
 	return v
+}
+
+// partitionedIndexDataFaultDetail says what a partitioned index build that
+// stopped on one partition's rows left, for the failed verdict's detail. Its
+// code is data-fault, and a rerun meets the same rows until they are
+// corrected, so the detail names the partition and its index, and says what
+// remains: the parent's invalid index with the partition indexes built so
+// far, and the failed build's own invalid index on that partition, which a
+// rerun once the rows are corrected proves abandoned, drops, and builds
+// again. Partitions are processed one at a time and the build stops at the
+// first fault, so the partitions after this one are not reached and a rerun
+// can stop on one of them in turn. An invalid index the run could not
+// prove its own is not placed on any table; it gets the investigation steps
+// the plain build gives. It reports false for every other failure.
+func partitionedIndexDataFaultDetail(table string, err error) (string, bool) {
+	invalidErr, ok := errors.AsType[*executor.InvalidIndexError](err)
+	if !ok || invalidErr.Code() != executor.CodeDataFault {
+		return "", false
+	}
+	index := pgx.Identifier{invalidErr.Schema, invalidErr.Index}.Sanitize()
+	if !errors.Is(invalidErr.Cleanup, executor.ErrBuildLeftInvalidIndex) {
+		return fmt.Sprintf("%s; the partitioned index build stopped there, %s; %s",
+			rowsViolateIndex("the rows of a partition", index), partitionedBuildStoppedLeaves(table), unprovenInvalidIndexLeftover), true
+	}
+	partition := pgx.Identifier{invalidErr.Schema, invalidErr.Table}.Sanitize()
+	return fmt.Sprintf("%s; the partitioned index build stopped there, %s, and %s invalid on %s — correct the rows, then run the same statement again: "+
+		"it drops that invalid index, builds it again, and resumes from what it had built, and a later partition whose rows break the index stops it the same way",
+		rowsViolateIndex("the rows of partition "+partition, index), partitionedBuildStoppedLeaves(table), index, partition), true
+}
+
+// partitionedBuildStoppedLeaves says what a partitioned index build that
+// stopped on one partition leaves on the rest of the tree. A sub-partition's
+// own index is attached to its parent's only once all its partitions have
+// theirs, so the partition indexes built so far are not all attached to the
+// table's index; the clause therefore says only that they remain.
+func partitionedBuildStoppedLeaves(table string) string {
+	return fmt.Sprintf("leaving the index of %s invalid, the partition indexes built before the stop in place, and the partitions after it not yet reached by this run", table)
 }

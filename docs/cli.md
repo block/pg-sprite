@@ -47,6 +47,20 @@ refusal names the one that is missing. pg-sprite needs one PostgreSQL session
 per connection; [session-affinity.md](session-affinity.md) says which poolers
 work.
 
+A `search_path` that lists `pg_catalog` after a user schema has that entry
+removed, so the schema no longer shadows the catalog; every other entry is left
+as configured. The connection pool holds at least six connections unless the URL
+sets `pool_max_conns`: one for each of a copy-and-swap run's four copy workers,
+and two more so its catch-up's flushes and its checkpoint saves do not wait
+behind the copy. A `pool_max_conns` in the URL is kept as given, and a
+copy-and-swap run refuses a pool below six before it creates anything
+(`code: pool-too-small`).
+
+Only `migrate` without `--dry-run` ever commits a schema change. The one other
+command that writes to the database is `reap` without `--dry-run`, which drops
+only the engine's orphan replication slots and their publications, never table
+data.
+
 `lint`, `suggest`, `fmt`, and `capabilities` take no connection flags at all,
 so they cannot reach a database by accident.
 
@@ -265,6 +279,10 @@ cannot apply here. The other acknowledgements work the same way:
     --accept-blocking public.users --allow-destructive public.users \
     --lock-timeout 3s --statement-timeout 10m
   ```
+
+  With `--desired` it lifts one refusal only, a reviewed plan's drop of a
+  partitioned table's index, and needs `--expect-fingerprint` and
+  `--allow-destructive` too, all naming the desired file's table.
 
   See [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
 
@@ -530,8 +548,9 @@ refused (plan-fingerprint-mismatch)
   `diff --desired` again to review what is left.
 - `--dry-run` prints the fingerprint to pin and executes nothing; with both
   flags it previews the plan the run would execute. Some plans stay refused
-  with both flags, such as a drop beside a copy-and-swap statement or a drop
-  of a partitioned table's index. For those, the dry run prints the refusal
+  with both flags, such as a drop beside a copy-and-swap statement, or a drop
+  of a partitioned table's index, which a run also needs `--accept-blocking`
+  for and a dry run cannot carry. For those, the dry run prints the refusal
   the pinned run gives instead of the flags. In `--json` output on a
   destructive plan, `fingerprint` covers the refused plan and cannot be
   pinned: pin `pinnable_fingerprint`, the same value the text output prints.
@@ -547,8 +566,22 @@ refused (plan-fingerprint-mismatch)
 
 ## Follow a running change
 
-`migrate` prints its verdict when the change finishes, and nothing before. To
-watch a long change, open a second terminal against the same database.
+`migrate` prints its verdict on stdout when the change finishes. While it runs,
+`--progress` controls a progress line on stderr showing the step, operation,
+percent, and ETA:
+
+| `--progress` | What stderr shows |
+|---|---|
+| `auto` (default) | The line, redrawn in place, only when stderr is a terminal (`TERM=dumb` turns it off) |
+| `always` | The line on any stderr; when stderr is not a terminal, such as a log file, a plain line per change of step, operation, or ten-percent mark |
+| `never` | No progress line |
+
+`--progress=always` cannot be combined with `--json` or `--dry-run`: the
+machine-readable run shows no progress line, and a dry run executes nothing.
+stdout carries only the verdict in every mode.
+
+To see what the sessions themselves are doing, open a second terminal against
+the same database.
 
 ### See which sessions are working
 
@@ -633,7 +666,7 @@ database, publications included; `--dry-run` shows what it would drop first:
 
 ```console
 $ pg-sprite reap --dry-run
-would drop (orphans, with their publications): 1
+would drop (orphans, with any publication of the engine's shape): 1
   pgsprite_deadbeef
 live (kept: a checkpoint row in a non-terminal phase names it): 1
   pgsprite_cafebabe
@@ -652,6 +685,14 @@ would drop opens one replication connection, as each drop does, so a role
 without the `REPLICATION` attribute or a URL that cannot open one fails the
 dry run with exit 1, after the report.
 
+The slot is dropped before its publication, so a slot whose same-named
+publication `reap` will not drop (one that is not the single-table
+publication pg-sprite makes, such as a `FOR ALL TABLES` one) is gone: the
+pass stops there, lists it last under `dropped`, as `failed`, and under
+`publication left` (`publication_left` in JSON), exits 1, and the error
+says why the publication of that name was left in place for you to look
+at.
+
 A database without the checkpoint table has no row that can show a slot is
 an orphan, so `reap` examines no slot there, drops nothing, and exits 0. A
 `pgsprite_` slot in such a database still keeps WAL; check
@@ -661,18 +702,19 @@ an orphan, so `reap` examines no slot there, drops nothing, and exits 0. A
 
 #### Reap report
 
-`reap --json` prints one object, `format_version` 1. A consumer must reject a
+`reap --json` prints one object, `format_version` 2. A consumer must reject a
 version it does not know; the version is bumped whenever a field is added,
 removed, or changes meaning.
 
 | Field | Meaning |
 |---|---|
-| `format_version` | The report's shape, 1 |
+| `format_version` | The report's shape, 2 |
 | `dry_run` | True for `--dry-run` |
 | `checkpoint_table_exists` | False when the database has no checkpoint table: no slot was examined and every list is empty |
 | `stopped` | True when the pass failed at a slot; the lists hold what was sorted before it, and the command exits 1 |
-| `failed` | The slot the pass stopped at, `""` when it did not stop. Its slot may already be gone: the drop removes the slot before its publication |
-| `dropped` | Orphans the run dropped, publications included; empty in a dry run |
+| `failed` | The slot the pass stopped at, `""` when it did not stop. Its slot may already be gone: the drop removes the slot before its publication, and a slot the drop reports gone with its publication left is also the last entry of `dropped` and the entry of `publication_left` |
+| `dropped` | Orphans the run dropped, publications included except for a slot in `publication_left`; empty in a dry run |
+| `publication_left` | The slot of `dropped` whose same-named publication the drop refused or failed to drop, left in place; at most the `failed` slot, empty in a dry run |
 | `would_drop` | Orphans a real run would drop now; empty in a real run |
 | `live` | Kept: a checkpoint row in a non-terminal phase names each |
 | `active` | Kept: a process holds each |
