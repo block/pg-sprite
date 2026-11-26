@@ -71,6 +71,23 @@ func TestRequiredTier(t *testing.T) {
 			execSQL: []string{"ALTER TABLE s.t ALTER COLUMN c TYPE bigint"},
 			tier:    preflight.TierAlterInPlace,
 		},
+		// Dropping an index needs ownership of it, which is its table's
+		// owner, whether or not the drop is concurrent.
+		{
+			name:    "concurrent index drop is owner-gated",
+			execSQL: []string{"DROP INDEX CONCURRENTLY s.i"},
+			tier:    preflight.TierAlterInPlace,
+		},
+		{
+			name:    "blocking index drop is owner-gated",
+			execSQL: []string{"DROP INDEX s.i"},
+			tier:    preflight.TierAlterInPlace,
+		},
+		{
+			name:    "index rename is owner-gated",
+			execSQL: []string{"ALTER INDEX s.i RENAME TO j"},
+			tier:    preflight.TierAlterInPlace,
+		},
 		// The greenfield create plan derives the off-ladder create tier —
 		// checked by CheckCreatePrivileges, never by the ladder walk —
 		// whether or not the plan also builds the new table's indexes.
@@ -97,8 +114,9 @@ func TestRequiredTier(t *testing.T) {
 	}
 
 	t.Run("a step shape the engine does not execute fails closed", func(t *testing.T) {
-		_, err := preflight.RequiredTier([]string{"DROP INDEX CONCURRENTLY i"})
+		_, err := preflight.RequiredTier([]string{"REINDEX INDEX CONCURRENTLY s.i"})
 		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not a shape the engine executes")
 	})
 
 	t.Run("an unparseable step fails closed", func(t *testing.T) {
@@ -113,6 +131,17 @@ func TestRequiredTier(t *testing.T) {
 		_, err := preflight.RequiredTier([]string{
 			"CREATE TABLE s.t (id int)",
 			"ALTER TABLE s.u ADD COLUMN c int",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mixes CREATE TABLE with ALTER TABLE")
+	})
+
+	t.Run("a set mixing create table with an index drop fails closed", func(t *testing.T) {
+		// An index drop acts on an existing table, so the create tier
+		// cannot vouch for it either.
+		_, err := preflight.RequiredTier([]string{
+			"CREATE TABLE s.t (id int)",
+			"DROP INDEX CONCURRENTLY s.i",
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "mixes CREATE TABLE with ALTER TABLE")
