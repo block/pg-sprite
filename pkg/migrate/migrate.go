@@ -713,6 +713,9 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		v.Detail = fmt.Sprintf("forced: the submitted form ran as-is under budgets (lock %s, statement %s), overriding the engine's routing",
 			opts.Budget.Brief.LockTimeout, opts.Budget.Brief.StatementTimeout)
 	}
+	if detail, ok := detachDetail(rep, opts.Budget.Brief); ok {
+		v.Detail = detail
+	}
 	v.StatisticsRefresh = refreshRetypedStatistics(ctx, pool, pt, st, opts.Budget.Brief, logger)
 	v.Detail += statisticsDetail(v.StatisticsRefresh)
 	return v, nil

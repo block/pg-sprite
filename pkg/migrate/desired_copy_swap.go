@@ -93,9 +93,46 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 		detail += fmt.Sprintf("; to run offline instead, blocking the table's writes until each swap, run each planned statement with migrate --alter --block-writes %s.%s",
 			report.Schema, report.Table)
 	}
+	return refuseCopySwapPlan(report, first, r, detail), false, nil
+}
+
+// AdmitPlanCopySwapPartitioning is [AdmitCopySwapPartitioning] for a
+// desired-state plan: when a planned statement routes to
+// copy-and-swap and the table is a partitioned parent, a partition, or part
+// of an inheritance tree, it returns the whole-plan refusal [RunDesired]
+// gives when the route's preflight refuses the table at admission — reason
+// copy-and-swap-refused, cause copy-and-swap-partitioned (or the unlogged or
+// forced row security cause the preflight decides first), the plan
+// carried — read from the live catalog on pool. It is how a desired-state dry run
+// learns that refusal instead of previewing a plan the run turns down; like
+// [AdmitCopySwapPartitioning] it claims nothing else the run's admission
+// decides. A plan with no copy-and-swap statement, which a plan that
+// creates its table never has, is admitted without a read. The boolean is
+// false when it refuses, as for [AdmitPlan] and the opposite sense of
+// [AdmitCopySwapPartitioning]; a non-nil error is a catalog read that could not
+// finish, and nothing has been decided.
+func AdmitPlanCopySwapPartitioning(ctx context.Context, pool *pgxpool.Pool, report plan.Report) (DesiredResult, bool, error) {
+	first, routed := firstCopySwapStatement(report)
+	if !routed {
+		return DesiredResult{}, true, nil
+	}
+	err := preflight.CheckCopySwapPartitioning(ctx, pool, report.Schema, report.Table)
+	if err == nil {
+		return DesiredResult{}, true, nil
+	}
+	r, detail, err := classifyCopySwapPreflight(err)
+	if err != nil {
+		return DesiredResult{}, false, fmt.Errorf("planned statement %d routes to copy-and-swap: %w", first+1, err)
+	}
+	return refuseCopySwapPlan(report, first, r, detail), false, nil
+}
+
+// refuseCopySwapPlan is the whole-plan refusal for a table the route's
+// preflight refused, naming the first planned statement that routes to it.
+func refuseCopySwapPlan(report plan.Report, first int, r verdict.Refusal, detail string) DesiredResult {
 	return DesiredResult{Plan: report}.refused(r, fmt.Sprintf(
 		"planned statement %d (%s) routes to copy-and-swap, whose preflight refused the table: %s; nothing was executed",
-		first+1, report.Statements[first].SQL, detail)), false, nil
+		first+1, report.Statements[first].SQL, detail))
 }
 
 // firstCopySwapStatement returns the position of the first planned

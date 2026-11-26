@@ -316,6 +316,22 @@ CREATE INDEX orders_ref_idx ON orders (reference);`
 		"one suggestion per blocking-idiom finding, in the same statement order")
 }
 
+// The concurrent detach suggest recommends for a blocking one carries the
+// no-default-partition caveat: PostgreSQL refuses it when the parent has a
+// DEFAULT partition, which offline advice cannot see.
+func TestAdviseDetachCarriesTheDefaultPartitionCaveat(t *testing.T) {
+	report, err := suggest.Advise("ALTER TABLE app.events DETACH PARTITION app.events_2024")
+	require.NoError(t, err)
+	require.Len(t, report.Suggestions, 1)
+	s := report.Suggestions[0]
+	assert.Equal(t, []string{"ALTER TABLE app.events DETACH PARTITION app.events_2024 CONCURRENTLY"}, s.Recommended)
+	assert.Equal(t, []suggest.Caveat{
+		suggest.CaveatNonTransactional,
+		suggest.CaveatDetachFinalizeOnFailure,
+		suggest.CaveatNoDefaultPartition,
+	}, s.Caveats)
+}
+
 // Every suggestion is complete: a constructed rewrite carries caveats and
 // its execution contract, a non-constructible one carries guidance. The
 // statements cover every safer-idiom path the planner produces, so an
@@ -383,7 +399,7 @@ func TestReportJSONShape(t *testing.T) {
 	recommended, err := json.Marshal(report.Suggestions[0].Recommended)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 7,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -414,7 +430,7 @@ func TestReportJSONGuidanceShape(t *testing.T) {
 	operation, err := json.Marshal(report.Suggestions[0].Operation)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 7,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -435,7 +451,7 @@ func TestReportJSONCleanSuggestionsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 6,
+		"format_version": 7,
 		"suggestions": []
 	}`, string(raw))
 }

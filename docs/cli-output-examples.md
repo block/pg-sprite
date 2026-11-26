@@ -43,7 +43,8 @@ dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 a verdict, not a plan report — and exit 2. So does an unacknowledged
 destructive statement, and so do statements whose routed
 steps the executor refuses from their shape alone before running anything
-(an unnamed or `IF NOT EXISTS` index build, `DETACH PARTITION`). The dry run
+(an unnamed or `IF NOT EXISTS` index build), or from the catalog (a
+`DETACH PARTITION` beside a `DEFAULT` partition). The dry run
 does not evaluate the apply's size guard or privilege preflight; those need
 live facts the dry run does not gather, and the apply runs them first. So a
 shape refusal on `--dry-run` is the apply's verdict when no earlier apply
