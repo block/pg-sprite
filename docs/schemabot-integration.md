@@ -1001,9 +1001,14 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   a statement whose `statement.Kind` is `KindRenameIndex` through
   `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index,
   and a statement with `Drops` set and a column, constraint, or NOT NULL kind through
-  `executor.ExecuteNativeDroppingWithProgress` with that `DroppedObject`; a `Drops` of kind
+  `executor.RunSequenceDropping` with that `DroppedObject`; a `Drops` of kind
   `index` is a `DROP INDEX` that runs through `executor.ExecuteDropIndexConcurrently` with the
-  definition. Each re-reads the index, constraint, column, or NOT NULL under the
+  definition. A `SET NOT NULL` that runs as the online helper-constraint sequence carries
+  `Validates` for its validation step and `DropsHelper` for the step that drops the helper: an
+  adapter that runs the steps on their own runs that drop through
+  `executor.RunSequenceDropping` with `DropsHelper`. The statement stays
+  non-destructive, since the helper is the plan's own. Each re-reads the index, constraint,
+  column, or NOT NULL under the
   lock it runs with (the dropping session, for an index) and refuses with `adopted-index-drift`,
   `validated-constraint-drift`, `renamed-index-drift`, `dropped-object-drift`, or
   `dropped-index-drift` when it changed after planning. An index drop whose name was taken by a
@@ -1011,8 +1016,8 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   unlike the drift refusals, an unreviewed index was dropped, and the error names it so the
   operator can check and recreate it. `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
-  rename under ST-7, since the statement names no table. `Adopts` and `Validates` stay out of
-  the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  rename under ST-7, since the statement names no table. `Adopts`, `Validates`, and
+  `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
   fingerprint, so a stored plan carries it.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:

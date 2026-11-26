@@ -143,7 +143,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return plan.Report{}, err
 	}
-	if err := recordNotNullScaffoldValidations(ctx, pool, report.Statements); err != nil {
+	if err := recordNotNullScaffolds(ctx, pool, report.Statements); err != nil {
 		return plan.Report{}, err
 	}
 	plan.RefuseForeignKeyDrops(&report)

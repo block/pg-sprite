@@ -2,6 +2,7 @@ package diffplan_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,7 +19,9 @@ import (
 // helper's drop. The plan records the helper and the definition its add
 // leaves as the constraint the sequence validates, so the validation step
 // checks it is still that helper, and a caller reading the plan sees the
-// validation is the plan's own. The definition matches what the catalog
+// validation is the plan's own. It also records the helper as it stands once
+// validated as the object the last step drops, so a caller that runs each
+// step on its own checks the drop. Both definitions match what the catalog
 // prints, including for a column whose name needs quoting.
 func TestPlanSetNotNullRecordsTheHelperItValidates(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
@@ -103,6 +106,21 @@ func TestPlanSetNotNullRecordsTheHelperItValidates(t *testing.T) {
 				FROM pg_catalog.pg_constraint
 				WHERE conrelid = $1::regclass AND conname = $2`, schema+".orders", tt.constraint).Scan(&def))
 			assert.Equal(t, tt.def, def)
+
+			// The recorded drop is the helper as the executor reads it once
+			// validated, which the drop step compares it to.
+			assert.Equal(t, &schemadiff.DroppedObject{
+				Kind:       schemadiff.DroppedConstraint,
+				Name:       tt.constraint,
+				Definition: strings.TrimSuffix(tt.def, " NOT VALID"),
+			}, st.DropsHelper)
+			_, err = pool.Exec(t.Context(), st.ExecSQL[1])
+			require.NoError(t, err)
+			live, found, err := schemadiff.ReadDroppedObject(t.Context(), pool, schema, "orders", schemadiff.DroppedConstraint, tt.constraint)
+			require.NoError(t, err)
+			require.True(t, found)
+			assert.Equal(t, *st.DropsHelper, live)
+			assert.False(t, st.Destructive, "the helper is the plan's own, not live structure")
 		})
 	}
 }
