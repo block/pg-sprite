@@ -370,6 +370,17 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
 
+	// Foreign keys to drop go first. A key a self-referencing foreign key
+	// rests on, its primary key, unique constraint, or unique index, cannot
+	// be dropped while the foreign key still depends on it, and a foreign
+	// key depends on nothing the rest of the plan drops.
+	for _, con := range live.Constraints {
+		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
+			continue
+		}
+		changes = append(changes, dropConstraintChange(table, con))
+	}
+
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
 	// adopts stays: the constraint takes it over below.
@@ -387,19 +398,14 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
-	// Constraints to drop: gone from desired, or changed (re-added below).
-	// One left NOT VALID with the desired definition is validated below
-	// instead.
+	// Other constraints to drop: gone from desired, or changed (re-added
+	// below). One left NOT VALID with the desired definition is validated
+	// below instead.
 	for _, con := range live.Constraints {
-		want, ok := desiredCons[con.Name]
-		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
-			changes = append(changes, Change{
-				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
-				Kind:        dropConstraintKind(con),
-				Destructive: true,
-				Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
-			})
+		if con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
+			continue
 		}
+		changes = append(changes, dropConstraintChange(table, con))
 	}
 
 	// Columns to drop. A rename is indistinguishable from drop+add at the
@@ -811,6 +817,25 @@ func adoptIndexSQL(table string, con Constraint) string {
 		sql += " INITIALLY DEFERRED"
 	}
 	return sql
+}
+
+// constraintNeedsDrop reports whether a live constraint is gone from the
+// desired model, or changed in a way validation in place cannot reach, so the
+// plan drops it (and re-adds a changed one).
+func constraintNeedsDrop(con Constraint, desiredCons map[string]Constraint) bool {
+	want, ok := desiredCons[con.Name]
+	return !ok || (want.Def != con.Def && !validatesInPlace(con, want))
+}
+
+// dropConstraintChange is the destructive drop of a live constraint, with the
+// record the checked drop compares against.
+func dropConstraintChange(table string, con Constraint) Change {
+	return Change{
+		SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
+		Kind:        dropConstraintKind(con),
+		Destructive: true,
+		Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
+	}
 }
 
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in

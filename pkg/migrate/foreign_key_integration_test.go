@@ -391,3 +391,61 @@ CREATE TABLE employees (
 		WHERE conrelid = ($1 || '.employees')::regclass AND conname = 'employees_manager_id_fkey'`, schema).Scan(&validated))
 	assert.True(t, validated)
 }
+
+// A self-referencing foreign key and the key it rests on, a primary key, a
+// unique constraint, or a unique index, both leave the desired file. The plan
+// drops the foreign key first, since PostgreSQL refuses to drop the key while
+// the foreign key still depends on it, and the run converges.
+func TestRunDesiredDropsASelfReferencingForeignKeyBeforeItsKey(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		live    string
+		desired string
+		keyDrop string
+	}{
+		{
+			name:    "primary key",
+			live:    `CREATE TABLE %[1]s.orders (id bigint CONSTRAINT orders_pkey PRIMARY KEY, parent_id bigint CONSTRAINT orders_parent_fkey REFERENCES %[1]s.orders (id))`,
+			desired: `CREATE TABLE orders (id bigint NOT NULL, parent_id bigint);`,
+			keyDrop: `ALTER TABLE %s.orders DROP CONSTRAINT orders_pkey`,
+		},
+		{
+			name:    "unique constraint",
+			live:    `CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, code text CONSTRAINT orders_code_key UNIQUE, parent_code text CONSTRAINT orders_parent_fkey REFERENCES %[1]s.orders (code))`,
+			desired: `CREATE TABLE orders (id bigint PRIMARY KEY, code text, parent_code text);`,
+			keyDrop: `ALTER TABLE %s.orders DROP CONSTRAINT orders_code_key`,
+		},
+		{
+			name: "unique index",
+			live: `CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, code text, parent_code text);
+				CREATE UNIQUE INDEX orders_code_idx ON %[1]s.orders (code);
+				ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_parent_fkey FOREIGN KEY (parent_code) REFERENCES %[1]s.orders (code)`,
+			desired: `CREATE TABLE orders (id bigint PRIMARY KEY, code text, parent_code text);`,
+			keyDrop: `DROP INDEX %s.orders_code_idx`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, schema := foreignKeySchema(t)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(tt.live, schema))
+			require.NoError(t, err)
+			req := reviewedDestructiveRequest(t, pool, schema, tt.desired)
+
+			plan, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: req.Desired})
+			require.NoError(t, err)
+			var drops []string
+			for _, st := range plan.Statements {
+				if st.Drops != nil {
+					drops = append(drops, st.SQL)
+				}
+			}
+			require.Len(t, drops, 2, "the foreign key and its key are both dropped")
+			assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_parent_fkey", schema), drops[0], "the foreign key drops first")
+			assert.Equal(t, fmt.Sprintf(tt.keyDrop, schema), drops[1])
+
+			res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+			require.NoError(t, err)
+			assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+			assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
+		})
+	}
+}
