@@ -25,7 +25,14 @@ type leafKeyColumn struct {
 	quoted string
 }
 
-const leafKeyColumnSQL = `SELECT a.attnum, a.attnotnull, pg_catalog.quote_ident(a.attname)
+const leafKeyColumnSQL = `SELECT a.attnum, a.attnotnull,
+		        EXISTS (
+		          SELECT 1 FROM pg_catalog.pg_constraint k
+		           WHERE k.conrelid OPERATOR(pg_catalog.=) a.attrelid
+		             AND k.contype::pg_catalog.text OPERATOR(pg_catalog.=) 'n'
+		             AND k.conkey[1] OPERATOR(pg_catalog.=) a.attnum
+		             AND NOT k.convalidated),
+		        pg_catalog.quote_ident(a.attname)
 		   FROM pg_catalog.pg_attribute a
 		  WHERE a.attrelid OPERATOR(pg_catalog.=) $1
 		    AND a.attname OPERATOR(pg_catalog.=) $2
@@ -33,20 +40,24 @@ const leafKeyColumnSQL = `SELECT a.attnum, a.attnotnull, pg_catalog.quote_ident(
 		    AND NOT a.attisdropped`
 
 // readLeafKeyColumns reads the requested key columns of the leaf, in key
-// order. pg_attribute.attnotnull says whether a column refuses NULL on every
-// supported major, including 18, which also catalogs the NOT NULL as a
-// constraint.
+// order. A column refuses NULL when pg_attribute.attnotnull is set and, from
+// PostgreSQL 18, which catalogs the NOT NULL as a constraint, that constraint
+// is validated: attnotnull is also set for a NOT VALID not-null constraint,
+// under which the column can still hold NULLs. Before 18 the catalog has no
+// not-null constraints, so attnotnull alone decides.
 func readLeafKeyColumns(ctx context.Context, q querier, node partitionNode, names []string) ([]leafKeyColumn, error) {
 	columns := make([]leafKeyColumn, 0, len(names))
 	for _, name := range names {
 		c := leafKeyColumn{name: name}
-		err := q.QueryRow(ctx, leafKeyColumnSQL, node.oid, name).Scan(&c.attnum, &c.notNull, &c.quoted)
+		var attNotNull, notNullNotValid bool
+		err := q.QueryRow(ctx, leafKeyColumnSQL, node.oid, name).Scan(&c.attnum, &attNotNull, &notNullNotValid, &c.quoted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("partition %s has no column %q for the key", node.qualified(), name)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read key column %q of partition %s: %w", name, node.qualified(), err)
 		}
+		c.notNull = attNotNull && !notNullNotValid
 		columns = append(columns, c)
 	}
 	return columns, nil
@@ -76,11 +87,15 @@ type leafConstraint struct {
 	// parentOID is pg_constraint.conparentid: nonzero once a partitioned
 	// table's constraint has adopted this one.
 	parentOID uint32
-	key       []int16
-	index     relationFacts
+	// deferrable is pg_constraint.condeferrable. The index definition does
+	// not show it, and a parent's immediate constraint still adopts a
+	// deferrable one.
+	deferrable bool
+	key        []int16
+	index      relationFacts
 }
 
-const leafConstraintsSQL = `SELECT k.oid, k.conname, k.contype::pg_catalog.text, k.conindid, k.conparentid, k.conkey
+const leafConstraintsSQL = `SELECT k.oid, k.conname, k.contype::pg_catalog.text, k.conindid, k.conparentid, k.condeferrable, k.conkey
 		   FROM pg_catalog.pg_constraint k
 		  WHERE k.conrelid OPERATOR(pg_catalog.=) $1
 		    AND k.contype::pg_catalog.text OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog.text[])
@@ -100,7 +115,7 @@ func readLeafConstraints(ctx context.Context, q querier, node partitionNode) ([]
 	for rows.Next() {
 		var c leafConstraint
 		var conindid uint32
-		if err := rows.Scan(&c.oid, &c.name, &c.contype, &conindid, &c.parentOID, &c.key); err != nil {
+		if err := rows.Scan(&c.oid, &c.name, &c.contype, &conindid, &c.parentOID, &c.deferrable, &c.key); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan the key constraints of partition %s: %w", node.qualified(), err)
 		}
@@ -130,8 +145,11 @@ const constraintNamedSQL = `SELECT EXISTS (
 		    WHERE k.conrelid OPERATOR(pg_catalog.=) $1
 		      AND k.conname OPERATOR(pg_catalog.=) $2)`
 
-// leafKeyFacts is everything the resume decision reads from one snapshot of
-// the leaf.
+// leafKeyFacts is everything the resume decision reads about the leaf, in one
+// read-only transaction. The transaction is READ COMMITTED, so each read takes
+// its own snapshot: the caller's advisory lock on the parent keeps other runs
+// of the step out between them, and the constraint step proves again, under
+// the leaf's lock, everything it acts on.
 type leafKeyFacts struct {
 	columns     []leafKeyColumn
 	constraints []leafConstraint
@@ -206,10 +224,10 @@ type leafKeyPlan struct {
 	debris bool
 }
 
-// decideLeafKey decides, from one snapshot of the leaf, which step brings it
-// to the requested key. Existing constraints are judged first, so a matching
-// one is reused whatever its name; then the primary key's columns; then the
-// derived name; then the leaf's unattached indexes.
+// decideLeafKey decides, from the facts readLeafKeyFacts read, which step
+// brings the leaf to the requested key. Existing constraints are judged
+// first, so a matching one is reused whatever its name; then the primary
+// key's columns; then the derived name; then the leaf's unattached indexes.
 func decideLeafKey(spec partitionedKeySpec, node partitionNode, name string, facts leafKeyFacts) (leafKeyPlan, error) {
 	want := leafKeyDefinitionKey(facts.columns)
 	match, err := matchingLeafConstraint(spec, node, facts, want)
@@ -276,10 +294,16 @@ func matchingLeafConstraint(spec partitionedKeySpec, node partitionNode, facts l
 	}
 }
 
-// isRequestedKey reports whether the constraint is of the requested kind and
-// backed by a valid index of the key's definition.
+// isRequestedKey reports whether the constraint is of the requested kind, not
+// deferrable, and backed by a valid index of the key's definition. The
+// requested key is checked immediately; a deferrable constraint the parent
+// adopted would check it only at commit, and could not be the arbiter of an
+// INSERT ... ON CONFLICT routed to the leaf.
 func (c leafConstraint) isRequestedKey(spec partitionedKeySpec, want string) (bool, error) {
 	if c.contype != spec.kind.contype() || !c.index.valid {
+		return false, nil
+	}
+	if c.deferrable {
 		return false, nil
 	}
 	key, err := c.index.definitionKey()
@@ -332,7 +356,7 @@ func requireNotNullForPrimaryKey(spec partitionedKeySpec, node partitionNode, co
 	if len(nullable) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%w: partition %s allows NULL in %s; make the columns NOT NULL first",
+	return fmt.Errorf("%w: partition %s allows NULL in %s; make the columns NOT NULL first, validating any NOT VALID not-null constraint on them",
 		ErrPartitionedKeyNullableColumn, node.qualified(), strings.Join(nullable, ", "))
 }
 
