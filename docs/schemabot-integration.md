@@ -737,6 +737,21 @@ so "what persists" below is also what the rerun builds on. Route each outcome by
 | `execution-failed` | unknown for the last step | no, inspect first | A failure outside the typed set: the statement text holds more than one statement (`statement.ErrNotOneStatement`), a step was cancelled as one side of a deadlock (SQLSTATE 40P01, for example against a concurrent `DETACH PARTITION`), or the server returned another error. Surface to an operator; a deadlock commits nothing of its step, so a rerun resumes |
 | `*dbconn.TableLockHeldError` (no code) | nothing | yes, after a wait | Another session holds the table's lock; the error names the backend. Wait and retry |
 
+### Outcomes of a partitioned key's partition step
+
+An online `PRIMARY KEY` or `UNIQUE` on a partitioned table first gives every partition its own
+key constraint (a concurrent unique index build, then `ADD CONSTRAINT ... USING INDEX`), which
+the parent's constraint then adopts. That partition step refuses with three codes of its own.
+`executor.Codes()` lists them, though no exported entry point returns them yet; an adapter that
+maps `Codes()` exhaustively routes them as follows. Each leaves the refused partition untouched,
+except as noted, and earlier partitions keep their finished key constraints:
+
+| Outcome | Persists | Retry | Orchestrator action |
+| --- | --- | --- | --- |
+| `partitioned-key-name-taken` | the partition is untouched | no, permanent | The name the key needs on a partition, for its index and constraint, is held by something that is not the requested key. Nothing is renamed or dropped; an operator renames or drops the occupant, then the same statement resumes |
+| `partitioned-key-conflict` | the partition is untouched | no, permanent | The partition already has a key constraint that conflicts with the requested one: two that match it, one on the same columns of another kind or definition or `DEFERRABLE`, one already attached to a parent's constraint, or another primary key. An operator resolves the partition's constraint, then the same statement resumes |
+| `partitioned-key-nullable-column` | the partition is untouched, or keeps a built index with no constraint when a column lost `NOT NULL` during the step | no, permanent | A primary key column allows NULL on the partition, or its not-null constraint is `NOT VALID` (PostgreSQL 18), so adding the key would scan the partition under `ACCESS EXCLUSIVE`. An operator makes the columns `NOT NULL`, or validates the constraint, then the same statement resumes and reuses any built index |
+
 ### Wiring the build through `migrate.Run` and `migrate.RunDesired`
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs

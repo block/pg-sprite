@@ -867,6 +867,17 @@ statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
 same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
+The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported)
+takes `ACCESS EXCLUSIVE` on one leaf only for `ADD CONSTRAINT ... USING INDEX` on an index already
+built concurrently, in a brief transaction under both bounds. A primary key over a column the leaf
+allows to be NULL, or whose not-null constraint is `NOT VALID` on PostgreSQL 18, would make that
+statement set `NOT NULL` and scan the leaf under the lock, so the step refuses it before it builds
+anything (`TestEnsureLeafKeyRefusals/primary_key_over_a_nullable_column`,
+`TestEnsureLeafKeyRefusals/primary_key_over_a_NOT_VALID_not-null_column`) and checks the columns
+again under the leaf's lock before the statement
+(`TestEnsureLeafKeyRefusals/not_null_dropped_before_the_constraint`), both as
+`partitioned-key-nullable-column`; a writer to the leaf keeps committing through the whole step
+(`TestEnsureLeafKeyWritersKeepCommitting`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1534,7 +1545,12 @@ a replacement table is refused with its index left in place and named for an ope
 the build cannot prove the index is its own
 (`TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved` and
 `TestBuildPartitionedIndexTreeChangesDuringARun`, which detaches a partition between its build
-and its attach).
+and its attach); the leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE`
+(`pkg/executor/partitioned_key_leaf.go`, unexported) proves the leaf in the tree, with no
+detach pending, before it builds, and in the constraint's transaction locks the leaf
+`SHARE UPDATE EXCLUSIVE`, which excludes a detach, before it proves the leaf and the index by
+identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-pending cases,
+`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
