@@ -18,7 +18,7 @@ func TestRenderReapDryRunSaysNothingWasDropped(t *testing.T) {
 		Active:                []string{},
 		Foreign:               []string{},
 	})
-	assert.Equal(t, "would drop (orphans, with their publications): 1\n"+
+	assert.Equal(t, "would drop (orphans, with any publication of the engine's shape): 1\n"+
 		"  pgsprite_deadbeef\n"+
 		"live (kept: a checkpoint row in a non-terminal phase names it): 0\n"+
 		"active (kept: a process holds it): 0\n"+
@@ -34,12 +34,14 @@ func TestRenderReapStoppedPassNamesTheSlotItStoppedAt(t *testing.T) {
 		Stopped:               true,
 		Failed:                "pgsprite_ffff0000",
 		Dropped:               []string{"pgsprite_0000aaaa"},
+		PublicationLeft:       []string{},
 		Live:                  []string{},
 		Active:                []string{},
 		Foreign:               []string{},
 	})
-	assert.Equal(t, "dropped (orphans, with their publications): 1\n"+
+	assert.Equal(t, "dropped (orphans, with their publications except any left below): 1\n"+
 		"  pgsprite_0000aaaa\n"+
+		"publication left (its slot dropped above; the publication of its name was refused or failed to drop): 0\n"+
 		"live (kept: a checkpoint row in a non-terminal phase names it): 0\n"+
 		"active (kept: a process holds it): 0\n"+
 		"foreign (kept: wears the pgsprite_ prefix without the engine's name shape or output plugin): 0\n"+

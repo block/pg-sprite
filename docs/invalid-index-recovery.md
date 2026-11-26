@@ -187,6 +187,15 @@ rerun is refused before the build as `invalid-index-abandoned`, which is recover
 An entry the run could not prove its own is reported with the same code; follow its
 state's section below before removing anything.
 
+A partitioned table's index build differs once the rows are corrected. Each partition's
+index is built under a name of its own, and when the run proved the failed build's
+invalid index its own, the verdict names it and the partition whose rows broke it. Correct
+the rows, then run the same statement again: the rerun is not refused, it proves that index
+abandoned, drops it, builds it again, and resumes from the partitions already done.
+Dropping it first with `DROP INDEX CONCURRENTLY` also works. Partitions are built one at a
+time and the build stops at the first fault, so a later partition whose rows also break the
+index stops the rerun the same way.
+
 ### Another backend's build is in flight (`ErrInvalidIndexBuildInFlight`)
 
 The error names the backend PID. Dropping the entry would destroy a healthy build that may
