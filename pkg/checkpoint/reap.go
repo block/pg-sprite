@@ -252,6 +252,23 @@ func (s *Store) liveRowSlots(ctx context.Context, names []string) (map[string]bo
 	return live, nil
 }
 
+// LiveRowNamesSlot reports whether a checkpoint row in a non-terminal
+// phase, of any table, names the slot: the read the reaper decides a
+// slot's ownership by (ST-3). A slot's name is a hash of its table's name,
+// so two tables can derive the same one, and only a read over every row
+// says whether the slot of one table's derived name is another table's
+// run's. A caller about to drop the slot reads it under the engine's lock
+// on the slot's name (WithSlotLock), as the reaper does, so no run claims
+// the slot between the read and the drop. A database where Ensure has
+// never run is refused with ErrTableMissing.
+func (s *Store) LiveRowNamesSlot(ctx context.Context, name string) (bool, error) {
+	live, err := s.liveRowSlots(ctx, []string{name})
+	if err != nil {
+		return false, err
+	}
+	return live[name], nil
+}
+
 // slotNames lists the candidates' names in order.
 func slotNames(candidates []candidateSlot) []string {
 	names := make([]string, 0, len(candidates))

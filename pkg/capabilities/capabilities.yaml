@@ -329,7 +329,7 @@ rows:
       migrate: refused
       diff: not_applicable
     refusal_reason: not-native-safe-rewrite-required
-    reason_notes: "Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one"
+    reason_notes: "Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom is surfaced as guidance: pre-prove the bound with a validated `CHECK` on the new table, exclude it with a validated `CHECK` on the parent's `DEFAULT` partition if it has one, and build the parent's indexes on the new table first, a unique one backing its constraint through `USING INDEX`, so the attach neither scans nor builds. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one"
   - id: detach-partition-concurrently
     area: "partitioned_tables"
     operation: "`DETACH PARTITION [CONCURRENTLY]`"

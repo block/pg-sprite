@@ -104,11 +104,14 @@ const (
 	// build the constraint with its online pattern as a separate ADD
 	// CONSTRAINT.
 	GuidanceAddColumnThenConstraint Guidance = "add-column-then-constraint"
-	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child under
-	// the parent's lock unless a validated CHECK matching the partition
-	// bound already exists on the child. Pre-add that CHECK (NOT VALID,
-	// then VALIDATE), attach, then drop it. The planner cannot construct
-	// the bound-matching CHECK from the statement alone.
+	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child unless a
+	// validated CHECK matching the partition bound already exists on it,
+	// scans the DEFAULT partition unless a validated CHECK there excludes
+	// the bound, and builds each parent index the child lacks, all under
+	// ACCESS EXCLUSIVE. Pre-add both CHECKs (NOT VALID, then VALIDATE),
+	// build the parent's indexes on the child concurrently, a unique one
+	// backing its constraint, attach, then drop the CHECKs. The planner
+	// cannot construct the CHECKs from the statement alone.
 	GuidancePrevalidatedCheck Guidance = "pre-add-validated-check"
 	// GuidanceNotNullScaffold: prove the invariant with a NOT VALID CHECK
 	// (col IS NOT NULL) plus an online VALIDATE, then the NOT NULL
@@ -208,7 +211,9 @@ func ManualPath(g Guidance) string {
 	case GuidanceAddColumnThenConstraint:
 		return "add the plain column first, then build the constraint as a separate, named ADD CONSTRAINT with its online pattern"
 	case GuidancePrevalidatedCheck:
-		return "pre-add a validated CHECK matching the partition bound on the child, attach, then drop it"
+		return "pre-add a validated CHECK matching the partition bound on the child and one excluding it on the DEFAULT partition, " +
+			"build the parent's indexes on the child concurrently (a unique one backing its constraint through USING INDEX), " +
+			"attach, then drop the CHECKs"
 	case GuidanceNotNullScaffold:
 		return "prove the invariant with a NOT VALID CHECK plus an online VALIDATE, then SET NOT NULL is a catalog flip"
 	case GuidanceNameConstraintThenValidate:

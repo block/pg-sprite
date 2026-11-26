@@ -426,9 +426,21 @@ func columnConversions(st statement.Statement, target preflight.CopySwapTarget) 
 	return conversions, nil
 }
 
-// checkProof refuses the zero CopySwapTarget: only the copy-and-swap shape
-// check mints a populated one.
-func checkProof(target preflight.CopySwapTarget) error {
+// provenTable is what both copy-and-swap proofs answer about the table they
+// were minted for: the preflight.CopySwapTarget every step of a run takes,
+// and the preflight.CopySwapShape a discard takes, which needs the table's
+// privileges and shape proven but not the room a run would need to grow.
+type provenTable interface {
+	Schema() string
+	Table() string
+	OwnerRole() string
+	PKColumn() string
+	DecodingName() string
+}
+
+// checkProof refuses a zero proof: only the copy-and-swap shape check
+// mints a populated one.
+func checkProof(target provenTable) error {
 	if target.Schema() == "" || target.Table() == "" || target.OwnerRole() == "" || target.PKColumn() == "" {
 		// INV: ST-6
 		return refuse(CauseProofEmpty, nil, "copy-and-swap proof is empty")
@@ -491,7 +503,7 @@ func namesTarget(st statement.Statement, schema, table string) bool {
 // setBuildSession bounds the transaction and puts it in the owner's shoes.
 // SET LOCAL cannot take bind parameters; the timeouts are integer
 // milliseconds and the search_path comes from dbconn so it upholds CO-9.
-func setBuildSession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, opts Options) error {
+func setBuildSession(ctx context.Context, tx pgx.Tx, target provenTable, opts Options) error {
 	return setSession(ctx, tx, target.Schema(), target.OwnerRole(), opts)
 }
 

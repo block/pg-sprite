@@ -27,32 +27,59 @@ import (
 // is discarded, as a resume refuses it: it is not this target's run, and
 // its slot is not the restart's to drop (ST-3).
 func (r *Runner) discardRow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint) error {
-	// INV: ST-3 — a restart drops only the target's own slot.
+	if err := r.checkDiscardable(ctx, pool, lock, target, cp); err != nil {
+		return err
+	}
+	_, err := r.discardRecorded(ctx, pool, lock, target, cp)
+	return err
+}
+
+// checkDiscardable refuses, before anything is discarded, a row whose run
+// is not the target's or is past the point of starting over: a row naming
+// a slot other than the target's derived name, and a cutover row whose
+// swap the catalog shows committed.
+func (r *Runner) checkDiscardable(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, cp checkpoint.Checkpoint) error {
+	// INV: ST-3 — a discard drops only the target's own slot.
 	if cp.SlotName != "" && cp.SlotName != target.DecodingName() {
-		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s names slot %s, the target's derived name is %s; a restart drops only the target's own slot", cp.Schema, cp.Table, cp.SlotName, target.DecodingName())
+		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s names slot %s, the target's derived name is %s; a discard drops only the target's own slot", cp.Schema, cp.Table, cp.SlotName, target.DecodingName())
 	}
 	if cp.Phase == checkpoint.PhaseCutover {
-		if err := r.refuseSwappedRestart(ctx, pool, lock, cp); err != nil {
-			return err
-		}
-	}
-	if err := r.discardShadow(ctx, pool, lock, target); err != nil {
-		return err
-	}
-	if err := r.discardHold(ctx, pool, lock, target, cp); err != nil {
-		return err
-	}
-	if err := r.store.Delete(ctx, lock, cp.Schema, cp.Table, cp.Identity()); err != nil {
-		return fmt.Errorf("discard checkpoint row for %s.%s: %w", cp.Schema, cp.Table, err)
+		return r.refuseSwappedRestart(ctx, pool, lock, cp)
 	}
 	return nil
 }
 
-// refuseSwappedRestart refuses the restart of a cutover row whose swap the
-// catalog shows committed, or whose retained source is already gone — in
-// both the shadow has taken the source's name. A swap the catalog shows
-// rolled back is a run back before its cutover, which the restart may
-// discard.
+// recordedSteps is how far a discardRecorded got: each step it finished.
+// A step that failed is not reported, though part of it may be gone.
+type recordedSteps struct {
+	shadow, hold, row bool
+}
+
+// discardRecorded discards what the row cp records, once checkDiscardable
+// has accepted it: the shadow, then the hold, then the row. It reports the
+// steps it finished beside any error.
+func (r *Runner) discardRecorded(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, cp checkpoint.Checkpoint) (recordedSteps, error) {
+	var done recordedSteps
+	if err := r.discardShadow(ctx, pool, lock, target); err != nil {
+		return done, err
+	}
+	done.shadow = true
+	if err := r.discardHold(ctx, pool, lock, target, cp); err != nil {
+		return done, err
+	}
+	done.hold = true
+	if err := r.store.Delete(ctx, lock, cp.Schema, cp.Table, cp.Identity()); err != nil {
+		return done, fmt.Errorf("discard checkpoint row for %s.%s: %w", cp.Schema, cp.Table, err)
+	}
+	done.row = true
+	return done, nil
+}
+
+// refuseSwappedRestart refuses the restart, or the discard (Runner.Discard),
+// of a cutover row whose swap the catalog shows committed, or whose
+// retained source is already gone — in both the shadow has taken the
+// source's name. A swap the catalog shows rolled back is a run back before
+// its cutover, which the restart or the discard may discard.
 func (r *Runner) refuseSwappedRestart(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, cp checkpoint.Checkpoint) error {
 	proof, err := rowProof(cp)
 	if err != nil {
@@ -62,7 +89,7 @@ func (r *Runner) refuseSwappedRestart(ctx context.Context, pool *pgxpool.Pool, l
 	_, err = InspectSwapped(ctx, pool, lock, proof, r.opts.Shadow)
 	switch {
 	case err == nil, errors.Is(err, ErrOldTableNotFound):
-		return refuse(CauseRestartSwapCommitted, nil, "checkpoint row for %s.%s is in phase %s and the catalog shows its swap committed; run the statement again without the restart to finish it", cp.Schema, cp.Table, cp.Phase)
+		return refuse(CauseRestartSwapCommitted, nil, "checkpoint row for %s.%s is in phase %s and the catalog shows its swap committed; run the statement again, neither restarted nor discarded, to finish it", cp.Schema, cp.Table, cp.Phase)
 	case errors.Is(err, ErrNotSwapped):
 		return nil
 	default:
@@ -79,17 +106,17 @@ func (r *Runner) refuseSwappedRestart(ctx context.Context, pool *pgxpool.Pool, l
 // slot is touched: without a row nothing says a slot of the derived name
 // is this run's to drop (ST-3), and the reaper takes an orphan of the
 // engine's own.
-func (r *Runner) discardUnrecorded(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
+func (r *Runner) discardUnrecorded(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable) error {
 	if err := r.discardShadow(ctx, pool, lock, target); err != nil {
 		return err
 	}
-	return DropWriteFence(ctx, pool, lock, target, r.opts.Shadow)
+	return dropWriteFenceOf(ctx, pool, lock, target, r.opts.Shadow)
 }
 
 // discardShadow drops the shadow under the target's derived name; a name
 // nothing bears is already discarded.
-func (r *Runner) discardShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
-	err := DropShadow(ctx, pool, lock, target, r.opts.Shadow)
+func (r *Runner) discardShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable) error {
+	err := dropShadowOf(ctx, pool, lock, target, r.opts.Shadow)
 	if err != nil && !errors.Is(err, ErrShadowNotFound) {
 		return err
 	}
@@ -101,10 +128,10 @@ func (r *Runner) discardShadow(ctx context.Context, pool *pgxpool.Pool, lock *db
 // fence a quiesced row stands for. Which of the two is read from the row,
 // not from the target's proof: the row records what the stopped run made,
 // and a restart discards that whichever kind of run this one is.
-// discardRow has already refused a row whose slot is not the target's.
-func (r *Runner) discardHold(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint) error {
+// checkDiscardable has already refused a row whose slot is not the target's.
+func (r *Runner) discardHold(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, cp checkpoint.Checkpoint) error {
 	if cp.SlotName != "" {
 		return decode.DropSlot(ctx, r.cfg, pool, cp.SlotName)
 	}
-	return DropWriteFence(ctx, pool, lock, target, r.opts.Shadow)
+	return dropWriteFenceOf(ctx, pool, lock, target, r.opts.Shadow)
 }
