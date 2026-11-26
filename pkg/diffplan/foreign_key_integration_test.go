@@ -18,6 +18,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // foreignKeyPool returns a pool and a fresh schema holding a users table
@@ -236,6 +237,40 @@ func TestPlanUndeclaredLiveForeignKeyIsDropped(t *testing.T) {
 	require.Len(t, report.Statements, 1)
 	requireForeignKeyDrop(t, schema, report.Statements[0])
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
+}
+
+// A live foreign key into another schema cannot be declared, since a desired
+// file names tables unqualified, so the diff plans its drop whatever the file
+// says. The drop is shown for review and refused, so planning an unrelated
+// change to the table never removes a key its author had no way to keep.
+func TestPlanDropOfAForeignKeyIntoAnotherSchemaIsRefused(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	other := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[2]s.regions (id bigint PRIMARY KEY);
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL,
+			region_id bigint CONSTRAINT orders_region_id_fkey REFERENCES %[2]s.regions (id)
+		)`, schema, other))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL,
+    region_id bigint
+);`)
+
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, st.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_region_id_fkey", schema), st.SQL)
+	assert.True(t, st.Destructive)
+	assert.Equal(t, router.DispositionRefuse, st.Disposition)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, st.Reason)
+	assert.Empty(t, st.ExecSQL)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
 
 // A foreign key whose definition changes plans as the drop of the live key

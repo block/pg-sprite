@@ -398,6 +398,9 @@ func verdictText(r verdict.Reason) string {
 	switch r {
 	case verdict.ReasonUnsupportedPartitionedParent:
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
+	case verdict.ReasonDeclarativeForeignKey:
+		return "this foreign key references another schema, which a desired file cannot declare, so desired-state apply does not drop it; " +
+			"this change is shown for review only — to remove it, run the statement with pg-sprite migrate --alter"
 	default:
 		return string(r)
 	}

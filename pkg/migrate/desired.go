@@ -881,6 +881,10 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 			return planIncoherentRefusal(), detail(fmt.Sprintf("is refused by the create path with a cause this build does not classify (%q)", ps.Cause))
 		}
 		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
+		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
+			return r, detail("drops a foreign key into another schema, which a desired file cannot declare — " +
+				"to remove it, run the statement through the imperative front door (migrate --alter)")
+		}
 		if err == nil {
 			return r, detail("has no safe path")
 		}

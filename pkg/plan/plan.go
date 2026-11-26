@@ -66,8 +66,9 @@ import (
 // Version 26 runs the add-foreign-key and validate-foreign-key kinds
 // instead of refusing them, and retires the foreign-key create-shape
 // cause: a new table is created with its foreign keys. Version 27 runs
-// the drop-foreign-key kind instead of refusing it, and retires the
-// declarative-foreign-key reason, which refused only that kind.
+// the drop-foreign-key kind instead of refusing it, and narrows the
+// declarative-foreign-key reason to the drop of a key into another schema,
+// which a desired file cannot declare.
 const FormatVersion = 27
 
 // Source identifies which front door derived the plan.

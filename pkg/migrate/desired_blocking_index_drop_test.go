@@ -99,16 +99,16 @@ func TestAdmitPlanAcceptsTheBlockingIndexDrop(t *testing.T) {
 	t.Run("any other refused statement still refuses the plan", func(t *testing.T) {
 		report := blockingDropReport()
 		report.Statements = append(report.Statements, plan.Statement{
-			SQL:         `ALTER TABLE app.events ALTER COLUMN kind TYPE bigint`,
+			SQL:         `ALTER TABLE app.events ADD CONSTRAINT events_user_fk FOREIGN KEY (user_id) REFERENCES app.users (id)`,
 			Disposition: router.DispositionRefuse,
-			Reason:      verdict.ReasonUnsupportedStatement,
+			Reason:      verdict.ReasonDeclarativeForeignKey,
 			Class:       verdict.ClassCapabilityBoundary,
 		})
 		req := reviewed
 		req.AcceptBlocking = "app.events"
 		res, ok := AdmitPlan(req, report)
 		require.False(t, ok)
-		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+		assert.Equal(t, verdict.ReasonDeclarativeForeignKey, res.Reason)
 	})
 }
 

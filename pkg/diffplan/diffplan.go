@@ -146,6 +146,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if err := recordNotNullScaffolds(ctx, pool, report.Statements); err != nil {
 		return plan.Report{}, err
 	}
+	plan.RefuseUndeclarableForeignKeyDrops(&report, foreignKeysIntoOtherSchemas(live))
 	if !tableExists {
 		// Shape refusals are stamped first so the disclosure below only
 		// describes the statements that remain executable.
@@ -174,6 +175,19 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	report.ExtensionSchemas = ds.ExtensionSchemas()
 	report.Fingerprint = report.ComputeFingerprint()
 	return report, nil
+}
+
+// foreignKeysIntoOtherSchemas names the live table's foreign keys whose
+// referenced table is in another schema. A desired file cannot declare one,
+// so the diff always plans its drop.
+func foreignKeysIntoOtherSchemas(live schemadiff.Model) map[string]bool {
+	keys := map[string]bool{}
+	for _, con := range live.Constraints {
+		if con.ForeignKey && con.ReferencesOtherSchema {
+			keys[con.Name] = true
+		}
+	}
+	return keys
 }
 
 // requireReferencesForAddedKeys checks the REFERENCES privilege for each

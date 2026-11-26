@@ -119,6 +119,7 @@ A file the parser cannot read is not a refusal: it is `statement.ErrParseDesired
 | `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole unless the run pins the reviewed plan's fingerprint and names the table in its own destructive acknowledgement, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` — and a `DROP INDEX` under `--accept-blocking` — until `--allow-destructive` names the table (RF-10) | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
+| `declarative-foreign-key` | A desired-state plan drops a foreign key into another schema, which a desired file cannot declare | `capability-boundary` | — |
 
 ### `unsupported-partitioned-parent`, keyed on `PartitionRefusalCause`
 

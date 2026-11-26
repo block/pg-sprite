@@ -955,6 +955,24 @@ path report this refusal under the same code, and both name the refused
 operation when the classifier recognized which part of the statement it
 cannot route.
 
+### `declarative-foreign-key`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The live table has a foreign key into another schema. A desired file names
+tables unqualified, so it cannot declare that key, and `diff` plans its drop
+whatever the file says. The drop is shown for review and refused, so a
+desired-state run never removes a key the file had no way to keep. To remove
+it, run the statement with
+`pg-sprite migrate --alter --allow-destructive SCHEMA.TABLE`.
+
+Every other foreign-key change runs. A key the desired file drops runs as a
+destructive `DROP CONSTRAINT`; a key it adds runs as
+`ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT`; and a
+changed key runs as the drop and the add.
+
 ### `table-not-found`
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |

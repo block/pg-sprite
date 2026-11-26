@@ -84,6 +84,13 @@ func RouteRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
 }
 
+// ForeignKeyChangeRefusal classifies the desired-state drop of a foreign key
+// into another schema, which a desired file cannot declare. The plan keeps
+// the statement, so the diff stays visible while execution refuses it.
+func ForeignKeyChangeRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey)
+}
+
 // DestructiveChangeRefusal classifies a change that would discard live data
 // or structure: desired-state admission of a destructive plan, and an
 // imperative destructive statement without the destructive acknowledgement.

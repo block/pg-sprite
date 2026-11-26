@@ -290,7 +290,8 @@ live schema (introspected)  ─┘                          │
   binds to the copy rather than resolving through the search_path to a live table it would
   lock. An added foreign key runs as `NOT VALID` then `VALIDATE CONSTRAINT`, a new table is
   created with its foreign keys, and a dropped foreign key runs as a destructive, checked
-  `DROP CONSTRAINT`. A schema-qualified reference is refused at admission. Changes
+  `DROP CONSTRAINT`, except one into another schema, which a desired file cannot declare and
+  whose drop is refused with `declarative-foreign-key`. A schema-qualified reference is refused at admission. Changes
   the plan cannot express — identity or generation changes on an existing column, adopting a
   sequence-backed (serial) default whose sequence only existed in the rolled-back scratch
   transaction — are refused as unsupported rather than emitted as an unexecutable plan.

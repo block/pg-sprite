@@ -127,6 +127,7 @@ func siteRefusals() []siteRefusal {
 		{"create-collision", createCollisionRefusal()},
 		{"attached-index-drop", attachedIndexDropRefusal()},
 		{"constraint-index-drop", constraintIndexDropRefusal()},
+		{"declarative-foreign-key", plan.ForeignKeyChangeRefusal()},
 		{"plan-incoherent", planIncoherentRefusal()},
 		{"copy-and-swap-not-enabled", copySwapNotEnabledRefusal()},
 		{"copy-and-swap-run-stopped", copySwapRunStoppedRefusal()},

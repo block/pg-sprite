@@ -45,6 +45,8 @@ const (
 	ChangeDropConstraint ChangeKind = "drop-constraint"
 	// ChangeDropForeignKey drops a foreign-key constraint. It is
 	// destructive: the constraint stops checking writes to both tables.
+	// Desired-state execution refuses the drop of a key into another
+	// schema, which a desired file cannot declare.
 	ChangeDropForeignKey ChangeKind = "drop-foreign-key"
 	// ChangeDropColumn drops a column.
 	ChangeDropColumn ChangeKind = "drop-column"
