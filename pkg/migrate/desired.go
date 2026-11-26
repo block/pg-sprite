@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -61,9 +63,24 @@ type DesiredRequest struct {
 	// anything runs. Each destructive statement then runs through [Run] with
 	// the acknowledgement it needs, so Run's per-statement gate, audit
 	// record, and AllowedDestructive verdict apply unchanged; a dropped index
-	// runs as DROP INDEX CONCURRENTLY. It is separate from
+	// runs as DROP INDEX CONCURRENTLY, except a partitioned table's index,
+	// which also needs AcceptBlocking. It is separate from
 	// Options.AllowDestructive, which desired-state execution still rejects.
 	AllowDestructive string
+	// AcceptBlocking lets the reviewed plan drop an index of a partitioned
+	// table, which PostgreSQL cannot drop concurrently: it names the desired
+	// table, schema-qualified, and accepts that the plan's plain DROP INDEX
+	// takes ACCESS EXCLUSIVE on the table, every partition, and every
+	// partition's index for as long as it runs. It lifts that refusal and no
+	// other. It is valid only with ExpectedFingerprint and AllowDestructive
+	// ([ErrAcceptBlockingNeedsReviewedDrop] before any database work
+	// otherwise), and with a brief budget whose statement timeout is longer
+	// than its lock timeout; another table fails with
+	// [ErrAcceptBlockingMismatch] before anything runs. The drop runs in one
+	// engine-owned transaction under that budget, and a run that commits one
+	// ends executed-without-online-safety. It is separate from
+	// Options.AcceptBlocking, which desired-state execution still rejects.
+	AcceptBlocking string
 }
 
 // DesiredResult is the aggregate report for one desired-state execution:
@@ -219,10 +236,14 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // imperative front door where the operator states it explicitly.
 // [Options.WithoutAcknowledgements] is the policy with all of them cleared.
 //
-// The one acknowledgement desired-state execution takes is
+// The acknowledgements desired-state execution takes are on the request:
 // [DesiredRequest.AllowDestructive], which is valid only with
 // ExpectedFingerprint; each destructive statement of the pinned plan then
-// runs through [Run] with the acknowledgement it needs.
+// runs through [Run] with the acknowledgement it needs. And
+// [DesiredRequest.AcceptBlocking], valid only beside both, which lets the
+// plan's drop of a partitioned table's index run as the blocking DROP INDEX
+// under the brief budget; a run that commits one is
+// executed-without-online-safety.
 //
 // Every planned statement runs back through [Run], so Run's note on the
 // pool's search_path applies to the pool passed here.
@@ -259,9 +280,12 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if err := opts.validate(); err != nil {
 		return DesiredResult{}, err
 	}
-	// INV: RF-12 — the one acknowledgement desired-state execution takes is
+	// INV: RF-12 — the acknowledgements desired-state execution takes are
 	// bound to a pinned plan, decided before any database work.
 	if err := checkDesiredAllowDestructive(req.AllowDestructive, req.ExpectedFingerprint); err != nil {
+		return DesiredResult{}, err
+	}
+	if err := checkDesiredAcceptBlocking(req, opts); err != nil {
 		return DesiredResult{}, err
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
@@ -272,6 +296,9 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return DesiredResult{}, err
 	}
 	if err := CheckDesiredAllowDestructiveTable(req.AllowDestructive, report); err != nil {
+		return DesiredResult{}, err
+	}
+	if err := checkDesiredAcceptBlockingTable(req.AcceptBlocking, report); err != nil {
 		return DesiredResult{}, err
 	}
 	opts.logger().Debug("desired plan derived",
@@ -333,7 +360,7 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return stopped, nil
 	}
 
-	return executePlan(ctx, pool, report, opts, req.AllowDestructive, func(ctx context.Context) (plan.Report, error) {
+	return executePlan(ctx, pool, report, opts, req.AllowDestructive, req.AcceptBlocking, func(ctx context.Context) (plan.Report, error) {
 		return diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	})
 }
@@ -345,9 +372,12 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 // allowDestructive is the table name an admitted destructive acknowledgement
 // carried, empty when the plan was admitted without one. A statement the
 // plan marks destructive runs only with it, set for that statement alone,
-// and a dropped index runs through its own concurrent path. Any other
-// statement is refused by Run's gate as it would be on its own.
-func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options, allowDestructive string, replan func(context.Context) (plan.Report, error)) (DesiredResult, error) {
+// and a dropped index runs through its own concurrent path, or, for a
+// partitioned table's index, through the accepted blocking drop when
+// acceptBlocking names the table. Any other statement is refused by Run's
+// gate as it would be on its own. A converged run that committed a blocking
+// drop ends executed-without-online-safety rather than executed.
+func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options, allowDestructive, acceptBlocking string, replan func(context.Context) (plan.Report, error)) (DesiredResult, error) {
 	result := DesiredResult{Plan: report}
 	for i, ps := range report.Statements {
 		st, err := statement.ParseOne(ps.SQL)
@@ -382,6 +412,8 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 			runErr error
 		)
 		switch {
+		case ps.Destructive && ps.Kind == schemadiff.ChangeDropIndex && ps.Execution == planner.ExecutionBlockingIndexDrop:
+			v, runErr = dropPlannedPartitionedIndex(ctx, pool, report, ps, st, opts, acceptBlocking, i+1)
 		case ps.Destructive && ps.Kind == schemadiff.ChangeDropIndex:
 			v, runErr = dropPlannedIndex(ctx, pool, report, ps, st, opts, i+1)
 		case ps.Destructive:
@@ -428,6 +460,13 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 	}
 	result.Outcome = verdict.OutcomeExecuted
 	result.Detail = fmt.Sprintf("converged: all %d planned statements committed and a fresh plan is empty", len(report.Statements))
+	if ranWithoutOnlineSafety(result.Verdicts) {
+		// The run's verdict is per run: one statement that committed under
+		// the accepted blocking lock means the engine does not vouch for the
+		// run's online safety.
+		result.Outcome = verdict.OutcomeExecutedWithoutOnlineSafety
+		result.Detail += "; the operator accepted the blocking lock of the partitioned index drop, which ran without an online-safety guarantee"
+	}
 	return result, nil
 }
 
@@ -646,14 +685,10 @@ func AdmitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		if !ps.Destructive {
 			continue
 		}
-		if isPartitionedIndexDrop(ps) {
-			detail := fmt.Sprintf(
-				"planned statement %d discards live structure (%s); PostgreSQL has no concurrent drop for an index "+
-					"of a partitioned table, so desired-state execution never runs it — drop it deliberately with this "+
-					"plain DROP INDEX through the imperative front door, acknowledging both the blocking lock on the "+
-					"parent and every partition and the destructive drop for the table, then rerun",
-				i+1, ps.SQL)
-			detail += skippedRestDetail(len(report.Statements) - 1)
+		// INV: RF-6 — a partitioned table's index drop runs only as the
+		// reviewed blocking drop the request accepts.
+		if isPartitionedIndexDrop(ps) && !acceptsBlockingDrop(req, report, ps) {
+			detail := partitionedIndexDropDetail(report, i, ps) + skippedRestDetail(len(report.Statements)-1)
 			return refused.refused(destructiveChangeRefusal(), detail), false
 		}
 		if !acknowledged {
@@ -673,8 +708,10 @@ func AdmitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		return refusal, false
 	}
 	if report.Disposition != router.DispositionExecute {
-		r, detail := planRefusal(report)
-		return refused.refused(r, detail), false
+		r, detail, blocked := acceptedPlanRefusal(report, func(ps plan.Statement) bool { return acceptsBlockingDrop(req, report, ps) })
+		if blocked {
+			return refused.refused(r, detail), false
+		}
 	}
 	return DesiredResult{}, true
 }
@@ -783,54 +820,83 @@ func skippedRestDetail(n int) string {
 // path refuses by shape carries the create path's own cause in the detail,
 // read from the plan's typed field rather than recomputed.
 func planRefusal(report plan.Report) (verdict.Refusal, string) {
-	for i, ps := range report.Statements {
-		detail := func(why string) string {
-			return fmt.Sprintf("planned statement %d (%s) %s; nothing was executed", i+1, ps.SQL, why)
-		}
-		switch ps.Disposition {
-		case router.DispositionExecute:
-			continue
-		case router.DispositionRewriteRequired:
-			// A desired-state plan derives a renamed column as a drop and an
-			// add and never emits a rename, so the rewrite-required statement
-			// here is always one that blocks the table.
-			return rewriteRequiredRefusal(), detail("blocks and has no safer native sequence")
-		case router.DispositionUnavailable:
-			return backendUnavailableRefusal(), detail("routes to an execution strategy that does not carry this operation yet")
-		case router.DispositionRefuse:
-			// The plan-side registry classified the statement when it was
-			// refused; the class travels with the statement. A refused
-			// statement the plan could not classify is a report this build
-			// cannot have produced.
-			if ps.Cause != "" {
-				if r, ok := plan.CreateShapeRefusal(ps.Cause); ok {
-					return r, detail("is refused by the create path: " + ps.Cause.Description())
-				}
-				return planIncoherentRefusal(), detail(fmt.Sprintf("is refused by the create path with a cause this build does not classify (%q)", ps.Cause))
-			}
-			r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
-			if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
-				return r, detail("changes a foreign key, which desired-state execution does not run yet — " +
-					"to apply it, run the statement through the imperative front door (migrate --alter), which validates it online")
-			}
-			if err == nil {
-				return r, detail("has no safe path")
-			}
-			// Keep the statement's own reason where it has one; the class
-			// says the build produced a refusal it did not classify.
-			if unclassified, err := verdict.NewRefusal(verdict.ClassInvariantViolation, ps.Reason, ""); err == nil {
-				return unclassified, detail("is refused but carries no refusal class")
-			}
-			return planIncoherentRefusal(), detail("is refused but carries no refusal class")
-		default:
-			return planIncoherentRefusal(), detail("carries a disposition this build does not know")
-		}
+	r, detail, _ := acceptedPlanRefusal(report, func(plan.Statement) bool { return false })
+	return r, detail
+}
+
+// acceptedPlanRefusal is planRefusal for a request that accepts some
+// refused statements: a statement lifted reports true for is skipped, and
+// when every non-executable statement is lifted, blocked is false and the
+// plan is admitted.
+func acceptedPlanRefusal(report plan.Report, lifted func(plan.Statement) bool) (r verdict.Refusal, detail string, blocked bool) {
+	r, detail, blocked = firstPlanRefusal(report, lifted)
+	if !blocked && !slices.ContainsFunc(report.Statements, lifted) {
+		// The aggregate disposition is non-executable but every statement
+		// is: a report this build cannot have produced. Refuse rather than
+		// guess.
+		return planIncoherentRefusal(),
+			fmt.Sprintf("the plan's aggregate disposition is %q but no statement carries it; nothing was executed",
+				report.Disposition), true
 	}
-	// The aggregate disposition is non-executable but every statement is:
-	// a report this build cannot have produced. Refuse rather than guess.
-	return planIncoherentRefusal(),
-		fmt.Sprintf("the plan's aggregate disposition is %q but no statement carries it; nothing was executed",
-			report.Disposition)
+	return r, detail, blocked
+}
+
+// firstPlanRefusal is planRefusal's walk: the refusal of the first
+// non-executable statement lifted does not accept, and true, or false when
+// there is none.
+func firstPlanRefusal(report plan.Report, lifted func(plan.Statement) bool) (verdict.Refusal, string, bool) {
+	for i, ps := range report.Statements {
+		if ps.Disposition == router.DispositionExecute || lifted(ps) {
+			continue
+		}
+		r, detail := statementRefusal(i, ps)
+		return r, detail, true
+	}
+	return verdict.Refusal{}, "", false
+}
+
+// statementRefusal maps one non-executable planned statement, at position
+// i, to the typed refusal the aggregate result carries.
+func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
+	detail := func(why string) string {
+		return fmt.Sprintf("planned statement %d (%s) %s; nothing was executed", i+1, ps.SQL, why)
+	}
+	switch ps.Disposition {
+	case router.DispositionRewriteRequired:
+		// A desired-state plan derives a renamed column as a drop and an
+		// add and never emits a rename, so the rewrite-required statement
+		// here is always one that blocks the table.
+		return rewriteRequiredRefusal(), detail("blocks and has no safer native sequence")
+	case router.DispositionUnavailable:
+		return backendUnavailableRefusal(), detail("routes to an execution strategy that does not carry this operation yet")
+	case router.DispositionRefuse:
+		// The plan-side registry classified the statement when it was
+		// refused; the class travels with the statement. A refused
+		// statement the plan could not classify is a report this build
+		// cannot have produced.
+		if ps.Cause != "" {
+			if r, ok := plan.CreateShapeRefusal(ps.Cause); ok {
+				return r, detail("is refused by the create path: " + ps.Cause.Description())
+			}
+			return planIncoherentRefusal(), detail(fmt.Sprintf("is refused by the create path with a cause this build does not classify (%q)", ps.Cause))
+		}
+		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
+		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
+			return r, detail("changes a foreign key, which desired-state execution does not run yet — " +
+				"to apply it, run the statement through the imperative front door (migrate --alter), which validates it online")
+		}
+		if err == nil {
+			return r, detail("has no safe path")
+		}
+		// Keep the statement's own reason where it has one; the class
+		// says the build produced a refusal it did not classify.
+		if unclassified, err := verdict.NewRefusal(verdict.ClassInvariantViolation, ps.Reason, ""); err == nil {
+			return unclassified, detail("is refused but carries no refusal class")
+		}
+		return planIncoherentRefusal(), detail("is refused but carries no refusal class")
+	default:
+		return planIncoherentRefusal(), detail("carries a disposition this build does not know")
+	}
 }
 
 // committedPrefixDetail states how far convergence got when execution

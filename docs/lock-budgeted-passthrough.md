@@ -212,10 +212,11 @@ that reaches `ExecuteAcceptedBlocking` directly. A plain drop or an explicit `RE
 default behavior) stays eligible, and is the safe retry: if anything still depends on the
 index, PostgreSQL refuses the drop with SQLSTATE `2BP01` and changes nothing.
 
-Execution is exposed only by the imperative `migrate` front door. Declarative `diff` still
-classifies and reports eligibility, but it cannot accept the flag or execute this path. A
-desired-state plan may contain inferred destructive work or several statements; accepting a
-single blocking statement must instead be explicit SQL at `migrate`.
+Execution is exposed by the imperative `migrate` front door, and by `migrate --desired` for
+one statement only: a reviewed plan's drop of a partitioned table's index (below). Declarative
+`diff` still classifies and reports eligibility, but it cannot accept the flag or execute this
+path. A desired-state plan may contain inferred destructive work or several statements, so
+every other blocking statement must instead be explicit SQL at `migrate`.
 
 Rejected names:
 
@@ -225,6 +226,41 @@ Rejected names:
 | `--unsafe` | Labels risk but not the concrete blocking behavior, and is easily mistaken for disabling all checks. |
 | `--passthrough` | Describes implementation, suggests arbitrary unclassified SQL, and hides the engine-owned budget benefit. |
 | `--force-blocking` | Incorrectly presents the feature as a stronger form of `--force`; the two acknowledgements govern different decisions. |
+
+### A partitioned table's index dropped from a desired file
+
+Removing an index from a partitioned table's desired file plans the plain `DROP INDEX`, the
+only drop PostgreSQL has for it. The plan keeps the statement refused
+(`unsupported-partitioned-parent`, cause `parent-concurrent-index-drop` in the registry) and
+discloses the drop as its one `exec_sql` step with `execution: blocking-index-drop`
+([plan report](plan-report.md#execution-contracts-execution-safer_sql_execution)); the
+fingerprint covers both, so a pinned plan cannot switch drop forms. A run lifts that one
+refusal, and no other, when the reviewed plan is pinned and the table is named three times:
+
+```sh
+pg-sprite migrate \
+  --desired events.sql \
+  --expect-fingerprint sha256:… \
+  --allow-destructive app.events \
+  --accept-blocking app.events \
+  --lock-timeout 3s \
+  --statement-timeout 10m
+```
+
+The rules mirror the imperative path's: the value names the desired file's table, the
+statement timeout must be supplied on the command line and be longer than the lock timeout,
+and `--dry-run` cannot carry the flag. Without it the plan is refused whole with
+`destructive-change` as before, and the detail names the flags. The run requests the
+parent's `ACCESS EXCLUSIVE` lock, which reaches every partition, in one engine-owned
+transaction under `lock_timeout` (an exhausted budget refuses, exit 2, nothing dropped), reads
+the index again under it and refuses with `dropped-index-drift` unless it is still the
+parent's partitioned index with the definition the plan carried, runs the plain `DROP INDEX`
+— never `CONCURRENTLY` — under `statement_timeout`, and reads back that the parent's index and
+every attached partition index are gone before it commits. The statement's verdict is
+`executed-without-online-safety` and says the parent, every partition, and every partition's
+index were locked; the run's outcome is `executed-without-online-safety` too once it has
+converged, and the command exits 3. A partition's attached index never appears in a desired
+plan, since a desired file does not model partitions; the re-read refuses one anyway.
 
 ## Typed eligibility
 
@@ -240,7 +276,7 @@ The v1 set is:
 | --- | --- | --- | --- |
 | `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) and `DROP INDEX ... CASCADE`, whose dependent drops reach tables beyond the acknowledged one, stay ineligible. `REINDEX` on a partitioned table or index is eligible by shape but cannot run inside the engine-owned transaction; the executor reports it as `unsupported-accepted-blocking` (see [Engine-owned session and budgets](#engine-owned-session-and-budgets)). |
 | `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible in the registry; not reachable from `migrate` | The plain PostgreSQL statement is not unknown, and its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. An unforced plain `CREATE INDEX` on a partitioned parent is not refused: both front doors route it to the partitioned index build ([design](partitioned-index-build-design.md)). The blocking cause arises only under `--force`, which `--accept-blocking` rejects. |
-| `by-design` | `unsupported-partitioned-parent` with cause `parent-concurrent-index-drop` | eligible | PostgreSQL has no concurrent drop for an index of a partitioned table, so the plain single-index `DROP INDEX` is the only drop there is. A desired-state plan carries this cause for such a drop, and so does `migrate --alter`, which reads the index's kind from the catalog after the gate refuses a single-index `DROP INDEX`; the plain statement runs under the acknowledgement once `--allow-destructive` also names the table (RF-10), and its verdict says the parent, every partition, and every partition's index were locked. The submitted `DROP INDEX CONCURRENTLY` carries the same cause but is never passed through: the engine-owned transaction cannot run a concurrent drop, so the refusal stands and names the plain drop. A partition's index attached under a parent index is refused as `unsupported-statement` (`by-design`, ineligible), since PostgreSQL drops it only with its parent. |
+| `by-design` | `unsupported-partitioned-parent` with cause `parent-concurrent-index-drop` | eligible | PostgreSQL has no concurrent drop for an index of a partitioned table, so the plain single-index `DROP INDEX` is the only drop there is. A desired-state plan carries this cause for such a drop, and so does `migrate --alter`, which reads the index's kind from the catalog after the gate refuses a single-index `DROP INDEX`; the plain statement runs under the acknowledgement once `--allow-destructive` also names the table (RF-10), and its verdict says the parent, every partition, and every partition's index were locked. The submitted `DROP INDEX CONCURRENTLY` carries the same cause but is never passed through: the engine-owned transaction cannot run a concurrent drop, so the refusal stands and names the plain drop. `migrate --desired` lifts the same refusal for a reviewed plan's drop of the parent's index under `--accept-blocking` beside the pin and `--allow-destructive` ([desired file](#a-partitioned-tables-index-dropped-from-a-desired-file)). A partition's index attached under a parent index is refused as `unsupported-statement` (`by-design`, ineligible), since PostgreSQL drops it only with its parent. |
 | `capability-boundary` | `not-native-safe-rewrite-required` | ineligible | A rewrite holds its strong lock for the full rewrite. Bounding acquisition alone does not bound the outage, and v1 must not imply otherwise. |
 | `capability-boundary` | `backend-unavailable` and all other missing routes or backends | ineligible | A missing execution backend is not permission to substitute an unrelated blocking implementation. |
 | `no-online-safety-problem` | data changes, provisioning, imperative `CREATE TABLE`, and owner catalog work | ineligible | The lock budget is not pg-sprite's reason to own these jobs. Another tool or front door owns them, and broad admission would become arbitrary SQL passthrough. |
@@ -402,9 +438,9 @@ A distinct code is intentionally non-zero: generic CI fails closed, while a call
 deliberately permits this path can allow 3 explicitly.
 
 The full ladder is the binary's process contract, with the question each code answers. Its
-canonical statement is the root README's [Exit codes](../README.md#exit-codes) section; it is
-restated at the head of [cli-output-examples.md](cli-output-examples.md#exit-codes) and, with
-this path's cells spelled out, in the table below — all three pinned by test to the constants in
+canonical statement is the table at the head of [cli-output-examples.md](cli-output-examples.md#exit-codes);
+the root README's [Exit codes](../README.md#exit-codes) section restates it in short and, with
+this path's cells spelled out, so does the table below — all three pinned by test to the constants in
 `pkg/verdict`. This section holds the reasoning behind the two cells that are not obvious from
 the table. Refusals from every command — `migrate`, `diff`, a dry run, and
 `pull` — share exit 2, so a CI author gates on the status without caring which subcommand

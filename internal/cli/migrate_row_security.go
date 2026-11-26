@@ -16,6 +16,10 @@ import (
 )
 
 func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, desired statement.DesiredWithRowSecurity) error {
+	if c.AcceptBlocking != "" {
+		return errors.New("--accept-blocking does not apply to a file that declares row security; " +
+			"drop a partitioned table's index with a desired file for the table definition alone")
+	}
 	b := executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
@@ -28,7 +32,7 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 		if changesOnlyTheTable(report, planErr) || c.pinnedAndConverged(report, planErr) {
 			// Preview uses desired-state admission, as for a file without
 			// row security.
-			return c.writeDesiredPreview(out, report)
+			return c.previewDesired(ctx, pool, out, report)
 		}
 		if errors.Is(planErr, schemadiff.ErrOnlyTableDiffers) {
 			// Only the table definition differs and its plan refused; the

@@ -11,14 +11,21 @@ the examples at the end of this page.
 `migrate --dry-run --json` emits a refusal verdict instead of a report when the apply would
 refuse the statement before planning it, or refuse its routed steps from their shape alone:
 an unsupported statement kind, an unnamed or `IF NOT EXISTS` index build, a `DETACH
-PARTITION`. `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
+PARTITION` from a table with a `DEFAULT` partition, or a statement routed to copy-and-swap on a
+partitioned parent, a partition, or a member of an inheritance tree (cause
+`copy-and-swap-partitioned`, or `copy-and-swap-unlogged` or `copy-and-swap-force-rls` when the
+table is also UNLOGGED or forces row security). `diff --json` and `migrate --desired --dry-run --json` do the same when the desired
 file itself is refused before a plan exists: a statement the file may not hold (a type, a data
 change), a second table, partitions of a table, a table shape the planner cannot build, or a
 difference the diff does not converge (storage parameters, persistence, a collation, an identity,
 a generated column, a serial column). That verdict exits 2 and carries no `format_version`, `fingerprint`, or `exec_sql`; a consumer
 branches on the exit code and on whether `format_version` is present before reading the output
 as a report. ([CLI output examples](cli-output-examples.md) shows
-both shapes.)
+both shapes.) `migrate --desired --dry-run --json` also ends, exit 2, in the run's whole-plan
+refusal result instead of a report when a planned statement routes to copy-and-swap on a
+partitioned parent, a partition, or a member of an inheritance tree (cause
+`copy-and-swap-partitioned`); that result embeds this report under `plan`, while `diff --json`
+prints the report with the statement's `execute` disposition.
 
 ## Versioning: `format_version`
 
@@ -29,7 +36,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **23**: version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **24**: version 24 added the `blocking-index-drop` execution contract, which a refused `drop-index` of a partitioned table's index carries with its plain `DROP INDEX` as `exec_sql`, and which the fingerprint covers; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -100,7 +107,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `blocking_passthrough_eligible` | bool | refusals only | Whether this typed refusal is in the closed accepted-blocking registry. Independent of flags and catalog lookups; explanatory and excluded from the fingerprint. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
 | `drops` | object | `diff` source, statements that drop an index, constraint, column, or `NOT NULL` | The live object the statement removes, read when the plan was made: `kind` (`index`, `constraint`, `column`, or `not-null`), `name`, and `definition` (an index's or constraint's catalog definition; a column's attribute number, type, collation, generation, default, and nullability; for `not-null`, the attribute number and `NOT NULL`), and for a column drop `dependents`: the objects the drop also removes, each as `kind name` with its definition when it has one (`index`, `constraint`, `owned sequence` and `identity sequence` with the sequence's options, or `other`). The fingerprint covers all of it, so a pin binds what the drop removes and not only its name, and a run re-reads it under the statement's own lock and refuses with `dropped-object-drift`, or `dropped-index-drift` for an index, dropping nothing, if the live definition differs or the column has a dependent the plan did not list. A dependent the plan listed that an earlier statement of the plan or another session has since removed does not refuse. A `NOT NULL` drop is planned with the drops, after the column drops and before any statement that alters or adds, so a table rewrite later in the plan cannot renumber the column it names. |
-| `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes: an `execute` statement whose `backend` is `copy-and-swap` runs no literal SQL a consumer could replay — the shadow-table change is one engine step — so a consumer that runs statements itself must hand such a statement back to pg-sprite rather than treat the absence as "nothing to run". |
+| `exec_sql` | array | native route; a refused `drop-index` of a partitioned table's index | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). A refused statement carries it only as the plain `DROP INDEX` of a partitioned table's index, with `execution` `blocking-index-drop`: the one form a run that accepts the blocking lock executes. Absent for non-native routes: an `execute` statement whose `backend` is `copy-and-swap` runs no literal SQL a consumer could replay — the shadow-table change is one engine step — so a consumer that runs statements itself must hand such a statement back to pg-sprite rather than treat the absence as "nothing to run". |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
 | `guidance` | string | `rewrite-required` only | The typed manual path for a rewrite-required refusal, drawn from the [suggest report's Guidance vocabulary](suggest-report.md#guidance-guidance). The engine will not run the statement; this names what to do instead (`split-statement`, `add-column-then-constraint`, …). Present exactly when `disposition` is `rewrite-required`. Explanatory: excluded from the fingerprint. |
 
@@ -151,7 +158,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `volatile-default` | ADD COLUMN whose default PostgreSQL computes for every row, rewriting the table. Proven by the server, or, with `unverified`, assumed for an expression default nothing proved. |
 | `generated-stored` | Adding a stored generated column computes every row — a full rewrite. |
 | `type-rewrite` | A type PostgreSQL must convert or check row by row: a type change it cannot relabel (rewrite plus reindex), a type change that moves the column's collation (every index on it rebuilt, no heap rewrite), or an added column of a domain with constraints. With `unverified`, assumed for an added column the server could not prove. |
-| `relocation` | SET TABLESPACE moves the heap — a rewrite-scale copy. |
+| `relocation` | SET TABLESPACE moves the heap — a rewrite-scale copy. A partitioned parent has no heap to move, so a live plan classifies SET TABLESPACE on one as `metadata-only`; an offline plan (`lint`, `suggest`) has no catalog to tell, and keeps `relocation` as `unverified`. |
 | `partition-parent-lock` | Creating a partition (`CREATE TABLE … PARTITION OF`): a brief `ACCESS EXCLUSIVE` on the parent, no scan. |
 | `replica-identity` | The operation drops what a replica identity index of the table, or of a partition or inheritance child below it, is built on: the index, the constraint that owns it, or one of its columns, `INCLUDE` columns too. The index is the one `REPLICA IDENTITY USING INDEX` selects, or the primary key under `REPLICA IDENTITY DEFAULT` while a publication publishes the table's updates or deletes. The setting outlives the index, so every `UPDATE` and `DELETE` on the table fails while a publication publishes them. Refused; move the identity first (`ALTER TABLE … REPLICA IDENTITY`), then re-plan. |
 | `dependent-view` | The operation retypes or drops a column that a view or materialized view reads, on the table or, without `ONLY`, on a partition or inheritance child below it whose copy of the column the change reaches: every copy for a type change, and for a drop only the copies the server drops, which leaves out a child that declares the column itself or also inherits it from a table outside the drop. PostgreSQL refuses this while the view exists, even for a type change it would relabel. Refused; `dependent_views` names the views. Drop or redefine them first, then re-plan. `DROP COLUMN … CASCADE`, which would drop the views with the column, is refused as `cascading-drop`. |
@@ -172,7 +179,7 @@ treat the statement and report as refused.
 | Value | Meaning |
 |---|---|
 | `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
-| `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. The report carries no partition cause: a `drop-index` statement with this reason is a drop PostgreSQL cannot run concurrently, whose plain form `migrate --alter` runs under `--accept-blocking` and `--allow-destructive` (`blocking_passthrough_eligible` is true), and any other `kind` is an index build or a constraint the parent cannot take online. |
+| `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. The report carries no partition cause: a `drop-index` statement with this reason is a drop PostgreSQL cannot run concurrently, whose plain form a `diff`-source statement carries as `exec_sql` with `execution` `blocking-index-drop`, and which `migrate --desired` runs from the pinned plan, and `migrate --alter` as submitted, under `--accept-blocking` and `--allow-destructive` (`blocking_passthrough_eligible` is true), and any other `kind` is an index build or a constraint the parent cannot take online. |
 | `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs `ADD FOREIGN KEY` online. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
@@ -193,12 +200,13 @@ and privilege checks because it needs no connection.
 |---|---|
 | `autocommit-each-step` | The steps run one at a time, in order, each in its own implicit transaction — never inside an enclosing transaction block. The CONCURRENTLY forms refuse an enclosing block outright, and a multi-step sequence inside one block holds every earlier step's locks across the steps designed to avoid them. A failed step leaves partial state the runner must detect and recover before retrying (a failed CONCURRENTLY build leaves an invalid index, `pg_index.indisvalid = false`). |
 | `partitioned-index-build` | The one step is a `CREATE INDEX` on a partitioned table, and the executor runs it as the partition-aware index build, never as the statement: the parent's index is created with `ONLY`, each partition's index is built concurrently and attached, and the parent's index turns valid with the last attach. The partitions are listed when the build runs, not when the plan is made, so they are not in `exec_sql`. The statement must not be run as written, which would build every partition's index under a lock that blocks writes to the whole tree. A failed or interrupted run leaves an invalid parent index and the partition indexes built so far; running the same statement again resumes from them. |
+| `blocking-index-drop` | Only on a refused `drop-index` statement whose table is partitioned: the one step is the plain `DROP INDEX` of the parent's index, which PostgreSQL cannot drop concurrently (`DROP INDEX CONCURRENTLY` fails with SQLSTATE `0A000`). It takes `ACCESS EXCLUSIVE` on the parent, every partition, and every partition's index for as long as it runs, so the statement stays `refuse` and the report's disposition with it. `migrate --desired` runs it only when the run pins this plan's fingerprint and names the table in `--allow-destructive` and `--accept-blocking`, with an explicit `--statement-timeout` longer than `--lock-timeout`: in one engine-owned transaction it requests the parent's lock under `lock_timeout`, reads the index again (still the parent's partitioned index, with the `drops` definition), drops it under `statement_timeout`, and reads back that the parent's index and every attached partition index are gone before it commits. It is never run `CONCURRENTLY` and never falls back to another form. A consumer that runs statements itself must not run it as an online step. |
 
 ### Dispositions (`disposition`)
 
 | Value | Meaning |
 |---|---|
-| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. Nor does it say whether the run has opened the route: copy-and-swap is in preview, and a run without `--copy-and-swap` (`CopySwapOptions.Enabled`) refuses the plan the same way with cause `copy-and-swap-not-enabled`. |
+| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. (A `migrate` dry run reads one shape fact of that preflight, a table in a partition or inheritance tree, and ends in the refusal instead of a report; see the top of this page.) Nor does it say whether the run has opened the route: copy-and-swap is in preview, and a run without `--copy-and-swap` (`CopySwapOptions.Enabled`) refuses the plan the same way with cause `copy-and-swap-not-enabled`. |
 | `rewrite-required` | Native but not executable as submitted — it blocks the table, or it is a rename that breaks every running application instance still using the old name — and no safer sequence could be constructed; `guidance` names the manual path. `migrate` runs it as written only when `--force` names the table. |
 | `unavailable` | Routed to copy-and-swap for an operation the engine does not carry yet; nothing executes. |
 | `refuse` | The planner refused the statement; no backend is assigned. |
@@ -214,7 +222,7 @@ code's full manual path; this contract embeds it, so a new guidance code bumps t
 |---|---|
 | `split-statement` | Split the multi-operation statement into one operation per statement, then plan again. |
 | `add-column-then-constraint` | Add the plain column first, then build the inline constraint as a separate, named ADD CONSTRAINT with its online pattern. |
-| `pre-add-validated-check` | Pre-add a validated CHECK matching the partition bound before attaching. |
+| `pre-add-validated-check` | Pre-add a validated CHECK matching the partition bound on the child, and one excluding it on the `DEFAULT` partition, and build the parent's indexes on the child concurrently (a unique one backing its constraint through `USING INDEX`); attach, then drop the CHECKs. |
 | `not-null-scaffold` | Prove the invariant with a NOT VALID CHECK plus online VALIDATE, then flip NOT NULL. |
 | `name-constraint-then-validate` | Name the constraint, add it NOT VALID, then VALIDATE it online. |
 | `unique-index-then-constraint` | Build the unique index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with ADD CONSTRAINT … USING INDEX. |
@@ -325,11 +333,13 @@ time is the consumer's side of the contract.
 
 The serialization is exact and pinned by test: for each statement in plan order, hash the
 canonical `sql`, `route`, `backend`, and `disposition`, then each `exec_sql` entry, then — only
-for a statement whose `execution` is `partitioned-index-build` — that `execution` value. Every
-field is followed by a unit separator (`0x1F`), and each statement closes with a record
-separator (`0x1E`). The `execution` is hashed for that one value because the build's `exec_sql`
-is the `CREATE INDEX` as written, so the same text run as a literal `CREATE INDEX CONCURRENTLY`
-on a plain table is a different plan; a statement with any other `execution` hashes as it did
+for a statement whose `execution` is `partitioned-index-build` or `blocking-index-drop` — that
+`execution` value. Every field is followed by a unit separator (`0x1F`), and each statement
+closes with a record separator (`0x1E`). The `execution` is hashed for those two values because
+their `exec_sql` is the statement as written: the build's `CREATE INDEX` run as a literal
+`CREATE INDEX CONCURRENTLY` on a plain table is a different plan, and a reviewed drop of a
+partitioned table's index pins the blocking form a run that accepts it executes, so the plan
+cannot switch drop forms unnoticed; a statement with any other `execution` hashes as it did
 before. Explanatory fields (`decisions`, `kind`, `destructive`, `reason`, `cause`,
 `guidance`, and the report-level `advisories`) are excluded: a reworded reason does not
 change identity, but a rerouted, resequenced, or rewritten plan does. An empty plan has a
@@ -376,7 +386,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -419,7 +429,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -486,7 +496,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 23,
+  "format_version": 24,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

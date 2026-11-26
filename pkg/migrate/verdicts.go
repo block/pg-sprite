@@ -31,6 +31,17 @@ import (
 // names, whose refusal [GateWithCatalog] completes from the catalog; [Run]
 // re-checks it regardless.
 func Gate(st statement.Statement) (verdict.Verdict, bool) {
+	if st.FinalizesDetach() {
+		// The statement cannot be reprinted faithfully, so it is refused
+		// before anything reprints it; the detach it finishes is finished
+		// by running the statement that started it again.
+		return verdict.Verdict{
+			Statement: st.SQL(),
+			Detail: "pg-sprite does not run DETACH PARTITION ... FINALIZE as written; running the " +
+				"DETACH PARTITION ... CONCURRENTLY statement that started the detach again finishes it, " +
+				"or run this statement directly against the database",
+		}.WithRefusal(verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)), true
+	}
 	r, refused := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 	if !refused {
 		return verdict.Verdict{}, false
@@ -372,6 +383,12 @@ func failureVerdict(st statement.Statement, err error,
 	if buildFault {
 		v.Detail += "; " + leftover
 	}
+	if errors.Is(err, executor.ErrDetachInterrupted) {
+		// The step's own first transaction committed, which the generic
+		// wording above denies; the error names the partition and the
+		// statement that finishes it.
+		v.Detail = fmt.Sprintf("sequence step %d of %d: %v", stepErr.Step, stepErr.Total, stepErr.Err)
+	}
 	return v
 }
 
@@ -387,14 +404,24 @@ func indexBuildDataFaultDetail(err error) (string, bool) {
 		return "", false
 	}
 	index := pgx.Identifier{invalidErr.Schema, invalidErr.Index}.Sanitize()
+	fault := rowsViolateIndex("the table's rows", index)
 	if !errors.Is(invalidErr.Cleanup, executor.ErrBuildLeftInvalidIndex) {
-		return fmt.Sprintf("the table's rows violate index %s, so its concurrent build failed and every rerun meets the same rows until they are corrected; "+
-			"an invalid index remains under that name which the run could not prove its own — inspect it before any removal, see docs/invalid-index-recovery.md", index), true
+		return fault + "; " + unprovenInvalidIndexLeftover, true
 	}
-	return fmt.Sprintf("the table's rows violate index %s, so its concurrent build failed and every rerun meets the same rows until they are corrected; "+
-		"the failed build left the index behind invalid, which blocks a rerun under that name — correct the rows, then DROP INDEX CONCURRENTLY %s and run the change again",
-		index, index), true
+	return fmt.Sprintf("%s; the failed build left the index behind invalid, which blocks a rerun under that name — correct the rows, then DROP INDEX CONCURRENTLY %s and run the change again",
+		fault, index), true
 }
+
+// rowsViolateIndex is the clause a data-fault detail of an index build leads
+// with: whose rows broke which index, and that every rerun meets the same
+// rows until they are corrected.
+func rowsViolateIndex(rows, index string) string {
+	return fmt.Sprintf("%s violate index %s, so its concurrent build failed and every rerun meets the same rows until they are corrected", rows, index)
+}
+
+// unprovenInvalidIndexLeftover is what a data-fault detail says of an invalid
+// index under the build's name that the run could not prove its own.
+const unprovenInvalidIndexLeftover = "an invalid index remains under that name which the run could not prove its own — inspect it before any removal, see docs/invalid-index-recovery.md"
 
 // WithServerError records on a failed verdict the server error that
 // failed it: the SQLSTATE and primary message of the first

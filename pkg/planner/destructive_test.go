@@ -10,7 +10,7 @@ import (
 )
 
 // Every operation shape carries an explicit destructiveness decision, and
-// exactly the four drops are destructive. A shape added to
+// exactly the four drops and a partition detach are destructive. A shape added to
 // statement.OpKinds() without a case in classifyDestructive fails here
 // instead of reaching the destructive gates with an unexamined answer.
 func TestEveryOpKindIsClassifiedForDestructiveness(t *testing.T) {
@@ -31,6 +31,7 @@ func TestEveryOpKindIsClassifiedForDestructiveness(t *testing.T) {
 		statement.OpDropConstraint,
 		statement.OpDropIndex,
 		statement.OpDropNotNull,
+		statement.OpDetachPartition,
 	}, destructive)
 	assert.Equal(t, destructive, DestructiveOpKinds(),
 		"the exported set is the classification, in statement.OpKinds() order")

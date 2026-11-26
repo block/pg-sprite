@@ -1,4 +1,8 @@
-# pg-sprite
+<h1 align="center">pg-sprite</h1>
+
+<p align="center"><b>Change the shape of live PostgreSQL tables while your application keeps reading and writing them</b></p>
+
+<div align="center">
 
 [![CI](https://github.com/block/pg-sprite/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/block/pg-sprite/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Slot Release Proof](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml/badge.svg?branch=main&event=schedule)](https://github.com/block/pg-sprite/actions/workflows/slot-release-proof.yml?query=event%3Aschedule)
@@ -7,464 +11,173 @@
 [![PostgreSQL tested: 14 | 15 | 16 | 17 | 18](https://img.shields.io/badge/PostgreSQL%20tested-14%20%7C%2015%20%7C%2016%20%7C%2017%20%7C%2018-336791?logo=postgresql&logoColor=white)](docs/postgresql-version-support.md)
 [![Maturity: preview](https://img.shields.io/badge/maturity-preview-orange)](docs/capabilities.md)
 
+</div>
+
+<p align="center">
+  <a href="./docs/vision.md">Vision</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="./docs/cli.md">CLI guide</a> ·
+  <a href="#docs">Docs</a>
+</p>
+
+---
+
+pg-sprite is an online schema-change engine for PostgreSQL: community, RDS, and
+Aurora, tested on 14 through 18. Give it a DDL statement or a desired
+`CREATE TABLE` file. It works out what the change would lock and rewrite, runs
+the safest sequence that reaches the same end state, and refuses with a typed
+verdict when it cannot prove one.
+
 > [!IMPORTANT]
-> **Preview: ready to try.** pg-sprite handles everyday changes
-> today, like adding a column, an index, or a constraint, and keeps locks short
-> so your app keeps running. Rewriting a whole table, like changing a column's
-> type, is still in preview and only runs if you pass `--copy-and-swap`.
-> `pg-sprite capabilities --json` lists which changes are generally available
-> (`maturity: ga`) and which are in preview.
-> We're not at 1.0 yet, so commands and output may change between releases,
-> and there's no support guarantee. Read the release notes before you upgrade.
+> **Preview: ready to try.** Everyday changes such as adding a column, an index,
+> or a constraint run today with short locks. Rewriting a whole table, such as
+> changing a column's type, is in preview and runs only with `--copy-and-swap`.
+> We're not at 1.0 yet, so commands and output may change between releases.
+> `pg-sprite capabilities --json` says which changes are `ga` and which are `preview`.
 
-An online schema-change engine for **PostgreSQL** (community, RDS, and
-Aurora; tested on 14 through 18): a decoupled **planner → router → executor** design where the
-planner classifies each change, the router picks a strategy, and
-interchangeable executors carry it out — the cheap native PostgreSQL idiom
-when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
-`USING INDEX`), and a log-based, checksum-gated, resumable copy-and-swap for
-genuine table rewrites — a general `ALTER COLUMN TYPE` runs through it today.
+## How it works
 
-The planner is PostgreSQL's missing `ALGORITHM=` / `LOCK=` declaration: MySQL
-lets authors assert a cost bracket and a concurrency impact and fails closed
-when either can't be honored — PostgreSQL silently runs whichever cost
-applies. pg-sprite proves both dimensions before execution, routes each
-change to the safest sequence that exists, and refuses with a structured
-verdict when it can't prove one (see
-[docs/postgres-online-ddl-reference.md](docs/postgres-online-ddl-reference.md)).
+A **planner** classifies each change, a **router** picks a strategy, and an
+**executor** carries it out:
 
-pg-sprite embraces the Unix design philosophy — **do one thing, and do it
-perfectly**: change the shape of live PostgreSQL tables while applications
-keep reading and writing them. Anything that is not that one thing — data
-backfills, catalog bootstrap, GitOps orchestration, access control — is
-deliberately another tool's job: the engine refuses it with a typed verdict,
-and every refusal carries a routing class (and an owner when there is no online-safety
-problem for the engine to solve); [docs/capabilities.md](docs/capabilities.md) names the tool class that
-owns each job.
+- **Native idioms** when PostgreSQL has one: `CREATE INDEX CONCURRENTLY`,
+  `NOT VALID` + `VALIDATE`, fast defaults, `ADD CONSTRAINT … USING INDEX`.
+- **Copy-and-swap** for genuine rewrites: a shadow table filled in chunks while
+  writes stream through logical decoding, checksum-verified, then swapped in.
+  It is resumable and runs a general `ALTER COLUMN TYPE` today.
+- **A typed refusal** when neither is safe. Nothing runs, and the verdict
+  carries a `reason` and `class` that automation can route on.
 
-**Status: Phases 1, 2.1–2.5, and 3, with copy-and-swap in preview.** The maturity badge above is this project-level status; each capability row carries its own `ga` or `preview` maturity. The parse boundary, declarative diff,
-classifier, router seam, versioned dry-run plan report, offline linter, and
-advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` classifies and
-routes the statement, then executes the routed SQL — the planner's safer native sequence by
-default when the submitted form blocks (reported in the verdict's `executed_sql`), a bounded
-optimistic native attempt otherwise. A gated `--force` runs the submitted form as-is under the
-same budgets, and a statement that discards data runs only when `--allow-destructive` names
-its table. Changes without an available backend get a structured refusal (exit code 2).
-Desired-state execution — converging a live table onto a `CREATE TABLE` file, including
-creating the table when it does not exist yet — is available through `migrate --desired schema.sql` and
-`migrate.RunDesired` in [`pkg/migrate`](pkg/migrate/desired.go).
-The design docs and the phased
-build plan live in [docs/](docs/) — start with
-[docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —
-is [docs/vision.md](docs/vision.md); the canonical support matrix — is this
-change supported today, planned, or out of scope — is
-[docs/capabilities.md](docs/capabilities.md).
-The same embedded matrix is queryable for automation with
-`pg-sprite capabilities --json`; each supported row's `maturity` says whether it is
-generally available (`ga`) or in preview (`preview`, the run must opt in).
-
-## What pg-sprite does not do yet
-
-So expectations are set before you point it at a database — the complete
-support matrix (supported today / planned / out of scope, per operation and
-object type, with reasons) is **[docs/capabilities.md](docs/capabilities.md)**,
-and the mechanics of each current refusal are
-[docs/limitations.md](docs/limitations.md);
-wherever an operation meets a boundary below, it fails closed with a typed
-refusal — never a silently wrong or incomplete result:
-
-- **Copy-and-swap** (genuine table rewrites) is in preview: it has not yet
-  been exercised under production-like load, so the route stays closed until
-  a run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled` as a
-  library caller); without it a statement routed there is refused before
-  anything runs, and every native change is unaffected
-  ([running a copy-and-swap](docs/copy-and-swap.md#preview-the-route-is-closed-until-you-open-it)).
-  Open, it carries a general
-  `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
-  `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE`) refuse rather than fall
-  through to a blocking rewrite, and the route's preflight refuses table shapes
-  and environments it cannot run against. The shadow build also refuses a
-  statement the copy cannot carry: a `USING` expression it cannot reproduce,
-  a dropped-and-re-added or new column it cannot fill, a key it would not
-  keep, or a new identity or `serial` column whose sequence the swap cannot
-  carry. A run on a pool smaller than its copy workers plus two is refused
-  before it creates anything, from every entry point
-  ([the pool floor](docs/limitations.md#the-copy-and-swap-pool-floor)).
-- **Connection poolers**: point pg-sprite directly at the primary; the
-  application keeps whatever pooling it uses. pg-sprite's own connection
-  through a pooler is unsupported, except Supabase's Supavisor session
-  endpoint for native schema changes. Startup checks usually refuse a
-  transaction-mode pooler, but passing them does not make it supported
-  ([connections and poolers](docs/limitations.md#connections-and-poolers)).
-- **Row security** is included in exports when present, with reviewable before/after differences. The
-  [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables,
-  and creates a missing table together with its row security in one transaction, through
-  `migrate --desired` or the Go API. Only the Go API supports binding execution to an ordered
-  SQL review, and only for an existing table. A table change in a file whose row security already
-  matches runs as an ordinary desired run; a change to both remains unsupported. See the workflow and roadmap in
-  [declarative-row-security.md](docs/declarative-row-security.md).
-- **Foreign keys** are planned but not executed declaratively: a desired
-  file may declare them, `diff` shows an added or dropped foreign key with
-  the `declarative-foreign-key` refusal, and `migrate --desired` refuses
-  the plan. Export refuses both a table that carries foreign keys and a
-  table that other tables reference. FK DDL still works through
-  `migrate --alter` (`NOT VALID` + `VALIDATE`).
-- **Changed stored generated expressions** are planned but not executed:
-  `diff` shows one `SET EXPRESSION` statement (PostgreSQL 17+) refused with
-  `unsupported-statement`, since it recomputes every row under an exclusive
-  lock. Virtual generated columns (PostgreSQL 18+) are not modeled: export
-  refuses them and a desired file that redeclares one fails the diff.
-- **Identity and serial sequence declarations** are modeled but not
-  converged: an identity's declared options export and compare, and a
-  difference is a typed `diff` refusal; change the declaration with owner
-  tooling, then state it in the file. A serial cannot state one, so export
-  refuses a serial whose sequence was declared otherwise.
-- **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
-  on a partitioned table runs partition by partition, resuming when the same
-  statement is run again; a unique one that lacks a partition key column is
-  refused, as PostgreSQL rejects it. Only a partitioned parent can be expressed in or
-  exported to a desired file — partitions and their bounds stay owned outside
-  it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
-  `--force` names the table ([limitations](docs/limitations.md)). A reviewed
-  `migrate --desired` column or constraint drop on a partitioned parent removes it
-  from every partition; the column drop is refused, dropping nothing, when the column
-  is in a partition key at any level or a partition carries an index, constraint, or
-  statistics object of its own on it. A reviewed `NOT NULL` drop on a partitioned
-  parent is refused, and so is a reviewed column, constraint, or `NOT NULL` drop on
-  a table with inheritance children.
-- **Index maintenance** is not driven by `migrate --alter`: it refuses `DROP INDEX`
-  and `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
-  `migrate --desired` does run a planned index drop, as `DROP INDEX CONCURRENTLY`
-  under `--expect-fingerprint` and `--allow-destructive`.
-  An index of a partitioned table has no concurrent drop at all: drop it with
-  the plain `DROP INDEX` under `--accept-blocking SCHEMA.TABLE` and
-  `--allow-destructive SCHEMA.TABLE`, naming the parent, which locks the parent and
-  every partition while it runs
-  ([example](docs/lock-budgeted-passthrough.md#dropping-an-index-of-a-partitioned-table)).
-  A partition's index attached under the parent's is refused in either form; drop
-  the parent's index instead.
-- **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
-  instant in the catalog but break every running application instance that
-  still uses the old name, and no safer sequence can be built from the
-  statement alone, so `migrate` refuses them as `rewrite-required` with the
-  expand-and-contract (column) or coordinated-deploy (table) path as typed
-  guidance; `--force SCHEMA.TABLE` runs the submitted rename for the operator
-  who has coordinated the deploy. `ALTER INDEX ... RENAME TO` runs for a plain
-  index, but is refused, with no `--force` override, for an index that backs a
-  primary-key, unique, or exclusion constraint, since it renames the constraint.
-- **Unlogged tables and explicit column collations** are outside the
-  declarative model: converging either is a table (or column) rewrite, so
-  export and diff refuse rather than plan one.
-- **Two key constraints declared the same way** (`PRIMARY KEY`, `UNIQUE`,
-  or `EXCLUDE` on the same columns) cannot be declared in a desired file,
-  because one `CREATE TABLE` keeps only one of them. Export refuses such a
-  table, and a desired file that declares both fails its build instead of
-  planning the second one's live copy away.
-- **A key whose storage parameter cannot be rendered is refused** —
-  `ADD PRIMARY KEY` / `ADD UNIQUE` runs as a concurrent index build plus
-  `USING INDEX`, carrying the key's `WITH (...)` parameters; a value that
-  is not a plain word, number, or string, contains a backslash, or a
-  namespaced parameter name refuses with `rewrite-required` and the steps
-  to build the index by hand, then attach it.
-- **Dropping what a replica identity index is built on is refused** — the
-  index, the constraint that owns it, or a column it covers; move
-  `REPLICA IDENTITY` first, then re-plan.
-- **Retyping or dropping a column a view reads is refused** — PostgreSQL would
-  refuse it anyway; the plan names the views to drop or redefine first.
-- **Retyping or dropping a column a row-level security policy reads is refused**
-  — PostgreSQL would refuse it anyway; the plan names the policies to drop and
-  recreate around the change.
-- **Retyping or dropping a column a trigger, a generated column, or a partition
-  key depends on is refused** — PostgreSQL would refuse it anyway; the plan names
-  the triggers, generated columns, or partitioned tables in the way.
-- **Adding a `NOT NULL` column with no default to a table with rows is refused**
-  — PostgreSQL would refuse it anyway, after taking the table's exclusive lock;
-  the plan suggests a constant default or a backfill first.
-- **Destructive statements need a typed acknowledgement** — `migrate --alter`
-  refuses a statement that drops a column, a constraint, or a `NOT NULL` with
-  `destructive-change` (exit 2) on every route and in `--dry-run`, unless
-  `--allow-destructive SCHEMA.TABLE` names the table; the acknowledged run is
-  audited and its verdict carries `allowed_destructive: true`. A drop that
-  adds the same column back gets the guidance to change its type in place,
-  which keeps its values. A `DROP INDEX` run under `--accept-blocking` needs
-  `--allow-destructive` too: accepting the lock is not accepting the loss,
-  and the refusal lists the checks (`idx_scan` on every replica, foreign
-  keys, uniqueness) that catch an index the application still uses, with
-  the connected server's own scan count for the index in `index_usage`.
-- **Destructive desired-state plans are refused as a whole unless you pin them** —
-  `migrate --desired` creates missing tables and converges supported changes, but never
-  infers permission to discard live structure. Review the plan with `diff --desired`,
-  then run it with `--expect-fingerprint` (the `sha256:...` value `diff` prints) and
-  `--allow-destructive SCHEMA.TABLE`: the run executes only that plan, and each
-  destructive statement is audited and marked `allowed_destructive: true`. A dropped
-  index runs as `DROP INDEX CONCURRENTLY`. Row security policies are separate: a
-  policy drop in a desired file is already atomic and needs no acknowledgement. A new primary key or unique constraint over a live
-  unique index of its name is not destructive: it takes the index over with
-  `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
-  index changed after planning. Nor is a live check constraint left `NOT VALID`
-  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
-  refuses with `validated-constraint-drift` if the constraint changed after planning.
-- **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
-  build's leftover is reported with a typed state (and named by `diff` as a
-  typed plan advisory), and the proven removal
-  (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
-  the caller must not rebuild) is library-only; from the CLI the
-  [runbook](docs/invalid-index-recovery.md) applies.
-- **The accepted-blocking passthrough covers index maintenance only** —
-  `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
-  `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`
-  deliberately under the engine's bounded lock and statement budgets, with
-  the verdict marked `executed-without-online-safety` (exit 3). A `DROP INDEX`
-  also needs `--allow-destructive` naming the same table. Every other
-  refusal — including a forced blocking index build on a partitioned parent —
-  still exits 2. Design:
-  [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
-- **Non-table objects** — views, standalone sequences, enums, domains,
-  extensions, functions, triggers — are outside the declarative model,
-  which covers one ordinary table (or one partitioned parent) plus its
-  indexes per file. A table may
-  use them: the file names an object outside the table's schema and
-  `public` qualified, or names it bare when `--extension-schema` lists
-  the schema it lives in. The object's own definition is never managed,
-  with one exception: a desired file can hold one `CREATE TYPE ... AS ENUM`
-  instead of a table, and `diff` and `migrate --desired` add the labels the
-  live type lacks with `ALTER TYPE ... ADD VALUE`, which locks only the
-  type. The type must already exist, and a label is never removed, renamed,
-  or moved; `migrate` also adds a value imperatively.
-- **Dropping a table** is never planned or executed. pg-sprite converges
-  one declared table at a time, so a live table with no desired file is
-  the whole-schema owner's to enumerate and resolve — see
-  [Deliberately operator-owned](docs/capabilities.md#deliberately-operator-owned).
-- **Greenfield create shapes** the create path cannot run — `PARTITION OF`,
-  `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired
-  set claims twice — refuse at plan time, and the same rules re-check at
-  apply.
-- **A desired file that names a live parent** with `PARTITION OF` or
-  `INHERITS` refuses before planning builds anything, since the scratch
-  build would lock that parent.
-
-The codebase is partitioned into a small safety-critical core and a
-periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
-rules that apply inside the core. Read it before changing anything under
-`pkg/`.
+The planner is PostgreSQL's missing MySQL-style `ALGORITHM=` / `LOCK=`
+declaration. It proves the cost and the lock impact before anything executes
+([reference](docs/postgres-online-ddl-reference.md)). Anything that is not
+changing a table's shape, such as data backfills or access control, is another
+tool's job; [capabilities.md](docs/capabilities.md) names which.
 
 ## What it looks like
 
-Everything below is captured from a real session against the compose
-database (`make db-up`, PostgreSQL 16). The reports color their labels the
-way compilers do when stdout is a terminal; `--color=never` or a non-empty
-`NO_COLOR` forces plain text, and the `--json` / `--sql` machine outputs
-are never colored.
-
 ![pg-sprite replacing a blocking ADD CONSTRAINT with the safer online sequence: dry-run, real run, then the catalog proof](docs/demos/improve.gif)
 
-Animated demos for the other routes — declarative diff, refusal with typed
-help, offline lint — live in [docs/demos/](docs/demos/), rendered from committed
-[VHS](https://github.com/charmbracelet/vhs) tapes (`make demos` re-renders
-them).
+- **Improve:** a blocking form is replaced with the safer online sequence (above;
+  why it is safer is in [safer-sequences.md](docs/safer-sequences.md)).
+- **Diff:** a desired `CREATE TABLE` file in, a classified plan out
+  ([demo](docs/demos/diff-greenfield.gif)).
+- **Refuse:** no safe path exists, so nothing runs and the command exits 2
+  ([demo](docs/demos/refuse.gif)).
+- **Lint:** blocking idioms flagged offline, no database needed
+  ([demo](docs/demos/lint.gif)).
 
-**Diff: declarative desired state in, classified plan out.** Point at a
-reviewed `CREATE TABLE` file and get the statements that converge the live
-table onto it, reported in the same diagnostic grammar as the dry run.
-`--sql` prints the plan as an executable SQL script instead, and a plan
-containing a statement execution would refuse exits 2 — the same CI gate
-as the dry run. Watch it in
-[docs/demos/diff-greenfield.gif](docs/demos/diff-greenfield.gif); the
-machine-readable shape is in
-[docs/cli-output-examples.md](docs/cli-output-examples.md).
-
-**Improve: a blocking form is replaced with the safer online sequence.**
-`migrate --dry-run` shows exactly what would run, as compiler-style
-diagnostics with a doc anchor per finding (exit 0 — the plan is executable).
-The demo above records the whole flow — dry run, real run, catalog proof;
-why the substituted sequence is safer — same end state, different locking
-— is worked through in [docs/safer-sequences.md](docs/safer-sequences.md);
-the machine-readable shape is in
-[docs/cli-output-examples.md](docs/cli-output-examples.md).
-
-**Refuse: no safe path exists, so nothing runs.** A statement no online
-sequence can be built from (the demo's `ADD COLUMN … UNIQUE`), or a rewrite
-the copy-and-swap backend does not carry yet (a volatile column default),
-refuses; the
-dry run exits 2 so CI can gate on it without parsing JSON (the full four-code ladder is under
-[Exit codes](#exit-codes)). A destructive change (`DROP COLUMN`) is refused
-the same way, exit 2 with reason `destructive-change`, until
-`--allow-destructive SCHEMA.TABLE` names the table; the acknowledged dry run
-still marks it `.statements[].destructive` in the `--json` report. Watch it in
-[docs/demos/refuse.gif](docs/demos/refuse.gif); the machine-readable shape
-is in [docs/cli-output-examples.md](docs/cli-output-examples.md).
-
-**Lint: offline, no database needed.** Flag blocking idioms in a DDL file
-and suggest the safer form — no connection, no Docker; error-severity
-findings exit non-zero, warnings alone pass. Watch it in
-[docs/demos/lint.gif](docs/demos/lint.gif); the machine-readable shape is
-in [docs/cli-output-examples.md](docs/cli-output-examples.md).
-
-More shapes — every disposition as JSON, destructive refusals, and exit
-codes — are in [docs/cli-output-examples.md](docs/cli-output-examples.md).
+Every output shape, as text and JSON, is in
+[cli-output-examples.md](docs/cli-output-examples.md).
 
 ## Install
-
-Install with [Homebrew](https://brew.sh/) on macOS or Linux:
 
 ```sh
 brew install block/tap/pg-sprite
 ```
 
-Release archives for linux/darwin on amd64/arm64, with `checksums.txt`, are
-published on the [releases page](https://github.com/block/pg-sprite/releases).
-The binary is pure Go (the SQL parser is Wasm), so on any other platform, or
-to build an unreleased commit, `go install` works with no C toolchain:
+Release archives for linux and darwin on amd64 and arm64, with `checksums.txt`,
+are on the [releases page](https://github.com/block/pg-sprite/releases). The
+binary is pure Go, so `go install` works anywhere with no C toolchain:
 
 ```sh
 go install github.com/block/pg-sprite/cmd/pg-sprite@latest
 ```
 
+## Quick start
+
+```sh
+pg-sprite lint changes.sql                              # offline: flag blocking idioms
+
+export PGSPRITE_URL='postgres://user:pass@primary:5432/app'
+pg-sprite migrate --dry-run --alter 'ALTER TABLE app.orders ADD CONSTRAINT qty_positive CHECK (qty > 0)'
+pg-sprite migrate --alter 'ALTER TABLE app.orders ADD CONSTRAINT qty_positive CHECK (qty > 0)'
+
+pg-sprite pull --schema app --out schema                # one desired file per table
+pg-sprite diff --schema app --desired schema/orders.sql # what would converge app.orders
+```
+
+Connect directly to the primary, not through a pooler
+([why](docs/limitations.md#connections-and-poolers)). The
+[CLI guide](docs/cli.md) walks through each task with captured output.
+
 ## Commands
 
-[docs/cli.md](docs/cli.md) walks through the commands task by task, with
-captured output.
-
-Half the CLI works offline on DDL text alone; the other half connects to a
-live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
-and `statement_timeout`; a `search_path` that lists `pg_catalog` after a user
-schema has that entry removed so the schema no longer shadows the catalog, and
-every other entry is left as configured). The connection pool holds at least
-six connections unless the URL sets `pool_max_conns`: one for each of a
-copy-and-swap run's four copy workers, and two more so its catch-up's flushes
-and its checkpoint saves do not wait behind the copy. A
-`pool_max_conns` in the URL is kept as given, and a copy-and-swap run refuses a
-pool below six before it creates anything (`code: pool-too-small`). Only
-`migrate` without `--dry-run` ever commits a schema change. The one other
-command that writes to the database is `reap` without `--dry-run`, which drops
-only the engine's orphan replication slots and their publications, never table
-data. Every other command is read-only or fully offline.
-
-| Command | Live database | What the connection is used for |
+| Command | Database | What it does |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--copy-and-swap` (the route is in preview and closed without it) and `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode), `--restart SCHEMA.TABLE` (start a stopped run over), and `--slot-lag-ceiling SIZE` (the slot WAL at which a live run stops, default 1GiB); see [running a copy-and-swap](docs/copy-and-swap.md). While the change runs, a progress line on stderr shows the step, operation, percent, and ETA when stderr is a terminal; `--progress=always` prints it as plain lines anywhere else, `--progress=never` hides it, and stdout carries only the verdict |
-| `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
-| `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
-| [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |
-| `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
-| `reap` | required | Drop the orphan `pgsprite_` replication slots, publications included, that stopped copy-and-swap runs left in the connected database: slots no checkpoint row in a non-terminal phase names and no process holds. Slots a live row names, slots a process holds, and prefix-wearing slots of another name shape or output plugin are reported and kept; other databases' slots are never read. `--dry-run` reports the same sorting and drops nothing; a database where no schema change has run has no checkpoint table, which is reported, not an error |
-| `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
-| `fmt` | none | Canonicalize a schema file — parser only |
-| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone; `--desired` runs the desired-file admission `diff` and `migrate --desired` share and prints the refusal verdict for a file it refuses; planning can still refuse what admission does not inspect |
-| `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, exits 0 on any script it can parse |
+| `migrate` | required | Plan, route, and execute one change under bounded lock and statement budgets ([copy-and-swap flags](docs/copy-and-swap.md)) |
+| `migrate --dry-run` | required | The same plan against the real table; executes nothing |
+| `diff` | required | Plan the changes that converge a live table onto a desired file; changes nothing |
+| [`pull`](docs/pull.md) | required | Write one desired file per supported table in a schema |
+| `status` | required | Show live pg-sprite sessions |
+| `reap` | required | Drop orphan replication slots that stopped copy-and-swap runs left behind |
+| `capabilities` | none | Print the support matrix (`--json` for automation) |
+| `fmt` | none | Canonicalize a schema file |
+| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate |
+| `suggest` | none | Show the safer form the engine would run for risky DDL |
 
-The offline commands have no connection flags at all, so they cannot be
-pointed at a database by accident.
+Only `migrate` and `reap` ever write. If a multi-step change fails partway,
+[execution-model.md](docs/execution-model.md) says what state the table is in.
 
-**If a multi-step change fails halfway, what state is my table in?** Every
-step before the failure has committed and is harmless to live traffic; the
-failing step rolled back; nothing after it ran — and the verdict names the
-exact boundary. Why safer sequences run without a wrapping transaction
-(PostgreSQL forbids it for the online forms) and what each documented
-partial state means is [docs/execution-model.md](docs/execution-model.md).
+## What pg-sprite does not do yet
+
+Every boundary fails closed with a typed refusal, never a silently wrong or
+incomplete result. The full list is in
+[limitations.md](docs/limitations.md#boundaries-at-a-glance), and the support
+matrix is [capabilities.md](docs/capabilities.md).
+
+- **Copy-and-swap is in preview** and carries only `ALTER COLUMN TYPE`; other rewrites refuse ([running it](docs/copy-and-swap.md)).
+- **No connection poolers** on pg-sprite's own connection, except Supabase's session endpoint ([poolers](docs/limitations.md#connections-and-poolers)).
+- **Foreign keys** run through `migrate --alter`, not from desired files.
+- **Renames are refused** unless `--force` names the table, since they break running application instances.
+- **Destructive changes** need `--allow-destructive SCHEMA.TABLE`, and desired plans also need `--expect-fingerprint`.
+- **Index maintenance** (`DROP INDEX`, `REINDEX`) runs from `migrate --alter` only as an accepted blocking change ([passthrough](docs/lock-budgeted-passthrough.md)); a desired file drops an index concurrently under `--allow-destructive` and `--expect-fingerprint`, and a partitioned table's index only as an accepted blocking drop.
+- **Non-table objects** such as views, functions, and triggers are outside the declarative model, apart from adding enum labels.
+- **Tables are never dropped**; that stays with the owner of the whole schema.
 
 ## Exit codes
 
-The process status is the contract a shell gate reads without parsing JSON.
-Each code answers one question: did anything commit, and does the engine
-vouch for it as online-safe.
+| Exit | Meaning |
+|---|---|
+| 0 | Executed through an online-safe path, or a dry run, `diff`, or `pull` found nothing to refuse |
+| 1 | Failed: a PostgreSQL, operational, or usage error. A safer sequence that stopped partway keeps its committed steps, named in `executed_sql` |
+| 2 | Refused: no online-safe path. The verdict names the typed `reason` and `class`. A `migrate --desired` plan refused partway keeps the statements before it |
+| 3 | Committed through the accepted-blocking passthrough, without an online-safety guarantee |
 
-| Exit | Meaning | Anything committed? | Online-safe? |
-|---|---|---|---|
-| 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
-| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` or `--allow-destructive` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql`; unknown when the verdict's `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
-| 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no, except a `migrate --desired` plan refused partway: a statement refused at execution keeps the statements before it, listed in `verdicts`, so plan again before retrying | not applicable |
-| 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
+Gate on non-zero. The full rules, including a lost `COMMIT` and library
+callers, are in [cli-output-examples.md](docs/cli-output-examples.md#exit-codes).
 
-A usage error exits 1 and writes the usage and the error to stderr; stdout
-carries only the command's output, including under `--json`.
+## Docs
 
-Four rules follow from the table, and one note for embedders:
-
-- **Gate on non-zero.** `pg-sprite migrate … || exit 1` is fail-closed for
-  every code above. Allow 3 explicitly only where a maintenance-window
-  blocking change is intended; exit 0 is never borrowed for it.
-- **Refusal is one code, whichever command produced it.** `migrate`, its dry
-  run, `diff`, `pull`, and `lint --desired` all exit 2 on a refusal; exit 3
-  can come only from `migrate`, because no other command executes DDL. The
-  offline `lint` exits 1 when a script has error-severity findings (warnings
-  alone exit 0), and `suggest` exits 0 on any script it can parse — findings
-  never gate; only an unreadable or unparsable script exits 1.
-- **Exit 2 means nothing *committed*, not nothing ran.** An optimistic
-  attempt that exceeded its statement budget did run — PostgreSQL cancelled
-  it and transactional DDL rolled it back — and still exits 2, because the
-  refusal is a routing answer (the change needs a different strategy). The
-  one exception is a `migrate --desired` plan: each planned statement is
-  checked again as it runs, so one refused partway leaves the statements
-  before it committed, and the result's detail and `verdicts` say which.
-- **A lost `COMMIT` is exit 1, not 0, 2, or 3.** When the connection drops or
-  the caller's context ends while a bounded attempt's `COMMIT` is in flight,
-  the change may or may not have landed. Exit 0 and 3 would claim it did and
-  exit 2 would claim it did not; the failed exit says only that the engine
-  cannot vouch for the run, and the verdict's `code` (`commit-outcome-unknown`)
-  and detail tell the operator to inspect the catalog.
-- **Library callers get the same facts typed, not as a status.** An
-  orchestrator that imports `pkg/executor` branches on the verdict's
-  `outcome`, `errors.As` to the executor's typed errors, and
-  `executor.OutcomeCode` — the exit code is the CLI's rendering of those
-  facts, not a surface the library exposes. Check
-  `errors.As(err, new(*executor.CommitOutcomeUnknownError))` or `OutcomeCode`
-  before testing for context errors: a context cancelled during `COMMIT`
-  stays in the error chain, but the outcome is unknown, not a cancellation. The typed contract is in
-  [docs/execution-model.md](docs/execution-model.md#how-a-failure-is-reported).
-
-Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking
-SCHEMA.TABLE --statement-timeout …` on a refused plain `DROP INDEX`,
-`REINDEX INDEX`, or `REINDEX TABLE`, where the value names the table whose
-lock you accept. Why the code is non-zero, and why a
-statement-budget cancellation on that path is exit 1 rather than 2, is in
-[docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md#exit-codes);
-every code's JSON shape is in
-[docs/cli-output-examples.md](docs/cli-output-examples.md#exit-codes).
-
-## Demo
-
-A runnable tour of the CLI against a local PostgreSQL (Docker required):
-
-```sh
-make demo
-```
-
-It builds the binary, starts the compose database, seeds demo tables, and
-walks every planner route (dry-run), the declarative diff, the offline
-commands, and real executions — including the safer-sequence substitutions
-and a structured refusal. Rerunnable; see [demo/README.md](demo/README.md).
+- [Vision](docs/vision.md): what pg-sprite is and is not
+- [Capabilities](docs/capabilities.md) and [limitations](docs/limitations.md): what runs, what refuses, and why
+- [CLI guide](docs/cli.md) and [output examples](docs/cli-output-examples.md)
+- [Copy-and-swap](docs/copy-and-swap.md): running a table rewrite
+- [Execution model](docs/execution-model.md): partial states and how failures are reported
+- [Go library](docs/schemabot-integration.md): embedding pg-sprite in an orchestrator through `pkg/migrate` (`Run`, `RunDesired`); SchemaBot is the worked example
+- [Safety](SAFETY.md) and [invariants](docs/invariants.md): the safety-critical core and its rules
+- [Design docs](docs/README.md): everything else
 
 ## Development
 
 ```sh
-make setup       # one-time: configure git hooks (.githooks)
-make build       # build ./... and the bin/pg-sprite binary
+make setup       # one-time: configure git hooks
+make build       # build ./... and bin/pg-sprite
 make test        # full suite; integration tests need Docker
-make test-unit   # unit tests only (SKIP_INTEGRATION=1)
-make lint        # golangci-lint
+make test-unit   # unit tests only
+make demo        # runnable tour of the CLI against a local PostgreSQL
 ```
 
-Integration tests run against a real PostgreSQL via testcontainers. `PG_VERSION`
-selects the major (default 16); CI runs the matrix 14 → 18. To iterate against a
-long-lived local database instead of per-test containers:
-
-```sh
-make db-up PG_VERSION=14   # start PostgreSQL 14 on localhost via compose
-make test-db               # run the suite against it (PG_DSN); RACE= skips -race
-make db-down               # stop and discard it
-```
-
-`make test-supported-postgres` runs the full suite against every supported
-major (14 → 18) — the local mirror of the CI matrix, except that CI runs the
-race detector on PostgreSQL 18 only. See
-[docs/testing.md](docs/testing.md) for the test-suite layout, what each build
-phase owes, and the vanilla-PostgreSQL-vs-real-Aurora validation boundary.
+Integration tests run against real PostgreSQL through testcontainers.
+[testing.md](docs/testing.md) covers the version matrix and the local database
+targets; [demo/README.md](demo/README.md) covers the tour.
 
 ## Contributing
 
-Not yet — see [CONTRIBUTING](CONTRIBUTING.md). Safety-relevant issue
-reports are welcome even at this stage.
+Not yet; see [CONTRIBUTING](CONTRIBUTING.md). Safety-relevant issue reports are
+welcome even at this stage.
 
 ## License
 

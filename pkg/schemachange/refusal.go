@@ -177,11 +177,11 @@ const (
 	// run back before its cutover, and the caller writes the row there.
 	CauseResumeCutover RefusalCause = "resume-row-cutover"
 	// CauseRestartSwapCommitted means a Run asked to start over
-	// (RunOptions.Restart) met a cutover row whose swap the catalog shows
-	// committed (LK-4): the shadow already bears the source's name, so
-	// there is nothing to discard and the change is past the point of
-	// starting over. The row is left as found for a Run without the
-	// restart to finish.
+	// (RunOptions.Restart), or a Discard, met a cutover row whose swap the
+	// catalog shows committed (LK-4): the shadow already bears the source's
+	// name, so there is nothing to discard and the change is past the
+	// point of starting over. The row is left as found for a Run without
+	// the restart to finish.
 	CauseRestartSwapCommitted RefusalCause = "restart-swap-committed"
 	// CauseFinishAdmissionStale means a Run was handed a target the disk
 	// check admitted only to finish a committed swap
@@ -224,7 +224,10 @@ const (
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
 	// of another database. It is neither decoded from nor replaced; an
-	// operator renames or drops it.
+	// operator renames or drops it. A Discard that finds no row refuses
+	// the same way a slot of the table's derived name that a non-terminal
+	// row of another table names, since two tables can derive the same
+	// name: the slot is that run's, and is left for it.
 	CauseResumeSlotForeign RefusalCause = "resume-slot-foreign"
 	// CauseResumeSlotHeld means the row's slot is intact but another
 	// backend holds it (ST-4), so no stream can be opened on it now. The

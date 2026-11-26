@@ -27,12 +27,13 @@ var captureSentinelsNotRunFailures = map[string]map[string]string{
 		"ErrConversionDrift":       "every flush that raises it wraps ErrInvariantViolation with it, which captureFailed lists",
 	},
 	"decode": {
-		"ErrInvariantViolation":     "the same value as applier.ErrInvariantViolation (both are dbconn's), which captureFailed lists",
-		"ErrSlotActive":             "returned only by DropSlot, which runs after the capture has ended",
-		"ErrForeignDecodingState":   "raised while the route creates or adopts its slot and publication, before the capture starts",
-		"ForeignStateError":         "raised while the route creates or adopts its slot and publication, before the capture starts",
-		"PublicationPrivilegeError": "raised while the route creates its publication, before the capture starts",
-		"SlotExistsError":           "raised by CreateSlot, before the capture starts",
+		"ErrInvariantViolation":         "the same value as applier.ErrInvariantViolation (both are dbconn's), which captureFailed lists",
+		"ErrSlotActive":                 "returned only by DropSlot, which runs after the capture has ended",
+		"ErrSlotDroppedPublicationLeft": "returned only by DropSlot and DropIdleSlot, which the runner calls outside a capture: before it starts or after it has ended",
+		"ErrForeignDecodingState":       "raised while the route creates or adopts its slot and publication, before the capture starts",
+		"ForeignStateError":             "raised while the route creates or adopts its slot and publication, before the capture starts",
+		"PublicationPrivilegeError":     "raised while the route creates its publication, before the capture starts",
+		"SlotExistsError":               "raised by CreateSlot, before the capture starts",
 	},
 }
 
