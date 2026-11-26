@@ -114,7 +114,10 @@ type Statement struct {
 	// CONSTRAINT that runs as ADD ... NOT VALID and then VALIDATE
 	// CONSTRAINT carries the definition its add leaves
 	// (schemadiff.Change.AddsNotValid), which its validation step checks.
-	// Nil otherwise, and out of the JSON for the same reason.
+	// A SET NOT NULL that runs as the online helper-constraint sequence
+	// carries the helper CHECK it validates (see diffplan's
+	// recordNotNullScaffoldValidations). Nil otherwise, and out of the JSON
+	// for the same reason.
 	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Drops is the live object a diff-derived DROP INDEX, DROP CONSTRAINT,
 	// DROP COLUMN, or DROP NOT NULL removes, with the definition the diff
