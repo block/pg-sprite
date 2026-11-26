@@ -45,8 +45,9 @@ var (
 	// ErrPartitionDetachPending is returned when the partition tree holds a
 	// partition whose DETACH PARTITION CONCURRENTLY did not finish. The
 	// server leaves that partition out when it attaches an index, so the
-	// parent's index could never become valid; an operator finishes the
-	// detach with FINALIZE.
+	// parent's index could never become valid, and out of a parent's column
+	// drop, so it would keep its copy of the column; an operator finishes
+	// the detach with FINALIZE.
 	ErrPartitionDetachPending = errors.New("the partition tree holds a partition whose detach has not finished")
 	// ErrPartitionedIndexUnsettled is returned when partitions kept appearing
 	// without an attached index for as long as the build's bounded number of
