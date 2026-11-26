@@ -104,6 +104,16 @@ type RetryPolicy struct {
 	MaxAttempts    int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	// HolderWait, when set, is the longest a native attempt waits outside
+	// the lock queue, before it requests its lock, while a transaction
+	// that has held a lock on the table for a while keeps holding it. An
+	// attempt that queued behind such a transaction would hold back every
+	// later reader and writer of the table for its whole lock budget. A
+	// holder that outlasts the wait ends the run with a
+	// *LockHolderWaitError, nothing submitted. Each attempt waits afresh,
+	// so the bound is MaxAttempts times HolderWait. Zero requests the lock
+	// at once.
+	HolderWait time.Duration
 }
 
 // DefaultRetryPolicy returns the safe native-DDL retry policy used by
@@ -131,6 +141,9 @@ func (p RetryPolicy) validate() error {
 	}
 	if p.MaxBackoff < p.InitialBackoff {
 		return fmt.Errorf("maximum retry backoff %s must be at least initial backoff %s", p.MaxBackoff, p.InitialBackoff)
+	}
+	if p.HolderWait < 0 || p.HolderWait > maxOverallBudget {
+		return fmt.Errorf("lock holder wait must be between 0 and %s, got %s", maxOverallBudget, p.HolderWait)
 	}
 	return nil
 }
@@ -335,6 +348,12 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		}
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
+		// INV: LK-2 — the attempt requests its lock only once no
+		// long-lived transaction holds one on the table, so it never sits
+		// at the head of the lock queue behind one.
+		if err := waitOutsideLockQueue(ctx, pool, pt.Schema(), pt.Table(), retry.HolderWait, sleepContext); err != nil {
+			return err
+		}
 		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, nil)
 	}, sleepContext, func(attempt int) {
 		if tracker != nil {

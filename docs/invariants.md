@@ -833,7 +833,10 @@ cancelled wait leaves is a detach-pending partition, which the server keeps cons
 through the table leave it out, rows in its range are refused) and the executor detects from
 `pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors; `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+native and copy-and-swap executors; a native attempt run with `RetryPolicy.HolderWait` requests its lock only once no transaction
+has held a lock on the table across two reads of `pg_locks`, waiting outside the lock queue meanwhile and
+ending with `LockHolderWaitError`, nothing submitted, when a holder outlasts the wait
+(`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then
