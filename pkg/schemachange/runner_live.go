@@ -148,7 +148,7 @@ func (r *Runner) fillLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	}
 	verified, report, err := r.verifyWith(ctx, lock, target, *state, func(ctx context.Context, verifier *checksum.Verifier) (checksum.Outcome, error) {
 		live := r.opts.Live
-		live.Confirmed = cap.catchup
+		live.Confirmed = r.liveConfirmed(cap.catchup)
 		// INV: CO-1 — a key still changing when its chunk runs out of
 		// rereads is left for the run's swap, which compares it where it
 		// cannot change; the cap bounds what that reads under the lock.
@@ -168,6 +168,16 @@ func (r *Runner) fillLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 		return CutoverReady{}, report, err
 	}
 	return ready, report, nil
+}
+
+// liveConfirmed is the catch-up a live run's verification pass reads its
+// confirmed position from: the run's own, wrapped when the Runner has a
+// wrap set.
+func (r *Runner) liveConfirmed(c *applier.Catchup) checksum.ConfirmedSource {
+	if r.liveWrap == nil {
+		return c
+	}
+	return r.liveWrap(c)
 }
 
 // awaitCaughtUp waits until the capture has confirmed past a marker
