@@ -167,7 +167,7 @@ func TestExecutePlanRunsNoDestructiveStatementItCannotRecheck(t *testing.T) {
 			report := destructiveReport()
 			report.Statements = report.Statements[1:]
 			report.Statements[0].Drops = nil
-			res, err := executePlan(t.Context(), nil, report, DefaultOptions(), tc.acknowledge, nil)
+			res, err := executePlan(t.Context(), nil, report, DefaultOptions(), tc.acknowledge, "", nil)
 			require.ErrorIs(t, err, executor.ErrInvariantViolation)
 			assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
 			assert.Empty(t, res.Verdicts)

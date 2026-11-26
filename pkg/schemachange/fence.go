@@ -200,6 +200,12 @@ func confirmWriteFence(ctx context.Context, tx pgx.Tx, built BuiltShadow) error 
 // catalog alone, so a caller-built pool with another schema ahead of it
 // gets the same verdict.
 func DropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) error {
+	return dropWriteFenceOf(ctx, pool, lock, target, opts)
+}
+
+// dropWriteFenceOf is DropWriteFence for either proof of the table: a
+// discard holds the shape proof alone.
+func dropWriteFenceOf(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target provenTable, opts Options) error {
 	if err := opts.validate(); err != nil {
 		return err
 	}
@@ -307,7 +313,7 @@ func pinCatalogSearchPath(ctx context.Context, tx pgx.Tx) error {
 // owned by the proof's owner. Nothing under the name is ErrSourceNotFound;
 // another kind of relation, or a table of another owner, is refused as a
 // foreign relation (ST-5), since the proof was minted for neither.
-func checkSource(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget) error {
+func checkSource(ctx context.Context, tx pgx.Tx, target provenTable) error {
 	schema, table := target.Schema(), target.Table()
 	var relkind, owner string
 	// INV: CO-9 — every catalog name is qualified, so the read does not

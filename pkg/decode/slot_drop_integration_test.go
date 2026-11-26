@@ -183,6 +183,7 @@ func TestDropSlotRefusesAForeignSlotOfTheName(t *testing.T) {
 	require.NoError(t, err)
 	err = decode.DropSlot(t.Context(), f.cfg, f.pool, name)
 	require.ErrorIs(t, err, decode.ErrForeignDecodingState)
+	assert.NotErrorIs(t, err, decode.ErrSlotDroppedPublicationLeft, "a refused slot drop is not a dropped slot")
 	var foreign *decode.ForeignStateError
 	require.ErrorAs(t, err, &foreign)
 	assert.Equal(t, decode.ForeignObjectSlot, foreign.Object)

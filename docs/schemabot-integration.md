@@ -349,7 +349,7 @@ that tests the sentinel first would send an operator-dropped shadow or a held sl
 | --- | --- | --- |
 | `resume-row-terminal` | The row is `done` or `failed`; there is no run to resume | Report the recorded outcome; a new run needs `Store.Delete` of the row the caller was shown |
 | `resume-row-cutover` | The row says a swap began and nothing says how it ended; neither a clean resume nor a reconcile may touch the slot or the shadow until that is known. The refusal is answered before the slot is read, so it says nothing about whether the slot survived | Call `InspectSwapped` first; a committed swap continues from `DropOldTable`. A rolled-back swap (`ErrNotSwapped`) is a run still catching up: write the row back to `catching_up` and call `InspectResume` again — it answers clean when the slot is intact, and reconcile when the slot was lost during the cutover window, in which case `Reconcile` repairs the gap before the cutover is retried |
-| `restart-swap-committed` (from `Runner`, with `RunOptions.Restart`) | A run asked to start over met a `cutover` row whose swap the catalog shows committed: the shadow already bears the source's name, so there is nothing to discard and the change is past the point of starting over. Nothing is written | Run the same statement without the restart; `InspectSwapped` answers that the swap committed and the run finishes from `DropOldTable` — drops the slot of a live run, drops or keeps the retained source, writes the row `done` |
+| `restart-swap-committed` (from `Runner`, with `RunOptions.Restart`, and from `Runner.Discard`) | A run asked to start over, or a discard, met a `cutover` row whose swap the catalog shows committed: the shadow already bears the source's name, so there is nothing to discard and the change is past the point of starting over. Nothing is written | Run the same statement without the restart; `InspectSwapped` answers that the swap committed and the run finishes from `DropOldTable` — drops the slot of a live run, drops or keeps the retained source, writes the row `done` |
 | `finish-admission-stale` (from `Runner`) | The target was admitted only to finish a committed swap, with no disk space asked, and the row the run found under its lock asks for more: none, a `done` row, a row a restart discards, or a row whose swap has not committed. Nothing is written | Call `CheckCopySwap` again, which measures the row as it is now, and run on the new target |
 | `resume-row-mismatch` | The row is for another table, names another slot, or (in `Reconcile` and `Runner`) carries another statement's shadow name, fingerprints, or shadow proof; from `Runner` also a row whose recorded statement is not the one `Run` was given, compared as parsed, or a row that records no statement | Configuration or operator action: the target and the row disagree; retrying cannot succeed. A caller that means a second, different change on the same table deletes the row (`Store.Delete`) — and drops the shadow and the fence — first |
 | `shadow-statement-target` (from `Runner`, on resume) | The statement `Run` was given names another table than the proven target, caught before the row's statement is compared with it | Configuration: the statement and the target disagree; retrying cannot succeed |
@@ -930,6 +930,27 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   showed. `RunDesiredWithRowSecurity` takes the same two fields for a change to the table
   definition; a policy a row security file no longer lists is dropped by the atomic row
   security change without them.
+- <a id="desired-blocking-index-drop"></a>**A partitioned table's index drop is a reviewed
+  plan, a named table, and an accepted lock.** PostgreSQL has no concurrent drop for an index
+  of a partitioned table, so the plan keeps that `drop-index` statement refused
+  (`unsupported-partitioned-parent`, class `by-design`, `blocking_passthrough_eligible: true`)
+  and carries the plain `DROP INDEX` as its `exec_sql` with `execution: blocking-index-drop`
+  (`format_version` 24 and later), which the fingerprint covers. `RunDesired` admits it only
+  when `DesiredRequest.AcceptBlocking` names the desired table beside the pin and
+  `AllowDestructive`, and the run's brief budget has a statement timeout longer than its lock
+  timeout; otherwise the plan is refused whole with `destructive-change`, as it was before the
+  field existed, and the detail names the fields. `AcceptBlocking` without the pin or
+  `AllowDestructive` is `migrate.ErrAcceptBlockingNeedsReviewedDrop` before any database work,
+  and one naming another table is `migrate.ErrAcceptBlockingMismatch`. The drop runs in one
+  engine-owned transaction: the parent's `ACCESS EXCLUSIVE` lock (which reaches every
+  partition) under `lock_timeout`, a refusal with cause `lock-budget` and nothing dropped when
+  it runs out; the index read again (`dropped-index-drift` if it changed); the drop under
+  `statement_timeout`; and a read-back that every partition's index went with it. Its verdict
+  is `executed-without-online-safety` with the lifted refusal, and a converged run that
+  committed it ends `executed-without-online-safety` as a whole (the CLI exits 3). SchemaBot
+  does not set the field: like `Options.AcceptBlocking`, it is an operator's acceptance of
+  blocking, which [the passthrough design](lock-budgeted-passthrough.md#orchestrator-exposure)
+  keeps out of an author's reach.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
@@ -1015,7 +1036,14 @@ rerun as written; `code: data-fault` without it is rerun with `--restart`. A `da
 verdict that carries `failed_step` is not a copy-and-swap run at all but a native concurrent
 index build that failed on the rows (duplicate values under a unique index): there is no run
 to restart, and the build's own invalid index is the leftover to drop once the rows are
-corrected ([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)). On `RunDesired` the
+corrected ([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)). A
+`data-fault` verdict from a partitioned table's index build carries neither `abandoned` nor
+`failed_step`, and it is not a copy-and-swap run either: there is no run to restart. When
+the run proved the invalid index the build left its own, the detail names it and the
+partition whose rows broke the index, and once the rows are corrected the same statement
+run again drops that index itself and resumes; otherwise the detail names the index but no
+partition, and says to inspect it before any removal
+([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)). On `RunDesired` the
 field is on the failed entry of `DesiredResult.Verdicts`, not on the aggregate. An engine from
 before the field existed abandons the same way but never writes it, so an adapter that reads
 CLI output from binaries of mixed age keeps reading the detail for those.
@@ -1073,6 +1101,40 @@ rejects the field with `ErrRestartNotSupported` before planning anything: a desi
 resumes a stopped copy-and-swap on its own, and a run that must start over is the stopped
 statement run through `Run` — `migrate --alter … --restart SCHEMA.TABLE` on the CLI — before
 the plan is run again.
+
+**Discarding without running the change.** An orchestrator's `Cancel` — end the change and
+leave nothing behind, without running it — is `schemachange.Runner.Discard(ctx, pool, shape)`.
+It takes a `preflight.CopySwapShape` (`preflight.CheckPrivileges` with
+`TierCopyAndSwap`, and `LogicalDecoding` set when the stopped run may be a live one, then
+`preflight.CheckCopySwapShape`), not a target: a discard grows nothing, so it is not asked for
+the disk or the slot headroom the stopped run itself holds. It has no CLI flag or verb.
+
+The shape check reads the table as it stands now, so a table that has changed shape since the
+run stopped — a user trigger, a foreign key, or a dependent view added — has no
+`CopySwapShape` to hand to `Discard`. The operator then removes the run by hand, with no run
+in flight: delete the table's row from `pgsprite.pgsprite_checkpoint`, drop the shadow
+(`_pgsprite_…_new` in the table's schema), and for a blocked-writes run drop the
+`pgsprite_write_fence` trigger from the table; `pg-sprite reap` (`Store.ReapOrphanSlots`) then
+drops a live run's slot and publication, which no row names any more. A `cutover` row is not
+removed this way: read the catalog first, since a swap that committed is finished by running
+the statement again.
+
+A live row's slot is dropped with `decode.DropSlot`, which waits for a walsender holding it,
+bounded only by the context `Discard` is given, so a host's `Cancel` passes a deadline. Every
+error comes back beside a `Discarded` that names what the call dropped before it.
+
+| Outcome | What it means | What the adapter does |
+| --- | --- | --- |
+| `Discarded` with `Nothing()` false | The call held the table lock, and dropped what the stopped run left in the restart's order — the shadow (`Shadow`), the hold on the source (`Slot` and `Publication` for a live row, `WriteFence` for a blocked-writes row), then the row (`RowPhase` is the phase it was in, any phase but `done`, a `failed` row included). With no row, a shadow or fence under the table's names and a slot and publication of its derived name are dropped the same way, the slot as the orphan reaper drops one | Done: the table is as if no run had started, and the next `Run` of any statement starts from the beginning |
+| `Discarded` with `Nothing()` true, nil error | Nothing of a run stands on the table | Done. This is the answer to a discard called again after one that completed, so a `Cancel` retried after a crash is safe to repeat |
+| `*dbconn.TableLockHeldError` | A run, or another discard, holds the table lock; the call waited for nothing and touched nothing | Stop the run first (cancel its context and wait for `Run` to return), then call `Discard` again |
+| `restart-swap-committed` | The row is in `cutover` and the catalog shows its swap committed: the new table is live under the source's name. Nothing was dropped | The change cannot be discarded. Run the same statement again, without a restart, to finish it; undoing it is a new schema change |
+| `resume-row-terminal` | The row is `done`: the change completed. Nothing was dropped | Treat the change as applied; a `KeepOld` rollback window is the caller's own to end |
+| `resume-row-mismatch` | The row names a slot other than the table's derived name. Nothing was dropped | Operator: the row is not this table's run's; inspect it before deleting anything |
+| `resume-slot-foreign` | No row records the table's run, and a slot of its derived name is named by a live row of another table: two tables can derive the same name, and the slot is that table's run's. The shadow and fence before it are gone, and `Discarded` names them | Leave the slot; it is the other run's. Once that run ends, `Discard` again drops the slot if it is still there |
+| error wrapping `decode.ErrSlotActive` | No row records the table's derived slot and a process holds it, so the discard, which drops such a slot only as the reaper would, left it; the shadow and fence before it are gone, and `Discarded` names them | Find the holder, end it, and call `Discard` again |
+| error wrapping `preflight.ErrCopySwapProofMismatch` | A slot stands to be dropped and the shape was proven without replication access. Nothing was dropped | Prove the shape with `LogicalDecoding` and call again |
+| any other error | A drop failed partway, or the context's deadline ended the wait for a walsender holding a live row's slot. `Discarded` names each leftover the call dropped before it; a drop the error interrupted is not named, though part of it may be gone (a slot dropped before its publication). The row still records whatever stands | Call `Discard` again, after ending a holder if one kept the slot; each step is idempotent, and its `Discarded` names only what that call dropped |
 
 ## Design constraints the integration imposes
 

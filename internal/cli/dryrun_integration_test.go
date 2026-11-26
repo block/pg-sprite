@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	neturl "net/url"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -613,4 +616,198 @@ func TestMigrateDryRunReportsMissingTableBeforeAdmission(t *testing.T) {
 
 	require.NotNil(t, report.TableExists)
 	assert.False(t, *report.TableExists)
+}
+
+// A partitioned parent has no storage of its own, so SET TABLESPACE on it
+// moves nothing: the server records the tablespace as the default for
+// partitions created later, under a brief ACCESS EXCLUSIVE on the parent
+// alone. The dry run plans it as a metadata-only native statement, and the
+// apply runs it as written: every existing partition keeps its filenode and
+// its tablespace, and a partition created afterwards lands in the new one.
+func TestMigrateSetTablespaceOnAPartitionedParentMovesNoPartition(t *testing.T) {
+	testutil.SkipOnSharedServer(t, "creates a tablespace directory on the server's filesystem")
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	tablespace := schema + "_ts"
+	exec := func(sql string) {
+		t.Helper()
+		_, err := pool.Exec(t.Context(), sql)
+		require.NoError(t, err, sql)
+	}
+	exec(`COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/` + tablespace + `'`)
+	exec(`CREATE TABLESPACE ` + tablespace + ` LOCATION '/tmp/` + tablespace + `'`)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		_, err := pool.Exec(ctx, `DROP SCHEMA `+pgx.Identifier{schema}.Sanitize()+` CASCADE`)
+		assert.NoError(t, err)
+		_, err = pool.Exec(ctx, `DROP TABLESPACE `+tablespace)
+		assert.NoError(t, err)
+	})
+	exec(fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+			id bigint,
+			created_at timestamptz,
+			PRIMARY KEY (id, created_at)
+		) PARTITION BY RANGE (created_at)`, schema))
+	exec(fmt.Sprintf(`CREATE TABLE %[1]s.events_2024 PARTITION OF %[1]s.events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')`, schema))
+	exec(fmt.Sprintf(`CREATE TABLE %[1]s.events_2025 PARTITION OF %[1]s.events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01')`, schema))
+	exec(fmt.Sprintf(`
+		INSERT INTO %[1]s.events
+		SELECT g, timestamptz '2024-01-01' + g * interval '1 day'
+		FROM generate_series(1, 600) g`, schema))
+	// Each partition and partition index, by name, to its filenode and its
+	// tablespace (0 is the database default).
+	storage := func() map[string][2]uint32 {
+		t.Helper()
+		rows, err := pool.Query(t.Context(), `
+			SELECT c.relname, pg_catalog.pg_relation_filenode(c.oid), c.reltablespace
+			FROM pg_catalog.pg_class c
+			WHERE c.relnamespace = $1::regnamespace AND c.relkind IN ('r', 'i')`, schema)
+		require.NoError(t, err)
+		defer rows.Close()
+		out := map[string][2]uint32{}
+		for rows.Next() {
+			var name string
+			var node, spc uint32
+			require.NoError(t, rows.Scan(&name, &node, &spc))
+			out[name] = [2]uint32{node, spc}
+		}
+		require.NoError(t, rows.Err())
+		return out
+	}
+	before := storage()
+	require.Len(t, before, 4, "two partitions and their primary key indexes")
+
+	sql := fmt.Sprintf("ALTER TABLE %s.events SET TABLESPACE %s", schema, tablespace)
+	report := dryRunPlan(t, url, sql)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
+	assert.Equal(t, planner.RouteNative, st.Route)
+	assert.Equal(t, router.BackendNative, st.Backend)
+	assert.Equal(t, []string{sql}, st.ExecSQL, "the statement runs as written")
+	require.Len(t, st.Decisions, 1)
+	assert.Equal(t, planner.ReasonMetadataOnly, st.Decisions[0].Reason)
+
+	cmd := newMigrateCmd(url, sql)
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, v.Detail)
+
+	assert.Equal(t, before, storage(), "no partition or partition index moved or was rewritten")
+	var parentTablespace, laterTablespace string
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT t.spcname FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_tablespace t ON t.oid = c.reltablespace
+		WHERE c.oid = $1::regclass`, schema+".events").Scan(&parentTablespace))
+	assert.Equal(t, tablespace, parentTablespace, "the parent records the new default")
+	exec(fmt.Sprintf(`CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`, schema))
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT t.spcname FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_tablespace t ON t.oid = c.reltablespace
+		WHERE c.oid = $1::regclass`, schema+".events_2026").Scan(&laterTablespace))
+	assert.Equal(t, tablespace, laterTablespace, "a partition created afterwards lands in the new tablespace")
+}
+
+// A partition has a heap of its own, so SET TABLESPACE on it is the
+// rewrite-scale move, even though its parent's would be metadata-only: the
+// dry run plans it as relocation on copy-and-swap, which does not carry a
+// tablespace move, and the plan is unavailable. pg_default exists on every
+// server, so the test needs no tablespace directory.
+func TestMigrateDryRunKeepsSetTablespaceOnAPartitionOnTheRewritePath(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	for _, sql := range []string{
+		fmt.Sprintf(`
+			CREATE TABLE %[1]s.events (
+				id bigint,
+				created_at timestamptz,
+				PRIMARY KEY (id, created_at)
+			) PARTITION BY RANGE (created_at)`, schema),
+		fmt.Sprintf(`CREATE TABLE %[1]s.events_2024 PARTITION OF %[1]s.events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')`, schema),
+	} {
+		_, err := pool.Exec(t.Context(), sql)
+		require.NoError(t, err, sql)
+	}
+
+	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.events_2024 SET TABLESPACE pg_default", schema))
+	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, report.Statements[0].Route)
+	require.Len(t, report.Statements[0].Decisions, 1)
+	assert.Equal(t, planner.ReasonRelocation, report.Statements[0].Decisions[0].Reason)
+	assert.False(t, report.Statements[0].Decisions[0].Unverified, "the partition's storage was read live")
+}
+
+// An ordinary table has a heap, so SET TABLESPACE on it is the
+// rewrite-scale move: relocation on copy-and-swap, which does not carry a
+// tablespace move, so the plan is unavailable.
+func TestMigrateDryRunKeepsSetTablespaceOnAnOrdinaryTableOnTheRewritePath(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.accounts (
+			id bigint PRIMARY KEY
+		)`, schema))
+	require.NoError(t, err)
+
+	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.accounts SET TABLESPACE pg_default", schema))
+	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, report.Statements[0].Route)
+	require.Len(t, report.Statements[0].Decisions, 1)
+	assert.Equal(t, planner.ReasonRelocation, report.Statements[0].Decisions[0].Reason)
+	assert.False(t, report.Statements[0].Decisions[0].Unverified, "the table's storage was read live")
+}
+
+// SET TABLESPACE on a partitioned parent locks the parent alone: it does
+// not recurse, so a partition another session holds in EXCLUSIVE mode does
+// not hold it up, and the run completes under a short lock timeout. A
+// statement that took ACCESS EXCLUSIVE on the partition would wait for that
+// lock and fail on the timeout. EXCLUSIVE rather than ACCESS EXCLUSIVE,
+// because the run's size check reads every partition under ACCESS SHARE.
+func TestMigrateSetTablespaceOnAPartitionedParentDoesNotWaitForAPartitionLock(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	for _, sql := range []string{
+		fmt.Sprintf(`
+			CREATE TABLE %[1]s.events (
+				id bigint,
+				created_at timestamptz,
+				PRIMARY KEY (id, created_at)
+			) PARTITION BY RANGE (created_at)`, schema),
+		fmt.Sprintf(`CREATE TABLE %[1]s.events_2024 PARTITION OF %[1]s.events FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')`, schema),
+	} {
+		_, err := pool.Exec(t.Context(), sql)
+		require.NoError(t, err, sql)
+	}
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, holder.Rollback(context.WithoutCancel(t.Context()))) }()
+	_, err = holder.Exec(t.Context(), "LOCK TABLE "+schema+".events_2024 IN EXCLUSIVE MODE")
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.events SET TABLESPACE pg_default", schema))
+	cmd.LockTimeout = 200 * time.Millisecond
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, v.Detail)
 }

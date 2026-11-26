@@ -12,6 +12,9 @@ import (
 // deliberately total — a foreign slot leaves the publication of the name in
 // place too — and a caller must not answer it with DropSlot, which would
 // wait out and drop whatever the other owner is still streaming from.
+// DropSlot and DropIdleSlot judge the publication only once the slot of the
+// name is gone, so a publication refusal from them comes after that slot's
+// drop, with ErrSlotDroppedPublicationLeft also in the chain.
 var ErrForeignDecodingState = errors.New("logical-decoding state of the derived name is not this route's")
 
 // ForeignObject names which logical-decoding object of the derived name a
@@ -30,7 +33,8 @@ const (
 // ForeignStateError is the refusal CreateSlot and DropSlot return for
 // foreign state, so a caller can route on which object was foreign and
 // report why without reading message text. It unwraps to
-// ErrForeignDecodingState.
+// ErrForeignDecodingState. A publication refusal from DropSlot follows the
+// slot's drop and is joined with ErrSlotDroppedPublicationLeft.
 type ForeignStateError struct {
 	Object ForeignObject
 	// Name is the derived name the object wears.

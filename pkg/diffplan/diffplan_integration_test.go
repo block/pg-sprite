@@ -193,7 +193,8 @@ func TestPlanRefusesConcurrentDropOfPartitionedParentIndex(t *testing.T) {
 	assert.Equal(t, verdict.ClassByDesign, ch.Class)
 	require.NotNil(t, ch.BlockingPassthroughEligible)
 	assert.True(t, *ch.BlockingPassthroughEligible, "the plain drop may run under the bounded blocking path")
-	assert.Empty(t, ch.ExecSQL, "no DROP INDEX CONCURRENTLY is offered")
+	assert.Equal(t, []string{ch.SQL}, ch.ExecSQL, "the plain drop, the only one there is; no DROP INDEX CONCURRENTLY is offered")
+	assert.Equal(t, planner.ExecutionBlockingIndexDrop, ch.Execution)
 	for _, decision := range ch.Decisions {
 		assert.Empty(t, decision.SaferSQL)
 	}
