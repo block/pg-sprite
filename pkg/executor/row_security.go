@@ -274,6 +274,9 @@ func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 // does not support. Render refuses unsupported shapes even when two models
 // happen to match.
 func rowSecurityTableShape(m schemadiff.Model) (schemadiff.Model, error) {
+	if m.PartitionKey != "" {
+		return schemadiff.Model{}, fmt.Errorf("row security target: partitioned parent (PARTITION BY %s): %w", m.PartitionKey, schemadiff.ErrUnrenderablePartitionedRowSecurity)
+	}
 	table := withoutExportOnlyRefusals(m)
 	table.RowSecurity = schemadiff.RowSecurity{}
 	if _, err := schemadiff.Render(table); err != nil {

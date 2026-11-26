@@ -36,10 +36,10 @@ func (c *CapabilitiesCmd) run(out io.Writer) error {
 // terminal's cells; the status mark is a double-width glyph, so it is the
 // unpadded last column rather than a padded one that would shift everything
 // after it by a cell.
-const capabilitiesRowFormat = "%-13s %-29s %-4s %-14s %-14s %-9s %s\n"
+const capabilitiesRowFormat = "%-13s %-29s %-4s %-8s %-14s %-14s %-9s %s\n"
 
 func writeCapabilitiesText(out io.Writer, pal palette, rows []capabilities.Row) error {
-	header := fmt.Sprintf(capabilitiesRowFormat, "AREA", "OPERATION", "TIER", "BACKEND", "FRONT DOORS", "OWNER", "STATUS")
+	header := fmt.Sprintf(capabilitiesRowFormat, "AREA", "OPERATION", "TIER", "MATURITY", "BACKEND", "FRONT DOORS", "OWNER", "STATUS")
 	if _, err := fmt.Fprint(out, pal.bold(strings.TrimSuffix(header, "\n"))+"\n"); err != nil {
 		return fmt.Errorf("write capabilities: %w", err)
 	}
@@ -49,8 +49,12 @@ func writeCapabilitiesText(out io.Writer, pal palette, rows []capabilities.Row) 
 		if owner == "" {
 			owner = "—"
 		}
+		maturity := string(row.Maturity)
+		if maturity == "" {
+			maturity = "—"
+		}
 		if _, err := fmt.Fprintf(out, capabilitiesRowFormat,
-			clip(string(row.Area), 13), clip(row.Operation, 29), row.Tier,
+			clip(string(row.Area), 13), clip(row.Operation, 29), row.Tier, maturity,
 			clip(string(row.EnginePath), 14), frontDoors, clip(owner, 9), row.StatusMark); err != nil {
 			return fmt.Errorf("write capabilities: %w", err)
 		}

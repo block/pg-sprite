@@ -154,6 +154,24 @@ are UTC. The read takes no lock; if it fails, including when the server lists no
 for a leaf index, nothing executes and the error is returned instead of the refusal. `REINDEX INDEX` and `REINDEX TABLE` discard nothing and need only
 `--accept-blocking`.
 
+### Dropping an index of a partitioned table
+
+PostgreSQL has no concurrent drop for an index of a partitioned table, so the plain drop of
+the parent's index is the only drop there is, and it removes each partition's attached index
+with it. Name the parent in both acknowledgements:
+
+```sh
+pg-sprite migrate \
+  --alter 'DROP INDEX app.events_name_idx' \
+  --accept-blocking app.events \
+  --allow-destructive app.events \
+  --lock-timeout 3s
+```
+
+The engine requests `ACCESS EXCLUSIVE` on the parent, which reaches every partition, under the
+lock budget before the drop runs, and the drop holds it only while it changes the catalog. The
+verdict is `executed-without-online-safety` and the exit code is 3.
+
 The value names the table whose lock the operator accepts, because that is the relation the
 blocking form makes unavailable: a plain `DROP INDEX` takes `ACCESS EXCLUSIVE` on the index's
 table, and a parent index build locks the parent. The partitioned-parent statements and
@@ -221,7 +239,8 @@ The v1 set is:
 | Class | Typed refusal shape | v1 | Rationale |
 | --- | --- | --- | --- |
 | `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) and `DROP INDEX ... CASCADE`, whose dependent drops reach tables beyond the acknowledged one, stay ineligible. `REINDEX` on a partitioned table or index is eligible by shape but cannot run inside the engine-owned transaction; the executor reports it as `unsupported-accepted-blocking` (see [Engine-owned session and budgets](#engine-owned-session-and-budgets)). |
-| `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible in the registry; not reachable from `migrate` | The missing partition-aware flow does not make the plain PostgreSQL statement unknown. Its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. An unforced plain `CREATE INDEX` on a partitioned parent is refused with the `parent-concurrent-index-build` cause instead, because the partition check runs against the substituted concurrent form, and the blocking cause arises only under `--force`, which `--accept-blocking` rejects. |
+| `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible in the registry; not reachable from `migrate` | The plain PostgreSQL statement is not unknown, and its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. An unforced plain `CREATE INDEX` on a partitioned parent is not refused: both front doors route it to the partitioned index build ([design](partitioned-index-build-design.md)). The blocking cause arises only under `--force`, which `--accept-blocking` rejects. |
+| `by-design` | `unsupported-partitioned-parent` with cause `parent-concurrent-index-drop` | eligible | PostgreSQL has no concurrent drop for an index of a partitioned table, so the plain single-index `DROP INDEX` is the only drop there is. A desired-state plan carries this cause for such a drop, and so does `migrate --alter`, which reads the index's kind from the catalog after the gate refuses a single-index `DROP INDEX`; the plain statement runs under the acknowledgement once `--allow-destructive` also names the table (RF-10), and its verdict says the parent, every partition, and every partition's index were locked. The submitted `DROP INDEX CONCURRENTLY` carries the same cause but is never passed through: the engine-owned transaction cannot run a concurrent drop, so the refusal stands and names the plain drop. A partition's index attached under a parent index is refused as `unsupported-statement` (`by-design`, ineligible), since PostgreSQL drops it only with its parent. |
 | `capability-boundary` | `not-native-safe-rewrite-required` | ineligible | A rewrite holds its strong lock for the full rewrite. Bounding acquisition alone does not bound the outage, and v1 must not imply otherwise. |
 | `capability-boundary` | `backend-unavailable` and all other missing routes or backends | ineligible | A missing execution backend is not permission to substitute an unrelated blocking implementation. |
 | `no-online-safety-problem` | data changes, provisioning, imperative `CREATE TABLE`, and owner catalog work | ineligible | The lock budget is not pg-sprite's reason to own these jobs. Another tool or front door owns them, and broad admission would become arbitrary SQL passthrough. |
@@ -589,11 +608,11 @@ Sequence implementation as follows:
    *(done, with three recorded deviations. First, the flag reaches the single-relation
    `index-statement` refusals only — `DROP INDEX`, `REINDEX INDEX`, `REINDEX TABLE`. The
    `parent-blocking-index-build` row stays eligible in the registry but unreachable from
-   `migrate`: an unforced plain `CREATE INDEX` on a partitioned parent is refused with the
-   `parent-concurrent-index-build` cause, because the partition check runs against the
+   `migrate`: an unforced plain `CREATE INDEX` on a partitioned parent was refused with the
+   `parent-concurrent-index-build` cause, because the partition check ran against the
    substituted concurrent form, and the blocking cause arises only under `--force`, which the
-   flag rejects. Wiring that row needs the cause classified against the submitted form and is
-   a follow-up; RF-6 is therefore left unamended. Second, `--dry-run` is rejected with the flag,
+   flag rejects. The partitioned index build has since replaced that refusal with a run of the
+   statement, and RF-6 describes it. Second, `--dry-run` is rejected with the flag,
    mirroring `--force`, rather than reporting the refusal with the flag silently ignored.
    Third, the demo asserts the refusal, the mismatched acknowledgement, the accepted commit
    for both `DROP INDEX` and `REINDEX TABLE`, and their exit codes; the lock-budget refusal

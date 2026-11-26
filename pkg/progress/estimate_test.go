@@ -77,16 +77,24 @@ func TestCopyWithoutARowEstimateReportsNoPercentOrETA(t *testing.T) {
 func TestCopyPastItsEstimateCapsBelowCompleteAndDropsTheETA(t *testing.T) {
 	for _, copied := range []uint64{5000, 6500} {
 		s := pollStep(t, progress.OperationCopy, progress.Work{RowsCopied: copied, RowsTotal: 5000}, time.Minute)
-		assert.InDelta(t, 99.9, requirePercent(t, s), 0, "rows_copied %d of 5000", copied)
+		assert.InDelta(t, 99.99, requirePercent(t, s), 0, "rows_copied %d of 5000", copied)
 		assert.Nil(t, s.Detail.ETA, "rows_copied %d of 5000", copied)
 	}
 }
 
-// Rounding does not carry a nearly finished copy to 100 either: 99.97% of
+// Rounding does not carry a nearly finished copy to 100 either: 99.997% of
 // the estimate reads as the running ceiling.
 func TestCopyRoundingNeverReachesComplete(t *testing.T) {
-	s := pollStep(t, progress.OperationCopy, progress.Work{RowsCopied: 9997, RowsTotal: 10000}, time.Minute)
-	assert.InDelta(t, 99.9, requirePercent(t, s), 0)
+	s := pollStep(t, progress.OperationCopy, progress.Work{RowsCopied: 99997, RowsTotal: 100000}, time.Minute)
+	assert.InDelta(t, 99.99, requirePercent(t, s), 0)
+}
+
+// The percent keeps two decimal places, so a large step visibly moves
+// between polls long before its whole percent changes: 35,447 of 100,000
+// rows is 35.45%.
+func TestPercentKeepsTwoDecimalPlaces(t *testing.T) {
+	s := pollStep(t, progress.OperationCopy, progress.Work{RowsCopied: 35447, RowsTotal: 100000}, time.Minute)
+	assert.InDelta(t, 35.45, requirePercent(t, s), 0)
 }
 
 // The ETA waits for signal: a step that has run under five seconds, or

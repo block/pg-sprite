@@ -3,6 +3,7 @@ package replay_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -221,6 +222,48 @@ func TestReplayRefusesACorpusThatIsNotThePinnedOne(t *testing.T) {
 			assert.NotContains(t, out, "== per-statement results")
 		})
 	}
+}
+
+// A FILES list larger than a pipe buffer still verifies. The check that every
+// corpus file is in FILES must not stream FILES into a reader that exits at
+// its first match: under pipefail the writer then dies of SIGPIPE and the
+// check fails on a name that is in FILES.
+func TestVerifyCorpusPinAcceptsAFilesListLargerThanAPipeBuffer(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	project := filepath.Join(t.TempDir(), "big")
+	corpus := filepath.Join(project, "corpus")
+	require.NoError(t, os.MkdirAll(corpus, 0o755))
+
+	// 300 names of 240 bytes each come to about 72 KiB, past the 64 KiB
+	// Linux pipe buffer and the 16 KiB macOS one.
+	var files []string
+	var pin strings.Builder
+	pin.WriteString(fixtureCommit + "\n")
+	for i := range 300 {
+		name := fmt.Sprintf("%04d_%s.sql", i, strings.Repeat("x", 231))
+		files = append(files, name)
+		body := fmt.Sprintf("SELECT %d;\n", i)
+		require.NoError(t, os.WriteFile(filepath.Join(corpus, name), []byte(body), 0o644))
+		sum := sha256.Sum256([]byte(body))
+		pin.WriteString(hex.EncodeToString(sum[:]) + "  " + name + "\n")
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(corpus, ".pin"), []byte(pin.String()), 0o644))
+
+	script := `set -euo pipefail
+. "$1"
+PROJECT=big PROJECT_DIR="$2" COMMIT="$3"
+shift 3
+FILES=("$@")
+verify_corpus_pin
+echo verified`
+	common, err := filepath.Abs("common.sh")
+	require.NoError(t, err)
+	args := append([]string{"-c", script, "bash", common, project, fixtureCommit}, files...)
+	out, err := exec.CommandContext(t.Context(), "bash", args...).CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Equal(t, "verified\n", string(out))
 }
 
 // The manifest must claim every substantive line exactly once. A `/* */`

@@ -193,6 +193,7 @@ var noRewriteNotApplicable = map[string]string{
 	"extension-objects-named-unqualified-in-a-desired-file":                                                    "changes only where a desired file's names resolve; the statements it plans are proven by the rows for each statement kind",
 	"declarative-row-security-library":                                                                         "changes only policies and the table's row-security flags, through the row-security executor rather than a statement",
 	"declarative-unnamed-check-numbering":                                                                      "changes only which live check an unnamed desired check is paired with; the statements it plans are proven by the rows for each statement kind",
+	"partitioned-parents-in-the-declarative-model":                                                             "a partitioned parent has no heap of its own; the statements a desired file plans on it are proven by the rows for each statement kind",
 }
 
 // Every capability row whose imperative front door executes natively makes

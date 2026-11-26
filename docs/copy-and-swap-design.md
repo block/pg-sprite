@@ -353,11 +353,12 @@ to the record before, so on a busy source the slot keeps between one and two rel
 of writes with the stream caught up, and a ceiling below one release interval and a cycle of them
 stays crossed through every release. A slot sized that way peaks at about twice its ceiling just
 before a release, so the hard limit sits a ceiling above that. The reaper, `checkpoint.Store.ReapOrphanSlots`, drops orphan `pgsprite_*` slots
-that belong to the current database (`pg_replication_slots.database = current_database()`), are
-inactive (`active_pid IS NULL`), and whose checkpoint row is absent or terminal; slots of other
+that belong to the current database (`pg_replication_slots.database = current_database()`), decode
+with `pgoutput`, are inactive (`active_pid IS NULL`), and whose checkpoint row is absent or terminal; slots of other
 databases are never inspected, let alone dropped. Nothing runs it at startup in this build: an
 operator runs it with `pg-sprite reap` (`--dry-run` lists what a pass would drop and drops nothing,
-through the read-only `Store.PreviewOrphanSlots`, which sorts the slots with the same rule), or
+through the read-only `Store.PreviewOrphanSlots`, which sorts the slots with the same rule and
+reports its orphans in `WouldDrop`), or
 an orchestrator calls it as a library to reclaim orphans; failing that, PostgreSQL's own
 `SELECT pg_drop_replication_slot('<name>')` on the slot's database drops the slot (the
 publication of the same name is dropped separately with `DROP PUBLICATION`), after confirming
@@ -367,11 +368,11 @@ no checkpoint row in a non-terminal phase still names it. Slot inspection treats
 A host reaps with the connection config its runs use, on the database they run in. The pass is
 safe to run at any time, including while a schema change is in flight: it keeps every slot a
 live row names or a process holds, and waits on the slot's lock for a run that is claiming one.
-It stops at the first drop that fails and returns the slots sorted so far beside the error. The
-drop takes the slot before the publication of the same name, so a slot whose publication is then
-refused as not the route's, or fails to drop, is gone and in `Dropped`, and the error
-(`decode.ErrSlotDroppedPublicationLeft`, joined with the publication's own error) names the
-publication left for the operator.
+It stops at the first drop that fails and returns the slots sorted so far, and the one it stopped
+at in `Failed`, beside the error. The drop takes the slot before the publication of the same
+name, so a slot whose publication is then refused as not the route's, or fails to drop, is gone
+and in `Dropped` as well as `Failed`, and the error (`decode.ErrSlotDroppedPublicationLeft`,
+joined with the publication's own error) names the publication left for the operator.
 
 ```go
 // reapOrphans drops the engine's orphan slots in the database cfg names.

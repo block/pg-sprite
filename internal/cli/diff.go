@@ -198,9 +198,9 @@ func writeAdvisoryText(out io.Writer, advisories []schemadiff.Advisory) error {
 }
 
 // writeChangeText emits one annotated statement of the text plan. A
-// refused statement is emitted as an SQL comment: the script is
-// copy-pasteable, and it must never carry a statement the engine refuses
-// where a reader could run it by accident.
+// refused statement, and one only the engine can run, is emitted as an SQL
+// comment: the script is copy-pasteable, and it must never carry a statement
+// a reader could run by accident with an effect the plan does not describe.
 func writeChangeText(out io.Writer, ps plan.Statement) error {
 	if _, err := fmt.Fprintln(out, sqlDiagnosticComment(annotate(ps))); err != nil {
 		return fmt.Errorf("write plan: %w", err)
@@ -210,6 +210,20 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 			if _, err := fmt.Fprintln(out, sqlDiagnosticComment("the create path refuses this statement: "+ps.Cause.Description())); err != nil {
 				return fmt.Errorf("write plan: %w", err)
 			}
+		}
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
+			return fmt.Errorf("write plan: %w", err)
+		}
+		return nil
+	}
+	if ps.Execution == planner.ExecutionPartitionedIndexBuild {
+		// The build lists the partitions when it runs and builds and attaches
+		// each one's index in turn, which no script does. Run as written, the
+		// statement leaves the partitions unindexed and the parent's index
+		// invalid, or fails on the name of a build it would resume, so it is
+		// commented out like a refusal.
+		if _, err := fmt.Fprintln(out, "-- only the engine runs this build, one partition at a time: use pg-sprite migrate --desired or pg-sprite migrate --alter"); err != nil {
+			return fmt.Errorf("write plan: %w", err)
 		}
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
 			return fmt.Errorf("write plan: %w", err)

@@ -4,6 +4,18 @@
 
 die() { echo "$*" >&2; exit 1; }
 
+# in_files reports whether $1 is one of the project's FILES. It is a loop
+# rather than `printf | grep -q`: under pipefail, grep -q exits at its first
+# match, printf can then die of SIGPIPE, and the pipeline fails even though
+# the name matched.
+in_files() {
+    local want="$1" f
+    for f in "${FILES[@]}"; do
+        [ "$f" = "$want" ] && return 0
+    done
+    return 1
+}
+
 # sha256 of a file, portable across sha256sum (Linux) and shasum (macOS).
 # Fails (non-zero, no output) when the file is missing.
 file_sha256() {
@@ -41,7 +53,7 @@ verify_corpus_pin() {
     # a migration prefix and make replay.sh pick the wrong one.
     for f in "${PROJECT_DIR}/corpus/"*.sql; do
         [ -e "$f" ] || continue
-        printf '%s\n' "${FILES[@]}" | grep -qxF "$(basename "$f")" \
+        in_files "$(basename "$f")" \
             || die "corpus/$(basename "$f") is not in project.conf FILES — delete it or run ./fetch.sh ${PROJECT} after a pin move"
     done
 }

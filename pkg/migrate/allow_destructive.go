@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -27,11 +28,45 @@ var (
 	// tables.
 	ErrAllowDestructiveMismatch = errors.New("the destructive acknowledgement must name the resolved target table")
 	// ErrAllowDestructiveNotSupported is returned by [RunDesired] when
-	// Options.AllowDestructive is set: desired-state execution refuses a
-	// destructive plan whole and has no acknowledgement for it.
+	// Options.AllowDestructive is set: that acknowledgement accepts the
+	// loss of a statement the operator wrote, and desired-state execution
+	// runs statements its plan derived. A destructive plan runs only through
+	// [DesiredRequest.AllowDestructive], bound to a pinned fingerprint.
 	ErrAllowDestructiveNotSupported = errors.New(
-		"the destructive acknowledgement applies to the imperative front door only; desired-state execution refuses a destructive plan whole")
+		"the destructive acknowledgement in the options applies to the imperative front door only; a destructive desired-state " +
+			"plan runs only when the request's own acknowledgement names its table and the request pins the reviewed plan's fingerprint")
+	// ErrAllowDestructiveNeedsFingerprint is returned by [RunDesired] and
+	// [RunDesiredWithRowSecurity] when the request names a table in its
+	// destructive acknowledgement without pinning a plan fingerprint:
+	// without one nothing says which plan the reviewer read. No database was
+	// used and nothing has executed.
+	ErrAllowDestructiveNeedsFingerprint = errors.New(
+		"the destructive acknowledgement on a desired-state run is valid only with the fingerprint of the plan that was reviewed; nothing was executed")
 )
+
+// checkDesiredAllowDestructive is the usage check a desired-state request's
+// destructive acknowledgement passes before any database work: it must come
+// with the fingerprint of the plan whose drops it acknowledges.
+func checkDesiredAllowDestructive(allow, fingerprint string) error {
+	if allow != "" && fingerprint == "" {
+		return fmt.Errorf("%w: it names %q", ErrAllowDestructiveNeedsFingerprint, allow)
+	}
+	return nil
+}
+
+// CheckDesiredAllowDestructiveTable is the check a desired-state run makes
+// on its destructive acknowledgement once the plan is derived and before
+// anything runs: it must name the table report converges, whether or not
+// the plan drops anything, so an acknowledgement left on a script cannot
+// reach another table. A caller that previews a run calls it first so the
+// preview fails the way the run would. The error is an
+// [AcknowledgementMismatchError] matching [ErrAllowDestructiveMismatch].
+func CheckDesiredAllowDestructiveTable(allow string, report plan.Report) error {
+	if allow == "" {
+		return nil
+	}
+	return checkAllowDestructiveAck(desiredTable(report), allow)
+}
 
 // checkAllowDestructiveAck validates the destructive acknowledgement
 // against the resolved schema-qualified target table, the same typed
