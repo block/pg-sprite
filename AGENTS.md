@@ -188,7 +188,9 @@ is a smoke tour of the built binary, not a second test suite.
 [docs/capabilities.md](docs/capabilities.md) is the canonical support matrix (every
 operation and object type, tiered supported / planned / out of scope, with reasons);
 [docs/limitations.md](docs/limitations.md) explains current refusal mechanics, and the
-README's "What pg-sprite does not do yet" section is the short-form pointer. Any PR that
+README's "What pg-sprite does not do yet" section is the short-form pointer: each of its
+bullets summarizes an entry in limitations.md's "Boundaries at a glance", so a change to that
+entry rewrites its README bullet in the same PR. Any PR that
 adds, removes, or re-scopes a capability — a planner route, a refusal, a verdict outcome,
 a declarative-model boundary — updates all three in the same PR, and every release sweeps
 them against the shipped behavior before tagging. A supported row's `maturity` (`ga` or

@@ -35,6 +35,183 @@ not escape hatches:
 | A copy-and-swap statement that adds a column the copy cannot fill, or leaves the table without its key | The copy list names only the source columns the shadow kept as the same column ([ST-11](invariants.md#st-11--the-shadow-takes-a-columns-values-only-from-the-same-source-column)); every other shadow column is a new column that takes its own default (or NULL) on every copied row, as under a direct `ALTER TABLE`. Two shapes have nothing to take, and the shadow build refuses them with `shadow-statement-new-column` inside its own transaction, after the statement has run on the empty shadow and both relations' column positions have been read, so no shadow, fence, or checkpoint row exists: a new column that refuses NULL (by its own `NOT NULL` or its domain's, including a domain its type is built on) with no default of its own or on its type, no generation expression, and no identity — `ALTER COLUMN qty TYPE bigint, ADD COLUMN region text NOT NULL` — and the source's primary key missing from the shadow's kept columns, dropped outright or replaced by a key under a new name — `DROP COLUMN id, ADD COLUMN new_id bigint PRIMARY KEY, ALTER COLUMN qty TYPE bigint`. Without the refusal both would build and commit a shadow: the first then stops at the first chunk with the server's `not_null_violation`, a data fault that abandons the run and reports `code: data-fault` for a statement no data could have satisfied; the second stops at the applier's own check that the copy list names the primary key, as an `invariant-violation` failure that leaves the shadow, the checkpoint row, and the replication slot behind, pinning WAL until the run is restarted. From the CLI these shapes reach the build only beside an operation that routes to copy-and-swap, such as the retype above: on its own, `ADD COLUMN … NOT NULL` without a default is routed native and the server rejects it on a non-empty table, `ADD COLUMN` of a `NOT NULL` domain is `backend-unavailable`, and a dropped key is native. Beside a retype, every natively-routed operation rides along into the gated statement, so the build-time refusal is what stands between the operator and the first-chunk fault; it is also the library path's guard (`schemachange.Runner`, `BuildShadow`). A missing key is refused whatever the new key declares, because the key column must stay for the copy: to retype the key, change it in place with `ALTER COLUMN TYPE`; to drop it, run the drop as its own schema change (a drop alone is routed native). For a new column, give it a default (its own, or its domain's), or add it nullable or with a default in its own schema change, fill it, then `SET NOT NULL`; a nullable, defaulted, or generated new column builds and runs. A new column declared as an identity or `serial` is fillable and is refused by the next check, `shadow-statement-new-sequence` (next row). |
 | A copy-and-swap statement that gives the table a new identity or `serial` column | The swap carries only the source's sequences to the live table — each re-owned by the shadow column that kept its source column's name — so a sequence the gated statement mints on the shadow (`ADD COLUMN … GENERATED … AS IDENTITY`, `ADD COLUMN … serial`, `ALTER COLUMN … ADD GENERATED … AS IDENTITY` on a kept column, or a dropped column re-added as one) has no source counterpart to carry. The shadow build refuses such a statement with `shadow-statement-new-sequence` inside its own transaction, after the statement has run on the empty shadow and the shadow's columns and sequence-ownership edges have been read, so no shadow, fence, or checkpoint row exists; the source's own serial and identity columns are not new sequences and pass. From the CLI these statements are routed before the build reaches them — a new identity or `serial` column is a volatile-default `ADD COLUMN`, which the copy-and-swap backend does not carry yet (`backend-unavailable`), and `ADD GENERATED` on an existing column is `unsupported-operation` — so the build-time refusal is the library path's guard (`schemachange.Runner`, `BuildShadow`) and the engine's own defence should a route later admit them. Declare the column plain in this schema change. pg-sprite does not run the follow-up: add the identity (after filling the column and setting it `NOT NULL`) with a direct `ALTER COLUMN … ADD GENERATED … AS IDENTITY`, or attach a sequence with a direct `CREATE SEQUENCE … OWNED BY` and `SET DEFAULT nextval(…)`. |
 
+## Boundaries at a glance
+
+The README's short list points here. Each entry is a boundary where an operation
+fails closed with a typed refusal, never a silently wrong or incomplete result;
+the table above and [capabilities.md](capabilities.md) give the mechanics and the
+per-operation status.
+
+- **Copy-and-swap** (genuine table rewrites) is in preview: it has not yet
+  been exercised under production-like load, so the route stays closed until
+  a run opens it with `--copy-and-swap` (`CopySwapOptions.Enabled` as a
+  library caller); without it a statement routed there is refused before
+  anything runs, and every native change is unaffected
+  ([running a copy-and-swap](copy-and-swap.md#preview-the-route-is-closed-until-you-open-it)).
+  Open, it carries a general
+  `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
+  `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE` of a table with storage) refuse rather than fall
+  through to a blocking rewrite, and the route's preflight refuses table shapes
+  and environments it cannot run against. The shadow build also refuses a
+  statement the copy cannot carry: a `USING` expression it cannot reproduce,
+  a dropped-and-re-added or new column it cannot fill, a key it would not
+  keep, or a new identity or `serial` column whose sequence the swap cannot
+  carry. A run on a pool smaller than its copy workers plus two is refused
+  before it creates anything, from every entry point
+  ([the pool floor](#the-copy-and-swap-pool-floor)).
+- **Connection poolers**: point pg-sprite directly at the primary; the
+  application keeps whatever pooling it uses. pg-sprite's own connection
+  through a pooler is unsupported, except Supabase's Supavisor session
+  endpoint for native schema changes. Startup checks usually refuse a
+  transaction-mode pooler, but passing them does not make it supported
+  ([connections and poolers](#connections-and-poolers)).
+- **Row security** is included in exports when present, with reviewable before/after differences. The
+  [atomic executor](atomic-row-security.md) applies RLS-only changes to existing tables,
+  and creates a missing table together with its row security in one transaction, through
+  `migrate --desired` or the Go API. Only the Go API supports binding execution to an ordered
+  SQL review, and only for an existing table. A table change in a file whose row security already
+  matches runs as an ordinary desired run; a change to both remains unsupported. See the workflow and roadmap in
+  [declarative-row-security.md](declarative-row-security.md).
+- **Foreign keys** are planned but not executed declaratively: a desired
+  file may declare them, `diff` shows an added or dropped foreign key with
+  the `declarative-foreign-key` refusal, and `migrate --desired` refuses
+  the plan. Export refuses both a table that carries foreign keys and a
+  table that other tables reference. FK DDL still works through
+  `migrate --alter` (`NOT VALID` + `VALIDATE`).
+- **Changed stored generated expressions** are planned but not executed:
+  `diff` shows one `SET EXPRESSION` statement (PostgreSQL 17+) refused with
+  `unsupported-statement`, since it recomputes every row under an exclusive
+  lock. Virtual generated columns (PostgreSQL 18+) are not modeled: export
+  refuses them and a desired file that redeclares one fails the diff.
+- **Identity and serial sequence declarations** are modeled but not
+  converged: an identity's declared options export and compare, and a
+  difference is a typed `diff` refusal; change the declaration with owner
+  tooling, then state it in the file. A serial cannot state one, so export
+  refuses a serial whose sequence was declared otherwise.
+- **Partitioned tables** support in-place statement changes, and a `CREATE INDEX`
+  on a partitioned table runs partition by partition, resuming when the same
+  statement is run again; a unique one that lacks a partition key column is
+  refused, as PostgreSQL rejects it. Only a partitioned parent can be expressed in or
+  exported to a desired file — partitions and their bounds stay owned outside
+  it — and `migrate` refuses `ATTACH PARTITION` and `DETACH PARTITION` unless
+  `--force` names the table (see the table above). A reviewed
+  `migrate --desired` column or constraint drop on a partitioned parent removes it
+  from every partition; the column drop is refused, dropping nothing, when the column
+  is in a partition key at any level or a partition carries an index, constraint, or
+  statistics object of its own on it. A reviewed `NOT NULL` drop on a partitioned
+  parent is refused, and so is a reviewed column, constraint, or `NOT NULL` drop on
+  a table with inheritance children.
+- **Index maintenance** is not driven by `migrate --alter`: it refuses `DROP INDEX`
+  and `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` entry below.
+  `migrate --desired` does run a planned index drop, as `DROP INDEX CONCURRENTLY`
+  under `--expect-fingerprint` and `--allow-destructive`.
+  An index of a partitioned table has no concurrent drop at all: drop it with
+  the plain `DROP INDEX` under `--accept-blocking SCHEMA.TABLE` and
+  `--allow-destructive SCHEMA.TABLE`, naming the parent, which locks the parent and
+  every partition while it runs
+  ([example](lock-budgeted-passthrough.md#dropping-an-index-of-a-partitioned-table)).
+  A partition's index attached under the parent's is refused in either form; drop
+  the parent's index instead.
+- **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
+  instant in the catalog but break every running application instance that
+  still uses the old name, and no safer sequence can be built from the
+  statement alone, so `migrate` refuses them as `rewrite-required` with the
+  expand-and-contract (column) or coordinated-deploy (table) path as typed
+  guidance; `--force SCHEMA.TABLE` runs the submitted rename for the operator
+  who has coordinated the deploy. `ALTER INDEX ... RENAME TO` runs for a plain
+  index, but is refused, with no `--force` override, for an index that backs a
+  primary-key, unique, or exclusion constraint, since it renames the constraint.
+- **Unlogged tables and explicit column collations** are outside the
+  declarative model: converging either is a table (or column) rewrite, so
+  export and diff refuse rather than plan one.
+- **Two key constraints declared the same way** (`PRIMARY KEY`, `UNIQUE`,
+  or `EXCLUDE` on the same columns) cannot be declared in a desired file,
+  because one `CREATE TABLE` keeps only one of them. Export refuses such a
+  table, and a desired file that declares both fails its build instead of
+  planning the second one's live copy away.
+- **A key whose storage parameter cannot be rendered is refused** —
+  `ADD PRIMARY KEY` / `ADD UNIQUE` runs as a concurrent index build plus
+  `USING INDEX`, carrying the key's `WITH (...)` parameters; a value that
+  is not a plain word, number, or string, contains a backslash, or a
+  namespaced parameter name refuses with `rewrite-required` and the steps
+  to build the index by hand, then attach it.
+- **Dropping what a replica identity index is built on is refused** — the
+  index, the constraint that owns it, or a column it covers; move
+  `REPLICA IDENTITY` first, then re-plan.
+- **Retyping or dropping a column a view reads is refused** — PostgreSQL would
+  refuse it anyway; the plan names the views to drop or redefine first.
+- **Retyping or dropping a column a row-level security policy reads is refused**
+  — PostgreSQL would refuse it anyway; the plan names the policies to drop and
+  recreate around the change.
+- **Retyping or dropping a column a trigger, a generated column, or a partition
+  key depends on is refused** — PostgreSQL would refuse it anyway; the plan names
+  the triggers, generated columns, or partitioned tables in the way.
+- **Adding a `NOT NULL` column with no default to a table with rows is refused**
+  — PostgreSQL would refuse it anyway, after taking the table's exclusive lock;
+  the plan suggests a constant default or a backfill first.
+- **Destructive statements need a typed acknowledgement** — `migrate --alter`
+  refuses a statement that drops a column, a constraint, or a `NOT NULL` with
+  `destructive-change` (exit 2) on every route and in `--dry-run`, unless
+  `--allow-destructive SCHEMA.TABLE` names the table; the acknowledged run is
+  audited and its verdict carries `allowed_destructive: true`. A drop that
+  adds the same column back gets the guidance to change its type in place,
+  which keeps its values. A `DROP INDEX` run under `--accept-blocking` needs
+  `--allow-destructive` too: accepting the lock is not accepting the loss,
+  and the refusal lists the checks (`idx_scan` on every replica, foreign
+  keys, uniqueness) that catch an index the application still uses, with
+  the connected server's own scan count for the index in `index_usage`.
+- **Destructive desired-state plans are refused as a whole unless you pin them** —
+  `migrate --desired` creates missing tables and converges supported changes, but never
+  infers permission to discard live structure. Review the plan with `diff --desired`,
+  then run it with `--expect-fingerprint` (the `sha256:...` value `diff` prints) and
+  `--allow-destructive SCHEMA.TABLE`: the run executes only that plan, and each
+  destructive statement is audited and marked `allowed_destructive: true`. A dropped
+  index runs as `DROP INDEX CONCURRENTLY`. Row security policies are separate: a
+  policy drop in a desired file is already atomic and needs no acknowledgement. A new primary key or unique constraint over a live
+  unique index of its name is not destructive: it takes the index over with
+  `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
+  index changed after planning. Nor is a live check constraint left `NOT VALID`
+  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
+  refuses with `validated-constraint-drift` if the constraint changed after planning.
+- **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
+  build's leftover is reported with a typed state (and named by `diff` as a
+  typed plan advisory), and the proven removal
+  (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
+  the caller must not rebuild) is library-only; from the CLI the
+  [runbook](invalid-index-recovery.md) applies.
+- **The accepted-blocking passthrough covers index maintenance only** —
+  `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
+  `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`
+  deliberately under the engine's bounded lock and statement budgets, with
+  the verdict marked `executed-without-online-safety` (exit 3). A `DROP INDEX`
+  also needs `--allow-destructive` naming the same table. Every other
+  refusal — including a forced blocking index build on a partitioned parent —
+  still exits 2. Design:
+  [docs/lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
+- **Non-table objects** — views, standalone sequences, enums, domains,
+  extensions, functions, triggers — are outside the declarative model,
+  which covers one ordinary table (or one partitioned parent) plus its
+  indexes per file. A table may
+  use them: the file names an object outside the table's schema and
+  `public` qualified, or names it bare when `--extension-schema` lists
+  the schema it lives in. The object's own definition is never managed,
+  with one exception: a desired file can hold one `CREATE TYPE ... AS ENUM`
+  instead of a table, and `diff` and `migrate --desired` add the labels the
+  live type lacks with `ALTER TYPE ... ADD VALUE`, which locks only the
+  type. The type must already exist, and a label is never removed, renamed,
+  or moved; `migrate` also adds a value imperatively.
+- **Dropping a table** is never planned or executed. pg-sprite converges
+  one declared table at a time, so a live table with no desired file is
+  the whole-schema owner's to enumerate and resolve — see
+  [Deliberately operator-owned](capabilities.md#deliberately-operator-owned).
+- **Greenfield create shapes** the create path cannot run — `PARTITION OF`,
+  `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired
+  set claims twice — refuse at plan time, and the same rules re-check at
+  apply.
+- **A desired file that names a live parent** with `PARTITION OF` or
+  `INHERITS` refuses before planning builds anything, since the scratch
+  build would lock that parent.
+
 ## `USING` expressions the copy reproduces
 
 The bar is the server's own classification, read by trying the expression as a stored

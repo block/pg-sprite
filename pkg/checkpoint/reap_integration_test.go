@@ -165,6 +165,30 @@ func TestReapOrphanSlotsKeepsASlotARowInAnUnknownPhaseNames(t *testing.T) {
 	assert.True(t, slotExists(t, d.pool, live.Name()))
 }
 
+// LiveRowNamesSlot reads every table's rows by slot name, the read the
+// reaper decides ownership by: a slot a copying row of orders names is
+// live whichever table asks, a name no row names is not, and once the row
+// turns done the slot is no longer a live row's (ST-3).
+func TestLiveRowNamesSlotReadsEveryTablesRows(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	_, slot := d.slotFor(t, "orders")
+	_, unnamed := d.slotFor(t, "ledger")
+	d.claim(t, "orders", slot.Name(), checkpoint.PhaseCopying)
+
+	live, err := d.store.LiveRowNamesSlot(t.Context(), slot.Name())
+	require.NoError(t, err)
+	assert.True(t, live, "a copying row names the slot")
+	live, err = d.store.LiveRowNamesSlot(t.Context(), unnamed.Name())
+	require.NoError(t, err)
+	assert.False(t, live, "no row names the ledger's slot")
+
+	d.claim(t, "orders", slot.Name(), checkpoint.PhaseDone)
+	live, err = d.store.LiveRowNamesSlot(t.Context(), slot.Name())
+	require.NoError(t, err)
+	assert.False(t, live, "a done row does not keep its slot")
+}
+
 // A slot a stream holds is somebody's right now, row or no row: the reaper
 // reports it as active and leaves it, rather than wait out the holder and
 // drop a slot it may be about to claim. A slot of another database on the
