@@ -561,8 +561,22 @@ refused (plan-fingerprint-mismatch)
 
 ## Follow a running change
 
-`migrate` prints its verdict when the change finishes, and nothing before. To
-watch a long change, open a second terminal against the same database.
+`migrate` prints its verdict on stdout when the change finishes. While it runs,
+`--progress` controls a progress line on stderr showing the step, operation,
+percent, and ETA:
+
+| `--progress` | What stderr shows |
+|---|---|
+| `auto` (default) | The line, redrawn in place, only when stderr is a terminal (`TERM=dumb` turns it off) |
+| `always` | The line on any stderr; when stderr is not a terminal, such as a log file, a plain line per change of step, operation, or ten-percent mark |
+| `never` | No progress line |
+
+`--progress=always` cannot be combined with `--json` or `--dry-run`: the
+machine-readable run shows no progress line, and a dry run executes nothing.
+stdout carries only the verdict in every mode.
+
+To see what the sessions themselves are doing, open a second terminal against
+the same database.
 
 ### See which sessions are working
 

@@ -89,14 +89,14 @@ go install github.com/block/pg-sprite/cmd/pg-sprite@latest
 ## Quick start
 
 ```sh
-pg-sprite lint changes.sql                  # offline: flag blocking idioms
+pg-sprite lint changes.sql                              # offline: flag blocking idioms
 
 export PGSPRITE_URL='postgres://user:pass@primary:5432/app'
 pg-sprite migrate --dry-run --alter 'ALTER TABLE app.orders ADD CONSTRAINT qty_positive CHECK (qty > 0)'
 pg-sprite migrate --alter 'ALTER TABLE app.orders ADD CONSTRAINT qty_positive CHECK (qty > 0)'
 
-pg-sprite pull --schema app --out schema    # one desired file per table
-pg-sprite diff --desired schema/orders.sql  # what would converge the live table
+pg-sprite pull --schema app --out schema                # one desired file per table
+pg-sprite diff --schema app --desired schema/orders.sql # what would converge app.orders
 ```
 
 Connect directly to the primary, not through a pooler
@@ -133,7 +133,7 @@ matrix is [capabilities.md](docs/capabilities.md).
 - **Foreign keys** run through `migrate --alter`, not from desired files.
 - **Renames are refused** unless `--force` names the table, since they break running application instances.
 - **Destructive changes** need `--allow-destructive SCHEMA.TABLE`, and desired plans also need `--expect-fingerprint`.
-- **Index maintenance** (`DROP INDEX`, `REINDEX`) runs only as an accepted blocking change ([passthrough](docs/lock-budgeted-passthrough.md)).
+- **Index maintenance** (`DROP INDEX`, `REINDEX`) runs from `migrate --alter` only as an accepted blocking change ([passthrough](docs/lock-budgeted-passthrough.md)); a desired file drops an index concurrently under `--allow-destructive` and `--expect-fingerprint`.
 - **Non-table objects** such as views, functions, and triggers are outside the declarative model, apart from adding enum labels.
 - **Tables are never dropped**; that stays with the owner of the whole schema.
 
@@ -143,7 +143,7 @@ matrix is [capabilities.md](docs/capabilities.md).
 |---|---|
 | 0 | Executed through an online-safe path, or a dry run, `diff`, or `pull` found nothing to refuse |
 | 1 | Failed: a PostgreSQL, operational, or usage error. A safer sequence that stopped partway keeps its committed steps, named in `executed_sql` |
-| 2 | Refused: no online-safe path. The verdict names the typed `reason` and `class` |
+| 2 | Refused: no online-safe path. The verdict names the typed `reason` and `class`. A `migrate --desired` plan refused partway keeps the statements before it |
 | 3 | Committed through the accepted-blocking passthrough, without an online-safety guarantee |
 
 Gate on non-zero. The full rules, including a lost `COMMIT` and library
@@ -156,7 +156,7 @@ callers, are in [cli-output-examples.md](docs/cli-output-examples.md#exit-codes)
 - [CLI guide](docs/cli.md) and [output examples](docs/cli-output-examples.md)
 - [Copy-and-swap](docs/copy-and-swap.md): running a table rewrite
 - [Execution model](docs/execution-model.md): partial states and how failures are reported
-- [SchemaBot integration](docs/schemabot-integration.md): using pg-sprite as a library engine
+- [Go library](docs/schemabot-integration.md): embedding pg-sprite in an orchestrator through `pkg/migrate` (`Run`, `RunDesired`); SchemaBot is the worked example
 - [Safety](SAFETY.md) and [invariants](docs/invariants.md): the safety-critical core and its rules
 - [Design docs](docs/README.md): everything else
 
