@@ -186,6 +186,100 @@ func TestAddPartitionedKeyParentStepJudgesEveryLeaf(t *testing.T) {
 	})
 }
 
+// A partition carries the key's index and an index attached to another
+// partitioned index of the parent; the read-back reads only the index
+// attached to the key's, so the step adopts the key.
+func TestAddPartitionedKeyParentStepWithAnotherPartitionedIndex(t *testing.T) {
+	withPartitionedKeyServer(t, func(t *testing.T, newFixture func(t *testing.T) keyFixture) {
+		f := newFixture(t)
+		f.events(t)
+		f.exec(t, `CREATE INDEX events_payload_idx ON %[1]s.events (payload)`)
+		target, leaves := f.recordLeafKeys(t, eventsPrimaryKey)
+
+		out, err := adoptLeafKeys(t.Context(), f.begin(t), target, eventsPrimaryKey, leaves)
+
+		require.NoError(t, err)
+		assert.True(t, out.added)
+		assert.Equal(t, 2, out.partitions)
+	})
+}
+
+// The parent's step proves again, under the tree's lock, what the leaf steps
+// and the build's first read proved, so a change made in between is refused
+// with the same typed cause.
+func TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps(t *testing.T) {
+	withPartitionedKeyServer(t, func(t *testing.T, newFixture func(t *testing.T) keyFixture) {
+		// February's key is replaced by a DEFERRABLE constraint on the same
+		// columns. It has the key's index definition and the parent's
+		// immediate constraint would adopt it, leaving February checked only
+		// at commit, so the proof refuses it as the leaf step does.
+		t.Run("a deferrable constraint in place of a leaf's key", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			target, leaves := f.recordLeafKeys(t, eventsUniqueKey)
+			feb := f.leaf(t, "events", "events_2026_02")
+			f.exec(t, `ALTER TABLE %[1]s.events_2026_02 DROP CONSTRAINT `+pgx.Identifier{leaves[feb.oid].constraint}.Sanitize())
+			f.exec(t, `
+				ALTER TABLE %[1]s.events_2026_02
+				    ADD CONSTRAINT events_feb_deferrable UNIQUE (id, created_at)
+				    DEFERRABLE INITIALLY DEFERRED`)
+
+			_, err := adoptLeafKeys(t.Context(), f.begin(t), target, eventsUniqueKey, leaves)
+
+			require.ErrorIs(t, err, ErrPartitionedKeyConflict)
+			assert.Equal(t, CodePartitionedKeyConflict, OutcomeCode(err))
+		})
+
+		// A cancelled DETACH PARTITION ... CONCURRENTLY after February's leaf
+		// step leaves it detach-pending: it is leaving the tree, so the key
+		// the parent would adopt there would not stay the parent's.
+		t.Run("a partition left detach-pending after its leaf step", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			target, leaves := f.recordLeafKeys(t, eventsPrimaryKey)
+			f.cancelDetach(t, "events", "events_2026_02")
+
+			_, err := adoptLeafKeys(t.Context(), f.begin(t), target, eventsPrimaryKey, leaves)
+
+			require.ErrorIs(t, err, ErrPartitionDetachPending)
+			assert.Equal(t, CodePartitionDetachPending, OutcomeCode(err))
+		})
+
+		// From PostgreSQL 18 a NOT NULL can be added NOT VALID: the parent's
+		// id is then marked attnotnull though the constraint was never
+		// checked, and the parent's ADD CONSTRAINT ... PRIMARY KEY fails on
+		// it under the tree's lock. The step counts the column as nullable
+		// and refuses before the statement, as the build's first read does.
+		t.Run("a NOT VALID not-null constraint on the parent's key column", func(t *testing.T) {
+			f := newFixture(t)
+			if f.serverMajor(t) < 18 {
+				t.Skip("NOT VALID not-null constraints exist from PostgreSQL 18")
+			}
+			f.exec(t, `
+				CREATE TABLE %[1]s.visits (
+				    id         bigint,
+				    created_at timestamptz NOT NULL
+				) PARTITION BY RANGE (created_at)`)
+			f.exec(t, `
+				CREATE TABLE %[1]s.visits_2026_01 PARTITION OF %[1]s.visits (
+				    id NOT NULL
+				) FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')`)
+			f.exec(t, `INSERT INTO %[1]s.visits VALUES (1, '2026-01-02'), (2, '2026-01-03')`)
+			spec := partitionedKeySpec{kind: partitionedPrimaryKey, name: "visits_pkey", columns: []string{"id", "created_at"}}
+			jan := f.leaf(t, "visits", "visits_2026_01")
+			res, err := ensureLeafKey(t.Context(), f.pool, spec, jan, leafKeyBudget)
+			require.NoError(t, err)
+			f.exec(t, `ALTER TABLE %[1]s.visits ADD CONSTRAINT visits_id_nn NOT NULL id NOT VALID`)
+			target := indexTarget{tableOID: f.oid(t, "visits"), schema: f.schema, table: "visits"}
+
+			_, err = adoptLeafKeys(t.Context(), f.begin(t), target, spec, map[uint32]leafKeyResult{jan.oid: res})
+
+			require.ErrorIs(t, err, ErrPartitionedKeyNullableColumn)
+			assert.Equal(t, CodePartitionedKeyNullableColumn, OutcomeCode(err))
+		})
+	})
+}
+
 // The parent's step holds ACCESS EXCLUSIVE on the whole tree while it proves
 // and reads back every partition, so the statements it sends under that lock
 // do not grow with the number of partitions: the proof and the read-back

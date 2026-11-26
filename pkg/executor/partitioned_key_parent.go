@@ -107,8 +107,9 @@ func adoptLeafKeys(ctx context.Context, tx pgx.Tx, target indexTarget, spec part
 			return parentKeyOutcome{}, nil
 		}
 	}
-	// The proof reads every partition and the parent at once, so the time the
-	// tree's lock is held does not grow with the number of partitions.
+	// The proof reads every partition and the parent at once, so the number
+	// of statements, and of round trips, under the tree's lock does not grow
+	// with the number of partitions.
 	parentNode := parentNodeOf(target)
 	keyColumns, err := readKeyColumnsOf(ctx, tx, append([]partitionNode{parentNode}, tree...), spec.columns)
 	if err != nil {

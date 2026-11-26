@@ -884,9 +884,12 @@ transaction: the step's own `LOCK TABLE` on the tree takes those locks first und
 build its index under the lock), and after the statement it reads back that every leaf's adopted
 constraint is the one its leaf step recorded on the same index OID, rolling back with an invariant
 violation otherwise, so the window only changes the catalog, and the proof and the read-back read
-every leaf in a fixed number of statements, so the window does not grow with the number of
-partitions; a primary key over a column the parent allows to be NULL is refused before any leaf is
-touched (`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitionedKeyParentStepJudgesEveryLeaf`,
+every leaf in a fixed number of statements, so the number of statements, and of round trips,
+under the lock does not grow with the number of partitions (the lock itself and each read still
+cover every partition); a primary key over a column the parent allows to be NULL is refused before any leaf is
+touched and again under the tree's lock, a NOT VALID not-null constraint (PostgreSQL 18) counting
+as allowing NULL (`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitionedKeyParentStepJudgesEveryLeaf`,
+`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`,
 `TestAddPartitionedKeyParentStepRoundTrips`, `TestAddPartitionedKeyParentStepLocks`,
 `TestAddPartitionedKeyPrimaryKeyOnline`,
 `TestAddPartitionedKeyRefusals/a_primary_key_over_a_column_the_parent_allows_to_be_NULL`).
@@ -1566,11 +1569,13 @@ identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-
 `ADD PRIMARY KEY` or `ADD UNIQUE` on the preflighted partitioned table and renders the parent's
 statement from the admitted kind, name, and columns alone; it refuses a tree holding a partition
 with its detach pending before any leaf step, since a key given to a partition leaving the tree
-would not stay the parent's (`TestAddPartitionedKeyRefusals/a_partition_with_its_detach_pending`);
+would not stay the parent's (`TestAddPartitionedKeyRefusals/a_partition_with_its_detach_pending`),
+and refuses one again under the tree's lock;
 under the tree's lock, before that statement, it proves the parent's name still resolves to the
-table it resolved and that every leaf has exactly one constraint of the requested key, attached
-to nothing, which is the constraint and index its leaf step recorded
-(`TestAddPartitionedKeyParentStepFailsClosed`).
+table it resolved and that every leaf has exactly one constraint of the requested key, not
+deferrable and attached to nothing, which is the constraint and index its leaf step recorded
+(`TestAddPartitionedKeyParentStepFailsClosed`,
+`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof

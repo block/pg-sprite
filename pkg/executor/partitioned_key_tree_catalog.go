@@ -8,23 +8,27 @@ import (
 // The catalog reads the parent's step makes of every partition at once, under
 // the tree's ACCESS EXCLUSIVE lock: the same facts readLeafKeyColumns and
 // readLeafConstraints read of one leaf, in a fixed number of statements
-// whatever the number of partitions, so the time the lock is held does not
-// grow with the tree. Every read runs under catalogReadPath, and every
-// relation, function, operator, and cast is pg_catalog-qualified (CO-9).
+// whatever the number of partitions, so the number of statements, and of
+// round trips, under the lock does not grow with the tree. Every read runs
+// under catalogReadPath, and every relation, function, operator, and cast is
+// pg_catalog-qualified (CO-9).
 
 // keyColumnsRead is one relation's key columns as one read found them: every
 // key column in key order, or the first key column, in key order, the
 // relation does not have.
 type keyColumnsRead struct {
 	columns []leafKeyColumn
-	missing string
+	// lacksColumn is whether the relation does not have the key column
+	// missing names; any name, the empty one included, can be missing.
+	lacksColumn bool
+	missing     string
 }
 
 // of returns the key columns, or the error readLeafKeyColumns returns for a
 // relation without one of them. A relation the read did not cover has
 // neither, and fails closed.
 func (r keyColumnsRead) of(node partitionNode) ([]leafKeyColumn, error) {
-	if r.missing != "" {
+	if r.lacksColumn {
 		return nil, fmt.Errorf("table %s has no column %q for the key", node.qualified(), r.missing)
 	}
 	if len(r.columns) == 0 {
@@ -36,7 +40,14 @@ func (r keyColumnsRead) of(node partitionNode) ([]leafKeyColumn, error) {
 // keyColumnsOfSQL is leafKeyColumnSQL for every relation in $1 and every key
 // column in $2: one row per relation and key column, in key order, with
 // NULL column facts when the relation has no live column of that name.
-const keyColumnsOfSQL = `SELECT r.relid, w.name, a.attnum, a.attnotnull, pg_catalog.quote_ident(a.attname)
+const keyColumnsOfSQL = `SELECT r.relid, w.name, a.attnum, a.attnotnull,
+		        EXISTS (
+		          SELECT 1 FROM pg_catalog.pg_constraint k
+		           WHERE k.conrelid OPERATOR(pg_catalog.=) a.attrelid
+		             AND k.contype::pg_catalog.text OPERATOR(pg_catalog.=) 'n'
+		             AND k.conkey[1] OPERATOR(pg_catalog.=) a.attnum
+		             AND NOT k.convalidated),
+		        pg_catalog.quote_ident(a.attname)
 		   FROM pg_catalog.unnest($1::pg_catalog.oid[]) AS r(relid)
 		  CROSS JOIN pg_catalog.unnest($2::pg_catalog.name[]) WITH ORDINALITY AS w(name, ord)
 		   LEFT JOIN pg_catalog.pg_attribute a
@@ -47,13 +58,29 @@ const keyColumnsOfSQL = `SELECT r.relid, w.name, a.attnum, a.attnotnull, pg_cata
 		  ORDER BY r.relid, w.ord`
 
 // readKeyColumnsOf reads the requested key columns of every node in one
-// statement, keyed by the node's OID.
+// statement, keyed by the node's OID. A column refuses NULL as
+// readLeafKeyColumns decides it: attnotnull set and, from PostgreSQL 18, no
+// NOT VALID not-null constraint on it, under which it can still hold NULLs.
+//
+// A name longer than maxIdentifierBytes is no column's name, and the server
+// refuses it in a name[] (SQLSTATE 42622) rather than read it as missing. So
+// the statement carries only the names before the first such name, and that
+// name is read as missing from every relation that has all the names before
+// it: the relation is refused by name, as for any column it does not have.
 func readKeyColumnsOf(ctx context.Context, q querier, nodes []partitionNode, names []string) (map[uint32]keyColumnsRead, error) {
 	oids := make([]uint32, 0, len(nodes))
 	for _, n := range nodes {
 		oids = append(oids, n.oid)
 	}
-	rows, err := q.Query(ctx, keyColumnsOfSQL, oids, names)
+	asked := names
+	var tooLong *string
+	for i, name := range names {
+		if len(name) > maxIdentifierBytes {
+			asked, tooLong = names[:i], &names[i]
+			break
+		}
+	}
+	rows, err := q.Query(ctx, keyColumnsOfSQL, oids, asked)
 	if err != nil {
 		return nil, fmt.Errorf("read the key columns of %d tables: %w", len(nodes), err)
 	}
@@ -61,28 +88,40 @@ func readKeyColumnsOf(ctx context.Context, q querier, nodes []partitionNode, nam
 	found := make(map[uint32]keyColumnsRead, len(nodes))
 	for rows.Next() {
 		var (
-			relid   uint32
-			name    string
-			attnum  *int16
-			notNull *bool
-			quoted  *string
+			relid           uint32
+			name            string
+			attnum          *int16
+			attNotNull      *bool
+			notNullNotValid bool
+			quoted          *string
 		)
-		if err := rows.Scan(&relid, &name, &attnum, &notNull, &quoted); err != nil {
+		if err := rows.Scan(&relid, &name, &attnum, &attNotNull, &notNullNotValid, &quoted); err != nil {
 			return nil, fmt.Errorf("scan the key columns of %d tables: %w", len(nodes), err)
 		}
 		read := found[relid]
 		switch {
-		case read.missing != "":
+		case read.lacksColumn:
 			// A key column earlier in key order is already missing.
 		case attnum == nil:
-			read.missing = name
+			read.lacksColumn, read.missing = true, name
 		default:
-			read.columns = append(read.columns, leafKeyColumn{name: name, attnum: *attnum, notNull: deref(notNull), quoted: deref(quoted)})
+			read.columns = append(read.columns, leafKeyColumn{
+				name: name, attnum: *attnum, notNull: deref(attNotNull) && !notNullNotValid, quoted: deref(quoted),
+			})
 		}
 		found[relid] = read
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read the key columns of %d tables: %w", len(nodes), err)
+	}
+	if tooLong != nil {
+		for _, n := range nodes {
+			read := found[n.oid]
+			if !read.lacksColumn {
+				read.lacksColumn, read.missing = true, *tooLong
+			}
+			found[n.oid] = read
+		}
 	}
 	return found, nil
 }
@@ -109,7 +148,7 @@ func (r leafConstraintsRead) of(node partitionNode) ([]leafConstraint, error) {
 }
 
 // leafConstraintsOfSQL is leafConstraintsSQL for every leaf in $1.
-const leafConstraintsOfSQL = `SELECT k.conrelid, k.oid, k.conname, k.contype::pg_catalog.text, k.conindid, k.conparentid, k.conkey
+const leafConstraintsOfSQL = `SELECT k.conrelid, k.oid, k.conname, k.contype::pg_catalog.text, k.conindid, k.conparentid, k.condeferrable, k.conkey
 		   FROM pg_catalog.pg_constraint k
 		  WHERE k.conrelid OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.oid[])
 		    AND k.contype::pg_catalog.text OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog.text[])
@@ -143,7 +182,7 @@ func readLeafConstraintsOf(ctx context.Context, q querier, leaves []partitionNod
 	)
 	for rows.Next() {
 		var l listed
-		if err := rows.Scan(&l.leaf, &l.c.oid, &l.c.name, &l.c.contype, &l.indexOID, &l.c.parentOID, &l.c.key); err != nil {
+		if err := rows.Scan(&l.leaf, &l.c.oid, &l.c.name, &l.c.contype, &l.indexOID, &l.c.parentOID, &l.c.deferrable, &l.c.key); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan the key constraints of %d partitions: %w", len(leaves), err)
 		}
