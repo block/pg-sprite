@@ -104,7 +104,7 @@ runner (`statement.KindDataChange`). A statement the parse boundary does not nam
 | `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole unless the run pins the reviewed plan's fingerprint and names the table in its own destructive acknowledgement, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` — and a `DROP INDEX` under `--accept-blocking` — until `--allow-destructive` names the table (RF-10) | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
-| `declarative-foreign-key` | A desired-state plan adds or drops a foreign key, or creates a table that declares one; desired-state execution does not run foreign-key changes yet | `capability-boundary` | — |
+| `declarative-foreign-key` | A desired-state plan drops a foreign key; desired-state execution does not drop foreign keys yet | `capability-boundary` | — |
 
 ### `unsupported-partitioned-parent`, keyed on `PartitionRefusalCause`
 
@@ -347,7 +347,6 @@ cause added in a newer engine than the importer's pinned library.
 | `like` | Reading an existing source table is outside the absence proof | `capability-boundary` | As above. |
 | `of-type` | Binding to an existing composite type is outside the absence proof | `capability-boundary` | As above. |
 | `unsupported-kind` | The statement kind is outside the plain `CREATE TABLE` and `CREATE INDEX` shapes the create path runs | `capability-boundary` | A route that may be modeled later. |
-| `foreign-key` | A `CREATE TABLE` that declares a foreign key would lock each referenced live table | `capability-boundary` | The same planned capability as a foreign key added to a live table, so it carries the `declarative-foreign-key` reason rather than `unsupported-statement`. |
 | `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid | `by-design` | A permanent decision with a deliberate path: declare the shape and let `diff` converge it. |
 | `duplicate-name` | A desired set claims the same relation name twice | `by-design` | A permanent decision about input coherence; the fix is in the desired set. |
 | `concurrently` | A table born this run has no traffic to protect, and a plain build cannot leave an invalid index behind a failure | `by-design` | A permanent, reasoned decision that names the better idiom: the plain build. |

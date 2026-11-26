@@ -44,7 +44,7 @@ const (
 	// key.
 	ChangeDropConstraint ChangeKind = "drop-constraint"
 	// ChangeDropForeignKey drops a foreign-key constraint. Desired-state
-	// execution refuses it: foreign-key changes are planned, not run.
+	// execution refuses it: a foreign-key drop is planned, not run.
 	ChangeDropForeignKey ChangeKind = "drop-foreign-key"
 	// ChangeDropColumn drops a column.
 	ChangeDropColumn ChangeKind = "drop-column"
@@ -67,14 +67,13 @@ const (
 	ChangeDropNotNull ChangeKind = "drop-not-null"
 	// ChangeAddConstraint adds a table constraint other than a foreign key.
 	ChangeAddConstraint ChangeKind = "add-constraint"
-	// ChangeAddForeignKey adds a foreign-key constraint. Desired-state
-	// execution refuses it: foreign-key changes are planned, not run.
+	// ChangeAddForeignKey adds a foreign-key constraint. The planner runs it
+	// as ADD ... NOT VALID followed by VALIDATE CONSTRAINT.
 	ChangeAddForeignKey ChangeKind = "add-foreign-key"
 	// ChangeValidateConstraint validates a live check constraint left NOT
 	// VALID, the state an interrupted online add leaves behind.
 	ChangeValidateConstraint ChangeKind = "validate-constraint"
 	// ChangeValidateForeignKey validates a live foreign key left NOT VALID.
-	// Desired-state execution refuses it like every foreign-key change.
 	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
@@ -139,6 +138,17 @@ type Change struct {
 	// statement names only the constraint, so execution checks the
 	// definition again under the table's lock before validating it.
 	Validates *ConstraintValidation `json:"-"`
+	// AddsNotValid is set on an ADD CONSTRAINT of a CHECK or FOREIGN KEY:
+	// the constraint it adds, and the definition introspection reads for it
+	// once it is added NOT VALID. A plan that runs the add as ADD ... NOT VALID and then VALIDATE
+	// CONSTRAINT checks that definition before the validation, as it does
+	// for Validates, so a validation that runs apart from its add never
+	// validates a constraint someone put under the same name in between.
+	AddsNotValid *ConstraintValidation `json:"-"`
+	// References is set on an ADD CONSTRAINT of a FOREIGN KEY: the table
+	// and columns the key references, on which the role that runs the plan
+	// needs REFERENCES.
+	References *ForeignKeyReference `json:"-"`
 	// Drops is set on a DROP INDEX, DROP CONSTRAINT, DROP COLUMN, or
 	// DROP NOT NULL: the live object the statement removes, with the
 	// definition the diff read. A reviewer approves what the name stood for,
@@ -454,6 +464,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	}
 
 	// Constraints to add: new, or re-added after a definition change.
+	// Foreign keys are held back until the table's other constraints and
+	// indexes are in place, because a key can reference the primary key,
+	// unique constraint, or unique index the same diff adds to its own
+	// table.
+	var foreignKeys []Change
 	for _, con := range desired.Constraints {
 		if _, ok := adopted[con.Name]; ok {
 			changes = append(changes, Change{
@@ -465,11 +480,16 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 		had, ok := liveCons[con.Name]
 		if ok && validatesInPlace(had, con) {
-			changes = append(changes, Change{
+			validate := Change{
 				SQL:       "ALTER TABLE " + table + " VALIDATE CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:      validateConstraintKind(con),
 				Validates: &ConstraintValidation{Constraint: con.Name, Def: had.Def},
-			})
+			}
+			if con.ForeignKey {
+				foreignKeys = append(foreignKeys, validate)
+			} else {
+				changes = append(changes, validate)
+			}
 			continue
 		}
 		if !ok || had.Def != con.Def {
@@ -480,8 +500,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 					return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
 				}
 				sql = qualified
+				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), References: con.References})
+				continue
 			}
-			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con)})
+			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})
 		}
 	}
 
@@ -498,6 +520,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			changes = append(changes, Change{SQL: qualified, Kind: ChangeCreateIndex})
 		}
 	}
+
+	// Foreign keys last, once everything they can reference on this table
+	// exists.
+	changes = append(changes, foreignKeys...)
 
 	return changes, nil
 }
@@ -814,6 +840,17 @@ func validateConstraintKind(con Constraint) ChangeKind {
 // constraint the server has not validated, and the only difference from the
 // definition of the same constraint validated.
 const notValidSuffix = " NOT VALID"
+
+// addedNotValid is the record an added CHECK or FOREIGN KEY carries of the
+// definition it has once added NOT VALID: its desired definition with the
+// suffix the server prints for an unvalidated constraint. Nil for every other
+// constraint, which the server cannot add NOT VALID.
+func addedNotValid(con Constraint) *ConstraintValidation {
+	if !con.ForeignKey && !strings.HasPrefix(con.Def, "CHECK ") {
+		return nil
+	}
+	return &ConstraintValidation{Constraint: con.Name, Def: con.Def + notValidSuffix}
+}
 
 // validatesInPlace reports whether live is the desired constraint left NOT
 // VALID, so validating it converges the two: the drop and re-add the

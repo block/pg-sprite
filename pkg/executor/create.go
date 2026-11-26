@@ -507,9 +507,9 @@ func checkCreateSteps(schema string, ds statement.DesiredSchema) ([]createStep, 
 // column-owned sequences, for a CREATE INDEX its explicit name, nothing when the
 // server invents one. CREATE TABLE clauses that bind to a secondary
 // relation or type — PARTITION OF, INHERITS, LIKE, OF — are refused:
-// statement.Qualify rewrites only the target, so the secondary name would
-// resolve via search_path to an existing object the absence proof says
-// nothing about.
+// statement.Qualify rewrites only the target and foreign-key references, so
+// the secondary name would resolve via search_path to an existing object the
+// absence proof says nothing about.
 func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 	qualified, err := statement.Qualify(sql, schema)
 	if err != nil {
@@ -581,9 +581,6 @@ func createTableShapeRefusal(op statement.Op) error {
 	}
 	if op.OfType {
 		return &CreateShapeError{Cause: CreateShapeOfType}
-	}
-	if op.ForeignKey {
-		return &CreateShapeError{Cause: CreateShapeForeignKey}
 	}
 	if op.IfNotExists {
 		return &CreateShapeError{Cause: CreateShapeIfNotExists}
