@@ -65,6 +65,21 @@ boundary in `pkg/statement` assigns (`gateRefusal` in `pkg/migrate/refusal_regis
 runner (`statement.KindDataChange`). A statement the parse boundary does not name is
 `statement.KindOther`, the one catch-all left.
 
+A table or enum type file reports every statement it refuses at once
+(`*statement.RefusedStatementsError`, one `statement.Refusal` per statement, with its line and
+column), so the author fixes them in one edit. When it refuses more than one, the verdict lists
+them all in `refused_statements`, and the CLI prints each with where it starts. A row-security
+file reports the same way for its table and index statements; its row-security statements still
+stop at the first refused one.
+
+The file still takes one verdict. An input error, such as a schema-qualified name, outranks every
+refusal: the file takes no verdict, and the input error is what prints. Otherwise a partition
+anywhere in the file decides the class, then the one-table and one-type rules, then the first
+refused statement's kind.
+
+A file the parser cannot read is not a refusal: it is `statement.ErrParseDesired`, carrying a
+`*statement.SyntaxError` with the line, column and line text where the parser stopped.
+
 ### Reasons keyed on the site
 
 | Existing `reason` | Refusal site or shape | `class` | `owner`, when present |
