@@ -47,6 +47,20 @@ refusal names the one that is missing. pg-sprite needs one PostgreSQL session
 per connection; [session-affinity.md](session-affinity.md) says which poolers
 work.
 
+A `search_path` that lists `pg_catalog` after a user schema has that entry
+removed, so the schema no longer shadows the catalog; every other entry is left
+as configured. The connection pool holds at least six connections unless the URL
+sets `pool_max_conns`: one for each of a copy-and-swap run's four copy workers,
+and two more so its catch-up's flushes and its checkpoint saves do not wait
+behind the copy. A `pool_max_conns` in the URL is kept as given, and a
+copy-and-swap run refuses a pool below six before it creates anything
+(`code: pool-too-small`).
+
+Only `migrate` without `--dry-run` ever commits a schema change. The one other
+command that writes to the database is `reap` without `--dry-run`, which drops
+only the engine's orphan replication slots and their publications, never table
+data.
+
 `lint`, `suggest`, `fmt`, and `capabilities` take no connection flags at all,
 so they cannot reach a database by accident.
 
@@ -552,8 +566,22 @@ refused (plan-fingerprint-mismatch)
 
 ## Follow a running change
 
-`migrate` prints its verdict when the change finishes, and nothing before. To
-watch a long change, open a second terminal against the same database.
+`migrate` prints its verdict on stdout when the change finishes. While it runs,
+`--progress` controls a progress line on stderr showing the step, operation,
+percent, and ETA:
+
+| `--progress` | What stderr shows |
+|---|---|
+| `auto` (default) | The line, redrawn in place, only when stderr is a terminal (`TERM=dumb` turns it off) |
+| `always` | The line on any stderr; when stderr is not a terminal, such as a log file, a plain line per change of step, operation, or ten-percent mark |
+| `never` | No progress line |
+
+`--progress=always` cannot be combined with `--json` or `--dry-run`: the
+machine-readable run shows no progress line, and a dry run executes nothing.
+stdout carries only the verdict in every mode.
+
+To see what the sessions themselves are doing, open a second terminal against
+the same database.
 
 ### See which sessions are working
 
