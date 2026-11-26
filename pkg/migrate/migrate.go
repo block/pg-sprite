@@ -570,9 +570,12 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // override runs the submitted form as one blind bounded attempt, whatever
 // its kind — so it goes through the optimistic executor directly, under the
 // same brief budgets. Blind attempts of the submitted form — including
-// forced ones — are size-guarded; substituted sequences and planner-proven
-// online idioms are not — long work on large tables is their purpose, and
-// every brief step is still budget-bounded. Before anything runs, the
+// forced ones — are size-guarded unless every operation in the plan is
+// proven catalog-only (planner.ProvenCatalogOnly): such a statement reads
+// and writes no rows, so its cost does not grow with the table. Substituted
+// sequences and planner-proven online idioms are not size-guarded — long
+// work on large tables is their purpose, and every brief step is still
+// budget-bounded. Before anything runs, the
 // connected role is checked at the tier the routed steps actually need
 // (engine-role contract), so a role that would die mid-change is refused
 // with the exact provisioning statement instead.

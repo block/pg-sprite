@@ -296,6 +296,20 @@ type Decision struct {
 	// of the change: with facts (a live introspection or a supplied
 	// column type) the same operation may classify as native.
 	Unverified bool `json:"unverified,omitempty"`
+	// ProvenCatalogOnly marks an operation PostgreSQL runs on the catalog
+	// alone, never rewriting or reading the table's rows, so its cost does
+	// not grow with the table. Unlike Reason metadata-only, which is the
+	// planner's classification, it is set only where that is certain: for
+	// DROP COLUMN, DROP DEFAULT, DROP NOT NULL, and DROP CONSTRAINT, which
+	// PostgreSQL defines that way, and for an ADD COLUMN the server's probe
+	// proved adds in place without a scan. SET DEFAULT is not marked: the
+	// server coerces the new default to the column's type under the lock,
+	// and for a user-defined type that runs the type's input function. Absent means
+	// not established, not that the operation reads rows. An event trigger
+	// is outside the proof: its code runs under the statement's lock
+	// whatever the table's size, bounded by the attempt's budget like any
+	// other statement.
+	ProvenCatalogOnly bool `json:"proven_catalog_only,omitempty"`
 	// SaferSQL is the ordered safer native sequence, present only for
 	// safer-idiom decisions where the planner could construct it. It is a
 	// safer form of the submitted statement, not a semantic equivalent: it
@@ -707,6 +721,42 @@ func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
 	return facts.AddColumnProofs[op.Column]
 }
 
+// addsInPlace reports whether the server proved the column adds without
+// rewriting the table, whether or not it then scans it to check a NOT
+// NULL.
+func addsInPlace(proof statement.AddColumnProof) bool {
+	return proof == statement.AddColumnInPlace || proof == statement.AddColumnInPlaceScans ||
+		proof == statement.AddColumnInPlaceRunsUserCode
+}
+
+// addsOnCatalogAlone reports whether adding op's column is proven to cost
+// the same on a table of any size. The probe must prove it adds in place,
+// evaluating nothing a user defined (statement.AddColumnInPlace), and the
+// default, if any, must be a literal. A default expression is evaluated
+// once under the table's lock, and its value can depend on the session,
+// such as a setting the probe ran with and the statement does not, so
+// what the probe saw is not proof of what the statement will do.
+func addsOnCatalogAlone(op statement.Op, facts Facts) bool {
+	literalOrNone := op.Default == statement.DefaultNone || op.Default == statement.DefaultConstant
+	return literalOrNone && addColumnProof(op, facts) == statement.AddColumnInPlace
+}
+
+// ProvenCatalogOnly reports whether every decision is an operation
+// PostgreSQL is certain to run on the catalog alone (see
+// Decision.ProvenCatalogOnly), so running them costs the same on a table of
+// any size. An empty plan proves nothing and reports false.
+func ProvenCatalogOnly(decisions []Decision) bool {
+	if len(decisions) == 0 {
+		return false
+	}
+	for _, d := range decisions {
+		if !d.ProvenCatalogOnly {
+			return false
+		}
+	}
+	return true
+}
+
 // unprovenRewriteReason names the only cause the statement's shape leaves
 // for a rewrite nothing proved: an expression default may be computed for
 // every row, and without one only the column's type can rewrite.
@@ -926,7 +976,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
 		case addColumnProof(op, facts) == statement.AddColumnUnproven:
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
-		case op.Default == statement.DefaultExpression && addColumnProof(op, facts) != statement.AddColumnInPlace:
+		case op.Default == statement.DefaultExpression && !addsInPlace(addColumnProof(op, facts)):
 			// No proof was run, as in an offline lint: the default may be
 			// computed for every row.
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, ReasonVolatileDefault, true
@@ -942,14 +992,33 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			// A constant, or an expression the server proved it stores
 			// in the catalog.
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		default:
 			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+			d.ProvenCatalogOnly = addsOnCatalogAlone(op, facts)
 		}
 
-	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,
-		statement.OpDropNotNull,
-		statement.OpSetColumnOptions, statement.OpSetRelOptions,
-		statement.OpSetSchema, statement.OpDropConstraint:
+	case statement.OpDropColumn, statement.OpDropDefault,
+		statement.OpDropNotNull, statement.OpDropConstraint:
+		// PostgreSQL never touches the table's rows for these and runs no
+		// user code: a dropped column is only marked dropped, a dropped
+		// default applies to rows written later, and dropping a NOT NULL
+		// or a constraint has nothing to check. An index the drop takes
+		// with it is removed as a file, not read.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		d.ProvenCatalogOnly = true
+
+	case statement.OpSetDefault:
+		// The new default applies to rows written later, so no row is
+		// read. It is still not proven catalog-only: the server coerces
+		// the expression to the column's type under the lock, and for a
+		// user-defined base type that runs the type's input function,
+		// which can read any table. The planner has no fact that rules
+		// that out, so the statement stays size-guarded.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+
+	case statement.OpSetColumnOptions, statement.OpSetRelOptions,
+		statement.OpSetSchema:
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 
 	case statement.OpRenameColumn, statement.OpRenameTable:

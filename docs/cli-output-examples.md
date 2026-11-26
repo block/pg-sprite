@@ -165,7 +165,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 |---|---|
 | `unsupported-statement` | No safe path is known for the statement — only `ALTER TABLE` and `CREATE INDEX` reach classification — or a greenfield create plan carries a shape the create path refuses (`PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a duplicate claimed relation name; the [plan statement's `cause`](plan-report.md#causes-cause-greenfield-create-shape-refusals-only) names which — a create-shape vocabulary distinct from the verdict's budget `cause` below). These greenfield shapes refuse in the plan and are re-checked at apply. |
 | `index-statement` | Index maintenance (`DROP INDEX`, `REINDEX`) has a native safe idiom (`CONCURRENTLY`) and is never attempted; the verdict's `safer_idiom` names it. |
-| `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not provably metadata-only. |
+| `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not proven catalog-only. |
 | `insufficient-privileges` | The connected role lacks the access the change needs; `detail` names the missing grant for preflight checks (see [engine-role.md](engine-role.md)). RLS admission names the required table ownership or database CREATE privilege and its remedy; permission errors reported by PostgreSQL retain the server diagnostic, which may not identify an exact GRANT. |
 | `unsupported-partitioned-parent` | The statement is a shape PostgreSQL cannot run online on a partitioned parent: adopting an index as a constraint, a `NOT VALID` foreign key before PostgreSQL 18, or a blocking index build. |
 | `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. The same `cause` field carries the partitioned-parent shape under `unsupported-partitioned-parent`; both are refusal causes, unrelated to the plan statement's create-shape `cause`. |
@@ -200,7 +200,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -220,7 +220,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run -
           "operation": "ADD COLUMN note",
           "destructive": false,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -241,7 +242,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -434,7 +435,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -476,7 +477,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -571,7 +572,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -610,7 +611,7 @@ when it starts.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -706,7 +707,7 @@ cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx' --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -771,7 +772,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -791,7 +792,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --al
           "operation": "DROP COLUMN email",
           "destructive": true,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -815,7 +817,7 @@ object it removes, and the fingerprint covers it.
 ```console
 $ pg-sprite migrate --desired orders.sql --dry-run --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "diff",
   "schema": "public",
   "table": "orders",
@@ -846,7 +848,8 @@ $ pg-sprite migrate --desired orders.sql --dry-run --json
           "operation": "DROP COLUMN note",
           "destructive": true,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ]
     }
@@ -992,7 +995,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "diff",
   "schema": "public",
   "table": "users",

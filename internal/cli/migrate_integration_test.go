@@ -1075,13 +1075,15 @@ func TestMigrateSizeGuardSkipsAttempt(t *testing.T) {
 	require.NoError(t, err)
 	defer pool.Close()
 	schema := testutil.NewSchema(t, pool)
-	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v varchar(10))", schema))
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(
 		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
 	require.NoError(t, err)
 
-	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	// Widening a varchar is classified binary-coercible, but no probe
+	// proves it, so it runs as a blind attempt and stays size-guarded.
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v TYPE varchar(20)", schema))
 	cmd.MaxTableSize = 1 // guarantees the guard fires without a big fixture
 	cmd.JSON = true
 	var out strings.Builder
@@ -1092,13 +1094,93 @@ func TestMigrateSizeGuardSkipsAttempt(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.ReasonTableTooLarge, v.Reason)
 
-	// The attempt was skipped, so the (instant-eligible) change must not
-	// have been applied.
-	var n int
+	// The attempt was skipped, so the column keeps its old type.
+	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'age'`, schema).Scan(&n))
-	assert.Zero(t, n, "the size guard must skip the attempt entirely")
+		`SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+		 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&typ))
+	assert.Equal(t, "character varying(10)", typ, "the size guard must skip the attempt entirely")
+}
+
+// Changes PostgreSQL runs on the catalog alone, such as adding a nullable
+// column or dropping one, run on a table above the size limit: what
+// executes cannot rewrite or read the table, so its size cannot make the
+// lock last longer.
+func TestMigrateSizeGuardExemptsCatalogOnlyChanges(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	t.Run("add a nullable column", func(t *testing.T) {
+		table := oversizedCatalogOnlyTable(t, pool)
+		requireExecutedAboveSizeLimit(t, url, "ALTER TABLE "+table.Sanitize()+" ADD COLUMN age int", "")
+		assert.Equal(t, []string{"id", "v", "note", "age"}, tableColumns(t, pool, table))
+	})
+
+	t.Run("add a column with a constant default", func(t *testing.T) {
+		table := oversizedCatalogOnlyTable(t, pool)
+		requireExecutedAboveSizeLimit(t, url, "ALTER TABLE "+table.Sanitize()+" ADD COLUMN score int DEFAULT 0", "")
+		assert.Equal(t, []string{"id", "v", "note", "score"}, tableColumns(t, pool, table))
+	})
+
+	t.Run("drop a default", func(t *testing.T) {
+		table := oversizedCatalogOnlyTable(t, pool)
+		requireExecutedAboveSizeLimit(t, url, "ALTER TABLE "+table.Sanitize()+" ALTER COLUMN v DROP DEFAULT", "")
+		var hasDefault bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT atthasdef FROM pg_catalog.pg_attribute
+			 WHERE attrelid = $1::pg_catalog.regclass AND attname = 'v'`, table.Sanitize()).Scan(&hasDefault))
+		assert.False(t, hasDefault)
+	})
+
+	t.Run("drop a column", func(t *testing.T) {
+		table := oversizedCatalogOnlyTable(t, pool)
+		requireExecutedAboveSizeLimit(t, url, "ALTER TABLE "+table.Sanitize()+" DROP COLUMN note", table[0]+"."+table[1])
+		assert.Equal(t, []string{"id", "v"}, tableColumns(t, pool, table))
+	})
+}
+
+// oversizedCatalogOnlyTable creates a table in a schema of its own, with
+// rows enough that any non-zero size limit refuses a change the guard
+// applies to.
+func oversizedCatalogOnlyTable(t *testing.T, pool *pgxpool.Pool) pgx.Identifier {
+	t.Helper()
+	table := pgx.Identifier{testutil.NewSchema(t, pool), "t"}
+	_, err := pool.Exec(t.Context(), "CREATE TABLE "+table.Sanitize()+" (id int PRIMARY KEY, v text DEFAULT 'x', note text)")
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), "INSERT INTO "+table.Sanitize()+" SELECT g, 'v', 'n' FROM generate_series(1, 1000) g")
+	require.NoError(t, err)
+	return table
+}
+
+// requireExecutedAboveSizeLimit runs sql through migrate with a one-byte
+// size limit and requires that it executed. allowDestructive names the
+// table a destructive change may touch, or is empty.
+func requireExecutedAboveSizeLimit(t *testing.T, url, sql, allowDestructive string) {
+	t.Helper()
+	cmd := newMigrateCmd(url, sql)
+	cmd.MaxTableSize = 1
+	cmd.AllowDestructive = allowDestructive
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out), out.String())
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, out.String())
+}
+
+// tableColumns returns the table's live columns in order.
+func tableColumns(t *testing.T, pool *pgxpool.Pool, table pgx.Identifier) []string {
+	t.Helper()
+	rows, err := pool.Query(t.Context(),
+		`SELECT attname::pg_catalog.text FROM pg_catalog.pg_attribute
+		 WHERE attrelid = $1::pg_catalog.regclass AND attnum > 0 AND NOT attisdropped
+		 ORDER BY attnum`, table.Sanitize())
+	require.NoError(t, err)
+	cols, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	return cols
 }
 
 // A connected role without membership in the owning role is refused up

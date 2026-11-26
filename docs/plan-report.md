@@ -36,7 +36,7 @@ kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint se
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **24**: version 24 added the `blocking-index-drop` execution contract, which a refused `drop-index` of a partitioned table's index carries with its plain `DROP INDEX` as `exec_sql`, and which the fingerprint covers; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
+The current version is **25**: version 25 added the `proven_catalog_only` decision field, which marks an operation PostgreSQL runs on the catalog alone and which the fingerprint does not cover; version 24 added the `blocking-index-drop` execution contract, which a refused `drop-index` of a partitioned table's index carries with its plain `DROP INDEX` as `exec_sql`, and which the fingerprint covers; version 23 added the `partitioned-index-build` execution contract, which a `CREATE INDEX` on a partitioned table carries in place of its refusal and which the fingerprint covers; version 22 added the statement-level `drops` field, with its `dependents`, which the fingerprint covers when it is present, and the report-level `pinnable_fingerprint` field; version 21 added the `add-integer-primary-key` guidance code (carried by a `copy-and-swap-pk-unsupported` refusal verdict for a table with no primary key, never by a report statement; no field changed, so a consumer that pins the version only moves its pin); version 20 added the `add-enum-value` kind and the report-level `type` field, which a plan for a desired enum type file carries in place of `table`; version 19 added the report-level `extension_schemas` field, which the fingerprint covers when it is present; version 18 added the `dependent-trigger`, `dependent-generated-column`, and `partition-key` reasons and the `dependent_triggers`, `dependent_generated_columns`, and `partition_key_tables` decision fields, and made each `dependent_*` field present whenever its dependents block the change, whatever the decision's reason; version 17 added the `not-null-without-default` reason; version 16 added the `dependent-policy` reason and the `dependent_policies` decision field; version 15 added the report-level `advisories` field and its
 closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 14 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 13 added the `coordinated-constraint-rename` guidance code and classifies the rename of an index that backs a primary-key, unique, or exclusion constraint as `app-breaking-rename`; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
@@ -120,6 +120,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `route` | string | always | Where the operation goes (see Routes). |
 | `reason` | string | always | The typed cause of the routing decision (see Reasons). Automation branches on this, never on prose. |
 | `unverified` | bool | when true | The planner failed closed to this route for lack of live facts — the route is what the engine would do, not a proven property of the change. With facts (a live introspection or a supplied column type) the same operation may classify as native. Absent means the decision is proven. |
+| `proven_catalog_only` | bool | when true | PostgreSQL runs this operation on the catalog alone: it never rewrites or reads the table's rows, so it costs the same on a table of any size. Set for `DROP COLUMN`, `DROP DEFAULT`, `DROP NOT NULL`, and `DROP CONSTRAINT`, and for an `ADD COLUMN` the server's probe proved adds without a rewrite or a scan. Absent means not established, not that the operation reads rows. A statement whose decisions all carry it is exempt from the [size guard](optimistic-attempt.md#who-gets-size-checked). |
 | `safer_sql` | array | safer-idiom only | The ordered safer native sequence, when the planner could construct it. A safer form of the submitted operation, not a semantic equivalent: it converges on the same declared end state with different locking, transactionality, and failure modes. |
 | `safer_sql_execution` | string | with `safer_sql` | The typed execution contract for `safer_sql` (see Execution contracts). Present exactly when `safer_sql` is. |
 | `dependent_views` | array | when a view blocks the change | The views and materialized views that read the column, each schema-qualified with every identifier quoted, sorted. Present whenever one blocks the change, which makes `reason` `dependent-view`. Catalog identifiers: a consumer rendering them into a shared surface must clamp and escape them. |
@@ -386,7 +387,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -406,7 +407,8 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
           "operation": "DROP COLUMN legacy_status",
           "destructive": true,
           "route": "native",
-          "reason": "metadata-only"
+          "reason": "metadata-only",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -429,7 +431,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -474,7 +476,8 @@ A desired state that drops an index and adds a column with a constant default:
           "operation": "ADD COLUMN region",
           "destructive": false,
           "route": "native",
-          "reason": "fast-default"
+          "reason": "fast-default",
+          "proven_catalog_only": true
         }
       ],
       "exec_sql": [
@@ -496,7 +499,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 24,
+  "format_version": 25,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

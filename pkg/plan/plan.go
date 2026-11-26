@@ -62,8 +62,8 @@ import (
 // part in the fingerprint. Version 24 added the blocking-index-drop
 // execution contract, which a refused drop of a partitioned table's index
 // carries with its plain DROP INDEX as exec_sql, and its part in the
-// fingerprint.
-const FormatVersion = 24
+// fingerprint. Version 25 added the proven_catalog_only decision field.
+const FormatVersion = 25
 
 // Source identifies which front door derived the plan.
 type Source string
