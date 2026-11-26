@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 )
 
@@ -18,8 +20,13 @@ import (
 // DETACH PARTITION ... FINALIZE. The step report says a FINALIZE ended the
 // detach, though no earlier run left the partition pending.
 func TestRunSequenceReportsTheFinalizeThatEndedItsOwnInterruptedDetach(t *testing.T) {
-	pool, schema := newPool(t)
-	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+	// The FINALIZE waits for every older transaction in its database, so the
+	// test gets a database of its own rather than one other packages share.
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.NewDatabase(t, testutil.StartPostgres(t))})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.events (
 			id bigint NOT NULL,
 			day date NOT NULL,

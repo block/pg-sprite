@@ -20,10 +20,13 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// detachPool starts a server and returns a pool on it.
+// detachPool returns a pool on a database of its own. DETACH PARTITION ...
+// FINALIZE waits for every older transaction in its database, so on a
+// server other packages share, their transactions would hold it past the
+// tests' lock budgets.
 func detachPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.NewDatabase(t, testutil.StartPostgres(t))})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return pool
