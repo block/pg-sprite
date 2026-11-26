@@ -204,9 +204,11 @@ func partitionedIndexFailureVerdict(st statement.Statement, err error) verdict.V
 // remains: the parent's invalid index with the partition indexes built so
 // far, and the failed build's own invalid index on that partition, which a
 // rerun once the rows are corrected proves abandoned, drops, and builds
-// again. An invalid index the run could not prove its own is not placed on
-// any table; it gets the investigation steps the plain build gives. It
-// reports false for every other failure.
+// again. Partitions are processed one at a time and the build stops at the
+// first fault, so the partitions after this one are not reached and a rerun
+// can stop on one of them in turn. An invalid index the run could not
+// prove its own is not placed on any table; it gets the investigation steps
+// the plain build gives. It reports false for every other failure.
 func partitionedIndexDataFaultDetail(table string, err error) (string, bool) {
 	invalidErr, ok := errors.AsType[*executor.InvalidIndexError](err)
 	if !ok || invalidErr.Code() != executor.CodeDataFault {
@@ -214,11 +216,20 @@ func partitionedIndexDataFaultDetail(table string, err error) (string, bool) {
 	}
 	index := pgx.Identifier{invalidErr.Schema, invalidErr.Index}.Sanitize()
 	if !errors.Is(invalidErr.Cleanup, executor.ErrBuildLeftInvalidIndex) {
-		return fmt.Sprintf("%s; the partitioned index build stopped there, leaving the index of %s invalid with the partition indexes built so far attached; %s",
-			rowsViolateIndex("the rows of a partition", index), table, unprovenInvalidIndexLeftover), true
+		return fmt.Sprintf("%s; the partitioned index build stopped there, %s; %s",
+			rowsViolateIndex("the rows of a partition", index), partitionedBuildStoppedLeaves(table), unprovenInvalidIndexLeftover), true
 	}
 	partition := pgx.Identifier{invalidErr.Schema, invalidErr.Table}.Sanitize()
-	return fmt.Sprintf("%s; the partitioned index build stopped there, leaving the index of %s invalid with the partition indexes built so far attached "+
-		"and %s invalid on %s — correct the rows, then run the same statement again: it drops that invalid index, builds it again, and resumes from what it had built",
-		rowsViolateIndex("the rows of partition "+partition, index), table, index, partition), true
+	return fmt.Sprintf("%s; the partitioned index build stopped there, %s, and %s invalid on %s — correct the rows, then run the same statement again: "+
+		"it drops that invalid index, builds it again, and resumes from what it had built, and a later partition whose rows break the index stops it the same way",
+		rowsViolateIndex("the rows of partition "+partition, index), partitionedBuildStoppedLeaves(table), index, partition), true
+}
+
+// partitionedBuildStoppedLeaves says what a partitioned index build that
+// stopped on one partition leaves on the rest of the tree. A sub-partition's
+// own index is attached to its parent's only once all its partitions have
+// theirs, so the partition indexes built so far are not all attached to the
+// table's index; the clause therefore says only that they remain.
+func partitionedBuildStoppedLeaves(table string) string {
+	return fmt.Sprintf("leaving the index of %s invalid, the partition indexes built before the stop in place, and the partitions after it not yet reached by this run", table)
 }
