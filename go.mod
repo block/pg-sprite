@@ -17,7 +17,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
-	github.com/wasilibs/go-pgquery v0.0.0-20261106060434-4301e51f8dbf
+	github.com/wasilibs/go-pgquery v0.0.0-20261124022233-3939604ca45d
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 )

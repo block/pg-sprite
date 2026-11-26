@@ -155,6 +155,8 @@ github.com/tklauser/numcpus v0.12.0 h1:NR85qdvHA9pFse3x3weVZ0r0ST8R6l5RHbZrlRaqo
 github.com/tklauser/numcpus v0.12.0/go.mod h1:ABHeXzJnr/qqwguhClkZKT1/8VABcYrsyUiUGobwWJg=
 github.com/wasilibs/go-pgquery v0.0.0-20261106060434-4301e51f8dbf h1:zcAPl1D4vTT1I9s3l7sP4zvhr59iVQmYqebG0Qfzcyk=
 github.com/wasilibs/go-pgquery v0.0.0-20261106060434-4301e51f8dbf/go.mod h1:qsL+i7YEWvAeqOvbo1ARwbB6bdgdZKyravVkGOC8BYk=
+github.com/wasilibs/go-pgquery v0.0.0-20261124022233-3939604ca45d h1:ESxAHoKvtJ2dlqDw4kiR67ChFU278VmN78qWB/EuKhU=
+github.com/wasilibs/go-pgquery v0.0.0-20261124022233-3939604ca45d/go.mod h1:qsL+i7YEWvAeqOvbo1ARwbB6bdgdZKyravVkGOC8BYk=
 github.com/wasilibs/wazero-helpers v0.0.0-20250123031827-cd30c44769bb h1:gQ+ZV4wJke/EBKYciZ2MshEouEHFuinB85dY3f5s1q8=
 github.com/wasilibs/wazero-helpers v0.0.0-20250123031827-cd30c44769bb/go.mod h1:jMeV4Vpbi8osrE/pKUxRZkVaA0EX7NZN0A9/oRzgpgY=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
