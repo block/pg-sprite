@@ -333,15 +333,15 @@ rows:
   - id: detach-partition-concurrently
     area: "partitioned_tables"
     operation: "`DETACH PARTITION [CONCURRENTLY]`"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    maturity: "ga"
     online_safety_problem: true
     front_doors:
-      migrate: refused
+      migrate: supported
       diff: not_applicable
-    refusal_reason: unsupported-statement
-    reason_notes: "`CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`suggest` shows the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form ends in the same `unsupported-statement` refusal and exit code 2 as the real run. A desired schema cannot express a detach, so `diff` never produces one"
+    reason_notes: "The plain form is rewritten to `DETACH PARTITION ... CONCURRENTLY`, which takes `SHARE UPDATE EXCLUSIVE` on the table, so reads and writes of the other partitions keep running. It runs outside a transaction block under the brief budgets: `--lock-timeout` bounds each lock wait, the wait for transactions that still read the partition through the table included, and `--statement-timeout` the whole statement. Flagged **destructive**, since the partition's rows leave the table: `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. A detach that stops after its first transaction committed fails with `partition-detach-interrupted` and leaves the partition detach-pending; running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`. PostgreSQL detaches one partition of a table at a time, so while another partition is detach-pending the detach fails with `partition-detach-pending` before anything runs, naming that partition and its `FINALIZE`. PostgreSQL refuses a concurrent detach from a table with a `DEFAULT` partition, so both forms are refused there (`unsupported-statement`, `by-design`, in `--dry-run` too) before anything runs; `--force SCHEMA.TABLE` runs the plain `DETACH PARTITION` as submitted under bounded budgets, taking `ACCESS EXCLUSIVE` on the table and the partition. `DETACH PARTITION ... FINALIZE` itself is refused with `unsupported-statement`: rerun the statement that started the detach. A desired schema cannot express a detach, so `diff` never produces one"
   - id: set-tablespace-on-a-partitioned-parent
     area: "partitioned_tables"
     operation: "`SET TABLESPACE` on a **partitioned parent**"

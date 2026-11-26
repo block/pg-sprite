@@ -18,9 +18,9 @@ func parseStatement(t *testing.T, sql string) statement.Statement {
 }
 
 // DETACH PARTITION is substituted to its concurrent form, which the sequence
-// executor does not drive; the dry run learns the refusal from the routed
-// step and names the table the way the apply does.
-func TestAdmitRoutedStepsRefusesConcurrentDetach(t *testing.T) {
+// executor runs, so the routed step's shape admits it; whether the table's
+// DEFAULT partition rules it out is the catalog's half of the admission.
+func TestAdmitRoutedStepsAdmitsConcurrentDetach(t *testing.T) {
 	st := parseStatement(t, "ALTER TABLE billing.invoices DETACH PARTITION billing.invoices_2024")
 
 	v, refused, err := AdmitRoutedSteps(st, "billing", []string{
@@ -28,11 +28,21 @@ func TestAdmitRoutedStepsRefusesConcurrentDetach(t *testing.T) {
 	})
 
 	require.NoError(t, err)
+	assert.False(t, refused)
+	assert.Empty(t, v.Outcome)
+}
+
+// DETACH PARTITION ... FINALIZE is refused at the gate: the deparser
+// reprints it as a detach of a partition whose name ends in "finalize".
+func TestGateRefusesDetachFinalize(t *testing.T) {
+	st := parseStatement(t, "ALTER TABLE billing.invoices DETACH PARTITION billing.invoices_2024 FINALIZE")
+
+	v, refused := Gate(st)
+
 	require.True(t, refused)
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
 	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
-	assert.Equal(t, "billing.invoices", v.Table)
 }
 
 // An unnamed index build is refused whether or not the table is qualified:

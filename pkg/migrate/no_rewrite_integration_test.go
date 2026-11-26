@@ -184,6 +184,9 @@ var noRewriteCases = map[string][]noRewriteCase{
 	"set-not-null": {
 		{name: "set not null", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN qty SET NOT NULL"},
 	},
+	"detach-partition-concurrently": {
+		{name: "detach partition", setup: noRewritePartitioned, statement: "ALTER TABLE %[1]s.t DETACH PARTITION %[1]s.t_low", destructive: true},
+	},
 }
 
 // noRewriteNotApplicable names the natively executed rows a heap filenode

@@ -826,7 +826,13 @@ stops it. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
 transactionally clean (the constraint simply stays `NOT VALID`; no debris), so the sequence
 executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan
-itself runs under its own generous overall budget. *Enforced:* every DDL execution path in the
+itself runs under its own generous overall budget. `DETACH PARTITION ... CONCURRENTLY` follows
+the bounded rule, not the concurrent-build exception: `lock_timeout` bounds each lock wait, its wait
+for older transactions included, and `statement_timeout` the whole statement. The debris a
+cancelled wait leaves is a detach-pending partition, which the server keeps consistent (reads
+through the table leave it out, rows in its range are refused) and the executor detects from
+`pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
+statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
 native and copy-and-swap executors; `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
@@ -861,6 +867,17 @@ statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
 same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
+The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported)
+takes `ACCESS EXCLUSIVE` on one leaf only for `ADD CONSTRAINT ... USING INDEX` on an index already
+built concurrently, in a brief transaction under both bounds. A primary key over a column the leaf
+allows to be NULL, or whose not-null constraint is `NOT VALID` on PostgreSQL 18, would make that
+statement set `NOT NULL` and scan the leaf under the lock, so the step refuses it before it builds
+anything (`TestEnsureLeafKeyRefusals/primary_key_over_a_nullable_column`,
+`TestEnsureLeafKeyRefusals/primary_key_over_a_NOT_VALID_not-null_column`) and checks the columns
+again under the leaf's lock before the statement
+(`TestEnsureLeafKeyRefusals/not_null_dropped_before_the_constraint`), both as
+`partitioned-key-nullable-column`; a writer to the leaf keeps committing through the whole step
+(`TestEnsureLeafKeyWritersKeepCommitting`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1528,7 +1545,12 @@ a replacement table is refused with its index left in place and named for an ope
 the build cannot prove the index is its own
 (`TestBuildPartitionedIndexRefusesATableSwappedAfterItWasProved` and
 `TestBuildPartitionedIndexTreeChangesDuringARun`, which detaches a partition between its build
-and its attach).
+and its attach); the leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE`
+(`pkg/executor/partitioned_key_leaf.go`, unexported) proves the leaf in the tree, with no
+detach pending, before it builds, and in the constraint's transaction locks the leaf
+`SHARE UPDATE EXCLUSIVE`, which excludes a detach, before it proves the leaf and the index by
+identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-pending cases,
+`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
@@ -1762,7 +1784,7 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
 - **RF-10** — No statement that discards data, and no statement that would leave the table
   unreadable or unwritable beyond the engine's lock budget, runs without a loud, typed
   acknowledgement naming the table. A destructive statement — one whose plan drops a column,
-  a constraint, or a `NOT NULL` — is refused with `destructive-change` (class `by-design`)
+  a constraint, or a `NOT NULL`, or detaches a partition, whose rows then leave the table — is refused with `destructive-change` (class `by-design`)
   before any route runs it (native, safer sequence, forced, or copy-and-swap) and in a dry
   run, unless `--allow-destructive` (`Options.AllowDestructive`) names the resolved
   schema-qualified table; a mismatched acknowledgement is a typed usage error and nothing
@@ -2024,7 +2046,7 @@ about **how we write and review the code**.
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
-| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, desired-state execution rejects every `Options` acknowledgement and takes the destructive one only with a pinned fingerprint, demo refusal smoke |
+| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL and detach partition refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, desired-state execution rejects every `Options` acknowledgement and takes the destructive one only with a pinned fingerprint, demo refusal smoke |
 | AB-3, AB-4, AB-5, RF-9 | accepted-blocking rollout step 4 | catalog-resolved acknowledgement, mismatch executes nothing, ineligible refusals untouched, grammar rejects `--force`/`--dry-run`/missing budget, accepted verdict identity and exit 3, demo exit-code smoke |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
