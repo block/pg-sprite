@@ -259,10 +259,97 @@ ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lo
 | `SET TABLESPACE` | ACCESS EXCLUSIVE | **Yes** (moves heap) | No | ✅ **Yes** (repack-style) | Rewrite/move; use a repack-style copy instead |
 | `SET (fillfactor=...)` and most reloptions | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | Applies to new rows |
 | `CLUSTER` / `VACUUM FULL` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** (`pg_repack`) | Use `pg_repack` |
-| `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief and no scan, but it queues behind long-running queries and then blocks every reader of the parent |
-| `ATTACH PARTITION` | SHARE UPDATE EXCLUSIVE on parent + scan of child | No | Yes | ➖ Native pattern | Add a validated `CHECK` matching the bound on the child first to skip the scan |
+| `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief unless the parent has a `DEFAULT` partition, which it scans while it holds the parent; it also queues behind long-running queries and then blocks every reader of the parent. With a `DEFAULT` partition, create the table on its own and [attach it](#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build) instead |
+| `ATTACH PARTITION` | SHARE UPDATE EXCLUSIVE on parent; ACCESS EXCLUSIVE on the attached table and on the `DEFAULT` partition, which are scanned unless proven | No | Yes on the parent; blocked on the attached table and `DEFAULT` while held | ➖ Native pattern | [Prove the bound on both tables and build the parent's indexes first](#safe-pattern-attach-a-partition-without-a-scan-or-an-index-build) |
 | `DETACH PARTITION` | ACCESS EXCLUSIVE | No | No | ➖ Use `CONCURRENTLY` | |
 | `DETACH PARTITION CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | PG 14+ |
+
+### Safe pattern: attach a partition without a scan or an index build
+
+`ATTACH PARTITION` does up to three pieces of work, and skips each one only when something
+already proves it is unnecessary:
+
+| Work | Skipped when | Runs under |
+| --- | --- | --- |
+| Scan the attached table, to prove every row fits the new bound | A validated `CHECK` on the attached table implies the bound | ACCESS EXCLUSIVE on the attached table |
+| Scan the `DEFAULT` partition, to prove none of its rows belongs in the new bound | The parent has no `DEFAULT` partition, or a validated `CHECK` on it excludes the bound | ACCESS EXCLUSIVE on the `DEFAULT` partition |
+| Build each of the parent's indexes on the attached table | The attached table already has an index equivalent to the parent's (see below). For the parent's primary key or unique constraint, the matching index must also back a constraint (`ADD CONSTRAINT … USING INDEX`): a bare unique index is left alone and a new one is built | ACCESS EXCLUSIVE on the attached table |
+
+Do all three ahead of time, online, and the attach changes only the catalog. For a parent
+`events`, range-partitioned on `created_at`, with primary key `(id, created_at)`, an index on
+`kind`, and a `DEFAULT` partition `events_default`:
+
+```sql
+-- 1. Build and load the new table while it is not yet a partition.
+CREATE TABLE events_2027_01 (LIKE events INCLUDING DEFAULTS);
+
+-- 2. The parent's indexes, built online. The unique one backs a constraint.
+CREATE UNIQUE INDEX CONCURRENTLY events_2027_01_pkey ON events_2027_01 (id, created_at);
+ALTER TABLE events_2027_01 ADD CONSTRAINT events_2027_01_pkey
+    PRIMARY KEY USING INDEX events_2027_01_pkey;
+CREATE INDEX CONCURRENTLY events_2027_01_kind_idx ON events_2027_01 (kind);
+
+-- 3. Prove the bound on the new table.
+ALTER TABLE events_2027_01 ADD CONSTRAINT events_2027_01_bound
+    CHECK (created_at >= '2027-01-01' AND created_at < '2027-02-01') NOT VALID;
+ALTER TABLE events_2027_01 VALIDATE CONSTRAINT events_2027_01_bound;
+
+-- 4. Prove the DEFAULT partition holds no row in the bound (only when the parent has one).
+ALTER TABLE events_default ADD CONSTRAINT events_default_not_2027_01
+    CHECK (NOT (created_at >= '2027-01-01' AND created_at < '2027-02-01')) NOT VALID;
+ALTER TABLE events_default VALIDATE CONSTRAINT events_default_not_2027_01;
+
+-- 5. Attach: catalog only.
+ALTER TABLE events ATTACH PARTITION events_2027_01
+    FOR VALUES FROM ('2027-01-01') TO ('2027-02-01');
+
+-- 6. Optional: drop the proofs, which are redundant once attached.
+ALTER TABLE events_2027_01 DROP CONSTRAINT events_2027_01_bound;
+ALTER TABLE events_default DROP CONSTRAINT events_default_not_2027_01;
+```
+
+- Each statement commits on its own. Step 4's `ADD … NOT VALID` takes a brief ACCESS
+  EXCLUSIVE on the `DEFAULT` partition; its `VALIDATE` scans it under SHARE UPDATE
+  EXCLUSIVE, so reads and writes continue.
+- From step 4's `ADD` until step 5 commits, a row written through `events` for the new
+  range routes to `events_default` and fails its `CHECK`, and step 4's `VALIDATE` fails if
+  `events_default` already holds a row in the range. The recipe is for a range nobody writes
+  to yet, such as next month's partition.
+- For a live range, moving its rows out of `events_default` before step 4 is not enough
+  while writers stay active: a row written for the range after the move and before the
+  `ADD` lands in `events_default`, and the `VALIDATE` fails. Pause writes for the range
+  first, or run step 4's `ADD … NOT VALID` before the move. From the `ADD` on, inserts for
+  the range and updates to its rows still in `events_default` fail until the attach. Then
+  move the rows in one statement and run the `VALIDATE`:
+
+  ```sql
+  WITH moved AS (
+      DELETE FROM events_default
+      WHERE created_at >= '2027-01-01' AND created_at < '2027-02-01'
+      RETURNING *)
+  INSERT INTO events_2027_01 SELECT * FROM moved;
+  ```
+- The attach adopts an index only when it is equivalent to the parent's: the same columns
+  in the same order, operator classes, collations, predicate, `INCLUDE` columns, access
+  method, and uniqueness. A near miss is left in place as an extra index and a new one is
+  built under the attach's lock. Before attaching, compare `pg_get_indexdef` of each of the
+  new table's indexes with the parent's.
+- A partition key column that allows nulls must be proven non-null too: the partition
+  constraint includes `IS NOT NULL` on the key. Add `created_at IS NOT NULL AND` to the
+  step 3 `CHECK`, or the attach scans the new table anyway.
+- The attach itself still takes ACCESS EXCLUSIVE on the new table and on the `DEFAULT`
+  partition, and SHARE UPDATE EXCLUSIVE on the parent. It queues behind any long-running
+  query on `events_default`, and while it waits, new queries that reach `events_default`
+  queue behind it. Run it under a short `lock_timeout`.
+
+On PostgreSQL 14 to 18, with 400,000 rows in the new table and 100,000 in the `DEFAULT`
+partition, the attach took about 1 ms, and at `client_min_messages = debug1` the server
+reported both scans skipped (`partition constraint for table … is implied by existing
+constraints`, `updated partition constraint for default partition … is implied by existing
+constraints`), with the new table's indexes adopted unchanged. Leaving out step 4 made it
+log `verifying table "events_default"`; leaving out the `USING INDEX` constraint in step 2
+made it build a second unique index on the new table under its ACCESS EXCLUSIVE lock (50 to
+100 ms here, growing with the table).
 
 ## The headline takeaway (what the engine must cover)
 

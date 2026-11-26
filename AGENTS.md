@@ -199,7 +199,10 @@ them against the shipped behavior before tagging. A supported row's `maturity` (
 only from a later server major names it in `min_server_major`. A PR that takes a route out
 of preview flips its rows to `ga` in the same change, together with `validateMaturity`'s
 rule for that route, its `TestValidateRules` case, `TestPreviewRowsAreTheCopySwapRows`,
-and the route's sentence in `docs/capabilities-contract.md`.
+and the route's sentence in `docs/capabilities-contract.md`. When it is the last route in
+preview, the same change moves the README's maturity badge to `ga`, replaces the
+`> [!IMPORTANT]` preview notice under the badges, and rewrites any other README sentence
+that calls a route preview.
 
 ## Logging and observability
 

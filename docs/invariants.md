@@ -791,7 +791,10 @@ at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
 same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
 from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
 and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
-checkpoint over the newer engine's row; `pkg/migrate` `Run` and `RunDesired` prove, before the
+checkpoint over the newer engine's row; `pkg/schemachange` `Runner.Discard` takes the table's
+lock itself before it reads the row or drops anything, and a held lock refuses it at once with
+`TableLockHeldError`, touching nothing, so a discard cannot overlap a run on the table
+(`TestRunnerDiscardRefusesWhileARunHoldsTheTableLock`); `pkg/migrate` `Run` and `RunDesired` prove, before the
 preflight and before the lock session opens, that `CopySwapOptions.Connection` reaches the
 pool's database (the cluster's system identifier and `current_database()` on both sides), and
 stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
@@ -914,11 +917,13 @@ to `cutover` before it calls `Cutover`, and on resume hands a `cutover` row to `
 first, continuing at `DropOldTable` on a committed swap and back through verify and gate on
 `ErrNotSwapped` — a live run writes such a row back to `catching_up` before it reads its slot,
 so the resume inspection never meets a `cutover` row whose swap is known to have rolled back.
-A restart (`RunOptions.Restart`) answers a `cutover` row the same way before it discards
-anything: `Runner.refuseSwappedRestart` hands the row to `InspectSwapped`, refuses a committed
-swap — or one whose retained source is already gone — as `restart-swap-committed`, refuses any
-other answer with that answer's own cause, and discards the row only on `ErrNotSwapped`
-(refuses-a-committed-swap, refuses-a-cutover-row-the-catalog-does-not-answer-cleanly tests).
+A restart (`RunOptions.Restart`) or a discard (`Runner.Discard`) answers a `cutover` row the
+same way before it discards anything: `Runner.refuseSwappedRestart` hands the row to
+`InspectSwapped`, refuses a committed swap — or one whose retained source is already gone — as
+`restart-swap-committed`, refuses any other answer with that answer's own cause, and discards
+the row only on `ErrNotSwapped` (refuses-a-committed-swap,
+refuses-a-cutover-row-the-catalog-does-not-answer-cleanly, discard-refuses-a-row-whose-swap-committed
+tests).
 Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
@@ -1240,10 +1245,17 @@ it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
 row's position — a ceiling abort included, so the backlog is drained by resuming — or the
 operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`, or has a
-restart (`RunOptions.Restart`) do the same sequence under the run's own lock — a data fault
+restart (`RunOptions.Restart`) do the same sequence under the run's own lock, or a discard
+(`Runner.Discard`) do it under a lock of its own without running the change — a data fault
 is the one stop the Runner abandons itself, through the same discard, since a resume would
-meet the same rows (abandons-on-a-data-fault and holds-a-run-whose-abandon-fails tests) — where
-`Runner.discardRow` drops a slot only when it is the target's derived name and refuses any other
+meet the same rows (abandons-on-a-data-fault and holds-a-run-whose-abandon-fails tests); a
+discard that finds no row drops a slot of the derived name only as the reaper drops an
+orphan, under `Store.WithSlotLock`, every table's rows read again by slot name through
+`Store.LiveRowNamesSlot`, through `DropIdleSlot` (discard-drops-an-unrecorded-shadow-and-slot
+test), and refuses as `resume-slot-foreign` a slot another table's live row names, since the
+derived name is a hash two tables can share
+(`TestRunnerDiscardKeepsTheSlotAnotherTablesRowNames`) — where
+`Runner.checkDiscardable` drops a slot only when it is the target's derived name and refuses any other
 as `resume-row-mismatch` before discarding anything (refuses-a-row-naming-another-engine-slot
 test); the slot
 is dropped once the swap has committed, before the old table is settled, and a run resumed on
