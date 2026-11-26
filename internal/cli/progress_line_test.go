@@ -23,7 +23,7 @@ func TestRenderProgressCopyInARunOfSeveralSteps(t *testing.T) {
 		Percent:   new(41.2),
 		ETA:       new(3*time.Minute + 10*time.Second),
 	})
-	assert.Equal(t, "step 2/3  copy  41.2%  1.2M/2.9M rows  ETA 3m10s", renderProgress(s))
+	assert.Equal(t, "step 2/3  copy  41.20%  1.2M/2.9M rows  ETA 3m10s", renderProgress(s))
 }
 
 // A run of one step shows no step counter; a concurrent index build shows
@@ -37,7 +37,7 @@ func TestRenderProgressConcurrentIndexBuild(t *testing.T) {
 		Percent:     new(62.0),
 		ETA:         new(40 * time.Second),
 	})
-	assert.Equal(t, "concurrent index build  building index: scanning table  62.0%  ETA 40s", renderProgress(s))
+	assert.Equal(t, "concurrent index build  building index: scanning table  62.00%  ETA 40s", renderProgress(s))
 }
 
 // A catch-up has no total to measure against, so it shows the stream's lag
@@ -59,7 +59,7 @@ func TestRenderProgressChecksum(t *testing.T) {
 		Percent:   new(18.0),
 		ETA:       new(time.Minute),
 	})
-	assert.Equal(t, "checksum  18.0%  522.0K/2.9M rows  ETA 1m", renderProgress(s))
+	assert.Equal(t, "checksum  18.00%  522.0K/2.9M rows  ETA 1m", renderProgress(s))
 }
 
 // A native statement measures no work: the line names the operation only.
@@ -105,7 +105,7 @@ func TestRenderProgressOmitsETAWhilePercentIsKnown(t *testing.T) {
 		Work:      &progress.Work{RowsCopied: 10_000, RowsTotal: 5_000_000},
 		Percent:   new(0.2),
 	})
-	assert.Equal(t, "copy  0.2%  10.0K/5.0M rows", renderProgress(s))
+	assert.Equal(t, "copy  0.20%  10.0K/5.0M rows", renderProgress(s))
 }
 
 // A step that has not reported work yet shows its operation alone.

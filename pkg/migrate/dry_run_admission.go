@@ -57,11 +57,13 @@ func AdmitPartitionedIndexRequest(st statement.Statement, schema string, steps [
 
 // AdmitPartitionedUniqueIndex is the catalog half of the partitioned index
 // build's admission, for a statement [AdmitPartitionedIndexRequest] admitted:
-// a unique index whose key does not include every partition key column of
-// every partitioned table under the target is refused, read from the live
-// catalog on pool, as the build refuses it under its table lock before it
-// creates anything. The verdict, the boolean, and the error mean what they
-// mean for [AdmitRoutedSteps].
+// a unique index whose plain key columns do not contain the partition key of
+// the target and of every sub-partitioned partition is refused, read from the
+// live catalog on pool, as the build refuses it under its table lock before
+// it creates anything. A host that plans through the library calls it with a
+// pool from pkg/dbconn to learn that refusal without running the build. The
+// verdict, the boolean, and the error mean what they mean for
+// [AdmitRoutedSteps].
 func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
 	return admitRouted(st, schema, steps, func(steps []string) error {
 		if len(steps) != 1 {

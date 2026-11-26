@@ -145,7 +145,16 @@ resume it with `--slot-lag-ceiling 2GiB`. The resume needs 20 − 6 = 14 GiB for
 2 − 1.5 = 0.5 GiB for the slot, 14.5 GiB in all. Pass the free space the volume has now, as for
 any run. Neither discount goes past its own requirement, and anything pg-sprite cannot read
 (no shadow, a slot that is gone or lost, a server that cannot measure the WAL) counts as
-nothing held, so the check falls back to a fresh run's figure. A run with
+nothing held, so the check falls back to a fresh run's figure. A run that stopped after its
+swap committed, before it finished, is asked for no space at all when its statement runs
+through copy-and-swap again: that run only drops the slot, drops the retained old table (or,
+with `KeepOld`, leaves it and takes its write fence off), and records the change done, so it
+grows nothing on the volume. The admission is for that run alone: if the row has moved by the
+time the run holds the table's lock — another run finished it, or it was deleted or replaced —
+the run refuses with `finish-admission-stale` and writes nothing, and the next run is checked
+again. A stopped row whose retained old table was renamed away or changed owner is measured as
+a run that still copies, so a tight volume reports disk headroom first; with room, the run
+then refuses with `cutover-relation-replaced`. A run with
 `--restart SCHEMA.TABLE` is checked as a fresh run: it discards what the stopped run held
 before it builds anew.
 
@@ -158,9 +167,11 @@ offline run holds no slot, so the flag is refused with `--block-writes`. The cei
 1 GiB default included, counts against `--free-disk` beside the shadow (see
 [Free disk space](#free-disk-space)), so a ceiling the volume cannot hold is refused with cause
 `copy-and-swap-disk-headroom` before anything is built. That check is a floor on the free
-space, not a guarantee the slot cannot fill the volume: as the next paragraph says, the slot can
-stand over the ceiling, so leave headroom above it of about one release interval and a cycle
-of the cluster's WAL.
+space, not a guarantee the slot cannot fill the volume: the check counts the ceiling once, and as
+the next paragraph says, the slot can stand over it. A busy slot sized as below peaks at about
+twice its ceiling just before PostgreSQL frees WAL, and the run stops once a cycle reads more
+than three times the ceiling (`decode.RetainedHardLimit` gives that figure in bytes), so leave
+the volume room for about three times the ceiling plus a catch-up cycle of the cluster's WAL.
 
 The ceiling is a stop threshold pg-sprite checks once per catch-up cycle, not a limit
 PostgreSQL enforces on the slot. The slot can hold more than the ceiling by the time a cycle
@@ -180,8 +191,8 @@ seconds and a catch-up cycle of the cluster's WAL, with margin, or it stops `wal
 while pg-sprite keeps up (see below); a ceiling well below the default stops a busy run sooner,
 not more safely.
 
-The run stops with a failed verdict (exit 1) whose detail says which of two measures crossed
-the ceiling; the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
+The run stops with a failed verdict (exit 1) whose detail says which of three causes ended it;
+the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
 slot and the saved progress stay, so running the same command again resumes the run:
 
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
@@ -203,7 +214,12 @@ slot and the saved progress stay, so running the same command again resumes the 
   logs the same three on a busy test source. Resume with a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
   that much WAL. The resume's preflight counts the new ceiling against
   `--free-disk` beside the shadow, less the shadow already built and the WAL the slot already
-  retains (see [Free disk space](#free-disk-space)), so pass the free space the volume has now:
+  retains (see [Free disk space](#free-disk-space)), so pass the free space the volume has now.
+- **`wal-retained-hard-limit`:** pg-sprite kept up, but a cycle read the slot retaining more
+  than three times the ceiling before that release time had passed. A healthy slot peaks at
+  about twice its ceiling, so this is either a transaction holding the WAL back or a write rate
+  the ceiling cannot hold. Look for the transaction first, as for `wal-retained`, and end it,
+  then resume; if there is none, resume with a higher ceiling as for `wal-retained`:
 
 ```sh
 pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
@@ -230,20 +246,36 @@ pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_
 
 Point `PGSPRITE_URL` directly at the primary, not at a connection pooler.
 
-A successful run prints one verdict, `executed-via-copy-and-swap`, and exits 0. With `--json`:
+A successful run prints one verdict, `executed-via-copy-and-swap`, and exits 0. The live
+run above, with `--json`:
 
 ```json
 {
   "outcome": "executed-via-copy-and-swap",
-  "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
-  "table": "public.order_archive",
-  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run",
-  "swap_lsn": "0/3F2A1B8"
+  "statement": "ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)",
+  "table": "public.orders",
+  "detail": "verified 52693 rows in 26 chunks (1 settled against the stream); the retained source is dropped",
+  "swap_lsn": "0/3F2A1B8",
+  "verification": {
+    "rows": 52693,
+    "chunks": 26,
+    "settled": 1,
+    "unsettled": 2,
+    "carried": 3
+  }
 }
 ```
 
+The `--block-writes` run's verdict also carries `"writes_blocked": true`, and its `detail`
+ends by saying writes to the table were blocked for the length of the run.
+
 `swap_lsn` is the server's WAL position read inside the swap transaction, under its lock:
-writes to the table after it exist only in the new table.
+writes to the table after it exist only in the new table. `verification` is what the
+verification pass compared: rows hashed, chunks compared, and, for a live run, the chunks it
+settled against the stream, the chunks it could not settle, and how many keys of those it left
+for the swap to compare under its lock (`carried`, a count, never the keys). `detail` states
+the rows, chunks, and settled chunks too; `unsettled` and `carried` are only in the object.
+On this outcome a non-zero `unsettled` or `carried` is a record, not a warning: the swap compared those keys under its lock and would have refused had any differed.
 
 The old table is dropped once the swap commits. Add `--keep-old` to keep it under its `_old`
 name for a rollback window; you drop it yourself when the window ends.

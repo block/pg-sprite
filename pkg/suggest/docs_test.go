@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -66,6 +67,23 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 	// rename cannot silently break the printed link.
 	assert.Contains(t, doc, "## Caveats (`caveats`)",
 		"the caveats heading is a stable anchor the CLI's text output links")
+}
+
+// The add-integer-primary-key steps link a section of the primary key
+// guide by its anchor, and a renamed heading would break the link with
+// nothing else failing, so the anchor the link names must be a heading of
+// the guide.
+func TestAddIntegerPrimaryKeyLinksAHeadingOfTheGuide(t *testing.T) {
+	link := regexp.MustCompile(`docs/primary-keys\.md#([a-z0-9-]+)`).FindStringSubmatch(suggest.ManualPath(suggest.GuidanceAddIntegerPrimaryKey))
+	require.Len(t, link, 2, "the steps link the primary key guide")
+	raw, err := os.ReadFile("../../docs/primary-keys.md")
+	require.NoError(t, err)
+	var anchors []string
+	for _, heading := range regexp.MustCompile(`(?m)^#+ (.+)$`).FindAllStringSubmatch(string(raw), -1) {
+		anchor := strings.ToLower(regexp.MustCompile(`[^A-Za-z0-9 -]`).ReplaceAllString(heading[1], ""))
+		anchors = append(anchors, strings.ReplaceAll(anchor, " ", "-"))
+	}
+	assert.Contains(t, anchors, link[1], "the linked anchor is a heading of docs/primary-keys.md")
 }
 
 // The doc's stated current version is the constant, not prose that can

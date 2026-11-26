@@ -41,24 +41,6 @@ partition's index in the default tablespace, while a partition added later
 inherits the parent's. A partition's tablespace is chosen when the partition is
 created.
 
-A unique index must include every partition key column of every partitioned table
-it is created on, and PostgreSQL refuses a partition key that is an expression
-outright. The server checks this one partitioned table at a time: the parent at
-step 1, each sub-partitioned partition when step 2 reaches it, so a key that only
-a sub-partition's key defeats would fail after the parent's index committed.
-Under the lock, before step 1, the flow reads every partition key in the tree
-from `pg_catalog.pg_partitioned_table` and refuses such an index with nothing
-created (`*UniqueIndexPartitionKeyError`, wrapping
-`ErrUniqueIndexMissingPartitionKey`, naming each table and the columns the key
-lacks). Columns are matched by name, as the server matches a column the key
-writes plain, in parentheses, or under `COLLATE`; the server's further
-requirement that the two share a collation and equality operator is left to the
-server, which checks it on the parent at step 1. Once the parent's index exists,
-the server itself refuses a partition created or attached under it whose key the
-index does not cover, so the check does not repeat on later passes. A dry run
-reads the same keys (`executor.AdmitPartitionedUniqueIndex`) and reports the
-same refusal.
-
 ### Steps
 
 Under the advisory table lock (`dbconn.AcquireTableLock`, LK-1), so a second
@@ -81,6 +63,34 @@ pg-sprite run on the same parent is refused:
      (`buildIndexConcurrently`) under the derived name, and then attaches it.
    - A **foreign table** partition cannot carry an index, so the flow refuses the
      tree before step 1 (`ErrForeignTablePartition`).
+   - A partition whose `DETACH PARTITION ... CONCURRENTLY` did not finish is
+     left out by the server when it attaches an index, so the flow refuses the
+     tree before step 1 (`ErrPartitionDetachPending`), and the attach step's
+     proof treats such a partition as no longer in the tree.
+   - A **unique** index must contain the partition key of every partitioned
+     table in the tree among its plain key columns. PostgreSQL checks each
+     partitioned table only when that table gets its index, so the flow checks
+     every level once, after the first tree read and before step 1, and refuses
+     a mismatch with nothing created (`*UniqueIndexPartitionKeyError`, wrapping
+     `ErrUniqueIndexPartitionKey`; `Missing` names each table, as `Schema` and
+     `Table`, and the columns its key lacks, in key order). `migrate` maps it to
+     an `unsupported-statement`, `by-design` refusal. A dry run reads the same
+     keys and reports the same refusal; a host that plans through the library
+     calls `migrate.AdmitPartitionedUniqueIndex` with a pool from `pkg/dbconn`.
+     A desired-state plan never reaches this check: building the desired table
+     on the scratch schema runs the server's own check first, and the run stops
+     with that server error before anything executes.
+
+     The check matches columns by exact name. The server also requires each
+     matched column to share the partition key's collation and equality
+     operator. On the parent a mismatch is refused at step 1, which creates
+     nothing; on a sub-partitioned partition it is refused only at that
+     partition's step, after the parent's invalid index exists, and a rerun
+     resumes into that index and fails at the same step. Once the parent's index
+     exists, the server refuses a partition created or attached later whose key
+     the index does not contain; a sub-partitioned partition attached between
+     the check and step 1 is seen by neither and fails the run at its own step
+     the same way.
 3. **New partitions.** A partition created during the flow
    (`CREATE TABLE ... PARTITION OF`) gets a clone of every index on its parent,
    already attached. A table attached with `ATTACH PARTITION` ends up with an
@@ -210,7 +220,22 @@ ST-7 when a name moved:
   retry resumes. Once acquired, the lock is held through the read-back and the
   commit, each statement bounded by `statement_timeout`, and statements queued
   behind it wait under their own clients' timeouts. Other partitions are never
-  affected, and the transaction is brief. The leaf builds, being
+  affected, and the transaction is brief.
+- Before the attach, the step locks the partition `SHARE UPDATE EXCLUSIVE`, so
+  that the proof that it is still in the tree holds until commit. That lock does
+  not conflict with DML, but it waits behind anything that holds
+  `SHARE UPDATE EXCLUSIVE` or a stronger lock on the partition: `VACUUM`,
+  `ANALYZE`, `CREATE INDEX [CONCURRENTLY]`, and `REINDEX CONCURRENTLY`. An autovacuum normally gives way to the lock request,
+  but an anti-wraparound autovacuum does not, so on a large partition it can make
+  every attach `budget-lock-exceeded` until it finishes; the finished partitions
+  stay attached, and a retry resumes.
+- The step locks the partition before the attach takes `ACCESS SHARE` on the
+  parent, which is the opposite order from a plain `DETACH PARTITION` (the
+  parent `ACCESS EXCLUSIVE` first, then the partition). When the two overlap, the
+  server either lets the step's `lock_timeout` run out (`budget-lock-exceeded`)
+  or detects a deadlock and cancels one side with SQLSTATE 40P01. When the step
+  is the side cancelled, the outcome is `execution-failed`: nothing of that step
+  committed, and a rerun resumes from the partitions already attached. The leaf builds, being
   concurrent, do not block writers.
 - Statements derived from the parent's definition are fully schema-qualified, so
   they read the same under any `search_path`. The statements that carry the
@@ -219,8 +244,12 @@ ST-7 when a name moved:
 - The table lock is taken on a session of its own, dialed from the
   `dbconn.Config`, and every step runs on the pool. Before the first step the
   flow asks the pool's database which backend holds the lock, and refuses with
-  LK-1 unless it is the lock session's backend, so a config and a pool that point
-  at different databases are caught before anything is created.
+  LK-1 unless it is the lock session's backend, matched by PID and backend
+  start, so a config and a pool that point at different databases or servers
+  are caught before anything is created. When the pool's role cannot see that
+  session's backend start, which `pg_stat_activity` hides from another role
+  without `pg_read_all_stats`, the flow refuses with `ErrTableLockUnconfirmed`
+  instead.
 - A lock that is lost voids the run: the flow's context ends with it, and the
   error joins `ErrInvariantViolation` and `dbconn.ErrTableLockLost` (LK-1),
   whatever the interrupted step reported, so a lost lock is never a retryable
@@ -253,8 +282,8 @@ predicate.
   dedicated session the pool cannot supply. It is admitted only for a
   partitioned target (ST-7). Its refusals are typed: `ErrNotPartitionedTable`,
   `ErrPartitionedIndexNameTaken`, `ErrForeignTablePartition`,
-  `ErrPartitionedIndexTablespace`, `ErrUniqueIndexMissingPartitionKey`, and
-  `ErrPartitionedIndexUnsettled`, beside the
+  `ErrUniqueIndexPartitionKey`, `ErrTableLockUnconfirmed`, `ErrPartitionDetachPending`,
+  `ErrPartitionedIndexTablespace`, and `ErrPartitionedIndexUnsettled`, beside the
   concurrent build's own. The report lists each partition the run gave an index
   (`built`, `reused`, `adopted`, or `partitioned`) and whether it recovered
   debris.

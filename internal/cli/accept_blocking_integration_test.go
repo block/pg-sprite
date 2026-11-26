@@ -140,10 +140,13 @@ func TestMigrateAcceptBlockingRefusesCascadeAndKeepsDependentForeignKey(t *testi
 
 // The acknowledgement applies only to the eligible refusals. A gate
 // refusal outside the set — an already-concurrent form, a cascading drop, an
-// unsupported kind — still refuses before dialing, flag or no flag.
+// unsupported kind — still refuses before dialing, flag or no flag. A
+// single-index DROP INDEX dials to read the index's kind, so its concurrent
+// form is covered against a database in
+// TestMigrateDropIndexOfPartitionedTable.
 func TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone(t *testing.T) {
 	for _, alter := range []string{
-		"DROP INDEX CONCURRENTLY public.users_email_idx",
+		"DROP INDEX CONCURRENTLY public.users_email_idx, public.users_name_idx",
 		"DROP INDEX public.users_email_idx CASCADE",
 		"REINDEX SCHEMA public",
 		"ALTER INDEX public.users_email_idx SET (fillfactor = 90)",

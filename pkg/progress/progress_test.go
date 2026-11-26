@@ -239,7 +239,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 			"active": true,
 			"attempt": 2,
 			"current_locker_pid": 31337,
-			"percent": 13.8,
+			"percent": 13.75,
 			"work": {
 				"rows_copied": 0,
 				"rows_total": 0,

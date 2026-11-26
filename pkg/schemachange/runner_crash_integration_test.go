@@ -147,6 +147,7 @@ func TestRunnerReturnsTheResultWhenTheHookFailsAtDone(t *testing.T) {
 	require.ErrorIs(t, err, errStopHere)
 	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
 	assert.Equal(t, 3, result.Verification.Chunks, "the Result is the completed run's")
+	assert.False(t, result.FinishedEarlierSwap, "this run made the swap itself")
 	assert.True(t, result.OldTableDropped)
 	assert.Equal(t, checkpoint.PhaseDone, f.inspectRow(t, "orders").Phase)
 	assert.False(t, f.hasColumn(t, "orders", "note"))

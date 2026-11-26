@@ -110,6 +110,13 @@ func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	table := facts.Schema + "." + facts.Table
 	logger.Debug("index rename routed",
 		"table", table, "route", string(classified.Route), "disposition", string(rs.Disposition))
+	heldVerdict, held, err := refuseOverStoppedRun(ctx, pool, st, facts.Schema, facts.Table)
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	if held {
+		return heldVerdict, nil
+	}
 
 	switch rs.Disposition {
 	case router.DispositionExecute:

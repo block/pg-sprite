@@ -68,6 +68,12 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 	w.entry("plan:")
 	w.printf("  %s — %s, %s to run, %d refused\n", targetText(report),
 		countNoun(len(report.Statements), "statement"), countNoun(steps, "step"), refused)
+	if report.Fingerprint != "" {
+		// The pin a migrate --desired run takes to execute exactly this
+		// plan, which a plan that drops live structure needs.
+		w.entry("fingerprint:")
+		w.printf("  %s\n", report.Fingerprint)
+	}
 	w.entry("diff:")
 	w.printf("  nothing was executed\n")
 	w.entry("sql:")

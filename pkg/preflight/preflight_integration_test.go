@@ -48,6 +48,44 @@ func TestCheckTableOverLimit(t *testing.T) {
 	assert.Equal(t, int64(1), sizeErr.LimitBytes)
 }
 
+// A refusal carries the planner's row estimate beside the size, so a caller
+// that reports the refused table can report its rows too: the analyzed count
+// once the table has been analyzed, and -1, not zero, before then.
+func TestCheckTableSizeErrorCarriesRowEstimate(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, ddl := range []string{
+		fmt.Sprintf("CREATE TABLE %s.analyzed (id int PRIMARY KEY)", schema),
+		fmt.Sprintf("INSERT INTO %s.analyzed SELECT g FROM generate_series(1, 1000) g", schema),
+		fmt.Sprintf("ANALYZE %s.analyzed", schema),
+		// Fewer rows than autovacuum's analyze threshold, so the table stays
+		// unanalyzed for the life of the test.
+		fmt.Sprintf("CREATE TABLE %s.unanalyzed (id int PRIMARY KEY)", schema),
+		fmt.Sprintf("INSERT INTO %s.unanalyzed SELECT g FROM generate_series(1, 10) g", schema),
+	} {
+		_, err = pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	for _, tc := range []struct {
+		table string
+		rows  float64
+	}{
+		{"analyzed", 1000},
+		{"unanalyzed", -1},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			_, err := preflight.CheckTable(t.Context(), pool, schema, tc.table, 1)
+			var sizeErr *preflight.SizeError
+			require.ErrorAs(t, err, &sizeErr)
+			assert.Equal(t, tc.rows, sizeErr.RelTuples)
+		})
+	}
+}
+
 // A partitioned parent's own relation is 0 bytes on disk; the guard must sum
 // the partitions so a huge partitioned table cannot slip under the limit.
 func TestCheckTableSumsPartitions(t *testing.T) {

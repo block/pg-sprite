@@ -306,6 +306,32 @@ func TestDryRunTextRefusalAndDestructive(t *testing.T) {
 	assert.Contains(t, text, "1 refused\n")
 }
 
+// A dropped index of a partitioned table has no concurrent form, so the
+// refusal names the plain drop it is and the flags that run it, not the
+// partitioned-table refusal every other statement gets.
+func TestDryRunTextPartitionedIndexDropNamesThePlainDrop(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "app", "events", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `DROP INDEX app.events_name_idx`,
+		Kind:        schemadiff.ChangeDropIndex,
+		Destructive: true,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedPartitionedParent,
+		Class:       verdict.ClassByDesign,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, "PostgreSQL has no concurrent drop for an index of a partitioned table; "+
+		"the drop is this plain DROP INDEX, which takes ACCESS EXCLUSIVE on the parent, every partition, "+
+		"and every partition's index — run it with pg-sprite migrate --alter, --accept-blocking, "+
+		"and --allow-destructive naming the table")
+	assert.NotContains(t, text, "refused — the target is a partitioned table")
+}
+
 // A decision taken without live facts carries the conservative-classification
 // note so the reader knows introspection could cheapen the plan.
 func TestDryRunTextUnverifiedNote(t *testing.T) {

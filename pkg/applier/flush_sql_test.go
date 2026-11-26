@@ -130,7 +130,7 @@ func TestDeleteSQL(t *testing.T) {
 // insert position last, in the same statement as the values.
 func TestRowSQLRendersEachColumnAsTextWithTheReadPosition(t *testing.T) {
 	assert.Equal(t,
-		`SELECT "blob"::text, "paid at"::text, pg_catalog.pg_current_wal_insert_lsn()::text FROM "app"."orders_shadow" WHERE "id" = $1`,
+		`SELECT "blob"::pg_catalog.text, "paid at"::pg_catalog.text, pg_catalog.pg_current_wal_insert_lsn()::pg_catalog.text FROM "app"."orders_shadow" WHERE "id" = $1`,
 		rowSQL(testRelation, testPK, []string{"blob", "paid at"}))
 }
 

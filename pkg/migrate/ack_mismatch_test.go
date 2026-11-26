@@ -2,12 +2,14 @@ package migrate
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -143,4 +145,19 @@ func TestAcceptBlockingMismatchNamesTheLockingStatement(t *testing.T) {
 	for _, other := range []error{ErrForceMismatch, ErrRestartMismatch, ErrBlockWritesMismatch, ErrAllowDestructiveMismatch} {
 		assert.NotErrorIs(t, err, other)
 	}
+}
+
+// A planned index drop that fails after the drop ran says so: only the
+// replaced-index failure tells the operator an unreviewed index was dropped,
+// and every other failure says nothing was or may not have been dropped.
+func TestDroppedIndexFailureDetailSeparatesRefusalFromPostDropDetection(t *testing.T) {
+	refused := droppedIndexFailureDetail(fmt.Errorf("check: %w", executor.ErrDroppedIndexDrift), "app.orders", "orders_idx")
+	assert.Contains(t, refused, "nothing was dropped on app.orders")
+
+	replaced := droppedIndexFailureDetail(
+		fmt.Errorf("%w: orders_idx was dropped by name (oid 42)", executor.ErrDroppedIndexReplaced), "app.orders", "orders_idx")
+	assert.NotContains(t, replaced, "nothing was dropped")
+	assert.Contains(t, replaced, "an index the plan did not review was dropped")
+	assert.Contains(t, replaced, "orders_idx")
+	assert.Contains(t, replaced, "recreate the dropped one")
 }
