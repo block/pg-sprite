@@ -84,23 +84,31 @@ func declaresEnumType(tree *pganalyze.ParseResult) bool {
 // CREATE TYPE ... AS ENUM with distinct, non-empty labels.
 func parseDesiredEnumTree(source string, tree *pganalyze.ParseResult) (DesiredEnumType, error) {
 	var desired DesiredEnumType
+	refused := newRefusalCollector(source)
+	declared := false
 	for i, raw := range tree.GetStmts() {
 		node := raw.GetStmt()
 		create := node.GetCreateEnumStmt()
-		if create == nil || desired.name != "" {
-			sql, _, err := refusedStatement(source, raw)
-			if err != nil {
-				return DesiredEnumType{}, fmt.Errorf("statement %d: %w: %w", i+1, ErrEnumTypeAlone, err)
+		if create == nil || declared {
+			if err := refused.refuse(i, raw, enumTypeAloneRefusal(source, raw)); err != nil {
+				return DesiredEnumType{}, err
 			}
-			return DesiredEnumType{}, fmt.Errorf("statement %d: %w", i+1, &EnumTypeFileError{SQL: sql})
+			continue
 		}
+		declared = true
 		name, err := enumTypeName(create)
 		if err != nil {
-			return DesiredEnumType{}, fmt.Errorf("statement %d: %w", i+1, err)
+			if err := refused.refuse(i, raw, err); err != nil {
+				return DesiredEnumType{}, err
+			}
+			continue
 		}
 		labels, err := enumLabels(create)
 		if err != nil {
-			return DesiredEnumType{}, fmt.Errorf("statement %d: %w", i+1, err)
+			if err := refused.refuse(i, raw, err); err != nil {
+				return DesiredEnumType{}, err
+			}
+			continue
 		}
 		sql, err := deparseOne(node)
 		if err != nil {
@@ -112,7 +120,20 @@ func parseDesiredEnumTree(source string, tree *pganalyze.ParseResult) (DesiredEn
 		}
 		desired = DesiredEnumType{name: name, labels: labels, statement: st}
 	}
+	if err := refused.err(); err != nil {
+		return DesiredEnumType{}, err
+	}
 	return desired, nil
+}
+
+// enumTypeAloneRefusal returns the refusal for raw, a statement of an enum
+// type file other than its one CREATE TYPE ... AS ENUM.
+func enumTypeAloneRefusal(source string, raw *pganalyze.RawStmt) error {
+	sql, _, err := refusedStatement(source, raw)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrEnumTypeAlone, err)
+	}
+	return &EnumTypeFileError{SQL: sql}
 }
 
 // enumTypeName returns the unqualified type name a CREATE TYPE ... AS ENUM

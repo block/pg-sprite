@@ -235,35 +235,65 @@ func parseDesiredTree(source string, tree *pganalyze.ParseResult) (DesiredSchema
 	}
 	var ds DesiredSchema
 	partition := false
+	refused := newRefusalCollector(source)
+	// indexes holds each admitted CREATE INDEX's position in the file, so an
+	// index on another table is refused where it stands once the file's
+	// table is known: an index may precede its table.
+	var indexes []admittedIndex
 	for i, raw := range tree.GetStmts() {
 		st, err := admitDesiredStatement(source, raw, ds.table, partition)
 		if err != nil {
-			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
+			if err := refused.refuse(i, raw, err); err != nil {
+				return DesiredSchema{}, err
+			}
+			continue
 		}
 		if st.kind == KindCreateTable {
 			ds.table = st.table
 			partition = isPartition(raw.GetStmt().GetCreateStmt())
 			ds.foreignKeys = len(foreignKeyConstraints(raw.GetStmt().GetCreateStmt())) > 0
 			if ds.referenced, err = referencedTables(raw.GetStmt().GetCreateStmt()); err != nil {
-				return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
+				if err := refused.refuse(i, raw, err); err != nil {
+					return DesiredSchema{}, err
+				}
+				continue
 			}
 		}
 		if st.sql, err = deparseOne(raw.GetStmt()); err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
+		if st.kind == KindCreateIndex {
+			indexes = append(indexes, admittedIndex{index: i, raw: raw, table: st.table})
+		}
 		ds.statements = append(ds.statements, st)
+	}
+	if ds.table != "" {
+		for _, idx := range indexes {
+			if idx.table == ds.table {
+				continue
+			}
+			cause := fmt.Errorf("%w: index on %q, desired table is %q", ErrWrongIndexTarget, idx.table, ds.table)
+			if err := refused.refuse(idx.index, idx.raw, cause); err != nil {
+				return DesiredSchema{}, err
+			}
+		}
+	}
+	if err := refused.err(); err != nil {
+		return DesiredSchema{}, err
 	}
 	if ds.table == "" {
 		return DesiredSchema{}, ErrNoCreateTable
 	}
-	for _, st := range ds.statements {
-		if st.kind == KindCreateIndex && st.table != ds.table {
-			return DesiredSchema{}, fmt.Errorf("%w: index on %q, desired table is %q",
-				ErrWrongIndexTarget, st.table, ds.table)
-		}
-	}
 	ds.statements = executionOrder(ds.statements)
 	return ds, nil
+}
+
+// admittedIndex is a CREATE INDEX of a desired file, kept with its position
+// so a refusal of it can name where it stands.
+type admittedIndex struct {
+	index int
+	raw   *pganalyze.RawStmt
+	table string
 }
 
 // executionOrder hoists the CREATE TABLE to the front, keeping the indexes

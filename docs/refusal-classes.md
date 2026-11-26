@@ -65,6 +65,11 @@ boundary in `pkg/statement` assigns (`gateRefusal` in `pkg/migrate/refusal_regis
 runner (`statement.KindDataChange`). A statement the parse boundary does not name is
 `statement.KindOther`, the one catch-all left.
 
+A desired file reports every statement it refuses at once (`*statement.RefusedStatementsError`,
+one `statement.Refusal` per statement, with its line), so the author fixes them in one edit. The
+file still takes one verdict: a partition anywhere in it decides the class, then the one-table and
+one-type rules, then the first refused statement's kind.
+
 ### Reasons keyed on the site
 
 | Existing `reason` | Refusal site or shape | `class` | `owner`, when present |

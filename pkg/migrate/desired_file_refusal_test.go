@@ -69,6 +69,25 @@ func TestDesiredFileRefusalVerdicts(t *testing.T) {
 	}
 }
 
+// A desired file that refuses several statements still gets one verdict, and
+// its class, statement, and detail all describe the same refusal: a partition
+// anywhere in the file outranks a statement the file may not hold.
+func TestDesiredFileRefusalOfSeveralStatementsDescribesOne(t *testing.T) {
+	_, err := statement.ParseDesiredFile("CREATE TABLE log (id int, at date) PARTITION BY RANGE (at);\n" +
+		"COMMENT ON TABLE log IS 'events';\n" +
+		"CREATE TABLE log_p1 PARTITION OF log FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');\n")
+	require.Error(t, err)
+	refused, ok := errors.AsType[*statement.RefusedStatementsError](err)
+	require.True(t, ok, "%v", err)
+	require.Len(t, refused.Refusals, 2, "the comment and the partition are both reported")
+
+	v, ok := DesiredFileRefusal(err, "unused")
+	require.True(t, ok)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+	assert.Equal(t, "CREATE TABLE log_p1 PARTITION OF log FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')", v.Statement)
+	assert.Equal(t, "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed", v.Detail)
+}
+
 // A planner refusal of the desired table carries no statement of its own, so
 // the verdict names the statement the caller passes.
 func TestDesiredFileRefusalNamesTheCallersStatementForAPlannerRefusal(t *testing.T) {
