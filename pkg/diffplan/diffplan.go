@@ -161,6 +161,13 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, checkErr
 		}
 		if targetFacts.Partitioned() {
+			// A foreign key the file adds runs as the partitioned foreign key
+			// build before PostgreSQL 18, which refuses the planner's NOT
+			// VALID step on a partitioned table; RoutePartitionedParent then
+			// leaves it routed.
+			if err := plan.RouteDesiredPartitionedForeignKeyBuilds(&report, targetFacts.ServerMajor()); err != nil {
+				return plan.Report{}, err
+			}
 			if err := plan.RoutePartitionedParent(&report, targetFacts.ServerMajor()); err != nil {
 				return plan.Report{}, err
 			}

@@ -322,6 +322,60 @@ func TestRoutePartitionedForeignKeyBuildsRoutesAForeignKeyThatWouldBeRefused(t *
 	})
 }
 
+// A desired-state plan routes a foreign key the file adds to a partitioned
+// table to the same build before PostgreSQL 18, but only when the build's
+// own admission takes its shape, because a desired run has no admission
+// between the plan and the run: a plan that shows the build must be one the
+// run executes as the build. A shape the build refuses, such as an ON DELETE
+// column list, keeps the planner's NOT VALID step and stays refused.
+func TestRouteDesiredPartitionedForeignKeyBuildsRoutesOnlyAnAdmittedShape(t *testing.T) {
+	fkReport := func(sql string) plan.Report {
+		steps := []string{sql + ` NOT VALID`, `ALTER TABLE app.events VALIDATE CONSTRAINT events_account_fk`}
+		return plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   steps,
+			Execution: planner.ExecutionAutocommit,
+		}}}
+	}
+
+	t.Run("an admitted shape is routed before 18", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts(id)`
+		r := fkReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, []string{sql}, r.Statements[0].ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, r.Statements[0].Execution)
+	})
+
+	t.Run("a shape the build refuses stays refused", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts(id, region) ON DELETE SET NULL (account_id)`
+		r := fkReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+		assert.Equal(t, verdict.ClassEnvironmental, r.Statements[0].Class)
+		assert.Empty(t, r.Statements[0].Execution, "a refusal carries nothing to run")
+	})
+
+	t.Run("on 18 the substitute runs", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts(id)`
+		r := fkReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedForeignKeyBuilds(&r, 18))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 18))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	})
+}
+
 // A diff-derived drop of a partitioned table's index stays refused, because
 // PostgreSQL has no concurrent drop for it, and discloses the one drop there
 // is: the plain DROP INDEX as its step, with the blocking-index-drop

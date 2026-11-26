@@ -73,10 +73,21 @@ by the integration tests in `pkg/executor`:
 - A partitioned, foreign, or view referenced table, or a referenced table inside the tree
   (`partitioned-foreign-key-referenced-table`): the parent's statement would also clone the
   foreign key onto every referenced partition, which the build neither proves nor reads back.
-- Desired-state routing (`diff`, `migrate --desired`): a foreign key a desired file adds to a
-  partitioned table plans as the ordinary `NOT VALID` then `VALIDATE` sequence, which
-  PostgreSQL 14–17 refuse, so `diff` refuses it with `unsupported-partitioned-parent`, class
-  `environmental`, and `migrate --desired` refuses the plan.
+
+## Routing from a desired file
+
+A foreign key a desired file adds to a partitioned table plans as an `add-foreign-key` statement
+whose referenced table the diff qualifies with the target schema, as it does for every added
+foreign key, with the referenced columns the server prints. On PostgreSQL 14–17 the plan
+(`diffplan.Plan`, through `plan.RouteDesiredPartitionedForeignKeyBuilds`) gives that statement
+the execution `partitioned-foreign-key-build`, the same one `migrate --alter` plans, so `diff`,
+`migrate --desired --dry-run`, and the fingerprint show the build. `migrate --desired` runs the
+statement through `migrate.Run`'s routing below and ends in the same verdicts; its admission
+checks `migrate.Options.Connection` before any statement runs, as for a partitioned index build.
+A desired run has no admission between the plan and the run, so the plan routes only a foreign
+key the build's static admission takes; one it does not, such as an `ON DELETE` column list,
+keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, class
+`environmental`, before anything runs. On 18 nothing is routed.
 
 ## Routing from `migrate --alter`
 

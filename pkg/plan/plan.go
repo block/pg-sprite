@@ -329,10 +329,30 @@ func discloseBlockingIndexDrop(st *Statement) {
 // VALID, then VALIDATE) cannot run on a partitioned parent before version
 // 18. The partitions are not in the plan; the build lists them when it runs.
 // The imperative dry run calls it before RoutePartitionedParent, which
-// leaves the routed statements alone; the declarative plan does not route
-// foreign keys. A report on a table that is not partitioned must not pass
-// through here.
+// leaves the routed statements alone, and then runs the build's admission,
+// which refuses a shape the build does not carry. A report on a table that
+// is not partitioned must not pass through here.
 func RoutePartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
+	return routePartitionedForeignKeyBuilds(report, serverMajor, false)
+}
+
+// RouteDesiredPartitionedForeignKeyBuilds is RoutePartitionedForeignKeyBuilds
+// for a desired-state plan, which runs no admission of its own between the
+// plan and the run: it routes only a foreign key whose shape the build
+// admits (executor.AdmitPartitionedForeignKeyShape), so a plan that shows
+// the build is one the run executes as the build. A foreign key a desired
+// file adds is planned with a qualified referenced table and an explicit
+// referenced column list, which the build needs; one with a clause the build
+// cannot carry, such as an ON DELETE column list, keeps the planner's NOT
+// VALID then VALIDATE steps and meets RoutePartitionedParent's refusal.
+func RouteDesiredPartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
+	return routePartitionedForeignKeyBuilds(report, serverMajor, true)
+}
+
+// routePartitionedForeignKeyBuilds routes each executable statement
+// preflight.RoutesToPartitionedForeignKeyBuild accepts, and with
+// admittedShapeOnly only those the build's static admission accepts too.
+func routePartitionedForeignKeyBuilds(report *Report, serverMajor int, admittedShapeOnly bool) error {
 	for i := range report.Statements {
 		st := &report.Statements[i]
 		if st.Disposition != router.DispositionExecute {
@@ -342,9 +362,13 @@ func RoutePartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
 		if err != nil {
 			return err
 		}
-		if routes {
-			routeToPartitionedBuild(st, planner.ExecutionPartitionedForeignKeyBuild)
+		if !routes {
+			continue
 		}
+		if admittedShapeOnly && executor.AdmitPartitionedForeignKeyShape(st.SQL) != nil {
+			continue
+		}
+		routeToPartitionedBuild(st, planner.ExecutionPartitionedForeignKeyBuild)
 	}
 	return nil
 }
