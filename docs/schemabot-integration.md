@@ -1006,8 +1006,10 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   definition. A `SET NOT NULL` that runs as the online helper-constraint sequence carries
   `Validates` for its validation step and `DropsHelper` for the step that drops the helper: an
   adapter that runs the steps on their own runs that drop through
-  `executor.RunSequenceDropping` with `DropsHelper`. The statement stays
-  non-destructive, since the helper is the plan's own. Each re-reads the index, constraint,
+  `executor.RunSequenceDropping` with `DropsHelper`. `DropsHelper` is the helper as it stands
+  once validated, so a helper a failed validation left `NOT VALID` refuses the drop as
+  `dropped-object-drift`; fix the rows and resume at the validation step, after which the drop
+  matches. The statement stays non-destructive, since the helper is the plan's own. Each re-reads the index, constraint,
   column, or NOT NULL under the
   lock it runs with (the dropping session, for an index) and refuses with `adopted-index-drift`,
   `validated-constraint-drift`, `renamed-index-drift`, `dropped-object-drift`, or

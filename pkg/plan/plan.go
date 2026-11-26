@@ -126,12 +126,15 @@ type Statement struct {
 	// the object has changed since. Absent on every other statement.
 	Drops *schemadiff.DroppedObject `json:"drops,omitempty"`
 	// DropsHelper is the helper CHECK that a SET NOT NULL running as the
-	// online helper-constraint sequence adds and then drops in its last
+	// online helper-constraint sequence adds and then drops in a later
 	// step, with the definition the helper has once validated (see
 	// diffplan's recordNotNullScaffolds). A consumer that runs
 	// each step on its own checks the drop step against it, so the drop
 	// removes the plan's own helper rather than whatever took its name
-	// between the steps. The helper is not live structure a reviewer
+	// between the steps. It matches only a helper whose validation
+	// succeeded: a helper left NOT VALID by a failed validation is refused
+	// as drift, and the sequence resumes at its validation step once the
+	// rows are fixed. The helper is not live structure a reviewer
 	// reviews, so the statement stays non-destructive and the field stays
 	// out of the JSON and the fingerprint. Nil otherwise.
 	DropsHelper *schemadiff.DroppedObject `json:"-"`
