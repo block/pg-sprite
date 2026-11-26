@@ -102,7 +102,7 @@ func (e *SecondTableError) Unwrap() []error {
 
 // disallowedStatement returns the refusal for raw, a statement of the
 // desired file source that the front door does not admit.
-func disallowedStatement(source string, raw *pganalyze.RawStmt) error {
+func disallowedStatement(source *desiredSource, raw *pganalyze.RawStmt) error {
 	sql, kind, err := refusedStatement(source, raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDisallowedStatement, err)
@@ -116,12 +116,12 @@ func disallowedStatement(source string, raw *pganalyze.RawStmt) error {
 // statements apart: a RENAME VALUE whose old label is empty deparses as an
 // ADD VALUE. The text is the canonical one unless it classifies differently,
 // in which case it is the source text.
-func refusedStatement(source string, raw *pganalyze.RawStmt) (string, Kind, error) {
-	scan, err := pgquery.Scan(source)
+func refusedStatement(source *desiredSource, raw *pganalyze.RawStmt) (string, Kind, error) {
+	at, err := source.locate(raw)
 	if err != nil {
-		return "", KindOther, fmt.Errorf("scan desired file: %w", err)
+		return "", KindOther, err
 	}
-	verbatim := locate(source, scan.GetTokens(), raw).SQL
+	verbatim := at.SQL
 	written, err := ParseOne(verbatim)
 	if err != nil {
 		return "", KindOther, fmt.Errorf("classify %s: %w", verbatim, err)
@@ -224,13 +224,13 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 	if err != nil {
 		return DesiredSchema{}, parseFailure(sql, err)
 	}
-	return parseDesiredTree(sql, tree)
+	return parseDesiredTree(newDesiredSource(sql), fileStatements(tree))
 }
 
-// parseDesiredTree applies ParseDesired's admission rules to tree, the parse
-// of source.
-func parseDesiredTree(source string, tree *pganalyze.ParseResult) (DesiredSchema, error) {
-	if len(tree.GetStmts()) == 0 {
+// parseDesiredTree applies ParseDesired's admission rules to stmts, statements
+// of source, and names each refusal at the statement's place in source.
+func parseDesiredTree(source *desiredSource, stmts []fileStatement) (DesiredSchema, error) {
+	if len(stmts) == 0 {
 		return DesiredSchema{}, ErrEmptyDesired
 	}
 	var ds DesiredSchema
@@ -240,7 +240,8 @@ func parseDesiredTree(source string, tree *pganalyze.ParseResult) (DesiredSchema
 	// index on another table is refused where it stands once the file's
 	// table is known: an index may precede its table.
 	var indexes []admittedIndex
-	for i, raw := range tree.GetStmts() {
+	for _, stmt := range stmts {
+		i, raw := stmt.index, stmt.raw
 		st, err := admitDesiredStatement(source, raw, ds.table, partition)
 		if err != nil {
 			if err := refused.refuse(i, raw, err); err != nil {
@@ -320,7 +321,7 @@ func executionOrder(statements []Statement) []Statement {
 // statement of source, and returns its kind and target. seenTable is the CREATE TABLE
 // target admitted so far, empty when none, and seenPartition reports
 // whether that CREATE TABLE is a partition.
-func admitDesiredStatement(source string, raw *pganalyze.RawStmt, seenTable string, seenPartition bool) (Statement, error) {
+func admitDesiredStatement(source *desiredSource, raw *pganalyze.RawStmt, seenTable string, seenPartition bool) (Statement, error) {
 	node := raw.GetStmt()
 	switch {
 	case node.GetCreateStmt() != nil:

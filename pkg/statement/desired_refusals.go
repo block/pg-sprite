@@ -58,31 +58,68 @@ func (e *RefusedStatementsError) Unwrap() []error {
 	return errs
 }
 
+// desiredSource is a desired file's text and its lexer tokens. The text is
+// scanned at most once, and only when a refusal needs to locate a statement,
+// since a file with nothing refused never does. Every refusal of the file
+// shares the one scan, however many statements it refuses.
+type desiredSource struct {
+	text    string
+	tokens  []*pganalyze.ScanToken
+	scanned bool
+}
+
+func newDesiredSource(text string) *desiredSource {
+	return &desiredSource{text: text}
+}
+
+// locate returns raw's verbatim text and where it starts in the file.
+func (s *desiredSource) locate(raw *pganalyze.RawStmt) (SourceStatement, error) {
+	if !s.scanned {
+		scan, err := pgquery.Scan(s.text)
+		if err != nil {
+			return SourceStatement{}, fmt.Errorf("scan desired file: %w", err)
+		}
+		s.tokens, s.scanned = scan.GetTokens(), true
+	}
+	return locate(s.text, s.tokens, raw), nil
+}
+
+// fileStatement is one statement of a desired file with its 0-based position
+// among the file's statements, so a front door that admits only some of a
+// file's statements still names each refusal where the file has it.
+type fileStatement struct {
+	index int
+	raw   *pganalyze.RawStmt
+}
+
+// fileStatements returns every statement of tree, the parse of a desired
+// file, at its position in the file.
+func fileStatements(tree *pganalyze.ParseResult) []fileStatement {
+	stmts := make([]fileStatement, len(tree.GetStmts()))
+	for i, raw := range tree.GetStmts() {
+		stmts[i] = fileStatement{index: i, raw: raw}
+	}
+	return stmts
+}
+
 // refusalCollector gathers the refusals of one desired file's statements,
-// locating each in the file's source. The source is scanned once, on the
-// first refusal, since a file with nothing refused never needs it.
+// locating each in the file's source.
 type refusalCollector struct {
-	source   string
-	tokens   []*pganalyze.ScanToken
-	scanned  bool
+	source   *desiredSource
 	refusals []Refusal
 }
 
-func newRefusalCollector(source string) *refusalCollector {
+func newRefusalCollector(source *desiredSource) *refusalCollector {
 	return &refusalCollector{source: source}
 }
 
 // refuse records why the statement at index (0-based) of the file, raw, is
 // refused. It fails only when the source cannot be scanned to locate it.
 func (c *refusalCollector) refuse(index int, raw *pganalyze.RawStmt, cause error) error {
-	if !c.scanned {
-		scan, err := pgquery.Scan(c.source)
-		if err != nil {
-			return fmt.Errorf("statement %d: scan desired file to locate a refused statement: %w", index+1, err)
-		}
-		c.tokens, c.scanned = scan.GetTokens(), true
+	at, err := c.source.locate(raw)
+	if err != nil {
+		return fmt.Errorf("statement %d: locate a refused statement: %w", index+1, err)
 	}
-	at := locate(c.source, c.tokens, raw)
 	c.refusals = append(c.refusals, Refusal{
 		Statement: index + 1,
 		Line:      at.Line,

@@ -52,21 +52,22 @@ func ParseDesiredFile(sql string) (DesiredFile, error) {
 	if err != nil {
 		return DesiredFile{}, parseFailure(sql, err)
 	}
+	source := newDesiredSource(sql)
 	if declaresEnumType(tree) {
-		enumType, err := parseDesiredEnumTree(sql, tree)
+		enumType, err := parseDesiredEnumTree(source, tree)
 		if err != nil {
 			return DesiredFile{}, err
 		}
 		return DesiredFile{door: doorEnumType, enumType: enumType}, nil
 	}
 	if hasRowSecurity(tree) {
-		rowSecurity, err := parseDesiredWithRowSecurityTree(sql, tree)
+		rowSecurity, err := parseDesiredWithRowSecurityTree(source, tree)
 		if err != nil {
 			return DesiredFile{}, err
 		}
 		return DesiredFile{door: doorRowSecurity, rowSecurity: rowSecurity}, nil
 	}
-	schema, err := parseDesiredTree(sql, tree)
+	schema, err := parseDesiredTree(source, fileStatements(tree))
 	if err != nil {
 		return DesiredFile{}, err
 	}

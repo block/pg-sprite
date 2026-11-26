@@ -128,3 +128,23 @@ CREATE TYPE order_status_old AS ENUM ('placed');
 		assert.ErrorIs(t, refusal, ErrEnumTypeAlone)
 	}
 }
+
+// A row-security file's table and indexes are admitted apart from its row
+// security, yet a refusal of one of them still names its own statement and
+// line in the file, not its place among the table's statements.
+func TestParseDesiredFileRowSecurityRefusalNamesItsPlaceInTheFile(t *testing.T) {
+	sql := `CREATE TABLE accounts (id bigint PRIMARY KEY, owner text NOT NULL);
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+CREATE INDEX orders_owner ON orders (owner);
+`
+	_, err := ParseDesiredFile(sql)
+	require.Error(t, err)
+	refused, ok := errors.AsType[*RefusedStatementsError](err)
+	require.True(t, ok, "%v", err)
+	require.Len(t, refused.Refusals, 1)
+	got := refused.Refusals[0]
+	assert.Equal(t, 3, got.Statement)
+	assert.Equal(t, 3, got.Line)
+	assert.Equal(t, 1, got.Column)
+	assert.ErrorIs(t, got, ErrWrongIndexTarget)
+}

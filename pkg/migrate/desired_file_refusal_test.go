@@ -88,6 +88,25 @@ func TestDesiredFileRefusalOfSeveralStatementsDescribesOne(t *testing.T) {
 	assert.Equal(t, "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed", v.Detail)
 }
 
+// When a second table precedes a partition, the verdict still describes the
+// partition: its class decides the file's verdict, so its statement and
+// detail do too, not the earlier table's.
+func TestDesiredFileRefusalDescribesThePartitionAfterASecondTable(t *testing.T) {
+	_, err := statement.ParseDesiredFile("CREATE TABLE a (id int);\n" +
+		"CREATE TABLE b (id int);\n" +
+		"CREATE TABLE p PARTITION OF a DEFAULT;\n")
+	require.Error(t, err)
+	refused, ok := errors.AsType[*statement.RefusedStatementsError](err)
+	require.True(t, ok, "%v", err)
+	require.Len(t, refused.Refusals, 2, "the second table and the partition are both reported")
+
+	v, ok := DesiredFileRefusal(err, "unused")
+	require.True(t, ok)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+	assert.Equal(t, "CREATE TABLE p PARTITION OF a DEFAULT", v.Statement)
+	assert.Equal(t, "a desired file holds exactly one CREATE TABLE, and the declarative model does not plan partitions; nothing was planned or executed", v.Detail)
+}
+
 // A planner refusal of the desired table carries no statement of its own, so
 // the verdict names the statement the caller passes.
 func TestDesiredFileRefusalNamesTheCallersStatementForAPlannerRefusal(t *testing.T) {

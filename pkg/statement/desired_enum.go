@@ -82,7 +82,7 @@ func declaresEnumType(tree *pganalyze.ParseResult) bool {
 // parseDesiredEnumTree admits tree, the parse of a source file that
 // declares an enum type: the file's only statement is one unqualified
 // CREATE TYPE ... AS ENUM with distinct, non-empty labels.
-func parseDesiredEnumTree(source string, tree *pganalyze.ParseResult) (DesiredEnumType, error) {
+func parseDesiredEnumTree(source *desiredSource, tree *pganalyze.ParseResult) (DesiredEnumType, error) {
 	var desired DesiredEnumType
 	refused := newRefusalCollector(source)
 	declared := false
@@ -128,7 +128,7 @@ func parseDesiredEnumTree(source string, tree *pganalyze.ParseResult) (DesiredEn
 
 // enumTypeAloneRefusal returns the refusal for raw, a statement of an enum
 // type file other than its one CREATE TYPE ... AS ENUM.
-func enumTypeAloneRefusal(source string, raw *pganalyze.RawStmt) error {
+func enumTypeAloneRefusal(source *desiredSource, raw *pganalyze.RawStmt) error {
 	sql, _, err := refusedStatement(source, raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrEnumTypeAlone, err)

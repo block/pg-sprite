@@ -326,6 +326,7 @@ func desiredStatementRefusal(kind statement.Kind) (verdict.Refusal, bool) {
 // for every other error, including a syntax error, which is an input error
 // and not a refusal.
 func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
+	err = decisiveDesiredRefusal(err)
 	ref, ok := desiredFileRefusal(err)
 	if !ok {
 		ref, ok = desiredPlanRefusal(err)
@@ -353,6 +354,44 @@ func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 		}
 	}
 	return verdict.Verdict{Statement: sql, Detail: detail}.WithRefusal(ref), true
+}
+
+// decisiveDesiredRefusal returns the one refusal a desired file's verdict
+// describes when the file refuses several statements, so the verdict's class,
+// statement, and detail all come from the same statement: the first
+// partition, else the first breach of the one-table or one-type rule, else the
+// first statement the file may not hold, else the first refusal. Any other
+// error is returned unchanged.
+func decisiveDesiredRefusal(err error) error {
+	refused, ok := errors.AsType[*statement.RefusedStatementsError](err)
+	if !ok || len(refused.Refusals) == 0 {
+		return err
+	}
+	decisive := refused.Refusals[0]
+	for _, refusal := range refused.Refusals[1:] {
+		if desiredRefusalRank(refusal) < desiredRefusalRank(decisive) {
+			decisive = refusal
+		}
+	}
+	return decisive
+}
+
+// desiredRefusalRank orders one statement's refusal by how much of the file's
+// verdict it decides, lowest first, in the order desiredFileRefusal tests
+// the sentinels.
+func desiredRefusalRank(refusal statement.Refusal) int {
+	switch {
+	case errors.Is(refusal, statement.ErrDesiredPartitions):
+		return 0
+	case errors.Is(refusal, statement.ErrMultipleCreateTables),
+		errors.Is(refusal, statement.ErrEnumTypeAlone),
+		errors.Is(refusal, statement.ErrEnumLabel):
+		return 1
+	case errors.Is(refusal, statement.ErrDisallowedStatement):
+		return 2
+	default:
+		return 3
+	}
 }
 
 // createAdmissionSentinels is the closed set of the create path's static
