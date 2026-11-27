@@ -215,7 +215,7 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**67 operations: 29 supported today (2 of them in preview), 17 planned behind a typed refusal,
+**68 operations: 30 supported today (2 of them in preview), 17 planned behind a typed refusal,
 16 out of scope by design, and 5 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
