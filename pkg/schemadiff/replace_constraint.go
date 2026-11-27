@@ -40,7 +40,7 @@ const replacementIndexSuffix = "_new"
 // keys there. So does a table whose diff drops or retypes a column: a
 // dropped column takes the constraints that read it with it, and a retype
 // re-checks the constraints that are still in place.
-func replacedInPlace(partitioned, dropsOrRetypesColumn bool, liveCons map[string]Constraint, desired Model, desiredIdx map[string]Index) (map[string]struct{}, error) {
+func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]struct{}, error) {
 	replaced := make(map[string]struct{})
 	if partitioned || dropsOrRetypesColumn {
 		return replaced, nil
@@ -65,10 +65,28 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn bool, liveCons map[string
 				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the live table already names; rename that constraint",
 					ErrUnsupportedChange, con.Name, name)
 			}
+			if ix, taken := liveIdx[name]; taken {
+				return nil, replacementIndexTaken(schema, con.Name, ix)
+			}
 		}
 		replaced[con.Name] = struct{}{}
 	}
 	return replaced, nil
+}
+
+// replacementIndexTaken refuses a replacement whose temporary index name a
+// live index already holds. An invalid one is most likely an earlier
+// attempt's own build, which a failed build leaves behind; the refusal names
+// the statement that clears it, since no plan can tell an abandoned build from
+// one still running. A valid one is the table's own index, which the
+// replacement must not drop and reuse the name of.
+func replacementIndexTaken(schema, constraint string, ix Index) error {
+	if ix.Invalid {
+		return unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, and an unfinished build of that index is on the table, likely left by an earlier attempt; once pg_stat_progress_create_index shows no backend building it, run DROP INDEX CONCURRENTLY %s and plan again",
+			ErrUnsupportedChange, constraint, ix.Name, pgx.Identifier{schema, ix.Name}.Sanitize())
+	}
+	return unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which a live index on the table already names; rename that index",
+		ErrUnsupportedChange, constraint, ix.Name)
 }
 
 // isKey reports a primary key or unique constraint: one that owns an index.

@@ -147,6 +147,11 @@ func TestDiffRefusesAReplacementIndexNameInUse(t *testing.T) {
 			live.Constraints = append(live.Constraints, con)
 			desired.Constraints = append(desired.Constraints, con)
 		},
+		"a live index the desired table does not declare": func(live, _ *Model) {
+			live.Indexes = append(live.Indexes, Index{
+				Name: "events_email_key_new", Def: "CREATE INDEX events_email_key_new ON public.events USING btree (email)",
+			})
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -224,4 +229,26 @@ func TestReplacementIndexName(t *testing.T) {
 	cut := replacementIndexName(multibyte)
 	assert.LessOrEqual(t, len(cut), maxIdentifierBytes)
 	assert.True(t, utf8.ValidString(cut), "the cut never splits a character")
+}
+
+// An earlier attempt whose new index failed to build leaves that build
+// invalid under the temporary name. The next plan refuses rather than build
+// into the name, and names the statement that clears the leftover.
+func TestDiffRefusesAnEarlierAttemptsUnfinishedReplacementIndex(t *testing.T) {
+	live, desired := keyed(), keyed()
+	desired.Constraints[1] = Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email, name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
+	}
+	live.Indexes = append(live.Indexes, Index{
+		Name:    "events_email_key_new",
+		Def:     "CREATE UNIQUE INDEX events_email_key_new ON public.events USING btree (email, name)",
+		Invalid: true,
+	})
+	_, err := Diff("public", live, desired)
+	var refusal *UnsupportedChangeError
+	require.True(t, errors.As(err, &refusal), "%v", err)
+	assert.Equal(t, CauseReplacementIndexName, refusal.Cause)
+	assert.Contains(t, err.Error(), `DROP INDEX CONCURRENTLY "public"."events_email_key_new"`)
+	assert.Contains(t, err.Error(), "pg_stat_progress_create_index", "the reader checks no build is running before the drop")
 }
