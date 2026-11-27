@@ -142,6 +142,12 @@ type Statement struct {
 	// Explanatory: the fingerprint covers the statements that build and
 	// rename the replacement.
 	ReplacedBy string `json:"replaced_by,omitempty"`
+	// Replacement is the index ReplacedBy names and the definition it must
+	// still have when the drop runs (see schemadiff.Change.Replacement). Set
+	// with ReplacedBy. Out of the JSON report for the same reason as
+	// Adopts, and out of the fingerprint, which covers the statement that
+	// builds the replacement.
+	Replacement *schemadiff.IndexReplacement `json:"-"`
 	// DropsHelper is the helper CHECK that a SET NOT NULL running as the
 	// online helper-constraint sequence adds and then drops in a later
 	// step, with the definition the helper has once validated (see

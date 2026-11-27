@@ -206,11 +206,11 @@ func sameIndexUnderName(built, want Index) (bool, error) {
 // taken is left out.
 func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 	var changes []Change
+	def, err := statement.RenameIndex(r.want.Def, r.temp)
+	if err != nil {
+		return nil, fmt.Errorf("name the replacement of index %s: %w", r.want.Name, err)
+	}
 	if r.build {
-		def, err := statement.RenameIndex(r.want.Def, r.temp)
-		if err != nil {
-			return nil, fmt.Errorf("name the replacement of index %s: %w", r.want.Name, err)
-		}
 		create, err := statement.Qualify(def, schema)
 		if err != nil {
 			return nil, fmt.Errorf("qualify the replacement of index %s: %w", r.want.Name, err)
@@ -224,6 +224,7 @@ func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 			Destructive: true,
 			Drops:       &DroppedObject{Kind: DroppedIndex, Name: r.live.Name, Definition: r.live.Def},
 			ReplacedBy:  r.temp,
+			Replacement: &IndexReplacement{Index: r.temp, Def: def},
 		})
 	}
 	changes = append(changes, Change{

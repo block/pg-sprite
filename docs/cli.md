@@ -534,7 +534,10 @@ refused (plan-fingerprint-mismatch)
   name, is a different plan and the run refuses with `plan-fingerprint-mismatch`.
 - An index drop never blocks the table. Immediately before each drop, the run
   reads the live object again and refuses, dropping nothing, if it no longer
-  matches the plan (`dropped-index-drift`, `dropped-object-drift`); see
+  matches the plan (`dropped-index-drift`, `dropped-object-drift`). The drop
+  of a changed index's old definition also reads the index built to replace
+  it and refuses if it is gone, invalid, or rebuilt with another definition
+  (`replacement-index-drift`); see
   [execution-model.md](execution-model.md) for these codes and for
   `dropped-index-replaced`.
 - A `--allow-destructive` table that is not the resolved table is a usage

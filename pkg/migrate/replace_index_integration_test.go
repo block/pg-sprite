@@ -2,12 +2,15 @@ package migrate_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -193,4 +196,87 @@ func TestRunDesiredRefusesDroppingAUniqueIndexAForeignKeyReferences(t *testing.T
 			assert.NotContains(t, liveIndexes(t, pool, schema), "t_name_key_new", "nothing is built")
 		})
 	}
+}
+
+// A plan stored between its build and its drop, such as an apply that was
+// stopped there, finds the old index's replacement as the plan built it
+// before the old index goes. A replacement that was dropped, rebuilt with
+// another definition, or left invalid in the meantime refuses the drop with
+// replacement-index-drift, and the old index keeps enforcing its rule. The
+// replacement as planned lets the drop run.
+func TestReplacedIndexDropRefusesAReplacementThatChanged(t *testing.T) {
+	pool, schema := replaceIndexTable(t)
+	desired := replaceIndexDesired("CREATE UNIQUE INDEX t_email_lower_key ON t (lower(email)) WHERE deleted_at IS NULL AND qty > 0")
+	reviewed := plannedDrop(t, pool, schema, desired)
+	require.Len(t, reviewed.Statements, 3)
+	build, drop := reviewed.Statements[0], reviewed.Statements[1]
+	require.NotNil(t, drop.Replacement)
+	require.NotNil(t, drop.Drops)
+	assert.Equal(t, "t_email_lower_key_new", drop.Replacement.Index)
+	budget := executor.ConcurrentBudget{Overall: time.Minute}
+	dropOld := func(t *testing.T) error {
+		t.Helper()
+		_, err := executor.ExecuteReplacedIndexDropConcurrently(t.Context(), pool, schema, "t", "t_email_lower_key", drop.Drops.Definition, *drop.Replacement, budget)
+		return err
+	}
+	exec := func(t *testing.T, sql string) {
+		t.Helper()
+		_, err := pool.Exec(t.Context(), sql)
+		require.NoError(t, err)
+	}
+	requireOldIndexKept := func(t *testing.T, err error) {
+		t.Helper()
+		require.ErrorIs(t, err, executor.ErrReplacementIndexDrift)
+		assert.Equal(t, executor.CodeReplacementIndexDrift, executor.OutcomeCode(err))
+		def, valid := indexState(t, pool, schema, "t_email_lower_key")
+		assert.Contains(t, def, "WHERE (deleted_at IS NULL)", "the old index is untouched")
+		assert.True(t, valid)
+	}
+	temp := fmt.Sprintf("%s.t_email_lower_key_new", schema)
+
+	requireOldIndexKept(t, dropOld(t))
+
+	exec(t, fmt.Sprintf(`CREATE UNIQUE INDEX t_email_lower_key_new ON %s.t (lower(email)) WHERE deleted_at IS NULL`, schema))
+	err := dropOld(t)
+	requireOldIndexKept(t, err)
+	assert.Contains(t, err.Error(), "not the", "the refusal names the definition it found")
+
+	exec(t, "DROP INDEX "+temp)
+	leaveInvalidBuild(t, pool, schema, build.SQL)
+	requireOldIndexKept(t, dropOld(t))
+
+	exec(t, "DROP INDEX "+temp)
+	exec(t, build.SQL)
+	require.NoError(t, dropOld(t))
+	assert.NotContains(t, liveIndexes(t, pool, schema), "t_email_lower_key")
+	assert.Contains(t, liveIndexes(t, pool, schema), "t_email_lower_key_new")
+}
+
+// leaveInvalidBuild leaves the index build sql creates on schema.t invalid,
+// the way an interrupted CREATE INDEX CONCURRENTLY does: an open transaction
+// that wrote to the table holds the build in its wait for writers, and the
+// build's statement timeout cancels it after its catalog entry committed. It
+// writes no catalog row, which a managed server's role cannot.
+func leaveInvalidBuild(t *testing.T, pool *pgxpool.Pool, schema, sql string) {
+	t.Helper()
+	writer, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, writer.Rollback(t.Context())) }()
+	_, err = writer.Exec(t.Context(), fmt.Sprintf(`UPDATE %s.t SET qty = qty WHERE id = 1`, schema))
+	require.NoError(t, err)
+
+	conn, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer conn.Release()
+	_, err = conn.Exec(t.Context(), `SET statement_timeout = '500ms'`)
+	require.NoError(t, err)
+	defer func() {
+		_, err := conn.Exec(t.Context(), `RESET statement_timeout`)
+		require.NoError(t, err)
+	}()
+	_, err = conn.Exec(t.Context(), strings.Replace(sql, "CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX CONCURRENTLY ", 1))
+	require.Error(t, err, "the build waits on the open writer until its timeout")
+	def, valid := indexState(t, pool, schema, "t_email_lower_key_new")
+	require.NotEmpty(t, def, "the cancelled build leaves its catalog entry")
+	require.False(t, valid)
 }
