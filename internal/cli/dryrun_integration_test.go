@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -676,21 +675,12 @@ func TestMigrateSetTablespaceOnAPartitionedParentMovesNoPartition(t *testing.T) 
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
-	tablespace := schema + "_ts"
+	tablespace := testutil.NewTablespace(t, pool, schema)
 	exec := func(sql string) {
 		t.Helper()
 		_, err := pool.Exec(t.Context(), sql)
 		require.NoError(t, err, sql)
 	}
-	exec(`COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/` + tablespace + `'`)
-	exec(`CREATE TABLESPACE ` + tablespace + ` LOCATION '/tmp/` + tablespace + `'`)
-	t.Cleanup(func() {
-		ctx := context.WithoutCancel(t.Context())
-		_, err := pool.Exec(ctx, `DROP SCHEMA `+pgx.Identifier{schema}.Sanitize()+` CASCADE`)
-		assert.NoError(t, err)
-		_, err = pool.Exec(ctx, `DROP TABLESPACE `+tablespace)
-		assert.NoError(t, err)
-	})
 	exec(fmt.Sprintf(`
 		CREATE TABLE %[1]s.events (
 			id bigint,
