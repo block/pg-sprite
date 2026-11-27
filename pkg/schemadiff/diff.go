@@ -526,11 +526,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if err != nil {
 				return nil, err
 			}
-			if con.ForeignKey {
-				foreignKeys = append(foreignKeys, replacement...)
-			} else {
-				changes = append(changes, replacement...)
-			}
+			changes = append(changes, replacement...)
 			continue
 		}
 		if ok && validatesInPlace(had, con) {

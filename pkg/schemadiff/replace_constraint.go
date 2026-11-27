@@ -39,8 +39,7 @@ const replacementIndexSuffix = "_new"
 
 // replacedInPlace names the constraints of a table diff that are replaced
 // in place, keyed by constraint name. A partitioned parent keeps the drop
-// and re-add, since the server refuses USING INDEX and NOT VALID foreign
-// keys there. So does a table whose diff drops or retypes a column: a
+// and re-add, since the server refuses USING INDEX there. So does a table whose diff drops or retypes a column: a
 // dropped column takes the constraints that read it with it, and a retype
 // re-checks the constraints that are still in place. A primary key keeps
 // them too on a table whose diff drops a NOT NULL: the key owns its columns'
@@ -153,7 +152,7 @@ func replaceInPlaceChanges(table, schema string, had, con Constraint) ([]Change,
 	if isKey(con) {
 		return replaceKeyChanges(table, schema, had, con)
 	}
-	return replaceRuleChanges(table, schema, had, con)
+	return replaceRuleChanges(table, had, con), nil
 }
 
 // dropsOrRetypesColumn reports whether the diff drops a live column or
@@ -194,25 +193,15 @@ func replaceKeyChanges(table, schema string, had, con Constraint) ([]Change, err
 
 // replaceRuleChanges drops had and adds con NOT VALID in one statement, then
 // validates con on its own.
-func replaceRuleChanges(table, schema string, had, con Constraint) ([]Change, error) {
+func replaceRuleChanges(table string, had, con Constraint) []Change {
 	name := pgx.Identifier{con.Name}.Sanitize()
 	sql := "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{had.Name}.Sanitize() +
 		", ADD CONSTRAINT " + name + " " + con.Def + notValidSuffix
-	var references *ForeignKeyReference
-	if con.ForeignKey {
-		qualified, err := statement.QualifyForeignKeyReferences(sql, schema)
-		if err != nil {
-			return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
-		}
-		sql = qualified
-		references = con.References
-	}
 	return []Change{
 		{
 			SQL:         sql,
 			Kind:        addConstraintKind(con),
 			Destructive: true,
-			References:  references,
 			Drops:       &DroppedObject{Kind: DroppedConstraint, Name: had.Name, Definition: had.Def},
 		},
 		{
@@ -220,5 +209,5 @@ func replaceRuleChanges(table, schema string, had, con Constraint) ([]Change, er
 			Kind:      validateConstraintKind(con),
 			Validates: addedNotValid(con),
 		},
-	}, nil
+	}
 }
