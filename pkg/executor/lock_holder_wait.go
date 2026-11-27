@@ -147,10 +147,10 @@ func trackerHolderWaitReport(tracker *progress.Tracker) func(*progress.LockHolde
 
 // waitOutsideLockQueue returns once no transaction has held a conflicting
 // lock on any of the tables, or on a descendant the step also locks, across
-// two reads lockHolderSampleGap apart, or once one has for limit. Either way
-// the caller then requests its lock as it would without the wait, under its
-// own lock budget, so the wait can delay a step but never fails one. A zero
-// limit, or no tables, returns at once.
+// two reads lockHolderSampleGap apart, or once one has for limit, and says
+// which: the outcome is exhausted when a holder was still there at the limit,
+// and awaitLockQueue turns that into the step's failure. A zero limit, or no
+// tables, returns at once.
 //
 // While a holder lingers, report receives the holder that has held its lock
 // longest and the time waited; it receives nil when the wait ends.
@@ -268,6 +268,45 @@ func waitOutsideLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lock
 		reported = true
 	}
 	return holderWaitOutcome{waited: clock.now().Sub(start)}, nil
+}
+
+// LingeringHolderError reports that a transaction kept a lock that reads or
+// writes take on a table the step locks for the whole of
+// RetryPolicy.HolderWait, so the step ended without requesting its lock: an
+// attempt queued behind that transaction would hold every later reader and
+// writer of the table behind itself for its lock budget, and a transaction
+// that outlasts the wait is not one the lock budget is there to absorb. The
+// step did not take effect. Once the holder finishes, or is ended, the step
+// runs again unchanged.
+type LingeringHolderError struct {
+	// PID is the backend of the transaction that had held its lock longest.
+	PID uint32
+	// Table is the schema-qualified table it holds the lock on.
+	Table string
+	// Held is how long the wait saw it holding the lock.
+	Held time.Duration
+}
+
+// Error implements the error interface.
+func (e *LingeringHolderError) Error() string {
+	return fmt.Sprintf("backend %d held a lock on %s for %s, the whole wait, so the step did not request its lock and no reader or writer queued behind it",
+		e.PID, e.Table, e.Held.Round(time.Second))
+}
+
+// awaitLockQueue waits outside the lock queue (waitOutsideLockQueue) and
+// returns a *LingeringHolderError when the wait ran out with a holder still
+// holding its lock. A wait that ran out on its catalog reads, with no holder
+// seen, returns nil: nothing is known to be in the way, so the step requests
+// its lock under its lock budget.
+func awaitLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lockedTable, limit time.Duration, clock holderWaitClock, report func(*progress.LockHolderWait)) error {
+	outcome, err := waitOutsideLockQueue(ctx, pool, tables, limit, clock, report)
+	if err != nil {
+		return err
+	}
+	if !outcome.exhausted || outcome.holder.pid == 0 {
+		return nil
+	}
+	return &LingeringHolderError{PID: uint32(outcome.holder.pid), Table: outcome.holder.table, Held: outcome.waited - outcome.holder.since}
 }
 
 // oldestHolder returns the holder first seen earliest.

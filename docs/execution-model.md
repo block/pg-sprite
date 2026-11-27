@@ -73,9 +73,13 @@ autocommit-each-step has two shapes in the executor:
   locks for a while. A step that queued behind one would hold every later
   query of the table behind itself, so it waits outside the lock queue
   instead, for up to 30 s (`RetryPolicy.HolderWait`), and reports the
-  holder in progress as `lock_holder_wait`. Then it requests its lock as
-  usual, whether or not the holder has finished, so the wait can delay a
-  step but never fails one. It never ends another session. A step that
+  holder in progress as `lock_holder_wait`. Once the holder finishes, it
+  requests its lock as usual. A holder still there when the wait runs out
+  is not traffic a lock budget absorbs, so the step ends before it requests
+  its lock, with an `executor.LingeringHolderError` naming the holder's
+  backend and table, and no reader or writer queues behind it. The step
+  runs again unchanged once that transaction ends. It never ends another
+  session. A step that
   takes only `SHARE UPDATE EXCLUSIVE` conflicts with no reader or writer,
   so it does not wait.
 - **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is

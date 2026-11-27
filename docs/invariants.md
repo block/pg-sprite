@@ -836,10 +836,12 @@ statement runs again, so the bound costs a rerun rather than an unrecoverable st
 native and copy-and-swap executors; before a native step, a create step that adds a foreign key, or a table drop
 first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
 lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
-`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, and then
-requests its lock under its lock budget either way, so the wait adds at most `HolderWait` to the bound and never
-fails a step (`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
-`TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, then
+requests its lock under its lock budget once the holder is gone, and ends without requesting it, with
+`executor.LingeringHolderError`, when the holder is still there, so the wait adds at most `HolderWait` to the bound
+and never queues a step behind a holder it outlasted (`pkg/executor/lock_holder_wait.go`;
+`TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
+`TestExecuteNativeEndsWithoutQueueingWhenAReaderOutlastsTheWait`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then

@@ -2,6 +2,7 @@ package executor_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -152,25 +153,33 @@ func TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable(t *testi
 	assert.Nil(t, snap.Detail.LockHolderWait, "the wait leaves progress once it ends")
 }
 
-// A reader that keeps its transaction open past the whole wait does not fail
-// the step: the step then requests its lock as it would without the wait, and
-// the lock budget decides, here with today's lock-budget error since the
-// reader is still there. The table is unchanged.
-func TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut(t *testing.T) {
+// A reader that keeps its transaction open past the whole wait ends the step
+// before it requests its lock, so no reader or writer queues behind it: the
+// error names the reader's backend and the table, the step returns without
+// spending a lock budget, a write right after it is not held up, and the
+// table is unchanged.
+func TestExecuteNativeEndsWithoutQueueingWhenAReaderOutlastsTheWait(t *testing.T) {
 	pool, schema := newPool(t)
 	createCounterTable(t, pool, schema)
 	pt := mustPreflight(t, pool, schema, "t")
-	openReader(t, pool, schema)
+	_, readerPID := openReader(t, pool, schema)
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN coupon_code text", schema))
-	retry := executor.RetryPolicy{MaxAttempts: 1, HolderWait: time.Second}
+	retry := executor.RetryPolicy{MaxAttempts: 3, InitialBackoff: 100 * time.Millisecond, MaxBackoff: time.Second, HolderWait: time.Second}
 	began := time.Now()
 	err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, retry)
+	elapsed := time.Since(began)
 
-	var budgetErr *executor.BudgetError
-	require.ErrorAs(t, err, &budgetErr)
-	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
-	assert.GreaterOrEqual(t, time.Since(began), retry.HolderWait+budget.LockTimeout, "the step waited, then spent its lock budget")
+	var holderErr *executor.LingeringHolderError
+	require.ErrorAs(t, err, &holderErr)
+	assert.Equal(t, uint32(readerPID), holderErr.PID)
+	assert.Equal(t, schema+".t", holderErr.Table)
+	assert.GreaterOrEqual(t, holderErr.Held, retry.HolderWait-time.Second/2, "the reader held the table for the whole wait")
+	assert.Contains(t, err.Error(), fmt.Sprintf("backend %d held a lock on %s.t", readerPID, schema))
+	assert.False(t, errors.As(err, new(*executor.BudgetError)), "no attempt ran, so no lock budget was spent")
+	assert.GreaterOrEqual(t, elapsed, retry.HolderWait, "the step waited out the whole wait")
+	assert.Less(t, elapsed, retry.HolderWait+budget.LockTimeout, "the step never requested its lock")
+	require.NoError(t, writeUnderTightLockBudget(t, pool, schema), "nothing is queued ahead of a writer")
 	assert.False(t, hasColumn(t, pool, schema, "coupon_code"))
 }
 
