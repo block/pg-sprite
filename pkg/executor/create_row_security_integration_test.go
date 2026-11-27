@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"testing"
 	"time"
 
@@ -487,7 +488,11 @@ func TestExecuteReviewedCreateWithRowSecurityRunsTheReviewedStatements(t *testin
 }
 
 // Any difference from the reviewed sequence, a missing statement, a
-// reordered pair, or an extra one, refuses before the table is created.
+// reordered pair, an extra one, or a statement whose text differs while the
+// count stays the same, refuses before the table is created. No
+// normalization makes two different statements equal, so a policy reviewed
+// for one role and run for every role, or one that differs only in
+// whitespace, refuses.
 func TestExecuteReviewedCreateWithRowSecurityRefusesADifferentSequence(t *testing.T) {
 	f := newCreateFixture(t, "notes")
 	d := desiredRowSecurity(t, notesWithRowSecurity)
@@ -497,11 +502,20 @@ func TestExecuteReviewedCreateWithRowSecurityRefusesADifferentSequence(t *testin
 
 	swapped := append([]string{}, preview.Statements...)
 	swapped[3], swapped[4] = swapped[4], swapped[3]
+	policy := preview.Statements[4]
+	require.Contains(t, policy, "CREATE POLICY")
+	require.Contains(t, policy, " TO ")
+	narrowed := append([]string{}, preview.Statements...)
+	narrowed[4] = strings.Replace(policy, " TO ", " TO pg_monitor, ", 1)
+	spaced := append([]string{}, preview.Statements...)
+	spaced[4] = policy + " "
 	for name, reviewed := range map[string][]string{
-		"missing":   preview.Statements[:4],
-		"reordered": swapped,
-		"extra":     append(append([]string{}, preview.Statements...), preview.Statements[4]),
-		"empty":     nil,
+		"missing":    preview.Statements[:4],
+		"reordered":  swapped,
+		"extra":      append(append([]string{}, preview.Statements...), preview.Statements[4]),
+		"empty":      nil,
+		"other role": narrowed,
+		"whitespace": spaced,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := executor.ExecuteReviewedCreateWithRowSecurity(t.Context(), f.pool, f.schema, "", d, reviewed, createWithRowSecurityBudget)

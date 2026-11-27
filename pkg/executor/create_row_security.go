@@ -98,8 +98,11 @@ func executeDesiredRowSecurity(attempt context.Context, pool *pgxpool.Pool, sche
 // reviewed before any target DDL, including order and duplicates, and any
 // difference refuses with ErrRowSecurityPlanChanged. A table at the name
 // refuses the same way: the reviewed create no longer describes the change,
-// and the table is never converged in its place. The supplied SQL is
-// compared, never executed directly.
+// and the table is never converged in its place. One created at the name
+// after the comparison refuses as a create collision. The supplied SQL is
+// compared, never executed directly. createOwner is not part of the compared
+// sequence, so the caller passes the owner its preview used: the owner
+// bypasses the table's policies unless they are forced.
 func ExecuteReviewedCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, reviewed []string, b Budget) (RowSecurityReport, error) {
 	if err := b.validate(); err != nil {
 		return RowSecurityReport{}, err
@@ -298,6 +301,8 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	}
 	report := RowSecurityReport{Schema: schema, Table: table, Statements: []string{}, ExtensionSchemas: desired.ExtensionSchemas()}
 	for _, step := range admitted {
+		// A table created at the name after the comparison above fails here,
+		// and refuses as a collision.
 		if _, err := tx.Exec(ctx, step.statement.SQL()); err != nil {
 			return RowSecurityReport{}, fmt.Errorf("create %s: %w", target, asCreateCollision(err))
 		}

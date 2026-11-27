@@ -198,9 +198,16 @@ report, err := executor.ExecuteReviewedCreateWithRowSecurity(ctx, pool, "public"
 
 It renders the whole sequence, the table and index statements and then the row
 security, and compares it with the reviewed one before any target DDL. A
-mismatch returns `ErrRowSecurityPlanChanged`. So does a table that appeared at
-the name after the review: the reviewed create no longer describes the change,
-and the run does not converge that table in its place.
+mismatch returns `ErrRowSecurityPlanChanged`. So does a table that is at the
+name when the run starts: the reviewed create no longer describes the change,
+and the run does not converge that table in its place. The table does not
+exist yet, so the comparison holds no lock on it. A table created at the name
+after the comparison makes the `CREATE TABLE` fail, and the run refuses as a
+`create-collision`, leaving that table untouched.
+
+The owner is not part of the compared SQL. Pass the same `createOwner` to the
+preview and the run: the table's owner bypasses its policies unless they are
+forced, so a different owner changes who the reviewed policies exempt.
 
 This binds the SQL to review, not every detail of the earlier database state.
 For example, editing an existing policy predicate can leave the replacement SQL
