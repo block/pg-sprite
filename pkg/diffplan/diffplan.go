@@ -406,6 +406,9 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 			}
 		}
 		ps.Drops = ch.Drops
+		ps.ReplacedBy = ch.ReplacedBy
+		ps.Replacement = ch.Replacement
+		ps.Renames = ch.Renames
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil

@@ -14,6 +14,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/progress"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
 // The rename names an index, so the executor binds it to the preflighted
@@ -238,6 +239,59 @@ func TestExecuteIndexRenameWithProgressRenamesAPlainIndex(t *testing.T) {
 	requireOneStepSnapshot(t, tracker, progress.PhaseFinished, progress.OperationOptimistic, sql, 1)
 }
 
+// A planned rename carries the definition the plan matched the index by.
+// When the unique index the plan saw was replaced since planning by a
+// non-unique one under the same name, the rename would give the desired
+// unique index's name to an index that rejects nothing, so it fails with
+// the permanent renamed-index-drift code and renames nothing. The index
+// as planned renames.
+func TestExecutePlannedIndexRenameWithProgressChecksTheDefinition(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id    int PRIMARY KEY,
+			email text NOT NULL
+		);
+		CREATE UNIQUE INDEX users_email_uq ON %[1]s.users (email)`, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "users")
+	planned := schemadiff.IndexRename{Index: "users_email_uq", Def: "CREATE UNIQUE INDEX users_email_uq ON users USING btree (email)"}
+	sql := fmt.Sprintf("ALTER INDEX %s.users_email_uq RENAME TO users_email_key_uq", schema)
+	rename := func(t *testing.T, planned schemadiff.IndexRename) error {
+		t.Helper()
+		tracker, err := progress.NewTracker(progress.WallClock{})
+		require.NoError(t, err)
+		return executor.ExecutePlannedIndexRenameWithProgress(t.Context(), pool, pt, mustParse(t, sql),
+			budget, executor.DefaultRetryPolicy(), planned, tracker)
+	}
+
+	t.Run("a statement that renames another index", func(t *testing.T) {
+		err := rename(t, schemadiff.IndexRename{Index: "users_other_uq", Def: planned.Def})
+		require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	})
+
+	t.Run("the index was replaced by a non-unique one", func(t *testing.T) {
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			DROP INDEX %[1]s.users_email_uq;
+			CREATE INDEX users_email_uq ON %[1]s.users (email)`, schema))
+		require.NoError(t, err)
+		err = rename(t, planned)
+		require.ErrorIs(t, err, executor.ErrRenamedIndexDrift)
+		assert.Equal(t, executor.CodeRenamedIndexDrift, executor.OutcomeCode(err))
+		assert.Contains(t, err.Error(), `is now "CREATE INDEX users_email_uq ON users USING btree (email)"`)
+		assert.Equal(t, []string{"users", "users_email_uq", "users_pkey"}, relationNames(t, pool, schema), "nothing was renamed")
+	})
+
+	t.Run("the index as planned renames", func(t *testing.T) {
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			DROP INDEX %[1]s.users_email_uq;
+			CREATE UNIQUE INDEX users_email_uq ON %[1]s.users (email)`, schema))
+		require.NoError(t, err)
+		require.NoError(t, rename(t, planned))
+		assert.Equal(t, []string{"users", "users_email_key_uq", "users_pkey"}, relationNames(t, pool, schema))
+	})
+}
+
 // The progress-tracked rename runs the same check under the table's lock
 // as ExecuteIndexRename: an index that came to back a unique constraint
 // after planning would rename the constraint with it, so the rename fails
@@ -293,6 +347,58 @@ func TestExecuteIndexRenameWithProgressRefusesAStatementThatIsNotAnIndexRename(t
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	assert.Equal(t, []string{"users", "users_pkey"}, relationNames(t, pool, schema), "nothing ran")
 	requireOneStepSnapshot(t, tracker, progress.PhaseFailed, progress.OperationOptimistic, sql, 0)
+}
+
+// A consumer that runs each planned statement through the native executor
+// gets an index rename the same treatment: ExecuteNativeWithProgress hands
+// ALTER INDEX ... RENAME TO to the index-rename path, which binds it to the
+// preflighted table in the catalog. A unique index renames and keeps its
+// definition, and an index that now backs a constraint is refused with the
+// renamed-index-drift code, renaming nothing.
+func TestExecuteNativeWithProgressRunsAnIndexRename(t *testing.T) {
+	setup := func(t *testing.T) (*pgxpool.Pool, string) {
+		t.Helper()
+		pool, schema := newPool(t)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.users (
+				id    int PRIMARY KEY,
+				email text NOT NULL
+			);
+			CREATE UNIQUE INDEX users_email_uq ON %[1]s.users (lower(email))`, schema))
+		require.NoError(t, err)
+		return pool, schema
+	}
+
+	t.Run("a unique index renames", func(t *testing.T) {
+		pool, schema := setup(t)
+		tracker, err := progress.NewTracker(progress.WallClock{})
+		require.NoError(t, err)
+		sql := fmt.Sprintf("ALTER INDEX %s.users_email_uq RENAME TO users_email_lower_uq", schema)
+		require.NoError(t, executor.ExecuteNativeWithProgress(t.Context(), pool, mustPreflight(t, pool, schema, "users"),
+			mustParse(t, sql), budget, executor.DefaultRetryPolicy(), tracker))
+		assert.Equal(t, []string{"users", "users_email_lower_uq", "users_pkey"}, relationNames(t, pool, schema))
+		var def string
+		require.NoError(t, pool.QueryRow(t.Context(), `SELECT pg_get_indexdef(format('%I.users_email_lower_uq', $1::text)::regclass)`, schema).Scan(&def))
+		assert.Contains(t, def, "CREATE UNIQUE INDEX users_email_lower_uq")
+		assert.Contains(t, def, "lower(email)")
+		requireOneStepSnapshot(t, tracker, progress.PhaseFinished, progress.OperationOptimistic, sql, 1)
+	})
+
+	t.Run("an index that now backs a constraint is refused", func(t *testing.T) {
+		pool, schema := setup(t)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE UNIQUE INDEX users_email_key ON %[1]s.users (email);
+			ALTER TABLE %[1]s.users ADD CONSTRAINT users_email_key UNIQUE USING INDEX users_email_key`, schema))
+		require.NoError(t, err)
+		tracker, err := progress.NewTracker(progress.WallClock{})
+		require.NoError(t, err)
+		sql := fmt.Sprintf("ALTER INDEX %s.users_email_key RENAME TO users_email_uniq", schema)
+		err = executor.ExecuteNativeWithProgress(t.Context(), pool, mustPreflight(t, pool, schema, "users"),
+			mustParse(t, sql), budget, executor.DefaultRetryPolicy(), tracker)
+		require.ErrorIs(t, err, executor.ErrRenamedIndexDrift)
+		assert.Equal(t, executor.CodeRenamedIndexDrift, executor.OutcomeCode(err))
+		assert.Contains(t, relationNames(t, pool, schema), "users_email_key", "the refused rename renamed nothing")
+	})
 }
 
 // relationNames lists every relation in schema by name, in name order.

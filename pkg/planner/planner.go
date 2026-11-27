@@ -1071,8 +1071,11 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// error handling name, so it breaks the application like a column
 		// rename does. Without the live fact — an offline lint — the
 		// rename classifies as metadata-only, and the executor re-checks
-		// the constraint under the table's lock before it runs.
+		// the constraint under the table's lock before it runs. Either way
+		// the rename changes only the catalog's names: it reads no row of
+		// the table and runs no user code.
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		d.ProvenCatalogOnly = true
 		if facts.RenamedIndexConstraint != "" {
 			d.Reason = ReasonAppBreakingRename
 		}

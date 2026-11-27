@@ -73,9 +73,15 @@ func RunSequenceAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pre
 		return SequenceReport{}, fmt.Errorf("%w: one sequence cannot carry both the adoption of index %s and the validation of constraint %s",
 			ErrInvariantViolation, adopts.Index, validates.Constraint)
 	}
-	if dropped != nil && (adopts != nil || validates != nil) {
-		return SequenceReport{}, fmt.Errorf("%w: one sequence cannot carry both the drop of %s %s and an adoption or a validation",
-			ErrInvariantViolation, dropped.Kind, dropped.Name)
+	if dropped != nil && validates != nil {
+		return SequenceReport{}, fmt.Errorf("%w: one sequence cannot carry both the drop of %s %s and the validation of constraint %s",
+			ErrInvariantViolation, dropped.Kind, dropped.Name, validates.Constraint)
+	}
+	if dropped != nil && adopts != nil && dropped.Kind != schemadiff.DroppedConstraint {
+		// Only a constraint replaced in place drops and adopts at once:
+		// its new index takes the place of the old constraint's.
+		return SequenceReport{}, fmt.Errorf("%w: one sequence cannot carry both the drop of %s %s and the adoption of index %s",
+			ErrInvariantViolation, dropped.Kind, dropped.Name, adopts.Index)
 	}
 	return runSequence(ctx, pool, pt, steps, b, retry, adopts, validates, dropped, at.Tracker, at.Step)
 }

@@ -315,7 +315,8 @@ it — unless every operation in it is proven catalog-only (`sizeGuardApplies` i
 
 An operation is proven catalog-only when PostgreSQL has no path that touches the
 table's rows or run user code: `DROP COLUMN`, `DROP DEFAULT`, `DROP NOT NULL`,
-`DROP CONSTRAINT`, and an `ADD COLUMN` that meets both of these:
+`DROP CONSTRAINT`, `ALTER INDEX ... RENAME TO`, and an `ADD COLUMN` that meets
+both of these:
 
 - It has no default, or a literal one such as `0` or `'free'`.
 - Its probe proved it adds in place, checks no `NOT NULL` against every row, and
