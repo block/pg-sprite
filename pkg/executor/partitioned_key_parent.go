@@ -107,18 +107,30 @@ func adoptLeafKeys(ctx context.Context, tx pgx.Tx, target indexTarget, spec part
 			return parentKeyOutcome{}, nil
 		}
 	}
+	// The proof reads every partition and the parent at once, so the number
+	// of statements, and of round trips, under the tree's lock does not grow
+	// with the number of partitions.
+	parentNode := parentNodeOf(target)
+	keyColumns, err := readKeyColumnsOf(ctx, tx, append([]partitionNode{parentNode}, tree...), spec.columns)
+	if err != nil {
+		return parentKeyOutcome{}, err
+	}
+	keyConstraints, err := readLeafConstraintsOf(ctx, tx, tree)
+	if err != nil {
+		return parentKeyOutcome{}, err
+	}
 	for _, n := range tree {
-		if err := proveLeafKeyRecorded(ctx, tx, spec, n, leaves[n.oid]); err != nil {
+		if err := judgeLeafKeyRecorded(spec, n, keyColumns[n.oid], keyConstraints[n.oid], leaves[n.oid]); err != nil {
 			return parentKeyOutcome{}, err
 		}
 	}
 	// The parent's columns are proved NOT NULL again under the lock, for the
 	// same reason a partition's are (INV: LK-2).
-	columns, err := readLeafKeyColumns(ctx, tx, parentNodeOf(target), spec.columns)
+	columns, err := keyColumns[parentNode.oid].of(parentNode)
 	if err != nil {
 		return parentKeyOutcome{}, err
 	}
-	if err := requireParentNotNull(spec, parentNodeOf(target), columns); err != nil {
+	if err := requireParentNotNull(spec, parentNode, columns); err != nil {
 		return parentKeyOutcome{}, err
 	}
 	if _, err := tx.Exec(ctx, parentKeySQL(target, spec)); err != nil {
@@ -135,20 +147,20 @@ func adoptLeafKeys(ctx context.Context, tx pgx.Tx, target indexTarget, spec part
 	return out, nil
 }
 
-// proveLeafKeyRecorded proves, under the tree's lock, that the partition has
-// exactly one constraint that is the requested key, attached to no parent's
-// constraint, and that it is the constraint and index its leaf step recorded.
-// Anything else means the partition changed after its leaf step: the parent's
-// ADD CONSTRAINT could adopt another constraint or build an index, so the
-// step rolls back.
+// judgeLeafKeyRecorded proves, from what the parent's step read under the
+// tree's lock, that the partition has exactly one constraint that is the
+// requested key, attached to no parent's constraint, and that it is the
+// constraint and index its leaf step recorded. Anything else means the
+// partition changed after its leaf step: the parent's ADD CONSTRAINT could
+// adopt another constraint or build an index, so the step rolls back.
 // INV: ST-7 — the parent adopts exactly the constraints the leaf steps made
 // or proved.
-func proveLeafKeyRecorded(ctx context.Context, q querier, spec partitionedKeySpec, n partitionNode, rec leafKeyResult) error {
-	columns, err := readLeafKeyColumns(ctx, q, n, spec.columns)
+func judgeLeafKeyRecorded(spec partitionedKeySpec, n partitionNode, keyColumns keyColumnsRead, keyConstraints leafConstraintsRead, rec leafKeyResult) error {
+	columns, err := keyColumns.of(n)
 	if err != nil {
 		return err
 	}
-	constraints, err := readLeafConstraints(ctx, q, n)
+	constraints, err := keyConstraints.of(n)
 	if err != nil {
 		return err
 	}
@@ -172,18 +184,14 @@ const parentKeyReadBackSQL = `SELECT k.oid, k.contype::pg_catalog.text, k.conind
 		  WHERE k.conrelid OPERATOR(pg_catalog.=) $1
 		    AND k.conname OPERATOR(pg_catalog.=) $2`
 
-const adoptedLeafKeySQL = `SELECT k.oid, k.conindid
-		   FROM pg_catalog.pg_constraint k
-		  WHERE k.conrelid OPERATOR(pg_catalog.=) $1
-		    AND k.conparentid OPERATOR(pg_catalog.=) $2`
-
 // readBackParentKey reads, in the transaction that ran the parent's ADD
 // CONSTRAINT, what it did, and returns the parent constraint's OID: a
 // constraint of the requested kind under the requested name, backed by a
 // valid partitioned index, that adopted on every partition exactly the
 // constraint the leaf step recorded, whose index is now attached to the
 // parent's index under its recorded OID. Any other outcome rolls the step
-// back.
+// back. Every partition is read in the same statement, so the read-back
+// takes a fixed number of statements whatever the size of the tree.
 // INV: LK-2 — every partition's index OID unchanged is the proof the ADD
 // CONSTRAINT built nothing under its ACCESS EXCLUSIVE lock and only changed
 // the catalog.
@@ -209,29 +217,99 @@ func readBackParentKey(ctx context.Context, q querier, target indexTarget, spec 
 		return 0, fmt.Errorf("%w: after ADD CONSTRAINT, the index %d of constraint %s is not a valid partitioned index on %s",
 			ErrInvariantViolation, indexOID, spec.name, parent)
 	}
+	adopted, err := readAdoptedLeafKeys(ctx, q, tree, constraintOID, indexOID)
+	if err != nil {
+		return 0, err
+	}
+	nodes := make(map[uint32]partitionNode, len(tree))
 	for _, n := range tree {
-		rec := leaves[n.oid]
-		var adoptedOID, adoptedIndex uint32
-		err := q.QueryRow(ctx, adoptedLeafKeySQL, n.oid, constraintOID).Scan(&adoptedOID, &adoptedIndex)
-		if errors.Is(err, pgx.ErrNoRows) {
+		nodes[n.oid] = n
+	}
+	read := make(map[uint32]bool, len(tree))
+	for _, a := range adopted {
+		read[a.leaf] = true
+	}
+	for _, n := range tree {
+		if !read[n.oid] {
+			return 0, fmt.Errorf("%w: after ADD CONSTRAINT, the read-back returned nothing for partition %s",
+				ErrInvariantViolation, n.qualified())
+		}
+	}
+	for _, a := range adopted {
+		n := nodes[a.leaf]
+		rec := leaves[a.leaf]
+		if !a.hasConstraint {
 			return 0, fmt.Errorf("%w: after ADD CONSTRAINT, partition %s has no constraint adopted by %s",
 				ErrInvariantViolation, n.qualified(), spec.name)
 		}
-		if err != nil {
-			return 0, fmt.Errorf("read the adopted key constraint of partition %s: %w", n.qualified(), err)
-		}
-		if adoptedOID != rec.constraintOID || adoptedIndex != rec.indexOID {
+		if a.constraintOID != rec.constraintOID || a.indexOID != rec.indexOID {
 			return 0, fmt.Errorf("%w: LK-2: after ADD CONSTRAINT, partition %s's adopted constraint is %d on index %d, not the constraint %d on index %d its leaf step left; the statement built or chose another",
-				ErrInvariantViolation, n.qualified(), adoptedOID, adoptedIndex, rec.constraintOID, rec.indexOID)
+				ErrInvariantViolation, n.qualified(), a.constraintOID, a.indexOID, rec.constraintOID, rec.indexOID)
 		}
-		attached, ok, err := attachedIndexOf(ctx, q, n.oid, indexOID)
-		if err != nil {
-			return 0, err
-		}
-		if !ok || attached != rec.indexOID {
+		if !a.hasAttached || a.attachedOID != rec.indexOID {
 			return 0, fmt.Errorf("%w: LK-2: after ADD CONSTRAINT, the index of partition %s attached to %s is not index %d its leaf step left",
 				ErrInvariantViolation, n.qualified(), spec.name, rec.indexOID)
 		}
 	}
 	return constraintOID, nil
+}
+
+// adoptedLeafKey is what the read-back finds on one partition: the
+// constraint the parent's constraint adopted there and its index, and the
+// partition's index attached to the parent's index.
+type adoptedLeafKey struct {
+	leaf          uint32
+	constraintOID uint32
+	indexOID      uint32
+	hasConstraint bool
+	attachedOID   uint32
+	hasAttached   bool
+}
+
+// adoptedLeafKeysSQL lists, for every partition in $1 in the order given,
+// the constraint the parent's constraint $2 adopted on it and the partition's
+// index attached to the parent's index $3, each NULL when there is none. A
+// partition appears once for every adopted constraint and attached index the
+// catalog holds for it, at least once.
+const adoptedLeafKeysSQL = `SELECT r.leaf, k.oid, k.conindid, x.indexrelid
+		   FROM pg_catalog.unnest($1::pg_catalog.oid[]) WITH ORDINALITY AS r(leaf, ord)
+		   LEFT JOIN pg_catalog.pg_constraint k
+		          ON k.conrelid OPERATOR(pg_catalog.=) r.leaf
+		         AND k.conparentid OPERATOR(pg_catalog.=) $2
+		   LEFT JOIN (SELECT i.indrelid, i.indexrelid
+		                FROM pg_catalog.pg_index i
+		                JOIN pg_catalog.pg_inherits h ON h.inhrelid OPERATOR(pg_catalog.=) i.indexrelid
+		               WHERE h.inhparent OPERATOR(pg_catalog.=) $3) x
+		          ON x.indrelid OPERATOR(pg_catalog.=) r.leaf
+		  ORDER BY r.ord`
+
+// readAdoptedLeafKeys reads what the parent's constraint adopted on every
+// partition of the tree in one statement, in tree order.
+func readAdoptedLeafKeys(ctx context.Context, q querier, tree []partitionNode, constraintOID, indexOID uint32) ([]adoptedLeafKey, error) {
+	oids := make([]uint32, 0, len(tree))
+	for _, n := range tree {
+		oids = append(oids, n.oid)
+	}
+	rows, err := q.Query(ctx, adoptedLeafKeysSQL, oids, constraintOID, indexOID)
+	if err != nil {
+		return nil, fmt.Errorf("read the partitions' constraints adopted by constraint %d: %w", constraintOID, err)
+	}
+	defer rows.Close()
+	var found []adoptedLeafKey
+	for rows.Next() {
+		var (
+			a                                  adoptedLeafKey
+			adoptedOID, adoptedIndex, attached *uint32
+		)
+		if err := rows.Scan(&a.leaf, &adoptedOID, &adoptedIndex, &attached); err != nil {
+			return nil, fmt.Errorf("scan the partitions' constraints adopted by constraint %d: %w", constraintOID, err)
+		}
+		a.hasConstraint, a.constraintOID, a.indexOID = adoptedOID != nil, deref(adoptedOID), deref(adoptedIndex)
+		a.hasAttached, a.attachedOID = attached != nil, deref(attached)
+		found = append(found, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the partitions' constraints adopted by constraint %d: %w", constraintOID, err)
+	}
+	return found, nil
 }

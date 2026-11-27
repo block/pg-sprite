@@ -128,12 +128,36 @@ func adoptLeafFKs(ctx context.Context, tx pgx.Tx, target indexTarget, fk resolve
 	return out, nil
 }
 
+// lockAndProveReference locks the referenced table in SHARE ROW EXCLUSIVE,
+// after the tree's locks, the order the parent's ADD FOREIGN KEY takes them,
+// and proves under it that its name still resolves to the table the build
+// resolved. A rename needs ACCESS EXCLUSIVE, which the lock excludes until
+// the transaction ends, so the statement that names the table binds the one
+// proved here (INV: ST-7).
+func lockAndProveReference(ctx context.Context, tx pgx.Tx, ref fkReference) error {
+	_, err := tx.Exec(ctx, "LOCK TABLE ONLY "+pgx.Identifier{ref.schema, ref.table}.Sanitize()+" IN SHARE ROW EXCLUSIVE MODE")
+	if err != nil {
+		return err
+	}
+	current, found, err := relationByName(ctx, tx, ref.schema, ref.table)
+	if err != nil {
+		return err
+	}
+	if !found || current.oid != ref.oid {
+		return fmt.Errorf("%w: ST-7: %s no longer names the referenced table %d the build resolved",
+			ErrInvariantViolation, qualifiedName(ref.schema, ref.table), ref.oid)
+	}
+	return nil
+}
+
 // proveLeafFKRecorded proves, under the tree's lock, that the partition has
 // exactly one foreign key of the requested definition, validated, attached
 // to no parent's, and that it is the one its leaf step recorded. Anything
 // else means the partition changed after its leaf step: the parent's
 // statement could adopt another foreign key or validate a new one under the
-// tree's locks, so the step rolls back.
+// tree's locks, so the step rolls back with
+// ErrPartitionedForeignKeyLeafChanged, and a rerun decides the partition
+// again.
 // INV: ST-7 — the parent adopts exactly the foreign keys the leaf steps made
 // or proved.
 func proveLeafFKRecorded(ctx context.Context, q querier, fk resolvedFK, n partitionNode, rec leafFKResult) error {
@@ -147,12 +171,12 @@ func proveLeafFKRecorded(ctx context.Context, q querier, fk resolvedFK, n partit
 	}
 	matches := requestedForeignKeys(fks, fk.spec, attnums, fk.ref)
 	if len(matches) != 1 {
-		return fmt.Errorf("%w: ST-7: partition %s has %d foreign keys of the requested definition, not the one %s (%d) its leaf step left",
-			ErrInvariantViolation, n.qualified(), len(matches), rec.constraint, rec.constraintOID)
+		return fmt.Errorf("%w: partition %s has %d foreign keys of the requested definition, not the one %s (%d) its leaf step left",
+			ErrPartitionedForeignKeyLeafChanged, n.qualified(), len(matches), rec.constraint, rec.constraintOID)
 	}
 	if !matches[0].isRecorded(rec) {
-		return fmt.Errorf("%w: ST-7: the foreign key of partition %s is %s (%d, validated %t, parent %d), not the validated, unattached %s (%d) its leaf step left",
-			ErrInvariantViolation, n.qualified(), matches[0].name, matches[0].oid, matches[0].validated, matches[0].parentOID,
+		return fmt.Errorf("%w: the foreign key of partition %s is %s (%d, validated %t, parent %d), not the validated, unattached %s (%d) its leaf step left",
+			ErrPartitionedForeignKeyLeafChanged, n.qualified(), matches[0].name, matches[0].oid, matches[0].validated, matches[0].parentOID,
 			rec.constraint, rec.constraintOID)
 	}
 	return nil

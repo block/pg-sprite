@@ -2,11 +2,13 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/progress"
@@ -184,9 +186,11 @@ type leafFKStatementStarted func(op progress.Operation, sql string)
 //
 // Two of them, one already attached to a parent's foreign key, and a
 // derived name another constraint holds are refused, typed, before anything
-// is created; nothing the step did not create is dropped or renamed. Each
-// VALIDATE is bounded by b. The caller holds the parent's advisory table
-// lock (LK-1).
+// is created; nothing the step did not create is dropped or renamed. The
+// ADD and the VALIDATE each decide again under the leaf's lock, so a foreign
+// key that lands on the leaf between the steps is found or refused, never
+// left beside the step's. Each VALIDATE is bounded by b. The caller holds
+// the parent's advisory table lock (LK-1).
 func ensureLeafForeignKey(ctx context.Context, pool *pgxpool.Pool, fk resolvedFK, node partitionNode, b ValidateBudget, started leafFKStatementStarted) (leafFKResult, error) {
 	if err := fk.spec.validate(); err != nil {
 		return leafFKResult{}, err
@@ -200,18 +204,22 @@ func ensureLeafForeignKey(ctx context.Context, pool *pgxpool.Pool, fk resolvedFK
 	}
 	tx := briefTx{pool: pool}
 	name := derivedPartitionIndexName(fk.spec.name, node.oid)
-	var facts leafFKFacts
+	var plan leafFKPlan
 	err := tx.read(ctx, "inspect the foreign keys of partition "+node.qualified(), func(ctx context.Context, q querier) error {
 		var err error
-		facts, err = readLeafFKFacts(ctx, q, fk, node, name)
+		plan, err = readAndDecideLeafFK(ctx, q, fk, node, name)
 		return err
 	})
 	if err != nil {
 		return leafFKResult{}, err
 	}
-	plan, err := decideLeafForeignKey(node, name, fk, facts)
-	if err != nil {
-		return leafFKResult{}, err
+	added := false
+	if plan.state == leafFKAddNeeded {
+		addSQL := leafFKAddSQL(fk.spec, node, name)
+		reportLeafFKStatement(started, progress.OperationBrief, addSQL)
+		if plan, added, err = addLeafForeignKey(ctx, tx, fk, node, name, addSQL); err != nil {
+			return leafFKResult{}, fmt.Errorf("add foreign key %s on partition %s: %w", name, node.qualified(), err)
+		}
 	}
 	result := leafFKResult{constraint: plan.fk.name, constraintOID: plan.fk.oid}
 	switch plan.state {
@@ -220,13 +228,8 @@ func ensureLeafForeignKey(ctx context.Context, pool *pgxpool.Pool, fk resolvedFK
 		return result, nil
 	case leafFKValidatePending:
 		result.action = leafFKValidated
-	case leafFKAddNeeded:
-		result.action = leafFKAdded
-		result.constraint = name
-		addSQL := leafFKAddSQL(fk.spec, node, name)
-		reportLeafFKStatement(started, progress.OperationBrief, addSQL)
-		if result.constraintOID, err = addLeafForeignKey(ctx, tx, fk, node, name, addSQL); err != nil {
-			return leafFKResult{}, err
+		if added {
+			result.action = leafFKAdded
 		}
 	default:
 		return leafFKResult{}, fmt.Errorf("%w: unknown leaf foreign key state %d", ErrInvariantViolation, plan.state)
@@ -258,99 +261,91 @@ func leafFKValidateSQL(node partitionNode, constraint string) string {
 		" VALIDATE CONSTRAINT " + pgx.Identifier{constraint}.Sanitize()
 }
 
-// lockAndProveReference locks the referenced table in SHARE ROW EXCLUSIVE,
-// the lock ADD FOREIGN KEY takes on it anyway, and proves under it that its
-// name still resolves to the table the build resolved. A rename needs ACCESS
-// EXCLUSIVE, which the lock excludes until the transaction ends, so the
-// statement that names the table binds the one proved here (INV: ST-7).
-func lockAndProveReference(ctx context.Context, tx pgx.Tx, ref fkReference) error {
-	_, err := tx.Exec(ctx, "LOCK TABLE ONLY "+pgx.Identifier{ref.schema, ref.table}.Sanitize()+" IN SHARE ROW EXCLUSIVE MODE")
-	if err != nil {
-		return err
-	}
-	current, found, err := relationByName(ctx, tx, ref.schema, ref.table)
-	if err != nil {
-		return err
-	}
-	if !found || current.oid != ref.oid {
-		return fmt.Errorf("%w: ST-7: %s no longer names the referenced table %d the build resolved",
-			ErrInvariantViolation, ref.qualified(), ref.oid)
-	}
-	return nil
-}
-
 // addLeafForeignKey runs the leaf's ADD FOREIGN KEY ... NOT VALID in one
-// brief transaction and returns the constraint's OID. The statement takes
-// SHARE ROW EXCLUSIVE on the leaf and on the referenced table until the
-// transaction ends and scans nothing. It reads back, before the commit, that
-// it made a NOT VALID foreign key of the requested definition under the
-// derived name, adopted by nothing; any other outcome rolls it back. A rerun
-// after an unknown commit outcome finds the foreign key and validates it.
-func addLeafForeignKey(ctx context.Context, tx briefTx, fk resolvedFK, node partitionNode, name, addSQL string) (uint32, error) {
-	var constraintOID uint32
+// brief transaction and returns the decision it ends on, and whether it ran
+// the ADD. Under the leaf's SHARE UPDATE EXCLUSIVE, which excludes every
+// other constraint change on the leaf, it decides again: a foreign key of
+// the definition that landed since the first read is taken as it stands,
+// and nothing is added. The statement then takes SHARE ROW EXCLUSIVE on the
+// leaf and, after it, on the referenced table, the order the server's own
+// ADD FOREIGN KEY takes them, so a writer that holds the leaf and then
+// touches the referenced table waits only for this brief transaction. It
+// scans nothing. It reads back, before the commit, that the leaf has exactly
+// one foreign key of the requested definition, NOT VALID under the derived
+// name and adopted by nothing; the definition includes the referenced
+// table's OID, so a name that resolves to another table rolls the ADD back.
+// A rerun after an unknown commit outcome finds the foreign key and
+// validates it.
+func addLeafForeignKey(ctx context.Context, tx briefTx, fk resolvedFK, node partitionNode, name, addSQL string) (leafFKPlan, bool, error) {
+	var plan leafFKPlan
+	added := false
 	err := tx.run(ctx, "add the foreign key of partition "+node.qualified(), catalogReadPath(), true,
 		func(ctx context.Context, tx pgx.Tx) error {
-			// The partition stays in the tree, under its name, until the
-			// transaction ends (INV: ST-7).
+			// The partition stays in the tree, under its name, and its
+			// constraints stay as read, until the transaction ends
+			// (INV: ST-7).
 			if err := lockAndProveNode(ctx, tx, node); err != nil {
 				return err
 			}
-			if err := lockAndProveReference(ctx, tx, fk.ref); err != nil {
+			var err error
+			if plan, err = readAndDecideLeafFK(ctx, tx, fk, node, name); err != nil {
 				return err
 			}
+			if plan.state != leafFKAddNeeded {
+				return nil
+			}
 			// INV: LK-2 — the statement changes only the catalog: NOT VALID
-			// skips the scan, and the lock it takes is held only for this
+			// skips the scan, and the locks it takes are held only for this
 			// brief transaction under the pool's lock_timeout and
 			// statement_timeout.
 			if _, err := tx.Exec(ctx, addSQL); err != nil {
 				return err
 			}
-			added, err := leafFKByName(ctx, tx, fk, node, name)
-			if err != nil {
+			added = true
+			if plan, err = readAndDecideLeafFK(ctx, tx, fk, node, name); err != nil {
 				return err
 			}
-			if added.validated || added.parentOID != 0 {
-				return fmt.Errorf("%w: ST-7: after ADD FOREIGN KEY ... NOT VALID, foreign key %s on partition %s is validated or adopted",
-					ErrInvariantViolation, name, node.qualified())
-			}
-			constraintOID = added.oid
-			return nil
+			return requireLeafFKPlan(node, plan, leafFKValidatePending, name, 0)
 		})
-	return constraintOID, err
+	return plan, added, err
 }
 
-// leafFKByName reads the leaf's foreign key under name and requires it to
-// have the requested definition.
-func leafFKByName(ctx context.Context, q querier, fk resolvedFK, node partitionNode, name string) (catalogFK, error) {
-	attnums, err := fkColumnAttnums(ctx, q, node.oid, node.qualified(), fk.spec.columns)
+// readAndDecideLeafFK reads the leaf and decides from that one snapshot.
+func readAndDecideLeafFK(ctx context.Context, q querier, fk resolvedFK, node partitionNode, name string) (leafFKPlan, error) {
+	facts, err := readLeafFKFacts(ctx, q, fk, node, name)
 	if err != nil {
-		return catalogFK{}, err
+		return leafFKPlan{}, err
 	}
-	fks, err := readForeignKeys(ctx, q, node.oid, node.qualified(), fk.serverMajor)
-	if err != nil {
-		return catalogFK{}, err
+	return decideLeafForeignKey(node, name, fk, facts)
+}
+
+// requireLeafFKPlan requires the decision to be want on the constraint
+// named name, and, when oid is nonzero, on the constraint with that OID.
+func requireLeafFKPlan(node partitionNode, plan leafFKPlan, want leafFKState, name string, oid uint32) error {
+	if plan.state != want {
+		return fmt.Errorf("%w: ST-7: foreign key %s on partition %s is in state %d, want %d",
+			ErrInvariantViolation, name, node.qualified(), plan.state, want)
 	}
-	for _, k := range fks {
-		if k.name != name {
-			continue
-		}
-		if !k.isRequested(fk.spec, attnums, fk.ref) {
-			return catalogFK{}, fmt.Errorf("%w: ST-7: foreign key %s on partition %s does not have the requested definition",
-				ErrInvariantViolation, name, node.qualified())
-		}
-		return k, nil
+	if plan.fk.name != name {
+		return fmt.Errorf("%w: ST-7: the foreign key of the requested definition on partition %s is %s, want %s",
+			ErrInvariantViolation, node.qualified(), plan.fk.name, name)
 	}
-	return catalogFK{}, fmt.Errorf("%w: ST-7: partition %s has no foreign key %s", ErrInvariantViolation, node.qualified(), name)
+	if oid != 0 && plan.fk.oid != oid {
+		return fmt.Errorf("%w: ST-7: foreign key %s on partition %s is no longer the constraint %d the step decided on",
+			ErrInvariantViolation, name, node.qualified(), oid)
+	}
+	return nil
 }
 
 // validateLeafForeignKey runs the leaf's VALIDATE CONSTRAINT under b: the
 // lock wait bounded by b.LockTimeout and the scan by b.Overall. VALIDATE
 // takes SHARE UPDATE EXCLUSIVE on the leaf, which lets reads and writes go
 // on, and ROW SHARE on the referenced table. Under that lock and before the
-// statement, it proves the leaf is still in the tree and that the
-// constraint under the name is still the one decided on, of the requested
-// definition and adopted by nothing; after the statement, before the
-// commit, it reads back that it is validated.
+// statement, it proves the leaf is still in the tree and decides again: the
+// leaf must still have exactly one foreign key of the requested definition,
+// the one decided on, NOT VALID and adopted by nothing. After the statement,
+// before the commit, the same decision must find it validated. A failure
+// because rows violate the foreign key is ErrPartitionedForeignKeyViolation.
 func validateLeafForeignKey(ctx context.Context, pool *pgxpool.Pool, fk resolvedFK, node partitionNode, res leafFKResult, b ValidateBudget, started leafFKStatementStarted) error {
 	validateSQL := leafFKValidateSQL(node, res.constraint)
 	st, err := statement.ParseOne(validateSQL)
@@ -364,36 +359,32 @@ func validateLeafForeignKey(ctx context.Context, pool *pgxpool.Pool, fk resolved
 		if err := lockAndProveNode(ctx, tx, node); err != nil {
 			return err
 		}
-		return proveLeafFKState(ctx, tx, fk, node, res, false)
+		return proveLeafFKState(ctx, tx, fk, node, res, leafFKValidatePending)
 	}
 	after := func(ctx context.Context, tx pgx.Tx) error {
-		return proveLeafFKState(ctx, tx, fk, node, res, true)
+		return proveLeafFKState(ctx, tx, fk, node, res, leafFKDone)
 	}
 	reportLeafFKStatement(started, progress.OperationValidate, validateSQL)
 	start := time.Now()
 	err = executeBoundedAttemptAs(ctx, pool, st, Budget{LockTimeout: b.LockTimeout, StatementTimeout: b.Overall},
 		catalogReadPath(), "", before, after)
 	if err = corroborateValidateCancel(ctx, err, b, time.Since(start)); err != nil {
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateForeignKeyViolation {
+			return fmt.Errorf("%w: foreign key %s on partition %s stays NOT VALID and enforced for new rows: %w",
+				ErrPartitionedForeignKeyViolation, res.constraint, node.qualified(), err)
+		}
 		return fmt.Errorf("validate foreign key %s on partition %s: %w", res.constraint, node.qualified(), err)
 	}
 	return nil
 }
 
-// proveLeafFKState proves the constraint under the step's name is still the
-// one the step decided on, of the requested definition and adopted by
-// nothing, and that its convalidated is validated.
-func proveLeafFKState(ctx context.Context, q querier, fk resolvedFK, node partitionNode, res leafFKResult, validated bool) error {
-	current, err := leafFKByName(ctx, q, fk, node, res.constraint)
+// proveLeafFKState decides again from the leaf and requires the decision to
+// be want on the constraint the step decided on.
+func proveLeafFKState(ctx context.Context, q querier, fk resolvedFK, node partitionNode, res leafFKResult, want leafFKState) error {
+	name := derivedPartitionIndexName(fk.spec.name, node.oid)
+	plan, err := readAndDecideLeafFK(ctx, q, fk, node, name)
 	if err != nil {
 		return err
 	}
-	if current.oid != res.constraintOID || current.parentOID != 0 {
-		return fmt.Errorf("%w: ST-7: foreign key %s on partition %s is no longer the constraint %d the step decided on, adopted by nothing",
-			ErrInvariantViolation, res.constraint, node.qualified(), res.constraintOID)
-	}
-	if current.validated != validated {
-		return fmt.Errorf("%w: foreign key %s on partition %s has convalidated %t, want %t",
-			ErrInvariantViolation, res.constraint, node.qualified(), current.validated, validated)
-	}
-	return nil
+	return requireLeafFKPlan(node, plan, want, res.constraint, res.constraintOID)
 }
