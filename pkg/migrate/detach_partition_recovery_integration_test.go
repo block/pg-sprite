@@ -94,7 +94,7 @@ func TestRunReportsADetachCancelledWhileItWaitsAsInterrupted(t *testing.T) {
 		v, err := migrate.Run(ctx, pool, st, opts)
 		done <- result{v, err}
 	}()
-	waitForDetachToWait(t, pool)
+	waitForDetachToWait(t, pool, schema)
 	cancel()
 	res := <-done
 	require.ErrorIs(t, res.err, executor.ErrDetachInterrupted)
@@ -109,8 +109,9 @@ func TestRunReportsADetachCancelledWhileItWaitsAsInterrupted(t *testing.T) {
 		err := pool.QueryRow(t.Context(), `
 			SELECT EXISTS (SELECT 1 FROM pg_stat_activity
 			 WHERE query LIKE 'ALTER TABLE % DETACH PARTITION %'
+			   AND strpos(query, $1) > 0
 			   AND state = 'active'
-			   AND pid <> pg_backend_pid())`).Scan(&running)
+			   AND pid <> pg_backend_pid())`, schema).Scan(&running)
 		return err == nil && !running
 	}, cancelDeadline, 25*time.Millisecond, "the cancellation must stop the detach on the server")
 	endReader()

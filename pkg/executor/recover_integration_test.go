@@ -715,7 +715,8 @@ func TestRebuildAbandonedIndexReportsItsCallerCancellingTheDrop(t *testing.T) {
 		var waiting int
 		err := pool.QueryRow(t.Context(), `
 			SELECT count(*) FROM pg_catalog.pg_stat_activity
-			 WHERE wait_event_type = 'Lock' AND query LIKE 'DROP INDEX CONCURRENTLY %'`).Scan(&waiting)
+			 WHERE wait_event_type = 'Lock' AND query LIKE 'DROP INDEX CONCURRENTLY %'
+			   AND strpos(query, $1) > 0`, schema).Scan(&waiting)
 		return err == nil && waiting == 1
 	}, 10*time.Second, 20*time.Millisecond, "the drop must be waiting on the held table lock")
 	cancel()

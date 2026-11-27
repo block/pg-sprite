@@ -104,10 +104,10 @@ func openReader(t *testing.T, pool *pgxpool.Pool, schema string) func() {
 	return end
 }
 
-// waitForDetachToWait waits until a DETACH PARTITION statement is waiting
-// on a lock: for a concurrent detach after its first transaction, the wait
-// for the reader's transaction.
-func waitForDetachToWait(t *testing.T, pool *pgxpool.Pool) {
+// waitForDetachToWait waits until a DETACH PARTITION statement on a table
+// in schema is waiting on a lock: for a concurrent detach after its first
+// transaction, the wait for the reader's transaction.
+func waitForDetachToWait(t *testing.T, pool *pgxpool.Pool, schema string) {
 	t.Helper()
 	const detachWaitDeadline = 30 * time.Second
 	require.Eventually(t, func() bool {
@@ -115,8 +115,9 @@ func waitForDetachToWait(t *testing.T, pool *pgxpool.Pool) {
 		err := pool.QueryRow(t.Context(), `
 			SELECT EXISTS (SELECT 1 FROM pg_stat_activity
 			 WHERE query LIKE 'ALTER TABLE % DETACH PARTITION %'
+			   AND strpos(query, $1) > 0
 			   AND wait_event_type = 'Lock'
-			   AND pid <> pg_backend_pid())`).Scan(&waiting)
+			   AND pid <> pg_backend_pid())`, schema).Scan(&waiting)
 		return err == nil && waiting
 	}, detachWaitDeadline, 25*time.Millisecond, "the detach must be waiting for the reader")
 }
@@ -142,7 +143,7 @@ func TestRunDetachesAPartitionConcurrentlyWhileWritesCommit(t *testing.T) {
 			"ALTER TABLE %[1]s.events DETACH PARTITION %[1]s.events_2024", schema)), detachOptions(schema))
 		done <- result{v, err}
 	}()
-	waitForDetachToWait(t, pool)
+	waitForDetachToWait(t, pool, schema)
 
 	for i := 1; i <= 20; i++ {
 		tx, err := pool.Begin(t.Context())
