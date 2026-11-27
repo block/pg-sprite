@@ -252,3 +252,114 @@ func TestDiffRefusesAnEarlierAttemptsUnfinishedReplacementIndex(t *testing.T) {
 	assert.Contains(t, err.Error(), `DROP INDEX CONCURRENTLY "public"."events_email_key_new"`)
 	assert.Contains(t, err.Error(), "pg_stat_progress_create_index", "the reader checks no build is running before the drop")
 }
+
+// A unique constraint whose new index an earlier run built and left valid
+// under its temporary name is swapped in without a second build, and the
+// built index is not dropped as one the desired table does not declare.
+func TestDiffResumesAUniqueConstraintReplacementAfterItsBuild(t *testing.T) {
+	live, desired := keyed(), keyed()
+	desired.Constraints[1] = Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email, name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
+	}
+	live.Indexes = append(live.Indexes, Index{
+		Name: "events_email_key_new",
+		Def:  "CREATE UNIQUE INDEX events_email_key_new ON events USING btree (email, name)",
+	})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key", ADD CONSTRAINT "events_email_key" UNIQUE USING INDEX "events_email_key_new"`,
+	}, sqls(changes))
+	assert.Equal(t, "events_email_key_new", changes[0].Adopts.Index)
+
+	t.Run("a build of another definition is refused", func(t *testing.T) {
+		other := keyed()
+		other.Indexes = append(other.Indexes, Index{
+			Name: "events_email_key_new",
+			Def:  "CREATE UNIQUE INDEX events_email_key_new ON events USING btree (email)",
+		})
+		_, err := Diff("public", other, desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReplacementIndexName, refusal.Cause)
+	})
+}
+
+// A key a foreign key references cannot be dropped, so replacing it is
+// refused before anything is built, naming the foreign key.
+func TestDiffRefusesReplacingAKeyAForeignKeyReferences(t *testing.T) {
+	live, desired := keyed(), keyed()
+	live.Constraints[1].ReferencedBy = []IncomingForeignKey{{Schema: "public", Table: "orders", Constraint: "orders_email_fkey"}}
+	desired.Constraints[1] = Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email, name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
+	}
+	_, err := Diff("public", live, desired)
+	var refusal *UnsupportedChangeError
+	require.True(t, errors.As(err, &refusal), "%v", err)
+	assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+	assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "orders_email_fkey" on table "public"."orders"`)
+}
+
+// A key the file removes is refused while a foreign key still in place
+// references it, since PostgreSQL does not drop it and the plan would fail
+// after its earlier statements committed. A foreign key on the same table
+// that the plan drops ahead of the key no longer holds it.
+func TestDiffRefusesDroppingAKeyAForeignKeyStillReferences(t *testing.T) {
+	selfKey := Constraint{Name: "events_a_email_fkey", Def: "FOREIGN KEY (email) REFERENCES events(email)", ForeignKey: true}
+	referenced := func(fk IncomingForeignKey, withSelfKey bool) Model {
+		m := keyed()
+		m.Constraints[1].ReferencedBy = []IncomingForeignKey{fk}
+		if withSelfKey {
+			m.Constraints = []Constraint{m.Constraints[0], selfKey, m.Constraints[1]}
+		}
+		return m
+	}
+	withoutKey := keyed()
+	withoutKey.Constraints = withoutKey.Constraints[:1]
+
+	t.Run("referenced from another table", func(t *testing.T) {
+		_, err := Diff("public", referenced(IncomingForeignKey{Schema: "public", Table: "orders", Constraint: "orders_email_fkey"}, false), withoutKey)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+		assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "orders_email_fkey" on table "public"."orders"`)
+	})
+
+	self := IncomingForeignKey{Schema: "public", Table: "events", Constraint: selfKey.Name}
+	t.Run("referenced by a foreign key on the table that stays", func(t *testing.T) {
+		desired := keyed()
+		desired.Constraints = []Constraint{desired.Constraints[0], selfKey}
+		_, err := Diff("public", referenced(self, true), desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+	})
+
+	t.Run("referenced by a foreign key on the table the plan drops first", func(t *testing.T) {
+		changes, err := Diff("public", referenced(self, true), withoutKey)
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_a_email_fkey"`,
+			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key"`,
+		}, sqls(changes))
+	})
+
+	// The file renames the foreign key and the key it references. Each
+	// drop waits for the adds, and the foreign key's drop comes last, so it
+	// still holds the key when the key's drop runs.
+	t.Run("referenced by a foreign key on the table whose drop waits", func(t *testing.T) {
+		desired := keyed()
+		desired.Constraints = []Constraint{
+			desired.Constraints[0],
+			{Name: "events_email_uq", Def: "UNIQUE (email)"},
+			{Name: "events_email_self_fkey", Def: selfKey.Def, ForeignKey: true},
+		}
+		_, err := Diff("public", referenced(self, true), desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+		assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "events_a_email_fkey"`)
+	})
+}

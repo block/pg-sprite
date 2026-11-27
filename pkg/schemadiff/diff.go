@@ -409,6 +409,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	for _, r := range replacedIdx {
 		resumedBuilds[r.temp] = struct{}{}
 	}
+	for name, r := range replaced {
+		if r.built {
+			resumedBuilds[replacementIndexName(name)] = struct{}{}
+		}
+	}
 	renamed, err := renamedIndexes(partitioned, live.Indexes, desired.Indexes, liveIdx, desiredIdx, adopted, resumedBuilds)
 	if err != nil {
 		return nil, err
@@ -433,9 +438,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// come last; every other held drop goes before them, so a foreign key
 	// the plan adds cannot bind to a key the plan is about to drop.
 	var heldChanges, heldForeignKeys []Change
+	waits := func(ch Change) bool { return !dropsOrRetypes && held.holds(ch) }
 	appendDrop := func(ch Change) {
 		switch {
-		case dropsOrRetypes || !held.holds(ch):
+		case !waits(ch):
 			changes = append(changes, ch)
 		case held.dropsForeignKey(ch):
 			heldForeignKeys = append(heldForeignKeys, ch)
@@ -448,7 +454,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// recreated in the create bucket below). An index a new key constraint
 	// adopts stays: the constraint takes it over below. A replaced index is
 	// dropped in the create bucket, once its replacement is built, and an
-	// earlier run's build of a replacement stays to be renamed.
+	// earlier run's build of a replacement stays to be renamed, or, for a
+	// key, to be swapped in.
 	for _, ix := range live.Indexes {
 		if _, ok := adopted[ix.Name]; ok {
 			continue
@@ -480,18 +487,29 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// One left NOT VALID with the desired definition is validated below
 	// instead, and one replaced in place is dropped by the statement that
 	// adds its replacement.
+	droppedForeignKeys := make(map[string]bool)
 	for _, con := range live.Constraints {
 		if _, ok := replaced[con.Name]; ok {
 			continue
 		}
 		want, ok := desiredCons[con.Name]
 		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
-			appendDrop(Change{
+			if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
+				return nil, err
+			}
+			drop := Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:        dropConstraintKind(con),
 				Destructive: true,
 				Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
-			})
+			}
+			// A foreign key whose drop waits for the plan's adds is still in
+			// place when a key it references is dropped, so only one dropped
+			// here frees that key.
+			if con.ForeignKey && !waits(drop) {
+				droppedForeignKeys[con.Name] = true
+			}
+			appendDrop(drop)
 		}
 	}
 
@@ -574,8 +592,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			continue
 		}
 		had, ok := liveCons[con.Name]
-		if _, inPlace := replaced[con.Name]; inPlace {
-			replacement, err := replaceInPlaceChanges(table, schema, had, con)
+		if r, inPlace := replaced[con.Name]; inPlace {
+			replacement, err := replaceInPlaceChanges(table, schema, had, con, r)
 			if err != nil {
 				return nil, err
 			}

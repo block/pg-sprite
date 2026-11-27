@@ -212,6 +212,11 @@ type Constraint struct {
 	// privilege on them for a key the plan adds. Nil for every other
 	// constraint.
 	References *ForeignKeyReference `json:"-"`
+	// ReferencedBy are the foreign keys that reference a primary key or
+	// unique constraint's index, in a stable order. A key a foreign key
+	// depends on cannot be dropped, so a plan that replaces it is refused.
+	// A live fact, read only from a live table.
+	ReferencedBy []IncomingForeignKey `json:"-"`
 	// IndexInvalid reports a primary key, unique, or exclusion constraint
 	// whose index the server has not validated (pg_index.indisvalid is
 	// false). On a partitioned parent that is a key added with ALTER TABLE

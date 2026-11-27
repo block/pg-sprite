@@ -136,7 +136,7 @@ func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path
 	if m.Constraints, err = introspectConstraints(ctx, tx, oid, keyIndexDefs); err != nil {
 		return Model{}, fmt.Errorf("introspect constraints of %s.%s: %w", schema, table, err)
 	}
-	if m.Indexes, err = introspectIndexes(ctx, tx, oid); err != nil {
+	if m.Indexes, err = introspectIndexes(ctx, tx, oid, m.Constraints); err != nil {
 		return Model{}, fmt.Errorf("introspect indexes of %s.%s: %w", schema, table, err)
 	}
 	if m.IncomingForeignKeys, err = introspectReferencedBy(ctx, tx, oid); err != nil {
@@ -807,7 +807,10 @@ func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]Incom
 // the diff can tell a delivered index from an unfinished concurrent build;
 // indisready is deliberately not read — it turns true while a build is
 // still running, so it would report an in-flight index as delivered.
-func introspectIndexes(ctx context.Context, tx Querier, oid uint32) ([]Index, error) {
+//
+// The foreign keys that reference each index are recorded on it, and on the
+// constraint of cons whose index a key references.
+func introspectIndexes(ctx context.Context, tx Querier, oid uint32, cons []Constraint) ([]Index, error) {
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT c.relname, pg_catalog.pg_get_indexdef(i.indexrelid), NOT i.indisvalid
@@ -837,7 +840,7 @@ func introspectIndexes(ctx context.Context, tx Querier, oid uint32) ([]Index, er
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read indexes: %w", err)
 	}
-	if err := introspectIndexReferences(ctx, tx, oid, idxs); err != nil {
+	if err := introspectIndexReferences(ctx, tx, oid, idxs, cons); err != nil {
 		return nil, err
 	}
 	return idxs, nil
@@ -846,23 +849,32 @@ func introspectIndexes(ctx context.Context, tx Querier, oid uint32) ([]Index, er
 // introspectIndexReferences records on each index the foreign keys that
 // reference it: con.conindid names the index a key's referenced columns are
 // checked against, and the key depends on that index. A key on the table
-// itself counts, since it holds the index just the same. Partition clones
-// are left out (conislocal), as in introspectReferencedBy.
-func introspectIndexReferences(ctx context.Context, tx Querier, oid uint32, idxs []Index) error {
-	if len(idxs) == 0 {
+// itself counts, since it holds the index just the same. A key that
+// references a primary key or unique constraint is recorded on that
+// constraint of cons, whose index the model leaves out. Partition clones are
+// left out (conislocal), as in introspectReferencedBy.
+func introspectIndexReferences(ctx context.Context, tx Querier, oid uint32, idxs []Index, cons []Constraint) error {
+	if len(idxs) == 0 && len(cons) == 0 {
 		return nil
 	}
 	byName := make(map[string]int, len(idxs))
 	for i, ix := range idxs {
 		byName[ix.Name] = i
 	}
+	conByName := make(map[string]int, len(cons))
+	for i, con := range cons {
+		conByName[con.Name] = i
+	}
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT ix.relname, n.nspname, c.relname, con.conname
+		SELECT ix.relname, COALESCE(own.conname, ''), n.nspname, c.relname, con.conname
 		FROM pg_catalog.pg_constraint con
 		JOIN pg_catalog.pg_class ix ON ix.oid OPERATOR(pg_catalog.=) con.conindid
 		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) con.conrelid
 		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		LEFT JOIN pg_catalog.pg_constraint own ON own.conindid OPERATOR(pg_catalog.=) con.conindid
+		      AND own.conrelid OPERATOR(pg_catalog.=) $1
+		      AND own.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
 		WHERE con.confrelid OPERATOR(pg_catalog.=) $1 AND con.contype OPERATOR(pg_catalog.=) 'f'
 		      AND con.conislocal
 		ORDER BY ix.relname, c.relname, con.conname, n.nspname`, oid)
@@ -871,15 +883,16 @@ func introspectIndexReferences(ctx context.Context, tx Querier, oid uint32, idxs
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var index string
+		var index, owner string
 		var ref IncomingForeignKey
-		if err := rows.Scan(&index, &ref.Schema, &ref.Table, &ref.Constraint); err != nil {
+		if err := rows.Scan(&index, &owner, &ref.Schema, &ref.Table, &ref.Constraint); err != nil {
 			return fmt.Errorf("scan a foreign key that references an index: %w", err)
 		}
-		// A key that references a primary key or unique constraint is
-		// carried by that constraint, whose index the model leaves out.
 		if i, ok := byName[index]; ok {
 			idxs[i].ReferencedBy = append(idxs[i].ReferencedBy, ref)
+		}
+		if i, ok := conByName[owner]; ok && owner != "" {
+			cons[i].ReferencedBy = append(cons[i].ReferencedBy, ref)
 		}
 	}
 	if err := rows.Err(); err != nil {

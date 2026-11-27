@@ -113,7 +113,7 @@ func TestDiffChangedIndexRefusesATakenReplacementName(t *testing.T) {
 			live: func(m *Model) {
 				m.Indexes = append(m.Indexes, Index{Name: "events_name_idx_new", Def: "CREATE INDEX events_name_idx_new ON events USING btree (id)"})
 			},
-			want: "which a live index on the table already names; rename that index",
+			want: `a valid index the desired table does not declare already holds that name, likely an earlier attempt's build for another definition; run DROP INDEX CONCURRENTLY "public"."events_name_idx_new" and plan again`,
 		},
 		{
 			name: "an unfinished build of another definition",
