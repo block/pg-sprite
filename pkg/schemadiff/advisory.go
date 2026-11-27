@@ -58,7 +58,9 @@ type Advisory struct {
 }
 
 // Advisories reports every invalid index on a plain live table, in live
-// index order, classified by whether desired names it. These are the
+// index order, classified by whether the plan builds its name: desired names
+// it, or it is the temporary name a changed index or key's replacement is
+// built under, which a failed build leaves behind. These are the
 // entries Diff observes and declines to drop; Diff's change list alone
 // would discard the observation, so a caller reporting a plan pairs the two
 // over the same models. A partitioned parent's invalid entries are not
@@ -66,16 +68,39 @@ type Advisory struct {
 func Advisories(live, desired Model) []Advisory {
 	partitioned := live.PartitionKey != ""
 	desiredIdx := indexesByName(desired.Indexes)
+	replacements := replacementBuildNames(live, desired)
 	var advisories []Advisory
 	for _, ix := range live.Indexes {
 		if !isUnfinishedBuild(partitioned, ix) {
 			continue
 		}
 		kind := AdvisoryInvalidIndexUndeclared
-		if _, named := desiredIdx[ix.Name]; named {
+		_, named := desiredIdx[ix.Name]
+		_, replacement := replacements[ix.Name]
+		if named || replacement {
 			kind = AdvisoryInvalidIndexRebuild
 		}
 		advisories = append(advisories, Advisory{Kind: kind, Index: ix.Name})
 	}
 	return advisories
+}
+
+// replacementBuildNames names the temporary indexes the plan builds to
+// replace a changed index or key constraint: one for each name that live and
+// desired both hold with different definitions.
+func replacementBuildNames(live, desired Model) map[string]struct{} {
+	names := make(map[string]struct{})
+	liveIdx := indexesByName(live.Indexes)
+	for _, want := range desired.Indexes {
+		if had, ok := liveIdx[want.Name]; ok && had.Def != want.Def {
+			names[replacementIndexName(want.Name)] = struct{}{}
+		}
+	}
+	liveCons := constraintsByName(live.Constraints)
+	for _, want := range desired.Constraints {
+		if had, ok := liveCons[want.Name]; ok && isKey(want) && had.Def != want.Def {
+			names[replacementIndexName(want.Name)] = struct{}{}
+		}
+	}
+	return names
 }

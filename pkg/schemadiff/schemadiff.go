@@ -253,6 +253,11 @@ type Index struct {
 	// prints as Def or one of those; see settleDesired. Only a desired
 	// model carries them.
 	DefReplays []string `json:"-"`
+	// ReferencedBy are the foreign keys whose referenced index this is,
+	// including one on the table itself. PostgreSQL records each key's
+	// dependency on the index, so the index cannot be dropped while one
+	// remains. Only a live model carries them.
+	ReferencedBy []IncomingForeignKey `json:"-"`
 }
 
 // ReplicaIdentityKeys is what the replica identity indexes of a table are

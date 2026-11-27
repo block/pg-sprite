@@ -77,6 +77,9 @@ const (
 	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
+	// ChangeRenameIndex renames the index a replacement built under its
+	// temporary name to the name of the index it replaces.
+	ChangeRenameIndex ChangeKind = "rename-index"
 	// ChangeAddEnumValue adds a label to an enum type (ALTER TYPE ... ADD
 	// VALUE), the one change a desired enum type file plans.
 	ChangeAddEnumValue ChangeKind = "add-enum-value"
@@ -105,6 +108,7 @@ func ChangeKinds() []ChangeKind {
 		ChangeValidateConstraint,
 		ChangeValidateForeignKey,
 		ChangeCreateIndex,
+		ChangeRenameIndex,
 		ChangeAddEnumValue,
 	}
 }
@@ -154,6 +158,13 @@ type Change struct {
 	// definition the diff read. A reviewer approves what the name stood for,
 	// and execution refuses when the name now stands for something else.
 	Drops *DroppedObject `json:"-"`
+	// ReplacedBy is set on the DROP INDEX of a changed index the plan
+	// replaces: the index an earlier statement built under the desired
+	// definition, which is valid before the drop runs and takes the dropped
+	// index's name in the rename after it. The table has an index with the
+	// desired definition before the old one goes; what the desired
+	// definition drops from the old one, the drop removes.
+	ReplacedBy string `json:"-"`
 }
 
 // DroppedKind names the kind of object a destructive change removes.
@@ -304,7 +315,9 @@ type ConstraintValidation struct {
 // Order is dependency-correct: drops first (indexes, then constraints, then
 // columns, then NOT NULLs), then column adds and alters, then constraint adds, then index
 // creates — so an added column exists before an index or constraint that
-// references it. Within each bucket the order is deterministic: attribute
+// references it. A changed index is the exception to drops first: it is
+// replaced in the create bucket, built under a temporary name before the old
+// index is dropped (see replacedIndexes). Within each bucket the order is deterministic: attribute
 // order for columns, name order for constraints and indexes. schema
 // qualifies the emitted statements' table references. Columns are compared
 // by name only: attribute order carries no semantics in PostgreSQL and is
@@ -367,19 +380,40 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	partitioned := live.PartitionKey != ""
 
 	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
-	replaced, err := replacedInPlace(partitioned, dropsOrRetypesColumn(live, desiredCols), schema, liveCons, liveIdx, desired, desiredIdx)
+	dropsOrRetypes := dropsOrRetypesColumn(live, desiredCols)
+	replaced, err := replacedInPlace(partitioned, dropsOrRetypes, schema, liveCons, liveIdx, desired, desiredIdx)
 	if err != nil {
 		return nil, err
+	}
+	replacedIdx, err := replacedIndexes(partitioned, dropsOrRetypes, schema, liveCons, liveIdx, desired, desiredIdx, adopted)
+	if err != nil {
+		return nil, err
+	}
+	resumedBuilds := make(map[string]struct{}, len(replacedIdx))
+	for _, r := range replacedIdx {
+		resumedBuilds[r.temp] = struct{}{}
 	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
-	// adopts stays: the constraint takes it over below.
+	// adopts stays: the constraint takes it over below. A replaced index is
+	// dropped in the create bucket, once its replacement is built, and an
+	// earlier run's build of a replacement stays to be renamed.
 	for _, ix := range live.Indexes {
 		if _, ok := adopted[ix.Name]; ok {
 			continue
 		}
+		if _, ok := replacedIdx[ix.Name]; ok {
+			continue
+		}
+		if _, ok := resumedBuilds[ix.Name]; ok {
+			continue
+		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
+			_, changed := desiredIdx[ix.Name]
+			if err := refuseReferencedIndexDrop(ix, changed); err != nil {
+				return nil, err
+			}
 			changes = append(changes, Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
 				Kind:        ChangeDropIndex,
@@ -527,11 +561,20 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
-	// Indexes to create: new, recreated after a definition change, or
-	// rebuilt over an unfinished build. The desired definition is
-	// server-decompiled and unqualified; only the schema qualification is
-	// injected.
+	// Indexes to create: new, replaced after a definition change, recreated
+	// after a definition change on a table whose indexes cannot be
+	// replaced, or rebuilt over an unfinished build. The desired definition
+	// is server-decompiled and unqualified; only the schema qualification
+	// is injected.
 	for _, ix := range desired.Indexes {
+		if r, ok := replacedIdx[ix.Name]; ok {
+			replacement, err := replaceIndexChanges(schema, r)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, replacement...)
+			continue
+		}
 		if indexNeedsCreate(liveIdx, ix) {
 			qualified, err := statement.Qualify(ix.Def, schema)
 			if err != nil {
