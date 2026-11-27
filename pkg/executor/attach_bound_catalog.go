@@ -20,16 +20,26 @@ import (
 // readAttachKey reads the partition key of the partitioned table with the
 // given OID: its strategy, and for each key column the key as SQL, its type,
 // and its operator class's comparison operators. A key column with an
-// explicit COLLATE or a non-default operator class, or an expression whose
-// operator class takes a pseudo-type, is refused.
+// explicit COLLATE or a non-default operator class, a nondeterministic
+// collation, or a composite type, or an expression whose operator class
+// takes a pseudo-type, is refused, and so is a parent that is itself a
+// partition.
 func readAttachKey(ctx context.Context, q querier, parentOID uint32) (attachKey, error) {
 	var partstrat, keydef, parentLiteral string
-	err := q.QueryRow(ctx, attachKeyParentSQL, parentOID).Scan(&partstrat, &keydef, &parentLiteral)
+	var parentIsPartition bool
+	err := q.QueryRow(ctx, attachKeyParentSQL, parentOID).Scan(&partstrat, &keydef, &parentLiteral, &parentIsPartition)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return attachKey{}, fmt.Errorf("%w: table %d is not a partitioned table", ErrNotPartitionedTable, parentOID)
 	}
 	if err != nil {
 		return attachKey{}, fmt.Errorf("read the partition key of table %d: %w", parentOID, err)
+	}
+	// The server proves the new bound ANDed with the parent's own partition
+	// constraint, which a CHECK of the bound alone does not imply, so the
+	// attach under a parent that is itself a partition would scan anyway.
+	if parentIsPartition {
+		return attachKey{}, fmt.Errorf("%w: table %d is itself a partition, and its own partition constraint is part of what the attach proves",
+			errAttachBoundUnprovable, parentOID)
 	}
 	strategy, elems, err := statement.PartitionKey(keydef)
 	if err != nil {
@@ -48,7 +58,8 @@ func readAttachKey(ctx context.Context, q querier, parentOID uint32) (attachKey,
 
 const attachKeyParentSQL = `SELECT pt.partstrat::pg_catalog.text,
 		       pg_catalog.pg_get_partkeydef(pt.partrelid),
-		       pg_catalog.quote_literal(pg_catalog.format('%I.%I', n.nspname, c.relname))
+		       pg_catalog.quote_literal(pg_catalog.format('%I.%I', n.nspname, c.relname)),
+		       c.relispartition
 		  FROM pg_catalog.pg_partitioned_table pt
 		  JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) pt.partrelid
 		  JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
@@ -70,20 +81,28 @@ func catalogStrategy(partstrat string) statement.PartitionStrategy {
 // attachKeyColumnsSQL lists the key columns in key order: the column's name
 // (empty for an expression), the type its bound values take, as format_type
 // prints it (the column's type and typmod, or the operator class's input
-// type for an expression), whether that type is a pseudo-type or
-// collatable, and the operator class's family and input type.
+// type for an expression), whether that type is a pseudo-type, composite,
+// or collatable, whether the key's collation is nondeterministic, whether
+// the key may be relabeled to its operator class's input type (always for
+// an expression, which has no attribute type), and the operator class's
+// family and input type.
 const attachKeyColumnsSQL = `SELECT k.attnum::pg_catalog.int4,
 		       COALESCE(a.attname::pg_catalog.text, ''),
 		       pg_catalog.format_type(t.oid, a.atttypmod),
 		       t.typtype OPERATOR(pg_catalog.=) 'p',
+		       t.typtype OPERATOR(pg_catalog.=) 'c',
 		       t.typcollation OPERATOR(pg_catalog.<>) 0,
+		       COALESCE(NOT coll.collisdeterministic, false),
+		       a.atttypid IS DISTINCT FROM opc.opcintype,
 		       opc.opcfamily,
 		       opc.opcintype
 		  FROM pg_catalog.pg_partitioned_table pt
 		 CROSS JOIN LATERAL ROWS FROM (
 		         pg_catalog.unnest(pt.partattrs::pg_catalog.int2[]),
-		         pg_catalog.unnest(pt.partclass::pg_catalog.oid[])) WITH ORDINALITY AS k(attnum, opclass, n)
+		         pg_catalog.unnest(pt.partclass::pg_catalog.oid[]),
+		         pg_catalog.unnest(pt.partcollation::pg_catalog.oid[])) WITH ORDINALITY AS k(attnum, opclass, collid, n)
 		  JOIN pg_catalog.pg_opclass opc ON opc.oid OPERATOR(pg_catalog.=) k.opclass
+		  LEFT JOIN pg_catalog.pg_collation coll ON coll.oid OPERATOR(pg_catalog.=) k.collid
 		  LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) pt.partrelid
 		        AND a.attnum OPERATOR(pg_catalog.=) k.attnum
 		  JOIN pg_catalog.pg_type t ON t.oid OPERATOR(pg_catalog.=) COALESCE(a.atttypid, opc.opcintype)
@@ -91,13 +110,16 @@ const attachKeyColumnsSQL = `SELECT k.attnum::pg_catalog.int4,
 		 ORDER BY k.n`
 
 type attachKeyColumnRow struct {
-	attnum     int32
-	name       string
-	typeSQL    string
-	pseudo     bool
-	collatable bool
-	opfamily   uint32
-	opcintype  uint32
+	attnum           int32
+	name             string
+	typeSQL          string
+	pseudo           bool
+	composite        bool
+	collatable       bool
+	nondeterministic bool
+	relabeled        bool
+	opfamily         uint32
+	opcintype        uint32
 }
 
 func readAttachKeyColumns(ctx context.Context, q querier, parentOID uint32, strategy statement.PartitionStrategy, elems []statement.PartitionKeyElem) ([]attachKeyColumn, error) {
@@ -107,7 +129,7 @@ func readAttachKeyColumns(ctx context.Context, q querier, parentOID uint32, stra
 	}
 	collected, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (attachKeyColumnRow, error) {
 		var c attachKeyColumnRow
-		err := r.Scan(&c.attnum, &c.name, &c.typeSQL, &c.pseudo, &c.collatable, &c.opfamily, &c.opcintype)
+		err := r.Scan(&c.attnum, &c.name, &c.typeSQL, &c.pseudo, &c.composite, &c.collatable, &c.nondeterministic, &c.relabeled, &c.opfamily, &c.opcintype)
 		return c, err
 	})
 	if err != nil {
@@ -138,7 +160,18 @@ func attachKeyColumnFrom(row attachKeyColumnRow, elem statement.PartitionKeyElem
 	if elem.Collated || elem.OpClass {
 		return attachKeyColumn{}, fmt.Errorf("%w: the key has an explicit COLLATE or a non-default operator class", errAttachBoundUnprovable)
 	}
-	col := attachKeyColumn{typeSQL: row.typeSQL, collatable: row.collatable}
+	// The server decides the range's equal prefix under the key's
+	// collation, which may call values equal that this derivation's
+	// comparison does not.
+	if row.nondeterministic {
+		return attachKeyColumn{}, fmt.Errorf("%w: the key has a nondeterministic collation", errAttachBoundUnprovable)
+	}
+	// The parser reads IS NULL on a composite value as a test of every
+	// field, and the server's partition constraint tests the value itself.
+	if row.composite {
+		return attachKeyColumn{}, fmt.Errorf("%w: the key has a composite type", errAttachBoundUnprovable)
+	}
+	col := attachKeyColumn{typeSQL: row.typeSQL, collatable: row.collatable, relabeled: row.relabeled}
 	switch {
 	case row.attnum > 0 && elem.Column == row.name:
 		col.expr = pgx.Identifier{row.name}.Sanitize()
