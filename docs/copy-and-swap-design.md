@@ -811,11 +811,14 @@ verify and the swap and then failed that catalog comparison.
 (S settled against the stream)`; every other chunk matched in the sweep or had keys left for
 the swap. The engine reports a pass's rereads in the progress report while it runs
 (`chunks_reread`, `settle_rows_read`), and keeps the keys it left for the swap on
-`Report.Carried`, but the load proof records neither for a passing run, so neither is shown; a
-carried key that differed would have refused the swap, and none did. Every pass compared the
-retained and live tables row for row over 52,693 to 115,777 keys, with 55 to 304 excluded above
-the swap position and none ambiguous, and its only load failures were the 8 to 24 `0A000` stale
-prepared statements the swap causes.
+`Report.Carried`. The load proof records the carried keys and the settled and unsettled chunk
+counts under the verdict's `verification` object in `results.json`, as the library proof does in
+`results-library.json`; neither records the pass's rereads as a total, since they are not on
+`checksum.Report`. The runs above predate the `verification` object, so neither rereads nor
+carried keys are shown; a carried key that differed would have refused the swap, and none did.
+Every pass compared the retained and live tables row for row over 52,693 to 115,777 keys, with
+55 to 304 excluded above the swap position and none ambiguous, and its only load failures were
+the 8 to 24 `0A000` stale prepared statements the swap causes.
 
 At 50,000 rows the settling alone changes the outcome: before, a chunk the default load writes
 at every reread never reads equal as a whole, and the pass stops after its three rereads; from
