@@ -77,8 +77,9 @@ const (
 	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
-	// ChangeRenameIndex renames the index a replacement built under its
-	// temporary name to the name of the index it replaces.
+	// ChangeRenameIndex renames an index: a replacement built under its
+	// temporary name to the name of the index it replaces, or a live index
+	// the desired table declares under another name and otherwise unchanged.
 	ChangeRenameIndex ChangeKind = "rename-index"
 	// ChangeAddEnumValue adds a label to an enum type (ALTER TYPE ... ADD
 	// VALUE), the one change a desired enum type file plans.
@@ -393,6 +394,34 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	for _, r := range replacedIdx {
 		resumedBuilds[r.temp] = struct{}{}
 	}
+	renamed, err := renamedIndexes(partitioned, live.Indexes, desired.Indexes, liveIdx, desiredIdx, adopted, resumedBuilds)
+	if err != nil {
+		return nil, err
+	}
+	renameTargets := renameIndexTargets(renamed)
+
+	// A unique index or unique constraint the plan drops is held back until
+	// the plan's new unique indexes and constraints are in place, and so is
+	// a constraint the desired table declares again under another name. A
+	// uniqueness or rule that moves to another name or another kind of
+	// object keeps holding while its replacement builds, and a replacement
+	// that fails leaves the old one standing. A plan that drops or retypes a
+	// column keeps the drops first, since a dropped column takes the indexes
+	// and constraints that read it with it, and so does a drop whose name
+	// the desired table reuses.
+	held := heldDrops{
+		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
+		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
+		renamedRules: renamedConstraintDefs(desired, liveCons),
+	}
+	var heldChanges []Change
+	appendDrop := func(ch Change) {
+		if !dropsOrRetypes && held.holds(ch) {
+			heldChanges = append(heldChanges, ch)
+			return
+		}
+		changes = append(changes, ch)
+	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
@@ -409,12 +438,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if _, ok := resumedBuilds[ix.Name]; ok {
 			continue
 		}
+		if _, ok := renamed[ix.Name]; ok {
+			continue
+		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			_, changed := desiredIdx[ix.Name]
 			if err := refuseReferencedIndexDrop(ix, changed); err != nil {
 				return nil, err
 			}
-			changes = append(changes, Change{
+			appendDrop(Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
 				Kind:        ChangeDropIndex,
 				Destructive: true,
@@ -433,7 +465,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 		want, ok := desiredCons[con.Name]
 		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
-			changes = append(changes, Change{
+			appendDrop(Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:        dropConstraintKind(con),
 				Destructive: true,
@@ -575,6 +607,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			changes = append(changes, replacement...)
 			continue
 		}
+		if from, ok := renameTargets[ix.Name]; ok {
+			changes = append(changes, renameIndexChange(schema, from, ix.Name))
+			continue
+		}
 		if indexNeedsCreate(liveIdx, ix) {
 			qualified, err := statement.Qualify(ix.Def, schema)
 			if err != nil {
@@ -583,6 +619,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			changes = append(changes, Change{SQL: qualified, Kind: ChangeCreateIndex})
 		}
 	}
+
+	changes = append(changes, heldChanges...)
 
 	// Foreign keys last, once everything they can reference on this table
 	// exists.
