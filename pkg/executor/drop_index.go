@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // ErrDroppedIndexDrift means the index a reviewed plan drops is no longer
@@ -29,6 +30,15 @@ var ErrDroppedIndexDrift = errors.New("the index the plan drops changed after pl
 // recreates the one that was dropped if it should stay. The outcome is
 // permanent.
 var ErrDroppedIndexReplaced = errors.New("the drop removed an index the plan did not review")
+
+// ErrReplacementIndexDrift means the index that replaces the one a reviewed
+// plan drops is no longer the valid index of the plan's table with the
+// definition the plan built it with: it is gone, invalid, belongs to another
+// table, or was rebuilt with another definition, as can happen while an
+// apply is stopped between the build and the drop. It is returned only from
+// the read before the drop, so the old index is still in place. The outcome
+// is permanent: re-plan, which builds the replacement again.
+var ErrReplacementIndexDrift = errors.New("the index that replaces the dropped one changed after planning")
 
 // DropOutcomeUnknownError means DROP INDEX CONCURRENTLY returned success,
 // so an index was dropped, but the lookup that confirms it was the reviewed
@@ -84,12 +94,31 @@ func (e *DropOutcomeUnknownError) Unwrap() error { return e.Err }
 // or marks it invalid; an invalid leftover is debris the diff reports as an
 // advisory, never as a drop. It needs one pool connection.
 func ExecuteDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, b ConcurrentBudget) (DroppedIndex, error) {
-	return executeDropIndexConcurrently(ctx, pool, schema, table, index, definition, b, progress.WallClock{})
+	return executeDropIndexConcurrently(ctx, pool, schema, table, index, definition, nil, b, progress.WallClock{})
+}
+
+// ExecuteReplacedIndexDropConcurrently is ExecuteDropIndexConcurrently for
+// the old index of a changed index the plan replaces
+// (schemadiff.Change.Replacement). On the same session, immediately before
+// the drop, it also refuses, dropping nothing, unless the replacement is
+// still a valid index of schema.table with the definition the plan built it
+// with (ErrReplacementIndexDrift). The table then has the desired index
+// before the old one goes. Like the check of the dropped index, this read
+// cannot hold off a session that changes the replacement in the round trip
+// before the drop; it catches a replacement that changed while the apply
+// was not running.
+func ExecuteReplacedIndexDropConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, replacement schemadiff.IndexReplacement, b ConcurrentBudget) (DroppedIndex, error) {
+	if replacement.Index == "" || replacement.Def == "" {
+		return DroppedIndex{}, fmt.Errorf("%w: dropping index %s.%s for its replacement needs the replacement's name and definition, got %q, %q",
+			ErrInvariantViolation, schema, index, replacement.Index, replacement.Def)
+	}
+	return executeDropIndexConcurrently(ctx, pool, schema, table, index, definition, &replacement, b, progress.WallClock{})
 }
 
 // executeDropIndexConcurrently is ExecuteDropIndexConcurrently with the
-// clock it reads right before the drop and again right after it.
-func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, b ConcurrentBudget, clock progress.Clock) (DroppedIndex, error) {
+// replacement to check, nil for an index the plan removes, and the clock it
+// reads right before the drop and again right after it.
+func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schema, table, index, definition string, replacement *schemadiff.IndexReplacement, b ConcurrentBudget, clock progress.Clock) (DroppedIndex, error) {
 	if err := b.validate(); err != nil {
 		return DroppedIndex{}, err
 	}
@@ -187,6 +216,12 @@ func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schem
 			ErrDroppedIndexDrift, ref.Sanitize(), oid, nowOID)
 	}
 
+	if replacement != nil {
+		if err := refuseReplacementIndexDrift(ctx, conn, schema, table, *replacement); err != nil {
+			return DroppedIndex{}, err
+		}
+	}
+
 	start := clock.Now()
 	_, dropErr := conn.Exec(ctx, "DROP INDEX CONCURRENTLY "+ref.Sanitize())
 	elapsed := clock.Now().Sub(start)
@@ -208,4 +243,50 @@ func executeDropIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, schem
 			ErrDroppedIndexReplaced, ref.Sanitize(), oid, tableRef.Sanitize())
 	}
 	return DroppedIndex{Schema: schema, Index: index, IndexOID: oid, Duration: elapsed}, nil
+}
+
+// refuseReplacementIndexDrift refuses unless r.Index is a valid index of
+// schema.table whose definition, read the way introspection reads it, is
+// r.Def. Both are printed under r.Index by the same deparser, so the
+// comparison sees the definition the plan built.
+func refuseReplacementIndexDrift(ctx context.Context, q querier, schema, table string, r schemadiff.IndexReplacement) error {
+	ref := pgx.Identifier{schema, r.Index}
+	tableRef := pgx.Identifier{schema, table}
+	var (
+		def   string
+		valid bool
+	)
+	err := q.QueryRow(ctx,
+		`SELECT pg_catalog.pg_get_indexdef(i.indexrelid), i.indisvalid
+		   FROM pg_catalog.pg_index i
+		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
+		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		   JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
+		   JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
+		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2
+		    AND tn.nspname OPERATOR(pg_catalog.=) $1 AND t.relname OPERATOR(pg_catalog.=) $3`,
+		schema, r.Index, table).Scan(&def, &valid)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return fmt.Errorf("%w: %s has no index %s on %s any more, so dropping the old index would leave the table without its new definition; re-plan",
+			ErrReplacementIndexDrift, schema, ref.Sanitize(), tableRef.Sanitize())
+	case err != nil:
+		return fmt.Errorf("read replacement index %s before dropping the index it replaces: %w", ref.Sanitize(), err)
+	case !valid:
+		return fmt.Errorf("%w: replacement index %s is invalid, so dropping the old index would leave the table without its new definition; re-plan",
+			ErrReplacementIndexDrift, ref.Sanitize())
+	}
+	unqualified, err := statement.Qualify(def, "")
+	if err != nil {
+		return fmt.Errorf("unqualify replacement index %s: %w", ref.Sanitize(), err)
+	}
+	got, err := statement.RenameIndex(unqualified, r.Index)
+	if err != nil {
+		return fmt.Errorf("read the definition of replacement index %s: %w", ref.Sanitize(), err)
+	}
+	if got != r.Def {
+		return fmt.Errorf("%w: replacement index %s is now %q, not the %q the plan built; re-plan",
+			ErrReplacementIndexDrift, ref.Sanitize(), got, r.Def)
+	}
+	return nil
 }
