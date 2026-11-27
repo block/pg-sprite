@@ -2,6 +2,7 @@ package migrate_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,12 +242,41 @@ func TestReplacedIndexDropRefusesAReplacementThatChanged(t *testing.T) {
 	assert.Contains(t, err.Error(), "not the", "the refusal names the definition it found")
 
 	exec(t, "DROP INDEX "+temp)
-	exec(t, build.SQL)
-	exec(t, fmt.Sprintf(`UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = '%s'::regclass`, temp))
+	leaveInvalidBuild(t, pool, schema, build.SQL)
 	requireOldIndexKept(t, dropOld(t))
 
-	exec(t, fmt.Sprintf(`UPDATE pg_catalog.pg_index SET indisvalid = true WHERE indexrelid = '%s'::regclass`, temp))
+	exec(t, "DROP INDEX "+temp)
+	exec(t, build.SQL)
 	require.NoError(t, dropOld(t))
 	assert.NotContains(t, liveIndexes(t, pool, schema), "t_email_lower_key")
 	assert.Contains(t, liveIndexes(t, pool, schema), "t_email_lower_key_new")
+}
+
+// leaveInvalidBuild leaves the index build sql creates on schema.t invalid,
+// the way an interrupted CREATE INDEX CONCURRENTLY does: an open transaction
+// that wrote to the table holds the build in its wait for writers, and the
+// build's statement timeout cancels it after its catalog entry committed. It
+// writes no catalog row, which a managed server's role cannot.
+func leaveInvalidBuild(t *testing.T, pool *pgxpool.Pool, schema, sql string) {
+	t.Helper()
+	writer, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, writer.Rollback(t.Context())) }()
+	_, err = writer.Exec(t.Context(), fmt.Sprintf(`UPDATE %s.t SET qty = qty WHERE id = 1`, schema))
+	require.NoError(t, err)
+
+	conn, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer conn.Release()
+	_, err = conn.Exec(t.Context(), `SET statement_timeout = '500ms'`)
+	require.NoError(t, err)
+	defer func() {
+		_, err := conn.Exec(t.Context(), `RESET statement_timeout`)
+		require.NoError(t, err)
+	}()
+	_, err = conn.Exec(t.Context(), strings.Replace(sql, "CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX CONCURRENTLY ", 1))
+	require.Error(t, err, "the build waits on the open writer until its timeout")
+	def, valid := indexState(t, pool, schema, "t_email_lower_key_new")
+	require.NotEmpty(t, def, "the cancelled build leaves its catalog entry")
+	require.False(t, valid)
 }
