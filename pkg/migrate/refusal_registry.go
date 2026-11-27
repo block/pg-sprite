@@ -194,13 +194,15 @@ func admissionSentinels() []error {
 		executor.ErrPartitionedIndexTablespace,
 		executor.ErrUniqueIndexPartitionKey,
 		executor.ErrDetachDefaultPartition,
+		executor.ErrNotAddKeyConstraint,
+		executor.ErrPartitionedKeyUnsupportedShape,
 	}
 }
 
 // admissionRefusal classifies an imperative admission refusal: decided from
-// the statement's shape, or for a unique index on a partitioned table from the
-// tree's partition keys, before anything executes, so it maps to a refusal
-// verdict, not an operational error. ok is false for an error outside
+// the statement's shape, or for a unique index or key on a partitioned table
+// from the tree's partition keys, before anything executes, so it maps to a
+// refusal verdict, not an operational error. ok is false for an error outside
 // admissionSentinels(), and for a *SequenceStepError wrapper — execution
 // started, which is never an admission refusal.
 func admissionRefusal(err error) (verdict.Refusal, bool) {
@@ -226,6 +228,39 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
+}
+
+// partitionedKeySentinels is the closed set of the partitioned key build's
+// catalog refusals that the imperative front door maps to a refusal verdict
+// when the build returned them before it changed anything
+// (partitionedKeyBuild checks that): the parent stands in the way, a primary
+// key column allows NULL, or a partition is itself partitioned. The build
+// reads these before it touches a partition, and on a later pass too, so the
+// same error after the build changed a partition is a failed verdict instead.
+func partitionedKeySentinels() []error {
+	return []error{
+		executor.ErrPartitionedKeyParentConflict,
+		executor.ErrPartitionedKeyNullableColumn,
+		executor.ErrPartitionedKeySubPartitioned,
+	}
+}
+
+// partitionedKeyRefusal classifies a partitioned key build's catalog
+// refusal. A parent that already has a primary key, a constraint under the
+// name, or a relation holding the index's name is a catalog collision, and a
+// primary key column that allows NULL waits on the operator making it NOT
+// NULL: both are environmental, since the same statement runs once the table
+// changes. A sub-partitioned partition is a tree the build does not take yet,
+// a capability boundary. ok is false for an error outside
+// partitionedKeySentinels().
+func partitionedKeyRefusal(err error) (verdict.Refusal, bool) {
+	if !isInSentinelSet(err, partitionedKeySentinels()) {
+		return verdict.Refusal{}, false
+	}
+	if errors.Is(err, executor.ErrPartitionedKeySubPartitioned) {
+		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
+	}
+	return verdict.Environmental(verdict.ReasonUnsupportedStatement), true
 }
 
 // desiredShapeSentinels is the closed set of desired-file shapes the
@@ -326,6 +361,8 @@ func desiredStatementRefusal(kind statement.Kind) (verdict.Refusal, bool) {
 // for every other error, including a syntax error, which is an input error
 // and not a refusal.
 func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
+	refusedStatements := desiredRefusedStatements(err)
+	err = decisiveDesiredRefusal(err)
 	ref, ok := desiredFileRefusal(err)
 	if !ok {
 		ref, ok = desiredPlanRefusal(err)
@@ -352,7 +389,82 @@ func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 				"partitions; nothing was planned or executed"
 		}
 	}
-	return verdict.Verdict{Statement: sql, Detail: detail}.WithRefusal(ref), true
+	v := verdict.Verdict{Statement: sql, Detail: detail}.WithRefusal(ref)
+	v.RefusedStatements = refusedStatements
+	return v, true
+}
+
+// desiredRefusedStatements lists every statement a desired file refused, in
+// file order, with where each starts, when it refused more than one. A file
+// that refused one statement needs no list: the verdict names that statement.
+func desiredRefusedStatements(err error) []verdict.RefusedStatement {
+	refused, ok := errors.AsType[*statement.RefusedStatementsError](err)
+	if !ok || len(refused.Refusals) < 2 {
+		return nil
+	}
+	statements := make([]verdict.RefusedStatement, len(refused.Refusals))
+	for i, refusal := range refused.Refusals {
+		statements[i] = verdict.RefusedStatement{
+			Statement: refusal.Statement,
+			Line:      refusal.Line,
+			Column:    refusal.Column,
+			Detail:    refusal.Err.Error(),
+		}
+	}
+	return statements
+}
+
+// decisiveDesiredRefusal returns the one refusal a desired file's verdict
+// describes when the file refuses several statements, so the verdict's class,
+// statement, and detail all come from the same statement: the first input
+// error, which is not a refusal and so keeps the file from taking a verdict at
+// all, else the first partition, else the first breach of the one-table or
+// one-type rule, else the first statement the file may not hold, else the
+// first refusal. Any other error is returned unchanged.
+func decisiveDesiredRefusal(err error) error {
+	refused, ok := errors.AsType[*statement.RefusedStatementsError](err)
+	if !ok || len(refused.Refusals) == 0 {
+		return err
+	}
+	decisive := refused.Refusals[0]
+	for _, refusal := range refused.Refusals[1:] {
+		if desiredRefusalRank(refusal) < desiredRefusalRank(decisive) {
+			decisive = refusal
+		}
+	}
+	return decisive
+}
+
+// desiredRefusalRank orders one statement's refusal by how much of the file's
+// verdict it decides, lowest first, in the order desiredFileRefusal tests
+// the sentinels.
+func desiredRefusalRank(refusal statement.Refusal) int {
+	if !isDesiredRefusal(refusal) {
+		return -1
+	}
+	switch {
+	case errors.Is(refusal, statement.ErrDesiredPartitions):
+		return 0
+	case errors.Is(refusal, statement.ErrMultipleCreateTables),
+		errors.Is(refusal, statement.ErrEnumTypeAlone),
+		errors.Is(refusal, statement.ErrEnumLabel):
+		return 1
+	case errors.Is(refusal, statement.ErrDisallowedStatement):
+		return 2
+	default:
+		return 3
+	}
+}
+
+// isDesiredRefusal reports whether one statement's refusal classifies as a
+// refusal verdict. One that does not, such as a qualified table name, is an
+// input error the author must see as one.
+func isDesiredRefusal(refusal statement.Refusal) bool {
+	if _, ok := desiredFileRefusal(refusal); ok {
+		return true
+	}
+	_, ok := desiredPlanRefusal(refusal)
+	return ok
 }
 
 // createAdmissionSentinels is the closed set of the create path's static

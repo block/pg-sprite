@@ -122,6 +122,58 @@ func TestRenderRoundTripsSerialTable(t *testing.T) {
 	assert.Empty(t, changes)
 }
 
+// The table an ORM such as Prisma creates for a model named User, with an
+// autoincrementing id, round-trips through serial: the server prints its
+// default with the sequence name quoted, nextval('"User_id_seq"'::regclass).
+// A mixed-case column and a table name with a space take the same route.
+func TestRenderRoundTripsSerialTableWithAQuotedName(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		table  string
+		ddl    string
+		column string
+	}{
+		{
+			name:  "ORM model table",
+			table: "User",
+			ddl: `CREATE TABLE %s."User" (
+				"id" SERIAL NOT NULL,
+				"email" TEXT NOT NULL,
+				CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+			)`,
+			column: `"id" serial NOT NULL`,
+		},
+		{
+			name:  "table name with a space",
+			table: "Line Item",
+			ddl: `CREATE TABLE %s."Line Item" (
+				"ItemId" BIGSERIAL PRIMARY KEY,
+				"qty" integer NOT NULL
+			)`,
+			column: `"ItemId" bigserial NOT NULL`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+			require.NoError(t, err)
+			defer pool.Close()
+			schema := testutil.NewSchema(t, pool)
+			_, err = pool.Exec(t.Context(), fmt.Sprintf(tt.ddl, schema))
+			require.NoError(t, err)
+
+			model, err := schemadiff.Introspect(t.Context(), pool, schema, tt.table)
+			require.NoError(t, err)
+			rendered, err := schemadiff.Render(model)
+			require.NoError(t, err)
+			assert.Contains(t, rendered, tt.column)
+
+			live, desired, changes := roundTrip(t, pool, schema, tt.table)
+			assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired))
+			assert.Empty(t, changes)
+		})
+	}
+}
+
 // Quoted, mixed-case, whitespace, and reserved-word identifiers must
 // survive the round trip: every rendered name goes through
 // pgx.Identifier.Sanitize(), and this fixture is the one that would break
