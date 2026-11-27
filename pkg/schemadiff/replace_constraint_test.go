@@ -2,7 +2,6 @@ package schemadiff
 
 import (
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -126,10 +125,12 @@ func TestDiffKeepsAChangedForeignKeysDropAndAdd(t *testing.T) {
 }
 
 // A primary key narrowed to fewer columns, on a table whose file also lets a
-// column it drops be NULL, keeps its drop and re-add. The key owns that
-// column's NOT NULL until it is dropped, and the plan drops NOT NULLs before
-// it adds constraints, so a key still in place would refuse the DROP NOT NULL.
-func TestDiffKeepsANarrowedPrimaryKeysDropWhenItsColumnLosesNotNull(t *testing.T) {
+// column it drops be NULL, is replaced in place like any other key. The old
+// key owns that column's NOT NULL until the swap drops it, so the DROP NOT
+// NULL comes after the swap: the new key is built while the old one keeps
+// rejecting duplicates, and a build that fails leaves the old key and the
+// NOT NULL in place.
+func TestDiffDropsANarrowedPrimaryKeysNotNullAfterTheSwap(t *testing.T) {
 	live := keyed()
 	live.Constraints[0] = Constraint{Name: "events_pkey", Def: "PRIMARY KEY (id, name)", Primary: true}
 	desired := keyed()
@@ -145,14 +146,12 @@ func TestDiffKeepsANarrowedPrimaryKeysDropWhenItsColumnLosesNotNull(t *testing.T
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
 	got := sqls(changes)
-	require.Contains(t, got, `ALTER TABLE "public"."events" DROP CONSTRAINT "events_pkey"`)
-	require.Contains(t, got, `ALTER TABLE "public"."events" ALTER COLUMN "name" DROP NOT NULL`)
-	for _, sql := range got {
-		assert.NotContains(t, sql, "events_pkey_new", "the key is not replaced in place")
-	}
-	assert.Less(t, slices.Index(got, `ALTER TABLE "public"."events" DROP CONSTRAINT "events_pkey"`),
-		slices.Index(got, `ALTER TABLE "public"."events" ALTER COLUMN "name" DROP NOT NULL`),
-		"the key is dropped before the NOT NULL it owns")
+	require.Len(t, got, 3, "%v", got)
+	assert.Contains(t, got[0], "CREATE UNIQUE INDEX events_pkey_new")
+	assert.Contains(t, got[1], `DROP CONSTRAINT "events_pkey"`)
+	assert.Contains(t, got[1], "USING INDEX")
+	assert.Equal(t, `ALTER TABLE "public"."events" ALTER COLUMN "name" DROP NOT NULL`, got[2],
+		"the NOT NULL the old key owned is dropped once the key is swapped")
 }
 
 // A replaced key's new index is built under the constraint's name with a

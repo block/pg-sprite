@@ -50,15 +50,12 @@ type inPlaceReplacement struct {
 // in place, keyed by constraint name. A partitioned parent keeps the drop
 // and re-add, since the server refuses USING INDEX there. So does a table whose diff drops or retypes a column: a
 // dropped column takes the constraints that read it with it, and a retype
-// re-checks the constraints that are still in place. A primary key keeps
-// them too on a table whose diff drops a NOT NULL: the key owns its columns'
-// NOT NULL until it is dropped, and the plan drops NOT NULLs before it adds
-// constraints.
+// re-checks the constraints that are still in place.
 //
 // A key replacement an earlier run left after its build is picked up there:
 // a valid index under the temporary name with the desired definition is
 // swapped in, not built again. Any other index under that name is refused.
-func replacedInPlace(partitioned, dropsOrRetypesColumn, dropsNotNull bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]inPlaceReplacement, error) {
+func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]inPlaceReplacement, error) {
 	replaced := make(map[string]inPlaceReplacement)
 	if partitioned || dropsOrRetypesColumn {
 		return replaced, nil
@@ -67,9 +64,6 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn, dropsNotNull bool, schem
 	for _, con := range desired.Constraints {
 		had, ok := liveCons[con.Name]
 		if !ok || had.Def == con.Def || validatesInPlace(had, con) || !sameConstraintFamily(had, con) {
-			continue
-		}
-		if con.Primary && dropsNotNull {
 			continue
 		}
 		if isKey(con) {
@@ -104,6 +98,17 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn, dropsNotNull bool, schem
 		replaced[con.Name] = inPlaceReplacement{}
 	}
 	return replaced, nil
+}
+
+// replacesPrimaryKey reports whether the plan replaces the table's primary
+// key in place.
+func replacesPrimaryKey(replaced map[string]inPlaceReplacement, liveCons map[string]Constraint) bool {
+	for name := range replaced {
+		if liveCons[name].Primary {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseReferencedKeyReplacement refuses to replace a primary key or unique
