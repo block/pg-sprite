@@ -275,6 +275,15 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	if err := retry.validate(); err != nil {
 		return err
 	}
+	// An ALTER INDEX ... RENAME TO names an index, not a table, so its
+	// ST-7 binding is checked in the catalog, under the table's lock, by
+	// the index-rename path rather than on the statement's text.
+	if st.Kind() == statement.KindRenameIndex {
+		if adopts != nil || validates != nil || dropped != nil {
+			return fmt.Errorf("%w: an index rename carries no adoption, validation, or drop check", ErrInvariantViolation)
+		}
+		return executeIndexRename(ctx, pool, pt, st, b, retry, tracker)
+	}
 	// INV: ST-7 — the executor runs exactly the statement that was gated,
 	// and only against the table the preflight proof verified.
 	if st.Table() == "" || st.Schema() != pt.Schema() || st.Table() != pt.Table() {
