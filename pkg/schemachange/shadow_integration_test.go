@@ -420,18 +420,7 @@ func TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC(t *testing.T) {
 func TestBuildShadowKeepsTheSourceTablespace(t *testing.T) {
 	testutil.SkipOnSharedServer(t, "creates a tablespace directory on the server's filesystem")
 	f := newShadowFixture(t)
-	tablespace := f.schema + "_ts"
-	// The program reads its stdin, so the server's write of the copied row
-	// cannot meet a closed pipe after mkdir has exited.
-	f.exec(t, `COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/`+tablespace+` && cat > /dev/null'`)
-	f.exec(t, `CREATE TABLESPACE `+tablespace+` LOCATION '/tmp/`+tablespace+`'`)
-	t.Cleanup(func() {
-		ctx := context.WithoutCancel(t.Context())
-		_, err := f.pool.Exec(ctx, `DROP SCHEMA `+pgx.Identifier{f.schema}.Sanitize()+` CASCADE`)
-		assert.NoError(t, err)
-		_, err = f.pool.Exec(ctx, `DROP TABLESPACE `+tablespace)
-		assert.NoError(t, err)
-	})
+	tablespace := testutil.NewTablespace(t, f.pool, f.schema)
 	f.exec(t, `
 		CREATE TABLE %s.widgets (
 			id bigint PRIMARY KEY,
