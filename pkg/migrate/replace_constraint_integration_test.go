@@ -148,3 +148,78 @@ func TestRunDesiredReplacesACheckWithoutAGap(t *testing.T) {
 		require.Error(t, err, "the new rule checks new writes before it is validated")
 	})
 }
+
+// A unique constraint replacement that stopped after its build is picked up
+// there: the valid t_email_key_new with the desired definition is swapped in,
+// not built again and not dropped as an index the file does not declare. The
+// constraint ends with the new definition, and a re-plan is empty.
+func TestRunDesiredResumesAUniqueConstraintReplacementAfterItsBuild(t *testing.T) {
+	pool, schema := replaceConstraintTable(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE UNIQUE INDEX t_email_key_new ON %s.t (email, name, qty)`, schema))
+	require.NoError(t, err)
+	desired := replaceDesired("UNIQUE (email, name, qty)", "CHECK (qty > 0)")
+
+	planned := plannedDrop(t, pool, schema, desired)
+	require.Len(t, planned.Statements, 1, "only the swap is left")
+	assert.Contains(t, planned.Statements[0].SQL, "ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key_new")
+
+	res := runReplace(t, pool, schema, desired)
+	require.Equal(t, verdict.OutcomeExecuted, res.Outcome, "%s", res.Detail)
+	def, validated := constraintDef(t, pool, schema, "t_email_key")
+	assert.Equal(t, "UNIQUE (email, name, qty)", def)
+	assert.True(t, validated)
+	assert.NotContains(t, liveIndexes(t, pool, schema), "t_email_key_new")
+	assert.Empty(t, plannedDrop(t, pool, schema, desired).Statements)
+}
+
+// A primary key or unique constraint that a foreign key on another table
+// references cannot be dropped while the key remains, so a file that changes
+// its definition is refused at plan time, naming the foreign key. Nothing is
+// built, and the constraint stays as it was.
+func TestRunDesiredRefusesReplacingAKeyAForeignKeyReferences(t *testing.T) {
+	for name, tc := range map[string]struct {
+		references string
+		desired    string
+		constraint string
+	}{
+		"a unique constraint": {
+			references: "(email, name) REFERENCES %[1]s.t (email, name)",
+			desired:    replaceDesired("UNIQUE (email, name, qty)", "CHECK (qty > 0)"),
+			constraint: "t_email_key",
+		},
+		"a primary key": {
+			references: "(id) REFERENCES %[1]s.t (id)",
+			desired: `CREATE TABLE t (
+		id int,
+		email text,
+		name text,
+		qty int NOT NULL,
+		CONSTRAINT t_pkey PRIMARY KEY (id) INCLUDE (qty),
+		CONSTRAINT t_email_key UNIQUE (email, name),
+		CONSTRAINT t_qty_check CHECK (qty > 0)
+	);`,
+			constraint: "t_pkey",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool, schema := replaceConstraintTable(t)
+			before, _ := constraintDef(t, pool, schema, tc.constraint)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.r (id int, email text, name text,
+				CONSTRAINT r_t_fkey FOREIGN KEY `+tc.references+`)`, schema))
+			require.NoError(t, err)
+
+			res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+				Schema: schema, Desired: parseDesired(t, tc.desired),
+			}, runOptions())
+			require.NoError(t, err)
+			assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+			assert.Contains(t, res.Detail, `constraint "`+tc.constraint+`" is referenced by foreign key "r_t_fkey" on table "`+schema+`"."r"`)
+			assert.Contains(t, res.Detail, `drop or change "r_t_fkey" first, or keep the constraint's definition`)
+
+			after, _ := constraintDef(t, pool, schema, tc.constraint)
+			assert.Equal(t, before, after)
+			assert.NotContains(t, liveIndexes(t, pool, schema), tc.constraint+"_new", "nothing is built")
+		})
+	}
+}

@@ -34,14 +34,27 @@ import (
 // is built under.
 const replacementIndexSuffix = "_new"
 
+// inPlaceReplacement is how one changed constraint is replaced in place.
+type inPlaceReplacement struct {
+	// built is set for a primary key or unique constraint whose new index
+	// an earlier run already built under its temporary name, valid and with
+	// the desired definition, and stopped before the swap. The plan then
+	// swaps that index in without building it again.
+	built bool
+}
+
 // replacedInPlace names the constraints of a table diff that are replaced
 // in place, keyed by constraint name. A partitioned parent keeps the drop
 // and re-add, since the server refuses USING INDEX and NOT VALID foreign
 // keys there. So does a table whose diff drops or retypes a column: a
 // dropped column takes the constraints that read it with it, and a retype
 // re-checks the constraints that are still in place.
-func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]struct{}, error) {
-	replaced := make(map[string]struct{})
+//
+// A key replacement an earlier run left after its build is picked up there:
+// a valid index under the temporary name with the desired definition is
+// swapped in, not built again. Any other index under that name is refused.
+func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]inPlaceReplacement, error) {
+	replaced := make(map[string]inPlaceReplacement)
 	if partitioned || dropsOrRetypesColumn {
 		return replaced, nil
 	}
@@ -52,6 +65,9 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, live
 			continue
 		}
 		if isKey(con) {
+			if err := refuseReferencedKeyReplacement(had); err != nil {
+				return nil, err
+			}
 			name := replacementIndexName(con.Name)
 			if _, taken := desiredIdx[name]; taken {
 				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that index",
@@ -66,12 +82,43 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, live
 					ErrUnsupportedChange, con.Name, name)
 			}
 			if ix, taken := liveIdx[name]; taken {
-				return nil, replacementIndexTaken(schema, con.Name, ix)
+				resumed, err := isKeyReplacementBuild(ix, con)
+				if err != nil {
+					return nil, err
+				}
+				if !resumed {
+					return nil, replacementIndexTaken(schema, con.Name, ix)
+				}
+				replaced[con.Name] = inPlaceReplacement{built: true}
+				continue
 			}
 		}
-		replaced[con.Name] = struct{}{}
+		replaced[con.Name] = inPlaceReplacement{}
 	}
 	return replaced, nil
+}
+
+// refuseReferencedKeyReplacement refuses to replace a primary key or unique
+// constraint that a foreign key references. PostgreSQL does not drop a key a
+// foreign key depends on, so the swap would fail on every run after the new
+// index was built, and leave that index on the table.
+func refuseReferencedKeyReplacement(had Constraint) error {
+	if len(had.ReferencedBy) == 0 {
+		return nil
+	}
+	ref := had.ReferencedBy[0]
+	return unsupported(CauseReferencedIndex, "%w: constraint %q is referenced by foreign key %q on table %s, and PostgreSQL does not drop a key a foreign key depends on; drop or change %q first, or keep the constraint's definition",
+		ErrUnsupportedChange, had.Name, ref.Constraint, pgx.Identifier{ref.Schema, ref.Table}.Sanitize(), ref.Constraint)
+}
+
+// isKeyReplacementBuild reports whether ix, the live index under a key
+// replacement's temporary name, is an earlier run's finished build of con's
+// new index: valid and with con's index definition.
+func isKeyReplacementBuild(ix Index, con Constraint) (bool, error) {
+	if ix.Invalid {
+		return false, nil
+	}
+	return sameIndexUnderName(ix, Index{Name: con.Name, Def: con.IndexDef})
 }
 
 // replacementIndexTaken refuses a replacement whose temporary index name a
@@ -136,9 +183,9 @@ func replacementIndexName(constraint string) string {
 }
 
 // replaceInPlaceChanges is the plan that replaces had with con in place.
-func replaceInPlaceChanges(table, schema string, had, con Constraint) ([]Change, error) {
+func replaceInPlaceChanges(table, schema string, had, con Constraint, r inPlaceReplacement) ([]Change, error) {
 	if isKey(con) {
-		return replaceKeyChanges(table, schema, had, con)
+		return replaceKeyChanges(table, schema, had, con, r.built)
 	}
 	return replaceRuleChanges(table, schema, had, con)
 }
@@ -156,27 +203,31 @@ func dropsOrRetypesColumn(live Model, desiredCols map[string]Column) bool {
 }
 
 // replaceKeyChanges builds con's new index under its temporary name, then
-// drops had and attaches the index as con in one statement.
-func replaceKeyChanges(table, schema string, had, con Constraint) ([]Change, error) {
+// drops had and attaches the index as con in one statement. built leaves the
+// build out, for an index an earlier run already built.
+func replaceKeyChanges(table, schema string, had, con Constraint, built bool) ([]Change, error) {
 	index := replacementIndexName(con.Name)
 	def, err := statement.RenameIndex(con.IndexDef, index)
 	if err != nil {
 		return nil, fmt.Errorf("name the replacement index of constraint %s: %w", con.Name, err)
 	}
-	create, err := statement.Qualify(def, schema)
-	if err != nil {
-		return nil, fmt.Errorf("qualify the replacement index of constraint %s: %w", con.Name, err)
+	var changes []Change
+	if !built {
+		create, err := statement.Qualify(def, schema)
+		if err != nil {
+			return nil, fmt.Errorf("qualify the replacement index of constraint %s: %w", con.Name, err)
+		}
+		changes = append(changes, Change{SQL: create, Kind: ChangeCreateIndex})
 	}
-	return []Change{
-		{SQL: create, Kind: ChangeCreateIndex},
-		{
+	return append(changes,
+		Change{
 			SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{had.Name}.Sanitize() + ", " + addUsingIndexClause(con, index),
 			Kind:        ChangeAddConstraint,
 			Destructive: true,
 			Adopts:      &IndexAdoption{Index: index, Def: def},
 			Drops:       &DroppedObject{Kind: DroppedConstraint, Name: had.Name, Definition: had.Def},
 		},
-	}, nil
+	), nil
 }
 
 // replaceRuleChanges drops had and adds con NOT VALID in one statement, then

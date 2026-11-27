@@ -393,12 +393,18 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	for _, r := range replacedIdx {
 		resumedBuilds[r.temp] = struct{}{}
 	}
+	for name, r := range replaced {
+		if r.built {
+			resumedBuilds[replacementIndexName(name)] = struct{}{}
+		}
+	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
 	// adopts stays: the constraint takes it over below. A replaced index is
 	// dropped in the create bucket, once its replacement is built, and an
-	// earlier run's build of a replacement stays to be renamed.
+	// earlier run's build of a replacement stays to be renamed, or, for a
+	// key, to be swapped in.
 	for _, ix := range live.Indexes {
 		if _, ok := adopted[ix.Name]; ok {
 			continue
@@ -521,8 +527,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			continue
 		}
 		had, ok := liveCons[con.Name]
-		if _, inPlace := replaced[con.Name]; inPlace {
-			replacement, err := replaceInPlaceChanges(table, schema, had, con)
+		if r, inPlace := replaced[con.Name]; inPlace {
+			replacement, err := replaceInPlaceChanges(table, schema, had, con, r)
 			if err != nil {
 				return nil, err
 			}

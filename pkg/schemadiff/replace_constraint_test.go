@@ -252,3 +252,52 @@ func TestDiffRefusesAnEarlierAttemptsUnfinishedReplacementIndex(t *testing.T) {
 	assert.Contains(t, err.Error(), `DROP INDEX CONCURRENTLY "public"."events_email_key_new"`)
 	assert.Contains(t, err.Error(), "pg_stat_progress_create_index", "the reader checks no build is running before the drop")
 }
+
+// A unique constraint whose new index an earlier run built and left valid
+// under its temporary name is swapped in without a second build, and the
+// built index is not dropped as one the desired table does not declare.
+func TestDiffResumesAUniqueConstraintReplacementAfterItsBuild(t *testing.T) {
+	live, desired := keyed(), keyed()
+	desired.Constraints[1] = Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email, name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
+	}
+	live.Indexes = append(live.Indexes, Index{
+		Name: "events_email_key_new",
+		Def:  "CREATE UNIQUE INDEX events_email_key_new ON events USING btree (email, name)",
+	})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key", ADD CONSTRAINT "events_email_key" UNIQUE USING INDEX "events_email_key_new"`,
+	}, sqls(changes))
+	assert.Equal(t, "events_email_key_new", changes[0].Adopts.Index)
+
+	t.Run("a build of another definition is refused", func(t *testing.T) {
+		other := keyed()
+		other.Indexes = append(other.Indexes, Index{
+			Name: "events_email_key_new",
+			Def:  "CREATE UNIQUE INDEX events_email_key_new ON events USING btree (email)",
+		})
+		_, err := Diff("public", other, desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReplacementIndexName, refusal.Cause)
+	})
+}
+
+// A key a foreign key references cannot be dropped, so replacing it is
+// refused before anything is built, naming the foreign key.
+func TestDiffRefusesReplacingAKeyAForeignKeyReferences(t *testing.T) {
+	live, desired := keyed(), keyed()
+	live.Constraints[1].ReferencedBy = []IncomingForeignKey{{Schema: "public", Table: "orders", Constraint: "orders_email_fkey"}}
+	desired.Constraints[1] = Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email, name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
+	}
+	_, err := Diff("public", live, desired)
+	var refusal *UnsupportedChangeError
+	require.True(t, errors.As(err, &refusal), "%v", err)
+	assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+	assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "orders_email_fkey" on table "public"."orders"`)
+}
