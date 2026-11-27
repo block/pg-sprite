@@ -367,7 +367,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	partitioned := live.PartitionKey != ""
 
 	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
-	replaced, err := replacedInPlace(partitioned, dropsOrRetypesColumn(live, desiredCols), schema, liveCons, liveIdx, desired, desiredIdx)
+	replaced, err := replacedInPlace(partitioned, dropsOrRetypesColumn(live, desiredCols), len(dropNotNullChanges(table, live, desiredCols)) > 0, schema, liveCons, liveIdx, desired, desiredIdx)
 	if err != nil {
 		return nil, err
 	}
