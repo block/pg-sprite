@@ -605,9 +605,15 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the adoption of index %s and the validation of constraint %s",
 			executor.ErrInvariantViolation, adopts.Index, validates.Constraint)
 	}
-	if dropped != nil && (adopts != nil || validates != nil) {
-		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the drop of %s %s and an adoption or a validation",
-			executor.ErrInvariantViolation, dropped.Kind, dropped.Name)
+	if dropped != nil && validates != nil {
+		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the drop of %s %s and the validation of constraint %s",
+			executor.ErrInvariantViolation, dropped.Kind, dropped.Name, validates.Constraint)
+	}
+	if dropped != nil && adopts != nil && dropped.Kind != schemadiff.DroppedConstraint {
+		// Only a constraint replaced in place drops and adopts at once:
+		// its new index takes the place of the old constraint's.
+		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the drop of %s %s and the adoption of index %s",
+			executor.ErrInvariantViolation, dropped.Kind, dropped.Name, adopts.Index)
 	}
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, substituted) {

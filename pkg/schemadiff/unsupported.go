@@ -53,6 +53,10 @@ const (
 	// CauseEnumValueReordered refuses when the desired file lists the live
 	// enum type's labels in another order.
 	CauseEnumValueReordered UnsupportedCause = "enum-value-reordered"
+	// CauseReplacementIndexName refuses when a primary key or unique
+	// constraint is replaced in place and the temporary name its new index
+	// is built under is one the table already uses.
+	CauseReplacementIndexName UnsupportedCause = "replacement-index-name"
 )
 
 // UnsupportedCauses is the closed set of causes [Diff], [IntrospectEnumType],
@@ -75,6 +79,7 @@ func UnsupportedCauses() []UnsupportedCause {
 		CauseEnumTypeKind,
 		CauseEnumValueRemoved,
 		CauseEnumValueReordered,
+		CauseReplacementIndexName,
 	}
 }
 

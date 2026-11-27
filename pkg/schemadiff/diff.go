@@ -367,6 +367,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	partitioned := live.PartitionKey != ""
 
 	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
+	replaced, err := replacedInPlace(partitioned, dropsOrRetypesColumn(live, desiredCols), liveCons, desired, desiredIdx)
+	if err != nil {
+		return nil, err
+	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
@@ -387,8 +391,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	// Constraints to drop: gone from desired, or changed (re-added below).
 	// One left NOT VALID with the desired definition is validated below
-	// instead.
+	// instead, and one replaced in place is dropped by the statement that
+	// adds its replacement.
 	for _, con := range live.Constraints {
+		if _, ok := replaced[con.Name]; ok {
+			continue
+		}
 		want, ok := desiredCons[con.Name]
 		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
 			changes = append(changes, Change{
@@ -479,6 +487,18 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			continue
 		}
 		had, ok := liveCons[con.Name]
+		if _, inPlace := replaced[con.Name]; inPlace {
+			replacement, err := replaceInPlaceChanges(table, schema, had, con)
+			if err != nil {
+				return nil, err
+			}
+			if con.ForeignKey {
+				foreignKeys = append(foreignKeys, replacement...)
+			} else {
+				changes = append(changes, replacement...)
+			}
+			continue
+		}
 		if ok && validatesInPlace(had, con) {
 			validate := Change{
 				SQL:       "ALTER TABLE " + table + " VALIDATE CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
@@ -796,19 +816,25 @@ func adoptableIndexes(partitioned bool, liveCons map[string]Constraint, liveIdx 
 // constraint's declared deferrability: the server marks the index
 // deferred as it attaches it.
 func adoptIndexSQL(table string, con Constraint) string {
+	return "ALTER TABLE " + table + " " + addUsingIndexClause(con, con.Name)
+}
+
+// addUsingIndexClause is the ADD CONSTRAINT clause that makes con take over
+// index, with the constraint's declared deferrability. When index has
+// another name, the server renames it to the constraint's.
+func addUsingIndexClause(con Constraint, index string) string {
 	key := "UNIQUE"
 	if con.Primary {
 		key = "PRIMARY KEY"
 	}
-	name := pgx.Identifier{con.Name}.Sanitize()
-	sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + name + " " + key + " USING INDEX " + name
+	clause := "ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + key + " USING INDEX " + pgx.Identifier{index}.Sanitize()
 	if con.Deferrable {
-		sql += " DEFERRABLE"
+		clause += " DEFERRABLE"
 	}
 	if con.InitiallyDeferred {
-		sql += " INITIALLY DEFERRED"
+		clause += " INITIALLY DEFERRED"
 	}
-	return sql
+	return clause
 }
 
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in
