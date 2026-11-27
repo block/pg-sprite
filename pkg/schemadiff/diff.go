@@ -433,12 +433,19 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// One left NOT VALID with the desired definition is validated below
 	// instead, and one replaced in place is dropped by the statement that
 	// adds its replacement.
+	droppedForeignKeys := make(map[string]bool)
 	for _, con := range live.Constraints {
 		if _, ok := replaced[con.Name]; ok {
 			continue
 		}
 		want, ok := desiredCons[con.Name]
 		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
+			if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
+				return nil, err
+			}
+			if con.ForeignKey {
+				droppedForeignKeys[con.Name] = true
+			}
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:        dropConstraintKind(con),

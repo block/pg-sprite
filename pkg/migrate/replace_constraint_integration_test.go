@@ -150,14 +150,25 @@ func TestRunDesiredReplacesACheckWithoutAGap(t *testing.T) {
 }
 
 // A unique constraint replacement that stopped after its build is picked up
-// there: the valid t_email_key_new with the desired definition is swapped in,
-// not built again and not dropped as an index the file does not declare. The
-// constraint ends with the new definition, and a re-plan is empty.
+// there. The first plan's own build runs, as a run does before its swap,
+// and leaves t_email_key_new beside the old constraint, which still
+// enforces. The re-plan swaps that index in, not building it again and not
+// dropping it as an index the file does not declare. The constraint ends
+// with the new definition, and a re-plan is empty.
 func TestRunDesiredResumesAUniqueConstraintReplacementAfterItsBuild(t *testing.T) {
 	pool, schema := replaceConstraintTable(t)
-	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE UNIQUE INDEX t_email_key_new ON %s.t (email, name, qty)`, schema))
-	require.NoError(t, err)
 	desired := replaceDesired("UNIQUE (email, name, qty)", "CHECK (qty > 0)")
+	first := plannedDrop(t, pool, schema, desired)
+	require.NotEmpty(t, first.Statements)
+	build := first.Statements[0]
+	require.Len(t, build.ExecSQL, 1)
+	assert.Contains(t, build.ExecSQL[0], "CREATE UNIQUE INDEX CONCURRENTLY", "the build runs as the plan executes it")
+	_, err := pool.Exec(t.Context(), build.ExecSQL[0])
+	require.NoError(t, err)
+
+	def, validated := constraintDef(t, pool, schema, "t_email_key")
+	assert.Equal(t, "UNIQUE (email, name)", def, "the old constraint still enforces")
+	assert.True(t, validated)
 
 	planned := plannedDrop(t, pool, schema, desired)
 	require.Len(t, planned.Statements, 1, "only the swap is left")
@@ -165,7 +176,7 @@ func TestRunDesiredResumesAUniqueConstraintReplacementAfterItsBuild(t *testing.T
 
 	res := runReplace(t, pool, schema, desired)
 	require.Equal(t, verdict.OutcomeExecuted, res.Outcome, "%s", res.Detail)
-	def, validated := constraintDef(t, pool, schema, "t_email_key")
+	def, validated = constraintDef(t, pool, schema, "t_email_key")
 	assert.Equal(t, "UNIQUE (email, name, qty)", def)
 	assert.True(t, validated)
 	assert.NotContains(t, liveIndexes(t, pool, schema), "t_email_key_new")
