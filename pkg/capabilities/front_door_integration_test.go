@@ -317,6 +317,7 @@ var declarativeOnlyClaims = []string{
 	"declarative-row-security-library",
 	"declarative-not-valid-constraint",
 	"declarative-replace-constraint",
+	"declarative-replace-index",
 	"declarative-unnamed-check-numbering",
 	"extension-objects-named-unqualified-in-a-desired-file",
 	"declarative-foreign-key-add",
