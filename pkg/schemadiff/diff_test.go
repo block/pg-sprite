@@ -349,10 +349,11 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 		changes, err := Diff("public", with(notValid(check)), with(changed))
 		require.NoError(t, err)
 		require.Equal(t, []string{
-			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check"`,
-			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 1))`,
+			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check", ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 1)) NOT VALID`,
+			`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`,
 		}, sqls(changes))
 		assert.True(t, changes[0].Destructive)
+		assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: check.Name, Definition: check.Def + " NOT VALID"}, changes[0].Drops)
 	})
 
 	t.Run("no longer declared", func(t *testing.T) {
@@ -372,7 +373,8 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 // An added CHECK or FOREIGN KEY records the definition it has once added NOT
 // VALID, so a plan that validates it in a later step can check that the
 // constraint under that name is still the one the add created. A changed
-// constraint's re-add records it too; its drop records nothing of the kind.
+// constraint is replaced NOT VALID in one statement, and the validation that
+// follows it records the same definition.
 func TestDiffAddedConstraintRecordsItsNotValidDefinition(t *testing.T) {
 	check := Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"}
 	fk := Constraint{Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true}
@@ -402,8 +404,8 @@ func TestDiffAddedConstraintRecordsItsNotValidDefinition(t *testing.T) {
 		changes, err := Diff("public", with(check), with(changed))
 		require.NoError(t, err)
 		require.Len(t, changes, 2)
-		assert.Nil(t, changes[0].AddsNotValid, "the drop adds nothing")
-		assert.Equal(t, &ConstraintValidation{Constraint: check.Name, Def: changed.Def + " NOT VALID"}, changes[1].AddsNotValid)
+		assert.Nil(t, changes[0].AddsNotValid, "the replacement already adds NOT VALID")
+		assert.Equal(t, &ConstraintValidation{Constraint: check.Name, Def: changed.Def + " NOT VALID"}, changes[1].Validates)
 	})
 
 	t.Run("unique constraint", func(t *testing.T) {

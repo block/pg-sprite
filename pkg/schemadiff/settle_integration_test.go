@@ -93,8 +93,8 @@ func TestDiffTakesEveryReplayOfADesiredExpressionAsTheSame(t *testing.T) {
 			sqls = append(sqls, c.SQL)
 		}
 		assert.Equal(t, []string{
-			fmt.Sprintf(`ALTER TABLE "%s"."t" DROP CONSTRAINT "ck"`, schema),
-			fmt.Sprintf(`ALTER TABLE "%s"."t" ADD CONSTRAINT "ck" CHECK ((((ROW(a, b) IS DISTINCT FROM ROW(1, 2)) OR (ROW(c, d) IS DISTINCT FROM ROW(3, 4))) OR (e IS DISTINCT FROM 7)))`, schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" DROP CONSTRAINT "ck", ADD CONSTRAINT "ck" CHECK ((((ROW(a, b) IS DISTINCT FROM ROW(1, 2)) OR (ROW(c, d) IS DISTINCT FROM ROW(3, 4))) OR (e IS DISTINCT FROM 7))) NOT VALID`, schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "ck"`, schema),
 		}, sqls, "only the changed check is planned, with the first build's text")
 	})
 }
@@ -129,7 +129,7 @@ func TestDiffTakesAPulledDesiredFileAsTheSame(t *testing.T) {
 	for _, c := range diffDesired(t, pool, schema, changed) {
 		kinds = append(kinds, c.Kind)
 	}
-	assert.Equal(t, []schemadiff.ChangeKind{schemadiff.ChangeDropConstraint, schemadiff.ChangeAddConstraint}, kinds,
+	assert.Equal(t, []schemadiff.ChangeKind{schemadiff.ChangeAddConstraint, schemadiff.ChangeValidateConstraint}, kinds,
 		"a real change to the pulled check is planned")
 }
 
