@@ -145,8 +145,9 @@ wraps the statements in `BEGIN` and `COMMIT`, with the `SET LOCAL search_path`
 each part runs under: the table's statements under the schema and then
 `public`, and the row security under `pg_catalog` alone. A table that appears
 between planning and the preview is previewed as the existing table it now
-is. A run does not execute a saved preview: it re-derives the statements, and
-there is no reviewed variant of the create path.
+is. A run does not execute a saved preview: it re-derives the statements. To
+bind the run to a reviewed preview, use `ExecuteReviewedCreateWithRowSecurity`,
+described under [Bind execution to reviewed SQL](#bind-execution-to-reviewed-sql).
 
 A standalone type at the table's name refuses as `create-collision`. So does a
 table that appears at the name between the probe and the `CREATE TABLE`: the
@@ -183,6 +184,23 @@ if err != nil {
 
 A mismatch returns `ErrRowSecurityPlanChanged` and a zero report. An empty
 reviewed sequence authorizes only a no-op; it never disables this check.
+
+A table that does not exist yet binds the same way. Pass the `Statements` of
+`PreviewDesiredCreateWithRowSecurity` to `ExecuteReviewedCreateWithRowSecurity`:
+
+```go
+plan, err := executor.PreviewDesiredCreateWithRowSecurity(ctx, pool, "public", "", desired, budget)
+if err != nil {
+    return err
+}
+report, err := executor.ExecuteReviewedCreateWithRowSecurity(ctx, pool, "public", "", desired, plan.Statements, budget)
+```
+
+It renders the whole sequence, the table and index statements and then the row
+security, and compares it with the reviewed one before any target DDL. A
+mismatch returns `ErrRowSecurityPlanChanged`. So does a table that appeared at
+the name after the review: the reviewed create no longer describes the change,
+and the run does not converge that table in its place.
 
 This binds the SQL to review, not every detail of the earlier database state.
 For example, editing an existing policy predicate can leave the replacement SQL

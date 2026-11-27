@@ -465,3 +465,68 @@ func TestExecuteCreateWithRowSecurityPolicyReadsAnotherTable(t *testing.T) {
 	_, err = schemadiff.DiffWithRowSecurity(f.schema, live, wanted)
 	assert.NoError(t, err, "the created table must already match the desired file")
 }
+
+// A reviewed create runs when the statements it would run are exactly the
+// ones its preview showed, and the table commits with its row security.
+func TestExecuteReviewedCreateWithRowSecurityRunsTheReviewedStatements(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	d := desiredRowSecurity(t, notesWithRowSecurity)
+
+	preview, err := executor.PreviewDesiredCreateWithRowSecurity(t.Context(), f.pool, f.schema, "", d, createWithRowSecurityBudget)
+	require.NoError(t, err)
+	report, err := executor.ExecuteReviewedCreateWithRowSecurity(t.Context(), f.pool, f.schema, "", d, preview.Statements, createWithRowSecurityBudget)
+	require.NoError(t, err)
+	assert.True(t, report.TableCreated)
+	assert.Equal(t, preview.Statements, report.Statements)
+
+	live, err := schemadiff.Introspect(t.Context(), f.pool, f.schema, "notes")
+	require.NoError(t, err)
+	assert.True(t, live.RowSecurity.Enabled)
+	require.Len(t, live.RowSecurity.Policies, 1)
+	assert.Equal(t, "own_notes", live.RowSecurity.Policies[0].Name)
+}
+
+// Any difference from the reviewed sequence, a missing statement, a
+// reordered pair, or an extra one, refuses before the table is created.
+func TestExecuteReviewedCreateWithRowSecurityRefusesADifferentSequence(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	d := desiredRowSecurity(t, notesWithRowSecurity)
+	preview, err := executor.PreviewDesiredCreateWithRowSecurity(t.Context(), f.pool, f.schema, "", d, createWithRowSecurityBudget)
+	require.NoError(t, err)
+	require.Len(t, preview.Statements, 5)
+
+	swapped := append([]string{}, preview.Statements...)
+	swapped[3], swapped[4] = swapped[4], swapped[3]
+	for name, reviewed := range map[string][]string{
+		"missing":   preview.Statements[:4],
+		"reordered": swapped,
+		"extra":     append(append([]string{}, preview.Statements...), preview.Statements[4]),
+		"empty":     nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := executor.ExecuteReviewedCreateWithRowSecurity(t.Context(), f.pool, f.schema, "", d, reviewed, createWithRowSecurityBudget)
+			require.ErrorIs(t, err, executor.ErrRowSecurityPlanChanged)
+			assert.False(t, relationExists(t, f.pool, f.schema, "notes"), "nothing is created when the sequence differs")
+		})
+	}
+}
+
+// A table created at the name after the review is not converged in place of
+// the reviewed create: the reviewed SQL no longer describes the change, so
+// the run refuses and leaves the table as it found it.
+func TestExecuteReviewedCreateWithRowSecurityRefusesATableThatNowExists(t *testing.T) {
+	f := newCreateFixture(t, "notes")
+	d := desiredRowSecurity(t, notesWithRowSecurity)
+	preview, err := executor.PreviewDesiredCreateWithRowSecurity(t.Context(), f.pool, f.schema, "", d, createWithRowSecurityBudget)
+	require.NoError(t, err)
+
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.notes (id bigint PRIMARY KEY)", pgx.Identifier{f.schema}.Sanitize()))
+	require.NoError(t, err)
+
+	_, err = executor.ExecuteReviewedCreateWithRowSecurity(t.Context(), f.pool, f.schema, "", d, preview.Statements, createWithRowSecurityBudget)
+	require.ErrorIs(t, err, executor.ErrRowSecurityPlanChanged)
+	live, err := schemadiff.Introspect(t.Context(), f.pool, f.schema, "notes")
+	require.NoError(t, err)
+	assert.False(t, live.RowSecurity.Enabled, "the table that took the name is left as it was")
+	assert.Empty(t, live.RowSecurity.Policies)
+}

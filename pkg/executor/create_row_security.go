@@ -42,7 +42,7 @@ import (
 // b.StatementTimeout bounds each statement and the whole attempt. No retries
 // occur. The caller needs CREATE on the database for the scratch schema.
 func ExecuteCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
-	return runCreateWithRowSecurity(ctx, pool, at, cr, desired, b, false)
+	return runCreateWithRowSecurity(ctx, pool, at, cr, desired, b, createRun{})
 }
 
 // PreviewCreateWithRowSecurity runs everything ExecuteCreateWithRowSecurity
@@ -52,7 +52,7 @@ func ExecuteCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 // does run, so what a rollback does not undo survives the preview, such as
 // a sequence an event trigger on that DDL advances.
 func PreviewCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityPlan, error) {
-	report, err := runCreateWithRowSecurity(ctx, pool, at, cr, desired, b, true)
+	report, err := runCreateWithRowSecurity(ctx, pool, at, cr, desired, b, createRun{preview: true})
 	if err != nil {
 		return RowSecurityPlan{}, err
 	}
@@ -88,7 +88,42 @@ func executeDesiredRowSecurity(attempt context.Context, pool *pgxpool.Pool, sche
 	if err != nil {
 		return RowSecurityReport{}, err
 	}
-	return createWithRowSecurity(attempt, pool, at, cr, desired, b, false)
+	return createWithRowSecurity(attempt, pool, at, cr, desired, b, createRun{})
+}
+
+// ExecuteReviewedCreateWithRowSecurity creates an absent table with its row
+// security as ExecuteDesiredRowSecurity creates one, and runs only what
+// reviewed lists. The complete ordered sequence the create would run, its
+// table and index statements and then its row security, is compared with
+// reviewed before any target DDL, including order and duplicates, and any
+// difference refuses with ErrRowSecurityPlanChanged. A table at the name
+// refuses the same way: the reviewed create no longer describes the change,
+// and the table is never converged in its place. The supplied SQL is
+// compared, never executed directly.
+func ExecuteReviewedCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, reviewed []string, b Budget) (RowSecurityReport, error) {
+	if err := b.validate(); err != nil {
+		return RowSecurityReport{}, err
+	}
+	if desired.Table() == "" || schema == "" {
+		return RowSecurityReport{}, fmt.Errorf("%w: %w", ErrRowSecurityRefused, statement.ErrRowSecurityDeclaration)
+	}
+	// INV: RS-3 — the routing probes share the attempt's one deadline.
+	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
+	defer cancel()
+	report, err := executeReviewedCreate(attempt, pool, schema, createOwner, desired, slices.Clone(reviewed), b)
+	return report, rowSecurityError(ctx, attempt, err, b)
+}
+
+func executeReviewedCreate(attempt context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, reviewed []string, b Budget) (RowSecurityReport, error) {
+	at, cr, err := createWithRowSecurityProofs(attempt, pool, schema, createOwner, desired)
+	if errors.Is(err, preflight.ErrRelationExists) {
+		return RowSecurityReport{}, fmt.Errorf("review the create of %s: the table now exists: %w: %w",
+			qualifiedName(schema, desired.Table()), ErrRowSecurityPlanChanged, err)
+	}
+	if err != nil {
+		return RowSecurityReport{}, err
+	}
+	return createWithRowSecurity(attempt, pool, at, cr, desired, b, createRun{reviewed: reviewed, bound: true})
 }
 
 // PreviewDesiredCreateWithRowSecurity mints the same proofs as
@@ -118,7 +153,7 @@ func previewDesiredCreate(attempt context.Context, pool *pgxpool.Pool, schema, c
 	if err != nil {
 		return RowSecurityReport{}, err
 	}
-	return createWithRowSecurity(attempt, pool, at, cr, desired, b, true)
+	return createWithRowSecurity(attempt, pool, at, cr, desired, b, createRun{preview: true})
 }
 
 // createWithRowSecurityProofs mints the absence and creation-access proofs
@@ -143,20 +178,28 @@ func createWithRowSecurityProofs(ctx context.Context, pool *pgxpool.Pool, schema
 	return at, cr, nil
 }
 
-func runCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget, preview bool) (RowSecurityReport, error) {
+// createRun says how a create with row security ends: committed, rolled back
+// as a preview, or, when bound, run only if its statements are reviewed.
+type createRun struct {
+	preview  bool
+	bound    bool
+	reviewed []string
+}
+
+func runCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget, run createRun) (RowSecurityReport, error) {
 	if err := b.validate(); err != nil {
 		return RowSecurityReport{}, err
 	}
 	// INV: RS-3 — the whole attempt has one deadline, the name probe included.
 	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
 	defer cancel()
-	report, err := createWithRowSecurity(attempt, pool, at, cr, desired, b, preview)
+	report, err := createWithRowSecurity(attempt, pool, at, cr, desired, b, run)
 	return report, rowSecurityError(ctx, attempt, err, b)
 }
 
 // createWithRowSecurity checks the proofs, admits the create, probes its
 // names, and runs the transaction, all under the caller's attempt deadline.
-func createWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget, preview bool) (RowSecurityReport, error) {
+func createWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, b Budget, run createRun) (RowSecurityReport, error) {
 	// INV: ST-7 — the proofs are re-verified at the point of use, as in
 	// ExecuteCreate.
 	if at.Schema() == "" || at.Table() == "" {
@@ -194,10 +237,10 @@ func createWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("verify claimed names are absent in %s: %w", at.Schema(), err)
 	}
-	return executeCreateWithRowSecurity(ctx, pool, at, cr, desired, admitted, ownedClaims, b, preview)
+	return executeCreateWithRowSecurity(ctx, pool, at, cr, desired, admitted, ownedClaims, b, run)
 }
 
-func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, admitted []createStep, ownedClaims []string, b Budget, preview bool) (RowSecurityReport, error) {
+func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, desired statement.DesiredWithRowSecurity, admitted []createStep, ownedClaims []string, b Budget, run createRun) (RowSecurityReport, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("begin create with row security: %w", err)
@@ -227,6 +270,24 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	if _, err := rowSecurityTableShape(wanted); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("admit the desired table %s: %w: %w", target, ErrRowSecurityRefused, err)
 	}
+	// The row security is rendered from the scratch catalog alone, so the
+	// complete sequence is known before any target DDL runs.
+	security, err := schemadiff.RenderRowSecurity(schema, wanted)
+	if err != nil {
+		return RowSecurityReport{}, fmt.Errorf("render row security for %s: %w: %w", target, ErrRowSecurityRefused, err)
+	}
+	// INV: RS-5 — a reviewed create compares the complete ordered sequence
+	// before target DDL.
+	if run.bound {
+		planned := make([]string, 0, len(admitted)+len(security))
+		for _, step := range admitted {
+			planned = append(planned, step.statement.SQL())
+		}
+		planned = append(planned, security...)
+		if !slices.Equal(run.reviewed, planned) {
+			return RowSecurityReport{}, fmt.Errorf("review the create of %s: %w", target, ErrRowSecurityPlanChanged)
+		}
+	}
 	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(AttemptSearchPath(schema, desired.ExtensionSchemas())...)); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("set create search path for %s: %w", target, err)
 	}
@@ -244,10 +305,6 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	}
 	if err := verifyUncommittedNames(ctx, tx, at, ownedClaims); err != nil {
 		return RowSecurityReport{}, err
-	}
-	security, err := schemadiff.RenderRowSecurity(schema, wanted)
-	if err != nil {
-		return RowSecurityReport{}, fmt.Errorf("render row security for %s: %w: %w", target, ErrRowSecurityRefused, err)
 	}
 	// INV: RS-4 — helpers are explicitly qualified; no target-schema function
 	// may shadow a built-in while replaying policy expressions.
@@ -283,7 +340,7 @@ func executeCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 	if _, err := schemadiff.DiffWithRowSecurity(schema, actual, wanted); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("%w: RS-6: row security did not converge: %w", ErrInvariantViolation, err)
 	}
-	if preview {
+	if run.preview {
 		if err := tx.Rollback(ctx); err != nil {
 			return RowSecurityReport{}, fmt.Errorf("roll back the create with row security preview for %s: %w", target, err)
 		}
