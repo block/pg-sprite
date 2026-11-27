@@ -77,8 +77,9 @@ const (
 	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
-	// ChangeRenameIndex renames the index a replacement built under its
-	// temporary name to the name of the index it replaces.
+	// ChangeRenameIndex renames an index: a replacement built under its
+	// temporary name to the name of the index it replaces, or a live index
+	// the desired table declares under another name and otherwise unchanged.
 	ChangeRenameIndex ChangeKind = "rename-index"
 	// ChangeAddEnumValue adds a label to an enum type (ALTER TYPE ... ADD
 	// VALUE), the one change a desired enum type file plans.
@@ -169,6 +170,10 @@ type Change struct {
 	// must still be when the drop runs. The old index is dropped only while
 	// it is.
 	Replacement *IndexReplacement `json:"-"`
+	// Renames is set on a ChangeRenameIndex: the live index the rename
+	// gives the desired name and the definition the plan matched it by.
+	// The rename runs only while the index still has that definition.
+	Renames *IndexRename `json:"-"`
 }
 
 // DroppedKind names the kind of object a destructive change removes.
@@ -306,6 +311,16 @@ type IndexAdoption struct {
 	Def   string
 }
 
+// IndexRename is the live index a planned ALTER INDEX ... RENAME TO
+// renames and its definition as introspection reads it (pg_get_indexdef
+// with the schema qualification removed). An index replaced since planning
+// under the same name, such as by a non-unique one, would otherwise take
+// the desired unique index's name.
+type IndexRename struct {
+	Index string
+	Def   string
+}
+
 // IndexReplacement is the index a changed index's replacement built under
 // its temporary name, and the definition, as introspection reads it
 // (pg_get_indexdef with the schema qualification removed), that it must
@@ -328,12 +343,25 @@ type ConstraintValidation struct {
 
 // Diff derives the ordered statement list that converges live onto desired.
 // Order is dependency-correct: drops first (indexes, then constraints, then
-// columns, then NOT NULLs), then column adds and alters, then constraint adds, then index
-// creates — so an added column exists before an index or constraint that
-// references it. A changed index is the exception to drops first: it is
-// replaced in the create bucket, built under a temporary name before the old
-// index is dropped (see replacedIndexes). Within each bucket the order is deterministic: attribute
-// order for columns, name order for constraints and indexes. schema
+// columns, then NOT NULLs), then column adds and alters, then constraint
+// adds, then index creates, then foreign key adds — so an added column
+// exists before an index or constraint that references it. Four kinds of
+// change keep the old object in place until its replacement is, unless the
+// plan also drops or retypes a column:
+//
+//   - A changed index is replaced in the create bucket, built under a
+//     temporary name before the old index is dropped (see replacedIndexes).
+//   - An index whose name alone changes is renamed in the create bucket
+//     with ALTER INDEX ... RENAME TO, and never dropped (see
+//     renamedIndexes).
+//   - A unique index or unique constraint the plan drops, when the plan adds
+//     a unique index or constraint, and a constraint the file declares
+//     again under another name, are dropped after the index creates (see
+//     heldDrops).
+//   - Such a foreign key is dropped after the foreign key adds.
+//
+// Within each bucket the order is deterministic: attribute order for
+// columns, name order for constraints and indexes. schema
 // qualifies the emitted statements' table references. Columns are compared
 // by name only: attribute order carries no semantics in PostgreSQL and is
 // deliberately out of scope for convergence. An invalid index on a plain
@@ -413,6 +441,41 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			resumedBuilds[replacementIndexName(name)] = struct{}{}
 		}
 	}
+	renamed, err := renamedIndexes(partitioned, live.Indexes, desired.Indexes, liveIdx, desiredIdx, adopted, resumedBuilds)
+	if err != nil {
+		return nil, err
+	}
+	renameTargets := renameIndexTargets(renamed)
+
+	// A unique index or unique constraint the plan drops is held back until
+	// the plan's new unique indexes and constraints are in place, and so is
+	// a constraint the desired table declares again under another name. A
+	// uniqueness or rule that moves to another name or another kind of
+	// object keeps holding while its replacement builds, and a replacement
+	// that fails leaves the old one standing. A plan that drops or retypes a
+	// column keeps the drops first, since a dropped column takes the indexes
+	// and constraints that read it with it, and so does a drop whose name
+	// the desired table reuses.
+	held := heldDrops{
+		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
+		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
+		renamedRules: renamedConstraintDefs(desired, liveCons),
+	}
+	// A held foreign key waits for the foreign keys the plan adds, which
+	// come last; every other held drop goes before them, so a foreign key
+	// the plan adds cannot bind to a key the plan is about to drop.
+	var heldChanges, heldForeignKeys []Change
+	waits := func(ch Change) bool { return !dropsOrRetypes && held.holds(ch) }
+	appendDrop := func(ch Change) {
+		switch {
+		case !waits(ch):
+			changes = append(changes, ch)
+		case held.dropsForeignKey(ch):
+			heldForeignKeys = append(heldForeignKeys, ch)
+		default:
+			heldChanges = append(heldChanges, ch)
+		}
+	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
@@ -430,12 +493,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if _, ok := resumedBuilds[ix.Name]; ok {
 			continue
 		}
+		if _, ok := renamed[ix.Name]; ok {
+			continue
+		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			_, changed := desiredIdx[ix.Name]
 			if err := refuseReferencedIndexDrop(ix, changed); err != nil {
 				return nil, err
 			}
-			changes = append(changes, Change{
+			appendDrop(Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
 				Kind:        ChangeDropIndex,
 				Destructive: true,
@@ -458,15 +524,19 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
 				return nil, err
 			}
-			if con.ForeignKey {
-				droppedForeignKeys[con.Name] = true
-			}
-			changes = append(changes, Change{
+			drop := Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:        dropConstraintKind(con),
 				Destructive: true,
 				Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
-			})
+			}
+			// A foreign key whose drop waits for the plan's adds is still in
+			// place when a key it references is dropped, so only one dropped
+			// here frees that key.
+			if con.ForeignKey && !waits(drop) {
+				droppedForeignKeys[con.Name] = true
+			}
+			appendDrop(drop)
 		}
 	}
 
@@ -612,6 +682,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			changes = append(changes, replacement...)
 			continue
 		}
+		if from, ok := renameTargets[ix.Name]; ok {
+			changes = append(changes, renameIndexChange(schema, liveIdx[from], ix.Name))
+			continue
+		}
 		if indexNeedsCreate(liveIdx, ix) {
 			qualified, err := statement.Qualify(ix.Def, schema)
 			if err != nil {
@@ -621,9 +695,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
+	changes = append(changes, heldChanges...)
+
 	// Foreign keys last, once everything they can reference on this table
 	// exists.
 	changes = append(changes, foreignKeys...)
+	changes = append(changes, heldForeignKeys...)
 
 	return changes, nil
 }

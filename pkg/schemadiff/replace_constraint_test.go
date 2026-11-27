@@ -375,4 +375,21 @@ func TestDiffRefusesDroppingAKeyAForeignKeyStillReferences(t *testing.T) {
 			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key"`,
 		}, sqls(changes))
 	})
+
+	// The file renames the foreign key and the key it references. Each
+	// drop waits for the adds, and the foreign key's drop comes last, so it
+	// still holds the key when the key's drop runs.
+	t.Run("referenced by a foreign key on the table whose drop waits", func(t *testing.T) {
+		desired := keyed()
+		desired.Constraints = []Constraint{
+			desired.Constraints[0],
+			{Name: "events_email_uq", Def: "UNIQUE (email)"},
+			{Name: "events_email_self_fkey", Def: selfKey.Def, ForeignKey: true},
+		}
+		_, err := Diff("public", referenced(self, true), desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+		assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "events_a_email_fkey"`)
+	})
 }

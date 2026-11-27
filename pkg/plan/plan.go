@@ -148,6 +148,11 @@ type Statement struct {
 	// Adopts, and out of the fingerprint, which covers the statement that
 	// builds the replacement.
 	Replacement *schemadiff.IndexReplacement `json:"-"`
+	// Renames is the index a diff-derived ALTER INDEX ... RENAME TO
+	// renames and the definition it must still have when the rename runs
+	// (see schemadiff.Change.Renames). Out of the JSON report for the same
+	// reason as Adopts: the SQL already identifies the change.
+	Renames *schemadiff.IndexRename `json:"-"`
 	// DropsHelper is the helper CHECK that a SET NOT NULL running as the
 	// online helper-constraint sequence adds and then drops in a later
 	// step, with the definition the helper has once validated (see
