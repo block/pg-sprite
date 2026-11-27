@@ -40,6 +40,9 @@ type results struct {
 	// each one a host cancelled, and the one that ran to its verdict. The
 	// binary's proof makes one call and records none.
 	Attempts []attemptInfo `json:"attempts,omitempty"`
+	// Runs are the kill proof's runs of the binary, in order: each one the
+	// harness killed with SIGKILL, and the one that ran to its verdict.
+	Runs []killRun `json:"runs,omitempty"`
 	// SlotName is the replication slot the run used, so a leftover slot
 	// after a failed run can be found.
 	SlotName         string `json:"slot_name,omitempty"`

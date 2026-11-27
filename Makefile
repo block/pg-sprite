@@ -19,7 +19,7 @@ PINS_FILE ?= compose/supabase.yml
 # Guide whose tested versions must name each of those pins' versions.
 GUIDE_FILE ?= docs/supabase.md
 
-.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-guide-versions check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof load-proof-library slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-guide-versions check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof load-proof-library load-proof-kill slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -114,6 +114,14 @@ load-proof: build $(LOAD_PROOF_DB)
 # docs/testing.md#the-library-load-proof.
 load-proof-library: $(LOAD_PROOF_DB)
 	@LOAD_PROOF_LIBRARY=1 LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProofLibrary$$' -v ./integration/loadproof
+
+# The load proof's crash variant: the same change under the same load, run
+# through the built binary, killed with SIGKILL mid-copy and mid-verify and
+# run again each time, as an operator does after a crash. Same variables
+# and database as load-proof; writes results-kill.json. What it proves:
+# docs/testing.md#the-kill-load-proof.
+load-proof-kill: build $(LOAD_PROOF_DB)
+	@LOAD_PROOF_KILL=1 LOAD_PROOF_BIN=$(CURDIR)/bin/pg-sprite LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProofKill$$' -v ./integration/loadproof
 
 # Proof that a catch-up keeps running while PostgreSQL releases its slot at
 # the server's own cadence on a busy source (pkg/applier): about a minute of

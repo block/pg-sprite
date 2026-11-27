@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -30,11 +31,12 @@ const defaultLibraryResults = "results-library.json"
 // slot-held.
 const slotIdleDeadline = 30 * time.Second
 
-// waitForSlotIdle waits until no backend holds the slot the row names, as
-// a host resuming a cancelled run does, and returns how long it waited. A
-// slot that is gone is an error: the cancelled run left it to resume from.
-func waitForSlotIdle(ctx context.Context, h host, table testutil.WorkloadTable) (time.Duration, error) {
-	cp, err := h.store.Inspect(ctx, table.Schema, table.Table)
+// waitForSlotIdle waits, for at most deadline, until no backend holds the
+// slot the row names, as a host resuming a stopped run does, and returns
+// how long it waited. A slot that is gone is an error: the stopped run
+// left it to resume from.
+func waitForSlotIdle(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, deadline time.Duration) (time.Duration, error) {
+	cp, err := store.Inspect(ctx, table.Schema, table.Table)
 	if err != nil {
 		return 0, fmt.Errorf("inspect the checkpoint row before the resume: %w", err)
 	}
@@ -42,17 +44,17 @@ func waitForSlotIdle(ctx context.Context, h host, table testutil.WorkloadTable) 
 		return 0, fmt.Errorf("the stopped live run's row in %s names no slot", cp.Phase)
 	}
 	began := time.Now()
-	giveUp := time.NewTimer(slotIdleDeadline)
+	giveUp := time.NewTimer(deadline)
 	defer giveUp.Stop()
 	poll := time.NewTicker(commitPollInterval)
 	defer poll.Stop()
 	for {
-		holder, found, err := slotHolder(ctx, h.pool, cp.SlotName)
+		holder, found, err := slotHolder(ctx, pool, cp.SlotName)
 		if err != nil {
 			return 0, fmt.Errorf("read replication slot %s: %w", cp.SlotName, err)
 		}
 		if !found {
-			return 0, fmt.Errorf("the cancelled run's slot %s is gone, so there is no stream to resume", cp.SlotName)
+			return 0, fmt.Errorf("the stopped run's slot %s is gone, so there is no stream to resume", cp.SlotName)
 		}
 		if holder == 0 {
 			return time.Since(began), nil
@@ -61,7 +63,7 @@ func waitForSlotIdle(ctx context.Context, h host, table testutil.WorkloadTable) 
 		case <-ctx.Done():
 			return 0, fmt.Errorf("wait for slot %s to be let go: %w", cp.SlotName, ctx.Err())
 		case <-giveUp.C:
-			return 0, fmt.Errorf("%w: backend %d still holds %s after %s", errSlotStillHeld, holder, cp.SlotName, slotIdleDeadline)
+			return 0, fmt.Errorf("%w: backend %d still holds %s after %s", errSlotStillHeld, holder, cp.SlotName, deadline)
 		case <-poll.C:
 		}
 	}
@@ -102,7 +104,7 @@ func checkStoppedAt(ctx context.Context, h host, table testutil.WorkloadTable, s
 	if cp.Phase != stop.phase() {
 		return fmt.Errorf("%w: the row stands in %s, not %s, where the host cancelled", errNotStopped, cp.Phase, stop.phase())
 	}
-	if info.ShadowOID, err = relationOID(ctx, h, table.Schema, cp.ShadowTable); err != nil {
+	if info.ShadowOID, err = relationOID(ctx, h.pool, table.Schema, cp.ShadowTable); err != nil {
 		return fmt.Errorf("read the shadow the stopped run left: %w", err)
 	}
 	if stop != stopMidCopy {
@@ -208,7 +210,7 @@ func runAttempts(t *testing.T, ctx, runCtx context.Context, h host, table testut
 		}
 		t.Logf("attempt %d cancelled in %s after %s; the row stands in %s", info.Attempt, info.CancelledIn,
 			time.Duration(info.RunMillis)*time.Millisecond, info.RowPhase)
-		if waited, err = waitForSlotIdle(runCtx, h, table); err != nil {
+		if waited, err = waitForSlotIdle(runCtx, h.pool, h.store, table, slotIdleDeadline); err != nil {
 			return a, fmt.Errorf("before attempt %d: %w", info.Attempt+1, err)
 		}
 		if info.CommittedWhileStopped, err = waitForStoppedWrites(runCtx, load, committedAtReturn, stoppedWritesPerWorker*workers); err != nil {
@@ -226,7 +228,7 @@ func runAttempts(t *testing.T, ctx, runCtx context.Context, h host, table testut
 	if a.verdict.Outcome != verdict.OutcomeExecutedViaCopyAndSwap {
 		return a, nil
 	}
-	if info.ShadowOID, err = relationOID(runCtx, h, table.Schema, table.Table); err != nil {
+	if info.ShadowOID, err = relationOID(runCtx, h.pool, table.Schema, table.Table); err != nil {
 		return a, fmt.Errorf("read the swapped-in table: %w", err)
 	}
 	return a, checkResumed(prevStop, *previous, *info)
@@ -267,17 +269,7 @@ func TestLoadProofLibrary(t *testing.T) {
 	require.NoError(t, table.SeedRows(ctx, c.Rows))
 	h := newHost(t, c, fmt.Sprintf(alterTemplate, table.Qualified()))
 
-	load := testutil.StartLoad(t, pool, table, testutil.LoadSpec{
-		Seed:                 1,
-		Workers:              c.Workers,
-		RatePerSecond:        c.RatePerSecond,
-		Mix:                  loadMix,
-		HotRowFraction:       c.HotRowFraction,
-		ToastRewriteFraction: 0.5,
-		RecordFailures:       true,
-	})
-	waitForLoad(t, load, func(p testutil.Progress) bool { return p.Committed() > 0 },
-		firstCommitDeadline, "the load's first commit before the run starts")
+	load := startProofLoad(t, pool, table, c)
 
 	runCtx, cancelRun := context.WithTimeout(ctx, runBudget)
 	defer cancelRun()
@@ -302,7 +294,7 @@ func TestLoadProofLibrary(t *testing.T) {
 	require.NotEmpty(t, v.SwapLSN, "a run that committed its own swap reports the swap's WAL position")
 	swap, err := decode.ParseLSN(v.SwapLSN)
 	require.NoError(t, err)
-	requireDoneWithTheSlotGone(t, ctx, h, table, w.SlotName, &res.Attempts[len(res.Attempts)-1])
+	requireDoneWithTheSlotGone(t, ctx, h.pool, h.store, table, w.SlotName, &res.Attempts[len(res.Attempts)-1].RowPhase)
 	require.NoError(t, w.Err, "the checkpoint poll failed")
 	require.True(t, w.MarkSet, "the poll never saw the row before the cutover, so no write is known to have committed before the swap")
 	requireMarkSpansTheStream(t, w, atStart)
@@ -325,16 +317,17 @@ func TestLoadProofLibrary(t *testing.T) {
 // requireDoneWithTheSlotGone holds the finished run to its end state: the
 // checkpoint row is done, and no replication slot is left under the name
 // the engine derives for the table or the one the poll saw the row name.
-func requireDoneWithTheSlotGone(t *testing.T, ctx context.Context, h host, table testutil.WorkloadTable, seen string, info *attemptInfo) {
+// The row's phase is recorded in rowPhase before it is judged.
+func requireDoneWithTheSlotGone(t *testing.T, ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, seen string, rowPhase *string) {
 	t.Helper()
-	cp, err := h.store.Inspect(ctx, table.Schema, table.Table)
+	cp, err := store.Inspect(ctx, table.Schema, table.Table)
 	require.NoError(t, err)
-	info.RowPhase = cp.Phase.String()
+	*rowPhase = cp.Phase.String()
 	require.Equal(t, checkpoint.PhaseDone, cp.Phase)
 	var database string
-	require.NoError(t, h.pool.QueryRow(ctx, `SELECT current_database()`).Scan(&database))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT current_database()`).Scan(&database))
 	for _, slot := range appendNamed([]string{preflight.CopySwapDecodingName(database, table.Schema, table.Table)}, seen) {
-		_, found, err := slotHolder(ctx, h.pool, slot)
+		_, found, err := slotHolder(ctx, pool, slot)
 		require.NoError(t, err)
 		assert.False(t, found, "the finished run dropped its replication slot %s", slot)
 	}
