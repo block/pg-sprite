@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/progress"
@@ -283,14 +284,28 @@ type LingeringHolderError struct {
 	PID uint32
 	// Table is the schema-qualified table it holds the lock on.
 	Table string
-	// Held is how long the wait saw it holding the lock.
-	Held time.Duration
+	// Watched is how long the wait saw it holding the lock, which is at most
+	// the wait itself; the transaction may have held it for far longer.
+	Watched time.Duration
+	// State is the backend's pg_stat_activity state, such as "idle in
+	// transaction" or "active", and TransactionAge is how long its
+	// transaction has been open. Both are empty when the role cannot see
+	// that session or the session ended before it was described.
+	State          string
+	TransactionAge time.Duration
 }
 
 // Error implements the error interface.
 func (e *LingeringHolderError) Error() string {
-	return fmt.Sprintf("backend %d held a lock on %s for %s, the whole wait, so the step did not request its lock and no reader or writer queued behind it",
-		e.PID, e.Table, e.Held.Round(time.Second))
+	backend := fmt.Sprintf("backend %d", e.PID)
+	switch {
+	case e.State != "" && e.TransactionAge > 0:
+		backend += fmt.Sprintf(" (%s, transaction open for %s)", e.State, e.TransactionAge.Round(time.Second))
+	case e.State != "":
+		backend += fmt.Sprintf(" (%s)", e.State)
+	}
+	return fmt.Sprintf("%s held a lock on %s for the whole %s the step waited, so the step did not request its lock and no reader or writer queued behind it",
+		backend, e.Table, e.Watched.Round(time.Second))
 }
 
 // awaitLockQueue waits outside the lock queue (waitOutsideLockQueue) and
@@ -306,7 +321,44 @@ func awaitLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lockedTabl
 	if !outcome.exhausted || outcome.holder.pid == 0 {
 		return nil
 	}
-	return &LingeringHolderError{PID: uint32(outcome.holder.pid), Table: outcome.holder.table, Held: outcome.waited - outcome.holder.since}
+	lingering := &LingeringHolderError{
+		PID:     uint32(outcome.holder.pid),
+		Table:   outcome.holder.table,
+		Watched: outcome.waited - outcome.holder.since,
+	}
+	if err := describeHolder(ctx, pool, lingering); err != nil {
+		return err
+	}
+	return lingering
+}
+
+// describeHolder fills in the holder's state and transaction age from
+// pg_stat_activity, so an operator can tell a session left idle in a
+// transaction from a long report. The wait itself reads only pg_locks, which
+// needs no privilege; pg_stat_activity shows another role's session only to
+// a role allowed to see it, so for any other role the two stay empty. A
+// session that ended since the wait's last read has nothing to describe.
+// The query text is left out: it can carry row values.
+func describeHolder(ctx context.Context, pool *pgxpool.Pool, lingering *LingeringHolderError) error {
+	var state *string
+	var age *time.Duration
+	err := pool.QueryRow(ctx, `
+		SELECT a.state, pg_catalog.now() OPERATOR(pg_catalog.-) a.xact_start
+		FROM pg_catalog.pg_stat_activity a
+		WHERE a.pid OPERATOR(pg_catalog.=) $1`, int32(lingering.PID)).Scan(&state, &age)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("describe backend %d, which held a lock on %s for the whole wait: %w", lingering.PID, lingering.Table, err)
+	}
+	if state != nil {
+		lingering.State = *state
+	}
+	if age != nil {
+		lingering.TransactionAge = *age
+	}
+	return nil
 }
 
 // oldestHolder returns the holder first seen earliest.

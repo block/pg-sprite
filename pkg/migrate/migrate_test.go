@@ -302,12 +302,12 @@ func TestExecRefusal(t *testing.T) {
 	})
 
 	t.Run("a step that never requested its lock past a lingering holder is a lock budget refusal", func(t *testing.T) {
-		holderErr := &executor.LingeringHolderError{PID: 4242, Table: "billing.invoices", Held: 30 * time.Second}
+		holderErr := &executor.LingeringHolderError{PID: 4242, Table: "billing.invoices", Watched: 30 * time.Second, State: "idle in transaction", TransactionAge: 5 * time.Minute}
 		v, refused := execRefusal(st, fmt.Errorf("wrapped: %w", holderErr), false, false, false)
 		require.True(t, refused)
 		assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
 		assert.Equal(t, verdict.CauseLockBudget, v.Cause)
-		assert.Equal(t, "backend 4242 held a lock on billing.invoices for 30s, the whole wait, so the step did not request its lock and no reader or writer queued behind it; "+
+		assert.Equal(t, "backend 4242 (idle in transaction, transaction open for 5m0s) held a lock on billing.invoices for the whole 30s the step waited, so the step did not request its lock and no reader or writer queued behind it; "+
 			"nothing was executed, and the statement runs unchanged once that transaction ends", v.Detail)
 	})
 

@@ -77,7 +77,9 @@ autocommit-each-step has two shapes in the executor:
   requests its lock as usual. A holder still there when the wait runs out
   is not traffic a lock budget absorbs, so the step ends before it requests
   its lock, with an `executor.LingeringHolderError` naming the holder's
-  backend and table, and no reader or writer queues behind it. The step
+  backend and table, plus its state (such as `idle in transaction`) and
+  transaction age when the role can see that session. No reader or writer
+  queues behind it. The step
   runs again unchanged once that transaction ends. It never ends another
   session. A step that
   takes only `SHARE UPDATE EXCLUSIVE` conflicts with no reader or writer,

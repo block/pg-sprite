@@ -269,3 +269,16 @@ func TestNativeLockedTables(t *testing.T) {
 		})
 	}
 }
+
+// A lingering holder is named with what the role could see of it: its state
+// and transaction age when pg_stat_activity shows the session, and only its
+// backend when it does not.
+func TestLingeringHolderErrorNamesWhatTheRoleCouldSee(t *testing.T) {
+	seen := &LingeringHolderError{PID: 4242, Table: "billing.invoices", Watched: 30 * time.Second, State: "active", TransactionAge: 2*time.Hour + 400*time.Millisecond}
+	assert.Equal(t, "backend 4242 (active, transaction open for 2h0m0s) held a lock on billing.invoices for the whole 30s the step waited, "+
+		"so the step did not request its lock and no reader or writer queued behind it", seen.Error())
+
+	hidden := &LingeringHolderError{PID: 4242, Table: "billing.invoices", Watched: 30 * time.Second}
+	assert.Equal(t, "backend 4242 held a lock on billing.invoices for the whole 30s the step waited, "+
+		"so the step did not request its lock and no reader or writer queued behind it", hidden.Error())
+}
