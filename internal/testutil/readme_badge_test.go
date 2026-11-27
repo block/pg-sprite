@@ -73,6 +73,20 @@ func TestReadmeWorkflowBadgesNameExistingWorkflows(t *testing.T) {
 	}
 }
 
+// The README's release badge shows this repository's latest published
+// release, not its latest tag, and links to that release. Its image is
+// served with an hour-long cache, so GitHub's image proxy, which gives up on
+// a slow fetch, meets a cache miss at most once an hour.
+func TestReadmeReleaseBadgeShowsThisRepositorysLatestRelease(t *testing.T) {
+	badge := regexp.MustCompile(`\[!\[Release\]\(https://img\.shields\.io/github/v/([a-z]+)/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\?cacheSeconds=([0-9]+)\)\]\(https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/latest\)`).
+		FindStringSubmatch(readRepoFile(t, "README.md"))
+	require.Len(t, badge, 5, "the README has a release badge linking to the latest release")
+	assert.Equal(t, "release", badge[1], "the badge reads releases, not tags")
+	assert.Equal(t, "block/pg-sprite", badge[2], "the badge's repository")
+	assert.Equal(t, "block/pg-sprite", badge[4], "the link's repository")
+	assert.Equal(t, "3600", badge[3], "the badge's cache lifetime in seconds")
+}
+
 // The README's maturity badge is the project-level status, and it is preview
 // exactly while some supported capability row is in preview: a change that
 // takes the last preview route to ga changes the badge's word, its color, and
