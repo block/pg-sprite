@@ -205,7 +205,7 @@ func TestMigrateAlterFailsAPartitionedForeignKeyOnAnOrphanRow(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, verdict.ErrRefused, "the build executed steps, so this is a failure, not a refusal")
 	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
-	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+	assert.Equal(t, string(executor.CodeDataFault), v.Code)
 	assert.Equal(t, "23503", v.SQLState, "foreign_key_violation: the rows, not the engine, stopped the run")
 	assert.Contains(t, v.ServerError, "events_2026_02", "the server's error names the partition holding the orphan row")
 	assert.Contains(t, v.Detail, "run the same statement again")
