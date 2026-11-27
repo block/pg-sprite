@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -132,4 +133,27 @@ func TestRunDesiredFinishesAReplacementThatStoppedBeforeTheRename(t *testing.T) 
 	_, valid := indexState(t, pool, schema, "t_email_lower_key")
 	assert.True(t, valid)
 	assert.Empty(t, plannedDrop(t, pool, schema, desired).Statements)
+}
+
+// A table over the size limit still has its changed index replaced: the
+// build is an online idiom, the drop is concurrent, and the rename changes
+// only the catalog, so none of the three is the blind bounded attempt the
+// size guard exists for.
+func TestRunDesiredReplacesAnIndexOnATableOverTheSizeLimit(t *testing.T) {
+	pool, schema := replaceIndexTable(t)
+	desired := replaceIndexDesired("CREATE UNIQUE INDEX t_email_lower_key ON t (lower(email)) WHERE deleted_at IS NULL AND qty > 0")
+	reviewed := plannedDrop(t, pool, schema, desired)
+	opts := runOptions()
+	// A one-byte limit puts the table over it, as a large table would be.
+	opts.MaxTableSizeBytes = 1
+
+	res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+		Schema: schema, Desired: parseDesired(t, desired),
+		ExpectedFingerprint: reviewed.Fingerprint, AllowDestructive: schema + ".t",
+	}, opts)
+	require.NoError(t, err)
+	require.Equal(t, verdict.OutcomeExecuted, res.Outcome, "%s", res.Detail)
+	def, valid := indexState(t, pool, schema, "t_email_lower_key")
+	assert.Contains(t, def, "WHERE ((deleted_at IS NULL) AND (qty > 0))")
+	assert.True(t, valid)
 }
