@@ -345,7 +345,9 @@ plus a minute. SIGQUIT ends the test at once, leaving what the cleanups have not
 removed. The record, `results.json` in the package directory
 (`LOAD_PROOF_RESULTS` moves it), is written whether the run passed or failed: phase
 timings, peak slot lag per phase, load counts, failures by SQLSTATE, the slowest
-mutation, and the verdict.
+mutation, and the verdict as the binary printed it, whose `verification` object carries
+the verify pass's figures: rows hashed, chunks compared, chunks settled key by key,
+chunks left unsettled, and keys carried to the swap.
 
 Copy-and-swap at the default table size has not yet been shown to pass: the default run
 needs a host with the disk and I/O for two tables of about 10 GiB. The defaults stay at
@@ -421,7 +423,8 @@ started and how long it ran, how long the host waited for the slot before it, th
 in, the row's phase and watermark after it, the shadow's OID, the pool connections still
 counted as acquired when it returned, the writes the load committed before the next call,
 the last tracker counters the host read, and its outcome, code, and error. The phase list
-the checkpoint poll records spans all three calls.
+the checkpoint poll records spans all three calls, and `verdict` is the last call's verdict,
+encoded as the binary prints it, with the same `verification` object.
 
 The library proof has been shown to pass at 20,000 and 50,000 rows on a laptop with
 `fsync=off` under the default load, and not yet at the default table size, which needs the
