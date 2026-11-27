@@ -181,6 +181,8 @@ for as long as the source takes writes. After a stop, watch the slot's retained 
 (`pg_replication_slots`) and either resume soon or drop the slot deliberately, and raise the
 ceiling only with free space on the volume for that much WAL, read the way
 [Free disk space](#free-disk-space) describes for your platform.
+[replication-slots.md](replication-slots.md) explains what the slot holds on the server and is
+the runbook for checking it, resuming, dropping it, and starting over.
 
 `SIZE` is a positive whole number of bytes, optionally followed by a binary unit: `B`, `KiB`,
 `MiB`, `GiB`, or `TiB`, case-insensitive; `KB`, `MB`, `GB`, and `TB` mean the same binary
