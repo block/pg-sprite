@@ -75,7 +75,7 @@ func TestEnsureAttachProofAddsAndValidatesThenAttachSkipsBothScans(t *testing.T)
 
 		for _, p := range []attachProof{bound, def} {
 			var ran []string
-			res, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget,
+			res, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil,
 				func(_ progress.Operation, sql string) { ran = append(ran, sql) })
 			require.NoError(t, err, p.kind)
 			assert.Equal(t, attachProofAdded, res.action, p.kind)
@@ -85,7 +85,7 @@ func TestEnsureAttachProofAddsAndValidatesThenAttachSkipsBothScans(t *testing.T)
 			assert.True(t, exists && validated, p.kind)
 
 			ran = nil
-			again, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget,
+			again, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil,
 				func(_ progress.Operation, sql string) { ran = append(ran, sql) })
 			require.NoError(t, err)
 			assert.Equal(t, attachProofFound, again.action, "a rerun finds the validated CHECK")
@@ -113,7 +113,7 @@ func TestEnsureAttachProofResumesANotValidCheck(t *testing.T) {
 			WHERE conrelid = $1 AND conname = $2`, p.tableOID, p.name()).Scan(&oid))
 
 		var ran []string
-		res, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget,
+		res, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil,
 			func(_ progress.Operation, sql string) { ran = append(ran, sql) })
 		require.NoError(t, err)
 		assert.Equal(t, attachProofValidated, res.action)
@@ -126,8 +126,11 @@ func TestEnsureAttachProofResumesANotValidCheck(t *testing.T) {
 
 // A row of the new table outside the bound breaks the bound proof, and a row
 // of the DEFAULT partition inside the bound breaks the exclusion. Each
-// validation fails typed and leaves its CHECK NOT VALID, still enforced for
-// new rows; once the row is moved, the next call validates the same CHECK.
+// validation fails typed. The bound proof's CHECK stays NOT VALID, still
+// enforced for new rows, and once the row is moved the next call validates
+// the same CHECK. The exclusion's CHECK is dropped, because until the attach
+// it would refuse every row the parent routes to the DEFAULT partition for
+// the new bound.
 func TestEnsureAttachProofFailsTypedOnRowsThatBreakIt(t *testing.T) {
 	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
 		t.Run("a row of the new table outside the bound", func(t *testing.T) {
@@ -138,7 +141,7 @@ func TestEnsureAttachProofFailsTypedOnRowsThatBreakIt(t *testing.T) {
 			require.NoError(t, err)
 			p := f.proofOn(t, attachProofBound, "events_2027_01", check)
 
-			_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, nil)
+			_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil, nil)
 			require.ErrorIs(t, err, errAttachProofViolation)
 			validated, exists := f.proofValidated(t, p)
 			assert.True(t, exists, "the CHECK stays")
@@ -147,7 +150,7 @@ func TestEnsureAttachProofFailsTypedOnRowsThatBreakIt(t *testing.T) {
 			require.Error(t, err, "the NOT VALID CHECK refuses a new row outside the bound")
 
 			f.exec(t, `UPDATE %[1]s.events_2027_01 SET day = '2027-01-15' WHERE id = 5`)
-			res, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, nil)
+			res, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil, nil)
 			require.NoError(t, err)
 			assert.Equal(t, attachProofValidated, res.action)
 		})
@@ -160,11 +163,17 @@ func TestEnsureAttachProofFailsTypedOnRowsThatBreakIt(t *testing.T) {
 			require.NoError(t, err)
 			p := f.proofOn(t, attachProofDefault, "events_default", exclusion)
 
-			_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, nil)
+			_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil, nil)
 			require.ErrorIs(t, err, errAttachProofViolation)
-			validated, exists := f.proofValidated(t, p)
-			assert.True(t, exists)
-			assert.False(t, validated)
+			_, exists := f.proofValidated(t, p)
+			assert.False(t, exists, "the exclusion's CHECK is dropped")
+			_, err = f.pool.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, "events"}.Sanitize()+" VALUES (8, '2027-01-11')")
+			require.NoError(t, err, "a January row still routes to the DEFAULT partition")
+
+			f.exec(t, `DELETE FROM %[1]s.events_default WHERE day >= '2027-01-01' AND day < '2027-02-01'`)
+			res, err := ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil, nil)
+			require.NoError(t, err)
+			assert.Equal(t, attachProofAdded, res.action, "the rerun adds the CHECK again")
 		})
 	})
 }
@@ -182,7 +191,7 @@ func TestEnsureAttachProofRefusesANameHeldByAnotherConstraint(t *testing.T) {
 			" ADD CONSTRAINT "+pgx.Identifier{p.name()}.Sanitize()+" UNIQUE (id)")
 		require.NoError(t, err)
 
-		_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, nil)
+		_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil, nil)
 		require.ErrorIs(t, err, errAttachProofNameTaken)
 		var contype string
 		require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT contype::text FROM pg_catalog.pg_constraint
@@ -207,7 +216,7 @@ func TestEnsureAttachProofRefusesATableRenamedSinceItWasResolved(t *testing.T) {
 				day date
 			)`)
 
-		_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, nil)
+		_, err = ensureAttachProof(t.Context(), f.pool, p, attachProofTestBudget, 0, nil, nil)
 		require.ErrorIs(t, err, ErrInvariantViolation)
 		var n int
 		require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_catalog.pg_constraint
