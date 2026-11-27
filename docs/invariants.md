@@ -1805,7 +1805,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   them). On PostgreSQL before 18, an unforced lone named `ADD FOREIGN KEY` on a partitioned
   parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
   build (each partition's foreign key added `NOT VALID` and validated, then the parent's
-  `ADD CONSTRAINT` adopts them). `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
+  `ADD CONSTRAINT` adopts them); a foreign key a desired file adds runs as the same build when
+  the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`), and one it does
+  not keeps the `NOT VALID` plan and is refused. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
   refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
   concurrent idiom PostgreSQL rejects for it. The plan keeps a desired-state drop of a
   partitioned index refused; a desired-state run lifts only that refusal, running the plain

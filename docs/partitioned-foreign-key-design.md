@@ -73,10 +73,32 @@ by the integration tests in `pkg/executor`:
 - A partitioned, foreign, or view referenced table, or a referenced table inside the tree
   (`partitioned-foreign-key-referenced-table`): the parent's statement would also clone the
   foreign key onto every referenced partition, which the build neither proves nor reads back.
-- Desired-state routing (`diff`, `migrate --desired`): a foreign key a desired file adds to a
-  partitioned table plans as the ordinary `NOT VALID` then `VALIDATE` sequence, which
-  PostgreSQL 14–17 refuse, so `diff` refuses it with `unsupported-partitioned-parent`, class
-  `environmental`, and `migrate --desired` refuses the plan.
+
+## Routing from a desired file
+
+A foreign key a desired file adds to a partitioned table plans as an `add-foreign-key` statement
+whose referenced table the diff qualifies with the target schema, as it does for every added
+foreign key, with the referenced columns the server prints. On PostgreSQL 14–17 the plan
+(`diffplan.Plan`, through `plan.RouteDesiredPartitionedForeignKeyBuilds`) gives that statement
+the execution `partitioned-foreign-key-build`, the same one `migrate --alter` plans, so `diff`,
+`migrate --desired --dry-run`, and the fingerprint show the build. `migrate --desired` runs the
+statement through `migrate.Run`'s routing below and ends in the same verdicts; its admission
+checks `migrate.Options.Connection` before any statement runs, as for a partitioned index build.
+A desired run has no admission between the plan and the run, so the plan routes only a foreign
+key the build's static admission takes; one it does not, such as an `ON DELETE` column list,
+keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, class
+`environmental`, before anything runs. On 18 nothing is routed.
+
+The plan's routing reads the statement, not the catalog, so the refusals the build makes from the
+catalog are not in the plan. A foreign key to a partitioned, foreign, or view table, including
+one that references the partitioned table itself or one of its partitions, and a tree with a
+sub-partitioned partition plan as the build and are refused (`capability-boundary`) when the run
+reaches the statement; a tree with a foreign-table partition or a detach pending fails there with
+`foreign-table-partition` or `partition-detach-pending`. The build stops before it touches a
+partition, but the statements planned ahead of it have committed by then, so
+a desired file that also adds a column keeps the column, and the next plan is the foreign key
+alone, refused the same way. Leave such a foreign key out of the desired file until the build
+carries it.
 
 ## Routing from `migrate --alter`
 

@@ -775,7 +775,8 @@ gives every partition the foreign key (`ADD FOREIGN KEY ... NOT VALID`, a catalo
 `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes go on), then adds
 the parent's foreign key, which adopts them, in one brief transaction. `migrate --alter`
 (`migrate.Run`) routes a lone named `ADD FOREIGN KEY` on a partitioned table to it before
-PostgreSQL 18; desired-state plans do not yet, a library caller may call it directly, and
+PostgreSQL 18, and `migrate.RunDesired` runs a foreign key a desired file adds as it when the
+build admits its shape ([design](partitioned-foreign-key-design.md#routing-from-a-desired-file)); a library caller may call it directly, and
 `AdmitPartitionedForeignKeyShape` checks a statement's shape without a connection. The design is in
 [partitioned-foreign-key-design](partitioned-foreign-key-design.md).
 
@@ -813,9 +814,10 @@ step rolls back, every partition's foreign key stays, and the rerun adopts them.
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
 as this build; the plan statement carries `execution: partitioned-index-build`. The same wiring
-serves the two builds `migrate.Run` alone routes to: a lone `ADD PRIMARY KEY` or `ADD UNIQUE` on
-a partitioned table (`partitioned-key-build`), and a lone `ADD FOREIGN KEY` on one before
-PostgreSQL 18 (`partitioned-foreign-key-build`). Each build takes
+serves the key build, which `migrate.Run` alone routes a lone `ADD PRIMARY KEY` or `ADD UNIQUE`
+on a partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
+a foreign key on a partitioned table to before PostgreSQL 18 (`partitioned-foreign-key-build`).
+Each build takes
 the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
 sets `migrate.Options.Connection` to the `dbconn.Config` the pool was dialed with. It must
 reach the pool's database: the lock is an advisory lock, and an advisory lock excludes only
@@ -893,9 +895,12 @@ transaction that also holds `ACCESS EXCLUSIVE` on the referenced table. The `mig
 plan statement carries `execution: partitioned-foreign-key-build` (plan `format_version` 28). It
 needs `migrate.Options.Connection` for its table lock session exactly as the partitioned index
 build does, with the same two wiring errors. On PostgreSQL 18 the same statement runs as the
-ordinary `NOT VALID` then `VALIDATE` sequence. `migrate.RunDesired` does not route it: a foreign
-key a desired file adds to a partitioned table plans as `NOT VALID` then `VALIDATE` and meets
-`unsupported-partitioned-parent`, class `environmental`. A forced run runs the plain
+ordinary `NOT VALID` then `VALIDATE` sequence. A foreign key a desired file adds to a
+partitioned table takes the same route: `diffplan.Plan` gives its `add-foreign-key` statement the
+execution `partitioned-foreign-key-build`, and `migrate.RunDesired` runs it with the verdicts
+below, after checking `migrate.Options.Connection` before any statement runs. A desired foreign
+key whose shape the build does not carry is planned refused instead (`unsupported-partitioned-parent`,
+class `environmental`). A forced run runs the plain
 statement as written, and a submitted `NOT VALID` meets `unsupported-partitioned-parent`, cause
 `parent-not-valid-foreign-key`, as before.
 

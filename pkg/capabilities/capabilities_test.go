@@ -40,7 +40,6 @@ func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{
 		"add-constraint-using-index-on-a-partitioned-parent",
-		"add-foreign-key-on-a-partitioned-parent",
 		"add-primary-key-add-unique-on-a-partitioned-parent",
 	}, got)
 	for _, r := range rows {

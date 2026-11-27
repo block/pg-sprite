@@ -264,6 +264,41 @@ func TestPlanTextCommentsOutAPartitionedIndexBuild(t *testing.T) {
 	}
 }
 
+// diff --sql never prints a partitioned foreign key build as runnable SQL:
+// run by hand, the ADD CONSTRAINT validates every partition while it holds
+// SHARE ROW EXCLUSIVE on the whole tree. It is commented out and points the
+// reader at migrate.
+func TestPlanTextCommentsOutAPartitionedForeignKeyBuild(t *testing.T) {
+	const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts(id)`
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "app", "events", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	report.Statements = []plan.Statement{{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionPartitionedForeignKeyBuild,
+		Decisions: []planner.Decision{{
+			Operation: "add foreign key",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonSaferIdiom,
+		}},
+	}}
+
+	var out strings.Builder
+	require.NoError(t, writePlanText(&out, report))
+	text := out.String()
+	assert.Contains(t, text, "-- only the engine runs this build, one partition at a time while the table keeps taking writes, then a brief ACCESS EXCLUSIVE lock on the referenced table: use pg-sprite migrate --desired or pg-sprite migrate --alter\n"+
+		"-- "+sql+";\n")
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		assert.True(t, line == "" || strings.HasPrefix(line, "--"), "no build is runnable as written: %q", line)
+	}
+}
+
 // A greenfield index build renders as the metadata-only note the planner
 // already gives the CREATE TABLE — never as the safer-idiom warning that
 // would tell the reader a table nobody reads yet is about to be locked.
