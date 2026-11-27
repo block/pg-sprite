@@ -370,7 +370,11 @@ same definition instead of building one. The flow relies on that:
    (`partitioned-key-unsettled`). Any other mismatch, before or after the
    statement, is an invariant violation and the transaction rolls back. The
    window holds `ACCESS EXCLUSIVE` on the tree for catalog reads and writes only,
-   a few per partition.
+   and the proof and the read-back each read every partition in a fixed number of
+   statements (the partitions' OIDs passed as one array), so the number of
+   statements, and of round trips, under the lock does not grow with the number
+   of partitions; the lock itself and each read still cover every partition
+   (`TestAddPartitionedKeyParentStepRoundTrips`).
 
 The report (`PartitionedKeyReport`) lists each leaf's constraint, index, and
 action (`found`, `constrained`, or `built`, and whether it recovered debris), the
