@@ -486,6 +486,80 @@ func (f keyFixture) replaceFebruaryKey(t *testing.T, recorded leafKeyResult) {
 	f.exec(t, `ALTER TABLE %[1]s.events_2026_02 ADD CONSTRAINT events_feb_other PRIMARY KEY USING INDEX events_feb_other`)
 }
 
+// A partition's concurrent index build commits as it goes, before the
+// partition gets its constraint, so a run that stops after the build began
+// can leave the tree changed with no partition in Leaves. The report says the
+// run changed the tree, so a caller does not read the stop as one that
+// changed nothing. The runs have a database of their own, so no other
+// session decides how long a build waits for older transactions.
+func TestAddPartitionedKeyReportsAChangeBeforeAnyPartitionHasTheKey(t *testing.T) {
+	cfg := dbconn.Config{URL: testutil.NewDatabase(t, testutil.StartPostgres(t))}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	newFixture := func(t *testing.T) keyFixture {
+		t.Helper()
+		f := keyFixture{leafKeyFixture: leafKeyFixture{pool: pool, schema: testutil.NewSchema(t, pool)}, cfg: cfg}
+		f.events(t)
+		return f
+	}
+	// openReader begins a transaction that runs one statement on relation and
+	// stays open until the test ends.
+	openReader := func(t *testing.T, f keyFixture, iso pgx.TxIsoLevel, relation string) {
+		t.Helper()
+		reader, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: iso})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			if err := reader.Rollback(context.WithoutCancel(t.Context())); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+				t.Errorf("roll back the reader: %v", err)
+			}
+		})
+		_, err = reader.Exec(t.Context(), "SELECT count(*) FROM "+pgx.Identifier{f.schema, relation}.Sanitize())
+		require.NoError(t, err)
+	}
+	add := func(t *testing.T, f keyFixture, b ConcurrentBudget) (PartitionedKeyReport, error) {
+		t.Helper()
+		pt, err := preflight.CheckTable(t.Context(), pool, f.schema, "events", 1<<30)
+		require.NoError(t, err)
+		return AddPartitionedKey(t.Context(), cfg, pool, pt, fmt.Sprintf(addEventsPrimaryKey, f.schema), b)
+	}
+
+	// A repeatable-read reader's snapshot holds the first partition's build
+	// in its wait for older transactions until the one-second budget cancels
+	// it.
+	t.Run("the index build stops", func(t *testing.T) {
+		f := newFixture(t)
+		openReader(t, f, pgx.RepeatableRead, "events")
+
+		rep, err := add(t, f, ConcurrentBudget{Overall: time.Second})
+
+		var budgetErr *BudgetError
+		require.ErrorAs(t, err, &budgetErr)
+		assert.Equal(t, CauseStatement, budgetErr.Cause)
+		assert.Empty(t, rep.Leaves, "no partition got its constraint")
+		assert.True(t, rep.Changed, "the first partition's index build had begun")
+	})
+
+	// A read-committed reader holds ACCESS SHARE on the first partition but
+	// no snapshot, so the partition's index build finishes, and its ADD
+	// CONSTRAINT ... USING INDEX, which needs ACCESS EXCLUSIVE, runs out of
+	// lock_timeout. The built index stays without its constraint.
+	t.Run("the constraint step stops after the index is built", func(t *testing.T) {
+		f := newFixture(t)
+		openReader(t, f, pgx.ReadCommitted, "events_2026_01")
+
+		rep, err := add(t, f, leafKeyBudget)
+
+		var budgetErr *BudgetError
+		require.ErrorAs(t, err, &budgetErr)
+		assert.Equal(t, CauseLock, budgetErr.Cause)
+		assert.Empty(t, rep.Leaves, "no partition got its constraint")
+		assert.True(t, rep.Changed, "the first partition's index was built")
+		assert.Len(t, f.indexes(t, "events_2026_01"), 1, "the built index stays")
+		assert.Empty(t, f.keyConstraints(t, "events_2026_01"))
+	})
+}
+
 // The parent's step adds the parent's constraint only over exactly the leaf
 // constraints and indexes the leaf steps recorded, and reads back that it
 // adopted them; any other state rolls it back with an invariant violation.

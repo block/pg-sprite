@@ -33,6 +33,11 @@ func desiredFileRefusal(out io.Writer, pal palette, asJSON, asSQL bool, err erro
 		if _, writeErr := fmt.Fprintln(out, sqlDiagnosticComment("refused: "+v.Detail)); writeErr != nil {
 			return fmt.Errorf("write desired-file refusal: %w", writeErr)
 		}
+		for _, refused := range v.RefusedStatements {
+			if _, writeErr := fmt.Fprintln(out, sqlDiagnosticComment("refused at "+refused.String())); writeErr != nil {
+				return fmt.Errorf("write desired-file refusal: %w", writeErr)
+			}
+		}
 	default:
 		if writeErr := writeVerdictText(out, pal, v); writeErr != nil {
 			return writeErr
