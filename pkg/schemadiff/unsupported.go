@@ -58,8 +58,10 @@ const (
 	// is built under is one the table already uses.
 	CauseReplacementIndexName UnsupportedCause = "replacement-index-name"
 	// CauseReferencedIndex refuses when a standalone index that a foreign
-	// key references would be dropped, whether it is removed or changed: the
-	// key depends on the index, so PostgreSQL refuses the drop.
+	// key references would be dropped, whether it is removed or changed, or
+	// when a primary key or unique constraint a foreign key references would
+	// be replaced: the foreign key depends on it, so PostgreSQL refuses the
+	// drop.
 	CauseReferencedIndex UnsupportedCause = "referenced-index"
 )
 
