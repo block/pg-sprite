@@ -563,7 +563,8 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	// the engine does not derive it, so a delta fails closed instead of
 	// diffing to silence.
 	if live.Collation != desired.Collation {
-		return nil, unsupported(CauseCollationChange, "%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
+		return nil, unsupported(CauseCollationChange, "%w: column %q collation changes from %s to %s, which rewrites the column and rebuilds its indexes; keep %s in the file, or add a new column with the collation you want",
+			ErrUnsupportedChange, live.Name, describeCollation(live.Collation), describeCollation(desired.Collation), keepCollation(live.Collation))
 	}
 	if desired.IsGenerated() && live.Type != desired.Type {
 		return nil, unsupported(CauseGenerated, "%w: column %q generated column type change", ErrUnsupportedChange, live.Name)
@@ -924,4 +925,23 @@ func isUnfinishedBuild(partitioned bool, ix Index) bool {
 		return false
 	}
 	return ix.Invalid
+}
+
+// describeCollation names a column's collation for a refusal: the
+// schema-qualified name when the column declares one, and the type's default
+// otherwise.
+func describeCollation(collation string) string {
+	if collation == "" {
+		return "the type's default"
+	}
+	return collation
+}
+
+// keepCollation names, for a refusal, the declaration that leaves a column's
+// live collation as it is.
+func keepCollation(collation string) string {
+	if collation == "" {
+		return "the column without a COLLATE clause"
+	}
+	return "COLLATE " + collation
 }

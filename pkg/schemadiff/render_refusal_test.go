@@ -49,7 +49,6 @@ func TestRenderRefusalsCoverEveryUnrenderableVerdict(t *testing.T) {
 		"ErrUnrenderableInheritance":            ErrUnrenderableInheritance,
 		"ErrUnrenderableForeignKey":             ErrUnrenderableForeignKey,
 		"ErrUnrenderableUnlogged":               ErrUnrenderableUnlogged,
-		"ErrUnrenderableCollation":              ErrUnrenderableCollation,
 		"ErrUnrenderableVirtual":                ErrUnrenderableVirtual,
 		"ErrUnrenderableToastOptions":           ErrUnrenderableToastOptions,
 		"ErrUnrenderableSequenceOptions":        ErrUnrenderableSequenceOptions,

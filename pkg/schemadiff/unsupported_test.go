@@ -125,6 +125,23 @@ func TestDiffRefusalsCarryTheirCause(t *testing.T) {
 	}
 }
 
+// A collation change names both collations and the declaration that keeps the
+// live one, in either direction, so the reader can fix the file from the
+// message alone.
+func TestDiffCollationChangeNamesTheWayForward(t *testing.T) {
+	collated := func(collation string) Model {
+		return Model{Table: "codes", Columns: []Column{{Name: "code", Type: "text", Collation: collation}}}
+	}
+
+	_, err := Diff("public", collated(`pg_catalog."C"`), collated(""))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Equal(t, `unsupported schema change: column "code" collation changes from pg_catalog."C" to the type's default, which rewrites the column and rebuilds its indexes; keep COLLATE pg_catalog."C" in the file, or add a new column with the collation you want`, err.Error())
+
+	_, err = Diff("public", collated(""), collated(`pg_catalog."C"`))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Equal(t, `unsupported schema change: column "code" collation changes from the type's default to pg_catalog."C", which rewrites the column and rebuilds its indexes; keep the column without a COLLATE clause in the file, or add a new column with the collation you want`, err.Error())
+}
+
 func TestUnsupportedCausesAreDistinct(t *testing.T) {
 	causes := UnsupportedCauses()
 	require.NotEmpty(t, causes)

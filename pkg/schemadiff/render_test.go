@@ -234,14 +234,16 @@ func TestRenderRefusesUnloggedTable(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnrenderableUnlogged)
 }
 
-// A column with an explicit collation refuses to render: the model does
-// not manage collations, so a baseline without the COLLATE clause would
-// silently change sort order and index semantics.
-func TestRenderRefusesCollatedColumn(t *testing.T) {
+// A column with an explicit collation renders with its COLLATE clause after
+// the type and before its default and NOT NULL, so the baseline keeps the
+// column's sort order and index semantics.
+func TestRenderWritesColumnCollation(t *testing.T) {
 	m := base()
-	m.Columns[1].Collation = `"C"`
-	_, err := Render(m)
-	require.ErrorIs(t, err, ErrUnrenderableCollation)
+	m.Columns[1].Collation = `pg_catalog."C"`
+	m.Columns[1].Default = `'x'::text`
+	rendered, err := Render(m)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, `COLLATE pg_catalog."C" DEFAULT 'x'::text`)
 }
 
 // A virtual generated column refuses to render: no desired file can
