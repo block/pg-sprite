@@ -419,19 +419,6 @@ func TestDiffAddedConstraintRecordsItsNotValidDefinition(t *testing.T) {
 	})
 }
 
-func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
-	desired := base()
-	desired.Indexes = []Index{
-		{Name: "events_name_idx", Def: "CREATE UNIQUE INDEX events_name_idx ON events USING btree (name)"},
-	}
-	changes, err := Diff("public", base(), desired)
-	require.NoError(t, err)
-	require.Equal(t, []string{
-		`DROP INDEX "public"."events_name_idx"`,
-		`CREATE UNIQUE INDEX events_name_idx ON public.events USING btree (name)`,
-	}, sqls(changes))
-}
-
 // A new unique constraint whose name and index match a live unique index
 // takes the index over in place rather than dropping it and building its
 // own, which would leave the table without the guarantee and without the
@@ -765,6 +752,7 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeValidateConstraint,
 		ChangeValidateForeignKey,
 		ChangeCreateIndex,
+		ChangeRenameIndex,
 		ChangeAddEnumValue,
 	}, ChangeKinds())
 }

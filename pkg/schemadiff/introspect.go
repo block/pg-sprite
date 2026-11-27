@@ -837,5 +837,53 @@ func introspectIndexes(ctx context.Context, tx Querier, oid uint32) ([]Index, er
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read indexes: %w", err)
 	}
+	if err := introspectIndexReferences(ctx, tx, oid, idxs); err != nil {
+		return nil, err
+	}
 	return idxs, nil
+}
+
+// introspectIndexReferences records on each index the foreign keys that
+// reference it: con.conindid names the index a key's referenced columns are
+// checked against, and the key depends on that index. A key on the table
+// itself counts, since it holds the index just the same. Partition clones
+// are left out (conislocal), as in introspectReferencedBy.
+func introspectIndexReferences(ctx context.Context, tx Querier, oid uint32, idxs []Index) error {
+	if len(idxs) == 0 {
+		return nil
+	}
+	byName := make(map[string]int, len(idxs))
+	for i, ix := range idxs {
+		byName[ix.Name] = i
+	}
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
+	rows, err := tx.Query(ctx, `
+		SELECT ix.relname, n.nspname, c.relname, con.conname
+		FROM pg_catalog.pg_constraint con
+		JOIN pg_catalog.pg_class ix ON ix.oid OPERATOR(pg_catalog.=) con.conindid
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) con.conrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE con.confrelid OPERATOR(pg_catalog.=) $1 AND con.contype OPERATOR(pg_catalog.=) 'f'
+		      AND con.conislocal
+		ORDER BY ix.relname, c.relname, con.conname, n.nspname`, oid)
+	if err != nil {
+		return fmt.Errorf("query the foreign keys that reference indexes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var index string
+		var ref IncomingForeignKey
+		if err := rows.Scan(&index, &ref.Schema, &ref.Table, &ref.Constraint); err != nil {
+			return fmt.Errorf("scan a foreign key that references an index: %w", err)
+		}
+		// A key that references a primary key or unique constraint is
+		// carried by that constraint, whose index the model leaves out.
+		if i, ok := byName[index]; ok {
+			idxs[i].ReferencedBy = append(idxs[i].ReferencedBy, ref)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read the foreign keys that reference indexes: %w", err)
+	}
+	return nil
 }

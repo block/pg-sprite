@@ -57,6 +57,10 @@ const (
 	// constraint is replaced in place and the temporary name its new index
 	// is built under is one the table already uses.
 	CauseReplacementIndexName UnsupportedCause = "replacement-index-name"
+	// CauseReferencedIndex refuses when a standalone index that a foreign
+	// key references would be dropped, whether it is removed or changed: the
+	// key depends on the index, so PostgreSQL refuses the drop.
+	CauseReferencedIndex UnsupportedCause = "referenced-index"
 )
 
 // UnsupportedCauses is the closed set of causes [Diff], [IntrospectEnumType],
@@ -80,6 +84,7 @@ func UnsupportedCauses() []UnsupportedCause {
 		CauseEnumValueRemoved,
 		CauseEnumValueReordered,
 		CauseReplacementIndexName,
+		CauseReferencedIndex,
 	}
 }
 

@@ -69,7 +69,9 @@ import (
 // partitioned-key-build execution contract and its part in the fingerprint.
 // Version 28 added the partitioned-foreign-key-build execution contract and
 // its part in the fingerprint.
-const FormatVersion = 28
+// Version 29 added the rename-index kind and the replaced_by statement
+// field, which a changed index the diff replaces rather than drops carries.
+const FormatVersion = 29
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -128,6 +130,18 @@ type Statement struct {
 	// name stood for, the fingerprint covers it, and execution refuses when
 	// the object has changed since. Absent on every other statement.
 	Drops *schemadiff.DroppedObject `json:"drops,omitempty"`
+	// ReplacedBy is set on a diff-derived DROP INDEX of a changed index the
+	// plan replaces rather than drops: the index an earlier statement of the
+	// plan built under the desired definition, valid before the drop runs,
+	// which the rename after the drop gives the dropped index's name (see
+	// schemadiff.Change.ReplacedBy). The table has an index with the desired
+	// definition before the old one goes, so the drop removes only what the
+	// desired definition no longer asks for. That can still be a guarantee,
+	// as when a unique index becomes non-unique or its predicate narrows, so
+	// the drop stays destructive and a consumer reviews it as one.
+	// Explanatory: the fingerprint covers the statements that build and
+	// rename the replacement.
+	ReplacedBy string `json:"replaced_by,omitempty"`
 	// DropsHelper is the helper CHECK that a SET NOT NULL running as the
 	// online helper-constraint sequence adds and then drops in a later
 	// step, with the definition the helper has once validated (see
