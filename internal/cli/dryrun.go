@@ -174,10 +174,12 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 				return c.emit(out, v)
 			}
 			// A unique index or key must contain the tree's partition keys,
-			// which only the live catalog knows; the build refuses one that
-			// does not before it creates anything, and so does the dry run.
-			// The key build also refuses a sub-partitioned tree there.
-			if catalogAdmit := partitionKeyAdmission(ps.Execution); catalogAdmit != nil {
+			// and a foreign key's referenced table must be one the build
+			// takes, which only the live catalog knows; the build refuses
+			// one that does not before it creates anything, and so does the
+			// dry run. The key and foreign key builds also refuse a
+			// sub-partitioned tree there.
+			if catalogAdmit := partitionedCatalogAdmission(ps.Execution); catalogAdmit != nil {
 				v, refused, admitErr = catalogAdmit(ctx, pool, st, report.Schema, ps.ExecSQL)
 				if admitErr != nil {
 					return admitErr
@@ -220,15 +222,18 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
-// partitionKeyAdmission returns the catalog check a partitioned build makes
-// of a unique key against the tree's partition keys before it creates
-// anything, or nil for an execution that makes none.
-func partitionKeyAdmission(e planner.Execution) func(context.Context, *pgxpool.Pool, statement.Statement, string, []string) (verdict.Verdict, bool, error) {
+// partitionedCatalogAdmission returns the catalog check a partitioned build
+// makes before it creates anything — a unique key against the tree's
+// partition keys, a foreign key's referenced table and tree — or nil for an
+// execution that makes none.
+func partitionedCatalogAdmission(e planner.Execution) func(context.Context, *pgxpool.Pool, statement.Statement, string, []string) (verdict.Verdict, bool, error) {
 	switch e {
 	case planner.ExecutionPartitionedIndexBuild:
 		return migrate.AdmitPartitionedUniqueIndex
 	case planner.ExecutionPartitionedKeyBuild:
 		return migrate.AdmitPartitionedKeyCatalog
+	case planner.ExecutionPartitionedForeignKeyBuild:
+		return migrate.AdmitPartitionedForeignKeyCatalog
 	default:
 		return nil
 	}

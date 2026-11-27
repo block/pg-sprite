@@ -776,8 +776,10 @@ gives every partition the foreign key (`ADD FOREIGN KEY ... NOT VALID`, a catalo
 the parent's foreign key, which adopts them, in one brief transaction. `migrate --alter`
 (`migrate.Run`) routes a lone named `ADD FOREIGN KEY` on a partitioned table to it before
 PostgreSQL 18, and `migrate.RunDesired` runs a foreign key a desired file adds as it when the
-build admits its shape ([design](partitioned-foreign-key-design.md#routing-from-a-desired-file)); a library caller may call it directly, and
-`AdmitPartitionedForeignKeyShape` checks a statement's shape without a connection. The design is in
+build admits its shape ([design](partitioned-foreign-key-design.md#routing-from-a-desired-file)); a library caller may call it directly,
+`AdmitPartitionedForeignKeyShape` checks a statement's shape without a connection, and
+`AdmitPartitionedForeignKey` runs the build's checks of the referenced table and the partition
+tree in one bounded catalog read, without the table lock. The design is in
 [partitioned-foreign-key-design](partitioned-foreign-key-design.md).
 
 It stops at the first error and keeps every partition's foreign key, and **running the same
@@ -898,7 +900,12 @@ build does, with the same two wiring errors. On PostgreSQL 18 the same statement
 ordinary `NOT VALID` then `VALIDATE` sequence. A foreign key a desired file adds to a
 partitioned table takes the same route: `diffplan.Plan` gives its `add-foreign-key` statement the
 execution `partitioned-foreign-key-build`, and `migrate.RunDesired` runs it with the verdicts
-below, after checking `migrate.Options.Connection` before any statement runs. A desired foreign
+below, after checking `migrate.Options.Connection` and the build's catalog refusals before any
+statement runs (`migrate.AdmitPlanPartitionedForeignKeys`): a referenced table the build does not
+take or a sub-partitioned partition refuses the whole plan (`unsupported-statement`,
+`capability-boundary`), and a foreign-table partition or a pending detach stops it as a failed
+result with no verdict, so nothing planned ahead of the foreign key commits. `migrate --dry-run`
+and `migrate --desired --dry-run` report the same refusal. A desired foreign
 key whose shape the build does not carry is planned refused instead (`unsupported-partitioned-parent`,
 class `environmental`). A forced run runs the plain
 statement as written, and a submitted `NOT VALID` meets `unsupported-partitioned-parent`, cause
@@ -912,7 +919,7 @@ refusal row executed nothing and exits 2:
 | --- | --- | --- |
 | `not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape` | refused, `unsupported-statement`, `capability-boundary`; the dry run reports it too | The statement is not a lone named foreign key the build can carry to every partition (an unnamed constraint, an unqualified referenced table, no referenced column list, an `ON DELETE` column list, `ONLY`, or a repeated column); change the statement |
 | `partitioned-foreign-key-parent-conflict` | refused, `unsupported-statement`, `environmental`, when returned before any partition got the foreign key; otherwise failed with the code | The parent already has another constraint under the name, or the same foreign key under another name; drop or rename it, then rerun |
-| `partitioned-foreign-key-referenced-table`, `partitioned-foreign-key-sub-partitioned` | refused, `unsupported-statement`, `capability-boundary`, when returned before any partition got the foreign key; otherwise failed with the code | The referenced table is partitioned, foreign, a view, or inside the tree, or a partition is itself partitioned, which the build does not take yet |
+| `partitioned-foreign-key-referenced-table`, `partitioned-foreign-key-sub-partitioned` | refused, `unsupported-statement`, `capability-boundary`, when returned before any partition got the foreign key; otherwise failed with the code; the dry run reports the refusal too, and a desired-state run refuses the whole plan before any statement runs | The referenced table is partitioned, foreign, a view, or inside the tree, or a partition is itself partitioned, which the build does not take yet |
 | `partitioned-foreign-key-name-taken`, `partitioned-foreign-key-conflict`, `foreign-table-partition`, `partition-detach-pending` | failed with the code | Something on a partition stands in the way (another constraint under the derived name, more than one matching foreign key, a foreign table, an unfinished detach); an operator removes it, then the same statement resumes |
 | `data-fault` with `sqlstate` `23503` | failed | A partition's rows break the foreign key; `server_error` names the partition. Correct the rows, then rerun; the partitions already validated are not redone |
 | `partitioned-foreign-key-unsettled` | failed with the code | Partitions kept appearing; retry the same statement |

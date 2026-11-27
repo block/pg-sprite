@@ -1545,6 +1545,15 @@ table in a partition or inheritance tree through `preflight.CheckCopySwapPartiti
 `migrate.AdmitCopySwapPartitioning` and `migrate.AdmitPlanCopySwapPartitioning` call: the
 same catalog facts and the same `CheckCopySwapShape` decision, minting no proof, so it too is a
 read-only surface rather than a second enforcement.
+The partitioned foreign key build's catalog refusals — a referenced table it does not take, a
+sub-partitioned partition, a foreign-table partition, a pending detach — are read before the
+first write through `executor.AdmitPartitionedForeignKey`, the build's own checks
+(`resolveFKReference`, `refuseFKTree`) run without its table lock: `RunDesired` calls it for the
+whole plan through `migrate.AdmitPlanPartitionedForeignKeys`, so a refused foreign key stops the
+plan before the statements planned ahead of it commit, and `migrate --dry-run` and
+`migrate --desired --dry-run` call it through `migrate.AdmitPartitionedForeignKeyCatalog` and
+`migrate.AdmitPlanPartitionedForeignKeys` to report the same refusal. The build makes the same
+checks again under its lock, and that reading decides.
 Both front doors run the copy-and-swap checks through `schemachange.CheckCopySwap`, which runs
 `preflight.CheckCopySwap`'s checks with the resume measure, before the route writes anything.
 *Planned enforcement:* all other execution paths in preflight. *Source:*
@@ -1806,8 +1815,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
   build (each partition's foreign key added `NOT VALID` and validated, then the parent's
   `ADD CONSTRAINT` adopts them); a foreign key a desired file adds runs as the same build when
-  the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`), and one it does
-  not keeps the `NOT VALID` plan and is refused. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
+  the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`) and is refused whole
+  at desired-state admission when the build's catalog checks refuse it
+  (`migrate.AdmitPlanPartitionedForeignKeys`, see [ST-6](#st-6--preflight-before-the-first-write)), and one whose shape it does
+  not admit keeps the `NOT VALID` plan and is refused. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
   refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
   concurrent idiom PostgreSQL rejects for it. The plan keeps a desired-state drop of a
   partitioned index refused; a desired-state run lifts only that refusal, running the plain

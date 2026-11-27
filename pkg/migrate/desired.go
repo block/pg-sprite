@@ -200,7 +200,10 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // that builds an index on a partitioned table, or adds a foreign key to one
 // as the partitioned foreign key build, stops whole, with
 // [ErrConnectionRequired] or a [PartitionedIndexConnectionMismatchError], when
-// Options.Connection is unset or reaches another database than the pool.
+// Options.Connection is unset or reaches another database than the pool, and
+// a plan whose partitioned foreign key build would refuse the referenced
+// table or the partition tree is refused or stopped whole by the build's own
+// catalog checks ([AdmitPlanPartitionedForeignKeys]).
 // An empty plan is executed with nothing to run, unless the table has a
 // copy-and-swap run stopped short of done: its shape may match only
 // because that run swapped it in, so it is refused with cause
@@ -354,6 +357,13 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return stopped, nil
 	}
 	stopped, admitted, err = admitPartitionedIndexBuild(ctx, pool, report, opts)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
+	}
+	stopped, admitted, err = AdmitPlanPartitionedForeignKeys(ctx, pool, report)
 	if err != nil {
 		return stopped, err
 	}

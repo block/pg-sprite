@@ -269,6 +269,29 @@ func TestMigrateRefusesAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testing
 		"an ON DELETE column list")
 }
 
+// The build takes only a plain table as the referenced table: a partitioned
+// one makes the parent's statement clone the foreign key onto every
+// referenced partition, which the build neither proves nor reads back. Only
+// the catalog says ledgers is partitioned, so the dry run reads it as the
+// build does and ends in the refusal the apply gives, before anything runs.
+func TestMigrateRefusesAPartitionedForeignKeyToAPartitionedTableLikeApply(t *testing.T) {
+	pool, url, schema, major := partitionedForeignKeyFixture(t)
+	requireBeforeNotValidOnPartitions(t, major)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.ledgers (
+		    id bigint PRIMARY KEY
+		) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.ledgers_low PARTITION OF %[1]s.ledgers
+		    FOR VALUES FROM (1) TO (1000)`, schema))
+	require.NoError(t, err)
+
+	assertForeignKeyRefusedLikeApply(t, url, pool, schema, fmt.Sprintf(`
+		ALTER TABLE %[1]s.events
+		    ADD CONSTRAINT events_ledger_fk
+		    FOREIGN KEY (account_id) REFERENCES %[1]s.ledgers (id)`, schema),
+		schema+".ledgers is a partitioned table, not a plain table")
+}
+
 // --force runs the submitted form as written: the plain ADD FOREIGN KEY,
 // which validates every partition under SHARE ROW EXCLUSIVE on the whole
 // tree, bounded by the brief budgets. The override bypasses the routing to
