@@ -252,6 +252,30 @@ func TestEnsureLeafForeignKeyResumes(t *testing.T) {
 			f.requireLeafFK(t, "events_2026_02", res)
 			assert.Len(t, f.foreignKeys(t, "events_2026_02"), 2)
 		})
+
+		// From version 18 a foreign key can be NOT ENFORCED, which checks
+		// nothing; it is not the requested one, so the step adds an enforced
+		// one beside it.
+		t.Run("a NOT ENFORCED foreign key is left alone", func(t *testing.T) {
+			f := newFixture(t)
+			major, err := dbconn.ServerMajor(t.Context(), f.pool)
+			require.NoError(t, err)
+			if major < 18 {
+				t.Skipf("NOT ENFORCED foreign keys arrive in version 18; the server is %d", major)
+			}
+			f.events(t)
+			f.exec(t, `
+				ALTER TABLE %[1]s.events_2026_02
+				    ADD CONSTRAINT feb_unenforced_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
+				    NOT ENFORCED`)
+
+			res, err := f.ensure(t, f.accountFK(), "events_2026_02")
+
+			require.NoError(t, err)
+			assert.Equal(t, leafFKAdded, res.action)
+			f.requireLeafFK(t, "events_2026_02", res)
+			assert.Len(t, f.foreignKeys(t, "events_2026_02"), 2)
+		})
 	})
 }
 
@@ -338,6 +362,20 @@ func TestEnsureLeafForeignKeyRefusals(t *testing.T) {
 			assert.Equal(t, before, f.foreignKeys(t, "events_2026_01"))
 		})
 
+		// The step is written for a leaf; a sub-partitioned node is the
+		// caller's to recurse into, not the step's to act on.
+		t.Run("a node that is not a leaf", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			node := f.leaf(t, "events_2026_01")
+			node.relkind = "p"
+
+			_, err := ensureLeafForeignKey(t.Context(), f.pool, f.resolve(t, f.accountFK()), node, leafFKBudget, nil)
+
+			require.ErrorIs(t, err, ErrInvariantViolation)
+			assert.Empty(t, f.foreignKeys(t, "events_2026_01"))
+		})
+
 		t.Run("a partitioned referenced table", func(t *testing.T) {
 			f := newFixture(t)
 			f.events(t)
@@ -354,9 +392,10 @@ func TestEnsureLeafForeignKeyRefusals(t *testing.T) {
 	})
 }
 
-// A row whose account does not exist fails the VALIDATE with the server's
-// foreign key violation. The NOT VALID foreign key stays, still enforced for
-// new rows, and a rerun once the row is fixed validates it where it stands.
+// A row whose account does not exist fails the VALIDATE, typed as a
+// violation with the server's error kept in the chain. The NOT VALID
+// foreign key stays, still enforced for new rows, and a rerun once the row
+// is fixed validates it where it stands.
 func TestEnsureLeafForeignKeyValidateFailureResumes(t *testing.T) {
 	withFKServer(t, func(t *testing.T, newFixture func(t *testing.T) fkFixture) {
 		f := newFixture(t)
@@ -365,6 +404,7 @@ func TestEnsureLeafForeignKeyValidateFailureResumes(t *testing.T) {
 
 		_, err := f.ensure(t, f.accountFK(), "events_2026_01")
 
+		require.ErrorIs(t, err, ErrPartitionedForeignKeyViolation)
 		pgErr, ok := errors.AsType[*pgconn.PgError](err)
 		require.True(t, ok, "the VALIDATE's own error: %v", err)
 		assert.Equal(t, "23503", pgErr.Code)
