@@ -167,7 +167,12 @@ func (c *MigrateCmd) retryPolicy() executor.RetryPolicy {
 	if c.LockAttempts == 0 && c.LockBackoff == 0 && c.LockBackoffMax == 0 {
 		return executor.DefaultRetryPolicy()
 	}
-	return executor.RetryPolicy{MaxAttempts: c.LockAttempts, InitialBackoff: c.LockBackoff, MaxBackoff: c.LockBackoffMax}
+	return executor.RetryPolicy{
+		MaxAttempts:    c.LockAttempts,
+		InitialBackoff: c.LockBackoff,
+		MaxBackoff:     c.LockBackoffMax,
+		HolderWait:     executor.DefaultHolderWait,
+	}
 }
 
 // emit prints the verdict in the selected format and returns the sentinel

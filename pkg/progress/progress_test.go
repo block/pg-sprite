@@ -226,7 +226,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 8,
+		"format_version": 9,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 3,
@@ -296,7 +296,7 @@ func TestSnapshotJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 8,
+		"format_version": 9,
 		"phase": "pending",
 		"elapsed_ns": 0,
 		"step_elapsed_ns": 0,
@@ -1064,4 +1064,35 @@ func TestStateMutatorsDoNotWaitForInFlightObservation(t *testing.T) {
 	case <-mutatorDeadline:
 		t.Fatal("a state mutator waited behind an in-flight observation")
 	}
+}
+
+// A step waiting outside the lock queue reports the holder it waits for, in
+// the snapshot's JSON shape. The tracker keeps its own copy, so a later change
+// to the value the caller passed does not alter it, and the wait leaves the
+// snapshot when it is cleared or the next step starts.
+func TestTrackerReportsALockHolderWait(t *testing.T) {
+	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
+	require.NoError(t, err)
+	tracker.Start(2, progress.OperationOptimistic)
+	tracker.StartStep(1, progress.OperationOptimistic, "ALTER TABLE public.t ADD COLUMN c int")
+	wait := &progress.LockHolderWait{PID: 4242, Table: "public.t", Waited: 3 * time.Second, Limit: 30 * time.Second}
+	tracker.SetLockHolderWait(wait)
+	wait.PID = 1
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	raw, err := json.Marshal(snapshot.Detail.LockHolderWait)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"pid": 4242, "table": "public.t", "waited_ns": 3000000000, "limit_ns": 30000000000}`, string(raw))
+
+	tracker.SetLockHolderWait(nil)
+	snapshot, err = tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Nil(t, snapshot.Detail.LockHolderWait)
+
+	tracker.SetLockHolderWait(&progress.LockHolderWait{PID: 4242, Table: "public.t"})
+	tracker.StartStep(2, progress.OperationOptimistic, "ALTER TABLE public.t ADD COLUMN d int")
+	snapshot, err = tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Nil(t, snapshot.Detail.LockHolderWait, "a new step starts with no wait")
 }

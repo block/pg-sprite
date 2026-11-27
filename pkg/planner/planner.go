@@ -252,6 +252,18 @@ const (
 	// leaves an invalid parent index and the partition indexes built so far;
 	// running the same statement again resumes from them.
 	ExecutionPartitionedIndexBuild Execution = "partitioned-index-build"
+	// ExecutionPartitionedForeignKeyBuild: the one step is an ALTER TABLE
+	// ... ADD FOREIGN KEY on a partitioned table, on a server before
+	// PostgreSQL 18, and it runs as the partitioned foreign key build, not as
+	// the statement: each partition is given the foreign key NOT VALID and
+	// then validated while writes continue, and the parent's ADD FOREIGN KEY
+	// then adopts every partition's in one brief transaction that validates
+	// nothing. The partitions are listed when the build runs, not when the
+	// plan is made. The statement must not be run as written, which would
+	// validate every partition while it blocks writes to the whole tree. A
+	// failed or interrupted run leaves the partition foreign keys finished
+	// so far; running the same statement again resumes from them.
+	ExecutionPartitionedForeignKeyBuild Execution = "partitioned-foreign-key-build"
 	// ExecutionBlockingIndexDrop: the one step is the plain DROP INDEX of a
 	// partitioned table's index, which PostgreSQL cannot drop concurrently.
 	// It takes ACCESS EXCLUSIVE on the parent, every partition, and every
@@ -278,7 +290,7 @@ const (
 // format_version bump, and a consumer that meets an unrecognized value must
 // treat the sequence as unknown and refuse to run it.
 func Executions() []Execution {
-	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionBlockingIndexDrop, ExecutionPartitionedKeyBuild}
+	return []Execution{ExecutionAutocommit, ExecutionPartitionedIndexBuild, ExecutionBlockingIndexDrop, ExecutionPartitionedKeyBuild, ExecutionPartitionedForeignKeyBuild}
 }
 
 // Decision is the classification of one operation.
