@@ -39,6 +39,8 @@ func TestDiffChangedIndexIsReplaced(t *testing.T) {
 	assert.True(t, drop.Destructive)
 	assert.Equal(t, "events_name_idx_new", drop.ReplacedBy)
 	assert.Equal(t, &DroppedObject{Kind: DroppedIndex, Name: "events_name_idx", Definition: liveNameIndex}, drop.Drops)
+	assert.Equal(t, &IndexReplacement{Index: "events_name_idx_new", Def: builtNameIndex}, drop.Replacement,
+		"the drop carries the index it must find in place, as introspection reads it")
 	assert.False(t, changes[0].Destructive)
 	assert.False(t, changes[2].Destructive)
 	assert.Empty(t, changes[0].ReplacedBy)
@@ -58,6 +60,7 @@ func TestDiffChangedIndexResumesAfterTheBuild(t *testing.T) {
 		`ALTER INDEX "public"."events_name_idx_new" RENAME TO "events_name_idx"`,
 	}, sqls(changes))
 	assert.Equal(t, "events_name_idx_new", changes[0].ReplacedBy)
+	assert.Equal(t, &IndexReplacement{Index: "events_name_idx_new", Def: builtNameIndex}, changes[0].Replacement)
 }
 
 // A run that stopped after dropping the old index has only the rename left.

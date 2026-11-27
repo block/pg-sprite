@@ -1170,10 +1170,14 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `dropped-index-drift` when it changed after planning. An index drop whose name was taken by a
   different index between its check and the drop reports `dropped-index-replaced` (permanent):
   unlike the drift refusals, an unreviewed index was dropped, and the error names it so the
-  operator can check and recreate it. `ExecuteNativeWithProgress` carries no
+  operator can check and recreate it. The drop of a changed index's old definition carries
+  `Replacement`, the index the plan built under the temporary name and its definition; an adapter
+  passes it to `ExecuteReplacedIndexDropConcurrently`, which also refuses, dropping nothing, with
+  `replacement-index-drift` when that index is gone, invalid, or no longer has that definition.
+  `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
-  rename under ST-7, since the statement names no table. `Adopts`, `Validates`, and
-  `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
+  `Replacement`, and `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
   fingerprint, so a stored plan carries it.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:

@@ -40,7 +40,12 @@ func dropPlannedIndex(ctx context.Context, pool *pgxpool.Pool, report plan.Repor
 	auditAllowDestructive(opts.audit(), st, table)
 
 	opts.startStep(step, ps.SQL)
-	rep, err := executor.ExecuteDropIndexConcurrently(ctx, pool, report.Schema, report.Table, index, definition, opts.Budget.Concurrent)
+	var rep executor.DroppedIndex
+	if ps.Replacement != nil {
+		rep, err = executor.ExecuteReplacedIndexDropConcurrently(ctx, pool, report.Schema, report.Table, index, definition, *ps.Replacement, opts.Budget.Concurrent)
+	} else {
+		rep, err = executor.ExecuteDropIndexConcurrently(ctx, pool, report.Schema, report.Table, index, definition, opts.Budget.Concurrent)
+	}
 	logger := opts.logger()
 	switch {
 	case err == nil:
@@ -113,6 +118,8 @@ func droppedIndexFailureDetail(err error, table, index string) string {
 	switch {
 	case errors.Is(err, executor.ErrDroppedIndexDrift):
 		return fmt.Sprintf("the index changed since the plan was derived, so nothing was dropped on %s; re-plan and review the new plan", table)
+	case errors.Is(err, executor.ErrReplacementIndexDrift):
+		return fmt.Sprintf("the index built to replace %s changed since the plan was derived, so nothing was dropped on %s; re-plan, which builds the replacement again", index, table)
 	case errors.Is(err, executor.ErrDroppedIndexReplaced):
 		return fmt.Sprintf("an index the plan did not review was dropped: another session gave the name %s to a different index between the check and the drop; "+
 			"inspect the indexes of %s and recreate the dropped one if it should stay", index, table)

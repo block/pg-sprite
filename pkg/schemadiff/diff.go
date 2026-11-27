@@ -165,6 +165,10 @@ type Change struct {
 	// desired definition before the old one goes; what the desired
 	// definition drops from the old one, the drop removes.
 	ReplacedBy string `json:"-"`
+	// Replacement is set with ReplacedBy: the index the drop's replacement
+	// must still be when the drop runs. The old index is dropped only while
+	// it is.
+	Replacement *IndexReplacement `json:"-"`
 }
 
 // DroppedKind names the kind of object a destructive change removes.
@@ -300,6 +304,17 @@ func (c Column) DroppedNotNullDefinition() string {
 type IndexAdoption struct {
 	Index string
 	Def   string
+}
+
+// IndexReplacement is the index a changed index's replacement built under
+// its temporary name, and the definition, as introspection reads it
+// (pg_get_indexdef with the schema qualification removed), that it must
+// still have when the old index is dropped. A replacement that is gone,
+// invalid, or rebuilt with another definition by then would leave the table
+// without the desired index once the old one goes.
+type IndexReplacement struct {
+	Index string `json:"index"`
+	Def   string `json:"def"`
 }
 
 // ConstraintValidation is a NOT VALID constraint a planned VALIDATE
