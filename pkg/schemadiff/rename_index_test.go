@@ -116,6 +116,34 @@ func TestDiffDropsAUniquenessOnlyAfterItsReplacement(t *testing.T) {
 		}, sqls(changes))
 	})
 
+	t.Run("a unique index removed while another index becomes unique", func(t *testing.T) {
+		live, desired := base(), base()
+		live.Indexes = []Index{
+			{Name: "events_email_lookup", Def: "CREATE INDEX events_email_lookup ON events USING btree (lower(email))"},
+			{Name: "legacy_email_uq", Def: "CREATE UNIQUE INDEX legacy_email_uq ON events USING btree (email)"},
+		}
+		desired.Indexes = []Index{{Name: "events_email_lookup", Def: "CREATE UNIQUE INDEX events_email_lookup ON events USING btree (lower(email))"}}
+		changes, err := Diff("public", live, desired)
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			`CREATE UNIQUE INDEX events_email_lookup_new ON public.events USING btree (lower(email))`,
+			`DROP INDEX "public"."events_email_lookup"`,
+			`ALTER INDEX "public"."events_email_lookup_new" RENAME TO "events_email_lookup"`,
+			`DROP INDEX "public"."legacy_email_uq"`,
+		}, sqls(changes), "the old uniqueness waits for the index that becomes unique")
+	})
+
+	t.Run("a unique index removed while a unique constraint changes", func(t *testing.T) {
+		live, desired := keyed(), keyed()
+		live.Indexes = []Index{{Name: "legacy_email_uq", Def: "CREATE UNIQUE INDEX legacy_email_uq ON events USING btree (email)"}}
+		desired.Constraints[1] = Constraint{Name: desired.Constraints[1].Name, Def: "UNIQUE (email, name)"}
+		changes, err := Diff("public", live, desired)
+		require.NoError(t, err)
+		require.NotEmpty(t, changes)
+		assert.Equal(t, `DROP INDEX "public"."legacy_email_uq"`, changes[len(changes)-1].SQL,
+			"the old uniqueness waits for the changed constraint: %v", sqls(changes))
+	})
+
 	t.Run("a unique index the file removes outright drops first", func(t *testing.T) {
 		live, desired := base(), base()
 		live.Indexes = []Index{{Name: "events_name_uq", Def: "CREATE UNIQUE INDEX events_name_uq ON events USING btree (name)"}}

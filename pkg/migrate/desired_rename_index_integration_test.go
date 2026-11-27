@@ -78,3 +78,48 @@ func TestRunDesiredDropsAUniqueConstraintOnlyAfterItsIndexIsBuilt(t *testing.T) 
 		assert.Empty(t, plannedDrop(t, pool, schema, desired).Statements)
 	})
 }
+
+// A file removes the unique index t_email_uq on email and makes the plain
+// index t_email_lookup on lower(email) unique, which rows 1 and 3 break. The
+// plan builds the new unique index before it drops t_email_uq, so the failed
+// build leaves t_email_uq rejecting duplicates. Once the rows fit and the
+// failed build is cleared, the next run swaps t_email_lookup for its unique
+// form, drops t_email_uq, and a re-plan is empty.
+func TestRunDesiredKeepsAUniqueIndexWhileAnotherBecomesUnique(t *testing.T) {
+	pool, schema := replaceIndexTable(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE INDEX t_email_lookup ON %[1]s.t (lower(email));
+		CREATE UNIQUE INDEX t_email_uq ON %[1]s.t (email)`, schema))
+	require.NoError(t, err)
+	desired := `CREATE TABLE t (
+		id int PRIMARY KEY,
+		email text,
+		name text,
+		qty int NOT NULL,
+		deleted_at timestamptz
+	);
+	CREATE UNIQUE INDEX t_email_lower_key ON t (lower(email)) WHERE deleted_at IS NULL;
+	CREATE UNIQUE INDEX t_email_lookup ON t (lower(email));`
+
+	planned := plannedDrop(t, pool, schema, desired)
+	require.NotEmpty(t, planned.Statements)
+	assert.Contains(t, planned.Statements[len(planned.Statements)-1].SQL, "t_email_uq", "the old uniqueness is dropped last")
+
+	err = runReplaceFails(t, pool, schema, desired)
+	assert.Contains(t, err.Error(), "t_email_lookup_new", "the failure names the build it left behind")
+	def, valid := indexState(t, pool, schema, "t_email_uq")
+	assert.Equal(t, fmt.Sprintf("CREATE UNIQUE INDEX t_email_uq ON %s.t USING btree (email)", schema), def, "the old uniqueness still holds")
+	assert.True(t, valid)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s.t VALUES (4, 'b@example.com', 'd', 1, NULL)`, schema))
+	require.Error(t, err, "the old unique index still rejects a duplicate")
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`DELETE FROM %[1]s.t WHERE id = 3; DROP INDEX %[1]s.t_email_lookup_new`, schema))
+	require.NoError(t, err)
+	res := runReplace(t, pool, schema, desired)
+	require.Equal(t, verdict.OutcomeExecuted, res.Outcome, "%s", res.Detail)
+	assert.NotContains(t, liveIndexes(t, pool, schema), "t_email_uq")
+	def, valid = indexState(t, pool, schema, "t_email_lookup")
+	assert.Equal(t, fmt.Sprintf("CREATE UNIQUE INDEX t_email_lookup ON %s.t USING btree (lower(email))", schema), def)
+	assert.True(t, valid)
+	assert.Empty(t, plannedDrop(t, pool, schema, desired).Statements, "the change converges")
+}

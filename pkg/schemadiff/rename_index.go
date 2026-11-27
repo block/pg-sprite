@@ -151,15 +151,17 @@ func renamedConstraintDefs(desired Model, liveCons map[string]Constraint) map[st
 
 // addsUniqueness reports whether the plan builds a unique index or adds a
 // unique constraint, either of which may be what replaces a uniqueness the
-// plan drops.
+// plan drops. That includes one under a name the live table already uses
+// whose definition the plan changes, such as an index that becomes unique:
+// the plan builds it again, and the build can fail.
 func addsUniqueness(desired Model, liveIdx map[string]Index, liveCons map[string]Constraint) bool {
 	for _, ix := range desired.Indexes {
-		if _, ok := liveIdx[ix.Name]; !ok && isUniqueIndex(ix) {
+		if had, ok := liveIdx[ix.Name]; isUniqueIndex(ix) && (!ok || had.Invalid || had.Def != ix.Def) {
 			return true
 		}
 	}
 	for _, con := range desired.Constraints {
-		if _, ok := liveCons[con.Name]; !ok && isUniqueConstraint(con) {
+		if had, ok := liveCons[con.Name]; isUniqueConstraint(con) && (!ok || had.Def != con.Def) {
 			return true
 		}
 	}
