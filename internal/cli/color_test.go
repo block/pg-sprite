@@ -199,6 +199,10 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		StatementTimeout:          "10m",
 		StatisticsRefresh:         &verdict.StatisticsRefresh{Columns: []string{"c"}, Pending: `ANALYZE "t"`},
 		IndexUsage:                &verdict.IndexUsage{IdxScans: 7, Unique: true, TrackCounts: true},
+		RefusedStatements: []verdict.RefusedStatement{
+			{Statement: 2, Line: 6, Column: 1, Detail: "statement kind not allowed in a desired schema: COMMENT ON TABLE t IS 'x'"},
+			{Statement: 3, Line: 8, Column: 3, Detail: "statement kind not allowed in a desired schema: CREATE FUNCTION f() ..."},
+		},
 	}
 	rv := reflect.ValueOf(v)
 	for i := range rv.NumField() {

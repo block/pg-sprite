@@ -308,7 +308,16 @@ predicate.
 
 `executor.AddPartitionedKey(ctx, cfg, pool, pt, sql, budget)` (and
 `AddPartitionedKeyAsStep`) adds a `PRIMARY KEY` or `UNIQUE` constraint to a
-partitioned table online. It has no planner, migrate, or CLI route yet. A plain
+partitioned table online. `migrate --alter` (`migrate.Run`) routes a lone
+`ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table to it, on the submitted
+statement (`preflight.RoutesToPartitionedKeyBuild`), before the plain table's
+`USING INDEX` sequence the planner makes for it meets the partitioned-parent
+refusal; a forced run and `ADD CONSTRAINT ... USING INDEX` still meet that
+refusal. The dry run plans it with the execution `partitioned-key-build` and
+reports the shape, partition key, and sub-partitioned tree refusals; the
+parent's checks are read only under the build's lock, so for those the dry run
+reports the build and the apply refuses. Desired-state plans (`diff`,
+`migrate --desired`) do not route it yet and refuse the statement. A plain
 `ALTER TABLE parent ADD CONSTRAINT` builds every partition's index under
 `ACCESS EXCLUSIVE`, but it adopts a partition's unattached constraint of the
 same definition instead of building one. The flow relies on that:

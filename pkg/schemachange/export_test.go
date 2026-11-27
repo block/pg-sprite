@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 
 	"github.com/block/pg-sprite/pkg/applier"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
@@ -45,4 +46,14 @@ func PaceOverMark(r *Runner, readings int64, onOver func()) {
 		s.left.Store(readings)
 		return s
 	}
+}
+
+// WrapLiveConfirmed makes r's live verification pass read its confirmed
+// position from what wrap returns for the run's catch-up. wrap is called
+// once per pass, just before the pass begins, so it can also hold the
+// catch-up's flushes with Pause and decide, at every read of the
+// position the pass makes before a reread, what the shadow holds when
+// the reread reads it.
+func WrapLiveConfirmed(r *Runner, wrap func(*applier.Catchup) checksum.ConfirmedSource) {
+	r.liveWrap = wrap
 }

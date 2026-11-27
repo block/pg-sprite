@@ -241,6 +241,11 @@ type Runner struct {
 	// by. Tests set it: a real stream's lag crosses the pace mark only as
 	// the timing of a run allows, and a wrapped reading crosses it on cue.
 	paceWrap func(catchupStatus) catchupStatus
+	// liveWrap, when set, wraps the catch-up a live run's verification
+	// pass reads its confirmed position from. Tests set it: a real stream
+	// lags the source at a pass's read only as the timing of a run allows,
+	// and a wrapped catch-up can hold its flushes so the shadow lags on cue.
+	liveWrap func(*applier.Catchup) checksum.ConfirmedSource
 }
 
 // Result is what a completed run hands back.

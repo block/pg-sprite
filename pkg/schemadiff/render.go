@@ -362,9 +362,9 @@ func identityExpressible(c Column) error {
 // sequence that merely happens to carry the serial-style name is not
 // ownership, and rendering it as serial would silently convert a shared
 // sequence into a private one), and a default of nextval on the sequence
-// named <table>_<column>_seq. The name check covers only names that need
-// no quoting inside the nextval literal; exotic or truncated sequence
-// names fail closed to ErrUnrenderableDefault.
+// named <table>_<column>_seq, spelled the way the server prints it
+// (serialDefault). A truncated sequence name fails closed to
+// ErrUnrenderableDefault.
 func serialType(table string, c Column) (string, bool) {
 	base, ok := map[string]string{
 		"smallint": "smallserial",
@@ -374,10 +374,43 @@ func serialType(table string, c Column) (string, bool) {
 	if !ok || !c.NotNull || !c.SequenceOwned {
 		return "", false
 	}
-	if c.Default != "nextval('"+table+"_"+c.Name+"_seq'::regclass)" {
+	if c.Default != serialDefault(table+"_"+c.Name+"_seq") {
 		return "", false
 	}
 	return base, true
+}
+
+// serialDefault is the default the server prints for a serial column whose
+// sequence is named sequence: nextval of the sequence's regclass text as a
+// string literal. The regclass text quotes the name exactly when
+// quote_ident would, so a name with an uppercase letter, such as an ORM's
+// "User_id_seq", prints quoted. quote_ident also quotes a keyword, and a
+// name ending in _seq is never one. The caller has checked that the column
+// owns the sequence (Column.SequenceOwned), and PostgreSQL keeps an owned
+// sequence in its table's schema: it refuses OWNED BY across schemas and
+// refuses to move an owned sequence out. The introspecting session's
+// search_path lists that schema first, so the text is unqualified.
+func serialDefault(sequence string) string {
+	regclass := sequence
+	if !plainIdentifier(sequence) {
+		regclass = `"` + strings.ReplaceAll(sequence, `"`, `""`) + `"`
+	}
+	return "nextval('" + strings.ReplaceAll(regclass, "'", "''") + "'::regclass)"
+}
+
+// plainIdentifier reports whether quote_ident leaves name unquoted, keywords
+// aside: it starts with a lowercase ASCII letter or an underscore, and the
+// rest are lowercase ASCII letters, digits, or underscores.
+func plainIdentifier(name string) bool {
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return name != ""
 }
 
 // unrenderableForeignKey refuses a foreign key of the table that a desired

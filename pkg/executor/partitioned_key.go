@@ -82,6 +82,13 @@ type PartitionedKeyReport struct {
 	// first reached them. It is empty when the parent's constraint already
 	// existed.
 	Leaves []PartitionKeyResult `json:"leaves,omitempty"`
+	// Changed is true once the run began a partition's concurrent index
+	// build, or the removal of an earlier build's leftover, both of which
+	// commit as they go. A run that stops after one may leave an index on a
+	// partition that is not in Leaves, because the partition never got its
+	// constraint. A run that stops with Changed false and no Leaves changed
+	// nothing.
+	Changed bool `json:"changed,omitempty"`
 	// Passes is how many times the build walked the tree.
 	Passes int `json:"passes"`
 	// Duration is the wall-clock time of the whole build. It encodes as

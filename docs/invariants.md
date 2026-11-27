@@ -1769,14 +1769,18 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   foreign key `NOT VALID`. pg-sprite does not run a blocking parent build, and `--force` does not
   bypass that. A `CREATE INDEX` on a partitioned parent is not refused: it runs as that build
   (`CREATE INDEX ON ONLY`, then a concurrent build and attach per partition), each step committing
-  on its own. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
+  on its own. An unforced lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned parent
+  through `migrate --alter` is not refused either: it runs as the partitioned key build (each
+  partition's key built concurrently and constrained, then the parent's `ADD CONSTRAINT` adopts
+  them). `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
   refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
   concurrent idiom PostgreSQL rejects for it. The plan keeps a desired-state drop of a
   partitioned index refused; a desired-state run lifts only that refusal, running the plain
   `DROP INDEX` under the acknowledgements and pin [RF-12](#rf-12) records. *Enforced:* preflight (`RefusesPartitionedParent`,
-  with `RoutesToPartitionedIndexBuild` naming the one shape that is routed instead) and
-  sequence-executor admission, which refuses every index-building step on a parent because the
-  build is its own executor entry point; the concurrent drop by preflight and plan reporting,
+  with `RoutesToPartitionedIndexBuild` and `RoutesToPartitionedKeyBuild` naming the two shapes
+  that are routed instead) and sequence-executor admission, which refuses every index-building
+  step on a parent because each build is its own executor entry point (`BuildPartitionedIndexAsStep`
+  for the index, `AddPartitionedKeyAsStep` for the key); the concurrent drop by preflight and plan reporting,
   since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
   the relation kind, and `GateWithCatalog` in `pkg/migrate` for the imperative `DROP INDEX`.
   *Source:* PostgreSQL relation-kind and version capabilities.
