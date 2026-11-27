@@ -743,8 +743,8 @@ so "what persists" below is also what the rerun builds on. Route each outcome by
 its own key constraint (a concurrent unique index build, then `ADD CONSTRAINT ... USING INDEX`),
 then adds the parent's constraint, which adopts them, in one brief transaction. `migrate --alter`
 (`migrate.Run`) routes a lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table to
-it ([below](#outcomes-of-a-partitioned-key-build-1)); desired-state plans do not yet, and a
-library caller may call it directly. It stops at the first error and keeps every partition's
+it ([below](#outcomes-of-a-partitioned-key-build-1)), `migrate.RunDesired` runs a key a desired
+file adds the same way, and a library caller may call it directly. It stops at the first error and keeps every partition's
 finished key constraint, and **running the same statement again resumes from them**. The report
 it returns with an error says what the stop left: `leaves` lists the partitions that got their
 constraint, and `changed` is true once a partition's concurrent index build began, which can
@@ -807,8 +807,15 @@ index is built concurrently and given the constraint, then the parent's `ADD CON
 them in one brief transaction. The `migrate --dry-run` plan statement carries
 `execution: partitioned-key-build` (plan `format_version` 27). It needs `migrate.Options.Connection`
 for its table lock session exactly as the partitioned index build does, with the same two wiring
-errors. `migrate.RunDesired` does not route it yet: a desired-state plan refuses the statement
-with `unsupported-partitioned-parent`, cause `parent-concurrent-index-build`. A forced run meets
+errors. A key a desired file adds plans the same way: the `diff` plan statement carries
+`execution: partitioned-key-build`, schema-qualified and named, under the same `format_version`
+27, and `migrate.RunDesired` runs it through `migrate.Run` with the verdicts below, checking
+`Options.Connection` for the whole plan before its first statement. A desired key whose shape
+the build refuses, such as a `DEFERRABLE` one, is not routed: its plan statement stays refused
+with `unsupported-partitioned-parent`. A primary key over a column the table allows to be `NULL`
+is planned after the `SET NOT NULL` the file implies, so `partitioned-key-nullable-column` is
+not reached from a desired file unless the column loses `NOT NULL` between the two statements.
+A forced run meets
 cause `parent-blocking-index-build`, and `ADD CONSTRAINT ... USING INDEX` meets
 `parent-index-adoption`, as before.
 

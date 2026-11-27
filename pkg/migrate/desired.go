@@ -197,7 +197,8 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // does not match the pinned fingerprint is refused before anything runs,
 // and so is a plan that routes a statement through copy-and-swap when that
 // route's preflight refuses the table or the server as they stand now. A plan
-// that builds an index on a partitioned table stops whole, with
+// that builds an index on a partitioned table, or adds a primary key or
+// unique constraint to one as the partitioned key build, stops whole, with
 // [ErrConnectionRequired] or a [PartitionedIndexConnectionMismatchError], when
 // Options.Connection is unset or reaches another database than the pool.
 // An empty plan is executed with nothing to run, unless the table has a

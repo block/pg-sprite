@@ -47,4 +47,20 @@ func TestAdmitPartitionedIndexBuild(t *testing.T) {
 		assert.Contains(t, stopped.Detail, "Options.Connection is not configured")
 		assert.Contains(t, stopped.Detail, "nothing was executed")
 	})
+
+	// The key build takes its table lock on a session of its own too, so a
+	// plan that adds a key to a partitioned table stops the same way.
+	t.Run("a plan with the key build and no connection stops with the sentinel", func(t *testing.T) {
+		report := plan.Report{Schema: "billing", Table: "orders", Statements: []plan.Statement{{
+			SQL:       "ALTER TABLE billing.orders ADD CONSTRAINT orders_pkey PRIMARY KEY (id, placed_at)",
+			Backend:   router.BackendNative,
+			Execution: planner.ExecutionPartitionedKeyBuild,
+		}}}
+		stopped, admitted, err := admitPartitionedIndexBuild(t.Context(), nil, report, Options{})
+		require.ErrorIs(t, err, ErrConnectionRequired)
+		assert.False(t, admitted)
+		assert.Empty(t, stopped.Verdicts, "no statement was attempted")
+		assert.Equal(t, "planned statement 1 of 1 adds a key constraint to a partitioned table and Options.Connection is not configured; nothing was executed",
+			stopped.Detail)
+	})
 }

@@ -369,6 +369,75 @@ func TestRoutePartitionedKeyBuildsRoutesAKeyThatWouldBeRefused(t *testing.T) {
 	})
 }
 
+// A desired-state plan runs no admission between the plan and the run, so
+// its router sends a key to the build only when the build's shape check
+// accepts it. A key the build would refuse keeps the planner's USING INDEX
+// steps and meets the partitioned-parent refusal.
+func TestRouteDesiredPartitionedKeyBuildsRoutesOnlyAdmittedShapes(t *testing.T) {
+	keyReport := func(sql string) plan.Report {
+		steps := []string{
+			"CREATE UNIQUE INDEX CONCURRENTLY events_key ON app.events (id, created_at)",
+			"ALTER TABLE app.events ADD CONSTRAINT events_key UNIQUE USING INDEX events_key",
+		}
+		return plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   steps,
+			Execution: planner.ExecutionAutocommit,
+		}}}
+	}
+
+	t.Run("a named primary key routes to the build", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`
+		r := keyReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedKeyBuilds(&r))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		st := r.Statements[0]
+		assert.Equal(t, []string{sql}, st.ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, st.Execution)
+		assert.Equal(t, []string{sql}, st.Decisions[0].SaferSQL)
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, st.Decisions[0].SaferSQLExecution)
+	})
+
+	// The build gives each partition a constraint it cannot make
+	// deferrable, so it refuses DEFERRABLE; the plan keeps the refusal.
+	t.Run("a deferrable unique constraint stays refused", func(t *testing.T) {
+		r := keyReport(`ALTER TABLE app.events ADD CONSTRAINT events_key UNIQUE (id, created_at) DEFERRABLE`)
+		require.NoError(t, plan.RouteDesiredPartitionedKeyBuilds(&r))
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	})
+
+	// The build names each partition's constraint after the parent's, so it
+	// refuses an unnamed key. The diff names every key it plans, so this
+	// shape reaches the router only from a caller-built report.
+	t.Run("an unnamed key stays refused", func(t *testing.T) {
+		r := keyReport(`ALTER TABLE app.events ADD UNIQUE (id, created_at)`)
+		require.NoError(t, plan.RouteDesiredPartitionedKeyBuilds(&r))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	})
+
+	// The imperative router routes the same unnamed key, because the
+	// imperative dry run then runs the build's admission and refuses it with
+	// the build's own reason.
+	t.Run("the imperative router routes the unnamed key for its admission", func(t *testing.T) {
+		r := keyReport(`ALTER TABLE app.events ADD UNIQUE (id, created_at)`)
+		require.NoError(t, plan.RoutePartitionedKeyBuilds(&r))
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, r.Statements[0].Execution)
+	})
+}
+
 // The partition refusal's class is a property of the cause: an index-adoption
 // refusal is by-design, a pre-18 NOT VALID foreign key is environmental. A
 // registry keyed on the reason alone could not tell them apart.

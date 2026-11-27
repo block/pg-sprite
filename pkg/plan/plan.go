@@ -342,11 +342,31 @@ func discloseBlockingIndexDrop(st *Statement) {
 // for a plain table (a concurrent unique build and ADD CONSTRAINT ... USING
 // INDEX) cannot run on a partitioned parent. The partitions are not in the
 // plan; the build lists them when it runs. The imperative dry run calls it
-// before RoutePartitionedParent, which leaves the routed statements alone;
-// the declarative plan does not route keys, so its statements meet
-// RoutePartitionedParent's refusal. A report on a table that is not
-// partitioned must not pass through here.
+// before RoutePartitionedParent, which leaves the routed statements alone,
+// and then runs the build's admission, which refuses a shape the build does
+// not carry. A report on a table that is not partitioned must not pass
+// through here.
 func RoutePartitionedKeyBuilds(report *Report) error {
+	return routePartitionedKeyBuilds(report, false)
+}
+
+// RouteDesiredPartitionedKeyBuilds is RoutePartitionedKeyBuilds for a
+// desired-state plan, which runs no admission of its own between the plan
+// and the run: it routes only a key whose shape the build admits
+// (executor.AdmitPartitionedKeyShape), so a plan that shows the build is one
+// the run executes as the build. A key a desired file adds is planned
+// schema-qualified and named, the server's default name filled in for an
+// unnamed one; a key with a clause the build cannot carry, such as
+// DEFERRABLE or INCLUDE, keeps the planner's steps and meets
+// RoutePartitionedParent's refusal.
+func RouteDesiredPartitionedKeyBuilds(report *Report) error {
+	return routePartitionedKeyBuilds(report, true)
+}
+
+// routePartitionedKeyBuilds routes each executable statement
+// preflight.RoutesToPartitionedKeyBuild accepts, and with admittedShapeOnly
+// only those the build's static admission accepts too.
+func routePartitionedKeyBuilds(report *Report, admittedShapeOnly bool) error {
 	for i := range report.Statements {
 		st := &report.Statements[i]
 		if st.Disposition != router.DispositionExecute {
@@ -356,9 +376,13 @@ func RoutePartitionedKeyBuilds(report *Report) error {
 		if err != nil {
 			return err
 		}
-		if routes {
-			routeToPartitionedBuild(st, planner.ExecutionPartitionedKeyBuild)
+		if !routes {
+			continue
 		}
+		if admittedShapeOnly && executor.AdmitPartitionedKeyShape(st.SQL) != nil {
+			continue
+		}
+		routeToPartitionedBuild(st, planner.ExecutionPartitionedKeyBuild)
 	}
 	return nil
 }

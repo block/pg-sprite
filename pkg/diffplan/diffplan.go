@@ -167,6 +167,13 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, checkErr
 		}
 		if targetFacts.Partitioned() {
+			// A primary key or unique constraint the file adds runs as the
+			// partitioned key build, since the planner's USING INDEX steps
+			// cannot run on a partitioned table; RoutePartitionedParent
+			// then leaves it routed.
+			if err := plan.RouteDesiredPartitionedKeyBuilds(&report); err != nil {
+				return plan.Report{}, err
+			}
 			if err := plan.RoutePartitionedParent(&report, targetFacts.ServerMajor()); err != nil {
 				return plan.Report{}, err
 			}
