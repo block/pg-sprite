@@ -26,7 +26,9 @@ import (
 //
 // The caller has admitted the plan against the acknowledgement and the
 // pinned fingerprint, so this audits the acknowledgement and reports it on
-// the verdict, as [Run] does for an acknowledged ALTER TABLE drop. A replica
+// the verdict, as [Run] does for an acknowledged ALTER TABLE drop. A
+// copy-and-swap run stopped on the table refuses the drop before it is
+// audited, as Run refuses any statement but the stopped one. A replica
 // identity index ends in the refusal verdict a native drop gets at its
 // re-check; every other failure is a failed verdict and an error, and the
 // verdict says whether the index may still stand.
@@ -37,6 +39,13 @@ func dropPlannedIndex(ctx context.Context, pool *pgxpool.Pool, report plan.Repor
 		return verdict.Verdict{}, err
 	}
 	table := desiredTable(report)
+	heldVerdict, held, err := refuseOverStoppedRun(ctx, pool, st, report.Schema, report.Table)
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	if held {
+		return heldVerdict, nil
+	}
 	auditAllowDestructive(opts.audit(), st, table)
 
 	opts.startStep(step, ps.SQL)

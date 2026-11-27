@@ -81,12 +81,25 @@ func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report
 // the run's plan admission accepts, under the dry run's pin and
 // acknowledgement, next meets the copy-and-swap route's refusal of a table
 // in a partition or inheritance tree, which the run reads at admission
-// before anything executes; the dry run prints that refusal as the run's
-// result. Every other plan is previewed by writeDesiredPreview, which
+// before anything executes, and then a copy-and-swap run stopped on the
+// table, which the plan's first statement meets; the dry run prints either
+// refusal as the run's result, and refuses an empty plan over a stopped run
+// as the run does. Every other plan is previewed by writeDesiredPreview, which
 // reports plan admission's refusals as the run would.
 func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out io.Writer, report plan.Report) error {
 	if err := migrate.CheckDesiredAllowDestructiveTable(c.AllowDestructive, report); err != nil {
 		return err
+	}
+	if len(report.Statements) == 0 {
+		// The run refuses an empty plan for a table a copy-and-swap run is
+		// stopped on before it checks the pin, and so does the dry run.
+		refusal, refused, err := migrate.AdmitPlanStoppedRun(ctx, pool, report)
+		if err != nil {
+			return err
+		}
+		if refused {
+			return c.finishDesired(out, refusal, nil)
+		}
 	}
 	req := migrate.DesiredRequest{ExpectedFingerprint: c.ExpectFingerprint, AllowDestructive: c.AllowDestructive}
 	if _, admitted := migrate.AdmitPlan(req, report); admitted && len(report.Statements) > 0 {
@@ -95,6 +108,16 @@ func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out
 			return err
 		}
 		if !admitted {
+			return c.finishDesired(out, refusal, nil)
+		}
+		// The admitted plan's first statement meets a copy-and-swap run
+		// stopped on the table, which refuses it unless it is the stopped
+		// statement.
+		refusal, refused, err := migrate.AdmitPlanStoppedRun(ctx, pool, report)
+		if err != nil {
+			return err
+		}
+		if refused {
 			return c.finishDesired(out, refusal, nil)
 		}
 	}
