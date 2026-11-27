@@ -316,6 +316,7 @@ pg-sprite reap             # drop the orphans and their publications
 ```
 
 `reap` keeps a slot an in-flight row names, a slot a process holds, and any `pgsprite_` slot the
-engine did not create, so it never frees a stopped run's slot. Free that one by resuming,
+engine did not create, so it never frees a stopped run's slot. It drops slots and publications
+only: shadow tables, checkpoint rows, and table data are never touched. Free a stopped run's slot by resuming,
 dropping it by hand, or `--restart`, as above. The full report is in
 [cli.md](cli.md#drop-orphan-slots).
