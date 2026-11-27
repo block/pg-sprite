@@ -181,6 +181,8 @@ for as long as the source takes writes. After a stop, watch the slot's retained 
 (`pg_replication_slots`) and either resume soon or drop the slot deliberately, and raise the
 ceiling only with free space on the volume for that much WAL, read the way
 [Free disk space](#free-disk-space) describes for your platform.
+[replication-slots.md](replication-slots.md) explains what the slot holds on the server and is
+the runbook for checking it, resuming, dropping it, and starting over.
 
 `SIZE` is a positive whole number of bytes, optionally followed by a binary unit: `B`, `KiB`,
 `MiB`, `GiB`, or `TiB`, case-insensitive; `KB`, `MB`, `GB`, and `TB` mean the same binary
@@ -199,36 +201,25 @@ slot and the saved progress stay, so running the same command again resumes the 
   pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
   stop, and a resume reads the slot on its first catch-up cycle, before it has read through
   the backlog, so a resume under the same ceiling stops again unless it reads through the
-  backlog within that cycle. Once the write rate drops, resume with a higher ceiling, above
-  the unconfirmed WAL the detail reports, and with room on the volume for that much WAL; or
-  start over with `--restart SCHEMA.TABLE`, which drops the slot and the WAL it holds.
+  backlog within that cycle.
 - **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
-  for longer than it takes to release WAL pg-sprite has confirmed. Look for a transaction holding
-  it back first: an open write transaction (`pg_stat_activity` where `backend_xid IS NOT
-  NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`). End it, then
-  resume. If there is none, the cluster writes more WAL per release interval and cycle than the
-  ceiling holds. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a busy source
-  each step stops one step short, so the slot keeps between 15 and 30 seconds of the cluster's
-  WAL even while pg-sprite keeps up. That is everything the server logs, not only the
+  for longer than it takes to release WAL pg-sprite has confirmed: an open or prepared
+  transaction holds it back, or the cluster writes more WAL per release interval and cycle than
+  the ceiling holds. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a
+  busy source each step stops one step short, so the slot keeps between 15 and 30 seconds of the
+  cluster's WAL even while pg-sprite keeps up. That is everything the server logs, not only the
   application's writes: the copy's own inserts into the shadow and other databases count too.
   The ceiling must hold more than 15 seconds and a catch-up cycle of it, with margin (ten
-  percent covers a record the server logs late or a stream a cycle slower). To read your slot
-  the same way, compare `pg_current_wal_lsn()` with `restart_lsn` (retained) and
-  `confirmed_flush_lsn` (unconfirmed) from `pg_replication_slots`; `make slot-release-proof`
-  logs the same three on a busy test source. Resume with a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
-  that much WAL. The resume's preflight counts the new ceiling against
-  `--free-disk` beside the shadow, less the shadow already built and the WAL the slot already
-  retains (see [Free disk space](#free-disk-space)), so pass the free space the volume has now.
+  percent covers a record the server logs late or a stream a cycle slower);
+  `make slot-release-proof` logs the three measures on a busy test source.
 - **`wal-retained-hard-limit`:** pg-sprite kept up, but a cycle read the slot retaining more
-  than three times the ceiling before that release time had passed. A healthy slot peaks at
-  about twice its ceiling, so this is either a transaction holding the WAL back or a write rate
-  the ceiling cannot hold. Look for the transaction first, as for `wal-retained`, and end it,
-  then resume; if there is none, resume with a higher ceiling as for `wal-retained`:
+  than three times the ceiling before that grace had passed. A healthy slot peaks at about
+  twice its ceiling, so this is either a transaction holding the WAL back or a write rate the
+  ceiling cannot hold.
 
-```sh
-pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
-  --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
-```
+What to do for each cause, including how to find a transaction holding the WAL and how to
+resume with a higher ceiling, is the runbook's
+[The run stopped at the ceiling](replication-slots.md#the-run-stopped-at-the-ceiling).
 
 ## Run it
 
