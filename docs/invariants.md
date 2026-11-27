@@ -893,6 +893,15 @@ as allowing NULL (`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitio
 `TestAddPartitionedKeyParentStepRoundTrips`, `TestAddPartitionedKeyParentStepLocks`,
 `TestAddPartitionedKeyPrimaryKeyOnline`,
 `TestAddPartitionedKeyRefusals/a_primary_key_over_a_column_the_parent_allows_to_be_NULL`).
+The leaf step of an online partitioned `FOREIGN KEY` (`ensureLeafForeignKey`, unexported) runs
+the leaf's `ADD FOREIGN KEY ... NOT VALID` in a brief transaction under both bounds: it holds
+`SHARE ROW EXCLUSIVE` on the leaf and then on the referenced table, the order the server's own
+statement takes them, and scans nothing; its `VALIDATE CONSTRAINT` holds `SHARE UPDATE EXCLUSIVE`
+on the leaf and `ROW SHARE` on the referenced table under the caller's `ValidateBudget`
+(`TestLeafForeignKeyStatementsLockModes`,
+`TestEnsureLeafForeignKeyTakesTheLeafBeforeTheReferencedTable`,
+`TestEnsureLeafForeignKeyAddGivesUpAtTheLockBudgetBehindAWriter`,
+`TestEnsureLeafForeignKeyValidateGivesUpAtItsLockTimeout`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1575,7 +1584,13 @@ under the tree's lock, before that statement, it proves the parent's name still 
 table it resolved and that every leaf has exactly one constraint of the requested key, not
 deferrable and attached to nothing, which is the constraint and index its leaf step recorded
 (`TestAddPartitionedKeyParentStepFailsClosed`,
-`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`).
+`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`). The leaf step of an online partitioned
+`FOREIGN KEY` (`ensureLeafForeignKey`, unexported) locks the leaf `SHARE UPDATE EXCLUSIVE` in the
+transaction of its `ADD` and of its `VALIDATE`, proves the leaf in the tree, and decides again from
+the leaf's foreign keys before each statement and after it: the leaf has exactly one foreign key
+of the requested definition, on the referenced table's OID the build resolved, adopted by nothing,
+which is the one the step decided on (`TestEnsureLeafForeignKeyFindsOneThatLandsAfterTheRead`,
+`TestEnsureLeafForeignKeyRefusesASecondThatLandsBeforeTheValidate`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
