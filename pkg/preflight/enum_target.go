@@ -58,7 +58,7 @@ func CheckEnumTarget(ctx context.Context, pool *pgxpool.Pool, ref statement.Type
 		return EnumTarget{}, err
 	}
 	if !f.ownerUsage {
-		return EnumTarget{}, ownerMembershipRefusal(f, "type")
+		return EnumTarget{}, ownerMembershipRefusal(f, "type", TierAlterInPlace)
 	}
 	return e, nil
 }
@@ -91,7 +91,7 @@ func resolveEnumType(ctx context.Context, pool *pgxpool.Pool, ref statement.Type
 	// search_path cannot change which type the facts describe or answer
 	// the ownership probe true. to_regtype itself still resolves the bare
 	// name on that path, exactly as the statement will.
-	const q = `
+	q := `
 		SELECT t.oid,
 		       t.typtype OPERATOR(pg_catalog.=) 'e',
 		       current_user::pg_catalog.text,
@@ -100,7 +100,8 @@ func resolveEnumType(ctx context.Context, pool *pgxpool.Pool, ref statement.Type
 		       t.typname::pg_catalog.text,
 		       r.rolname::pg_catalog.text,
 		       pg_catalog.pg_has_role(current_user, t.typowner, 'USAGE'),
-		       (SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) current_user)
+		       (SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) current_user),
+		       ` + ownerPrivilegedFor("t.typowner") + `
 		FROM pg_catalog.pg_type t
 		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) t.typnamespace
 		JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) t.typowner
@@ -111,7 +112,7 @@ func resolveEnumType(ctx context.Context, pool *pgxpool.Pool, ref statement.Type
 	var f accessFacts
 	var isEnum bool
 	err := pool.QueryRow(ctx, q, name.Sanitize()).Scan(&e.oid, &isEnum,
-		&f.role, &f.versionNum, &f.schema, &f.table, &f.owner, &f.ownerUsage, &f.roleInherit)
+		&f.role, &f.versionNum, &f.schema, &f.table, &f.owner, &f.ownerUsage, &f.roleInherit, &f.ownerPrivileged)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EnumTarget{}, accessFacts{}, fmt.Errorf("%w: no type %s; nothing was executed", ErrEnumTypeNotFound, name.Sanitize())
 	}

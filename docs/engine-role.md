@@ -216,6 +216,17 @@ actually repairs the option — `GRANT ... WITH INHERIT TRUE` / `WITH SET TRUE` 
 PostgreSQL 16+, `ALTER ROLE ... INHERIT` on 14–15, where inheritance is a role attribute
 that `GRANT` cannot change.
 
+A refusal for a missing membership asks for no more than the run needs. On 16+ it grants
+`WITH INHERIT TRUE, SET FALSE`, since only copy-and-swap runs `SET ROLE`. A run that
+needs copy-and-swap is told `WITH INHERIT TRUE, SET TRUE` instead.
+
+A refusal never advises membership in an owner that holds power beyond its objects. That
+covers an owner that is a superuser or has `CREATEROLE`, `REPLICATION`, or `BYPASSRLS`. It
+also covers an owner that is a member, at any depth, of a role that has them, or of a
+predefined `pg_*` role other than `pg_database_owner`. Such a grant would hand the engine
+role that power, so the refusal names only the ownership transfer
+(`ALTER TABLE ... OWNER TO <role>`, to an ordinary role the engine is then made a member of).
+
 ## What the engine role must not have
 
 The contract is as much about what is absent:

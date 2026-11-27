@@ -115,14 +115,15 @@ func TestCheckPrivilegesWalksTheTierLadder(t *testing.T) {
 
 	// Tier 1: no owning-role membership yet. On 16+ the grant carries the
 	// INHERIT option explicitly, so it also repairs a non-inheriting
-	// membership; below 16 inheritance is the grantee's role attribute.
+	// membership, and withholds SET, which only copy-and-swap needs; below
+	// 16 inheritance is the grantee's role attribute.
 	_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierAlterInPlace})
 	require.ErrorAs(t, err, &privErr)
 	assert.Equal(t, preflight.TierAlterInPlace, privErr.Tier)
 	tier1Grant := fmt.Sprintf("GRANT %s TO %s",
 		pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize())
 	if serverVersionNum(t, f.admin) >= 160000 {
-		tier1Grant += " WITH INHERIT TRUE"
+		tier1Grant += " WITH INHERIT TRUE, SET FALSE"
 	}
 	assert.Equal(t, tier1Grant, privErr.Grant)
 
@@ -142,8 +143,17 @@ func TestCheckPrivilegesWalksTheTierLadder(t *testing.T) {
 	_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierIndexBuild})
 	require.NoError(t, err)
 
-	// Tier 3: a default membership grant is SET-capable on every
-	// supported major, so copy-and-swap admits without further grants.
+	// Tier 3: below 16 a membership is SET-capable, so copy-and-swap
+	// admits without further grants. On 16+ the Tier-1 grant withheld SET,
+	// and the refusal names the grant that adds it.
+	if serverVersionNum(t, f.admin) >= 160000 {
+		_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
+		require.ErrorAs(t, err, &privErr)
+		assert.Equal(t, preflight.TierCopyAndSwap, privErr.Tier)
+		assert.Equal(t, fmt.Sprintf("GRANT %s TO %s WITH SET TRUE",
+			pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
+		f.grant(t, privErr.Grant)
+	}
 	proof, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
 	require.NoError(t, err)
 	assert.Equal(t, preflight.TierCopyAndSwap, proof.Tier())
@@ -170,7 +180,7 @@ func TestCheckPrivilegesRemediatesNonInheritingMembership(t *testing.T) {
 	require.ErrorAs(t, err, &privErr)
 	assert.Equal(t, preflight.TierAlterInPlace, privErr.Tier)
 	if serverVersionNum(t, f.admin) >= 160000 {
-		assert.Equal(t, fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE",
+		assert.Equal(t, fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE, SET FALSE",
 			pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
 	} else {
 		assert.Equal(t, fmt.Sprintf("ALTER ROLE %s INHERIT",
@@ -182,6 +192,55 @@ func TestCheckPrivilegesRemediatesNonInheritingMembership(t *testing.T) {
 	_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target",
 		preflight.Requirement{Tier: preflight.TierAlterInPlace})
 	require.NoError(t, err)
+}
+
+// A run that needs copy-and-swap and lacks the owner's membership is told
+// to grant it with SET as well as INHERIT on 16+, so one grant clears both
+// rungs.
+func TestCheckPrivilegesGrantsSetOnlyForCopyAndSwap(t *testing.T) {
+	f := newPrivilegeFixture(t)
+	if serverVersionNum(t, f.admin) < 160000 {
+		t.Skip("membership options exist from PostgreSQL 16")
+	}
+	ctx := t.Context()
+	f.grant(t, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", f.schema, pgx.Identifier{f.role}.Sanitize()))
+	f.grant(t, fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s", f.schema, pgx.Identifier{f.owner}.Sanitize()))
+
+	_, err := preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
+	var privErr *preflight.PrivilegeError
+	require.ErrorAs(t, err, &privErr)
+	assert.Equal(t, preflight.TierAlterInPlace, privErr.Tier)
+	assert.Equal(t, fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE, SET TRUE",
+		pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
+
+	f.grant(t, privErr.Grant)
+	_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
+	require.NoError(t, err)
+}
+
+// A table owned by a superuser, or by a role that is a member of one with
+// CREATEROLE, is never offered as a membership: the grant would let the
+// engine role reach that power. The refusal names the ownership transfer
+// alone, on every major.
+func TestCheckPrivilegesNeverAdvisesMembershipInAPrivilegedOwner(t *testing.T) {
+	f := newPrivilegeFixture(t)
+	ctx := t.Context()
+	f.grant(t, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", f.schema, pgx.Identifier{f.role}.Sanitize()))
+	var superuser string
+	require.NoError(t, f.admin.QueryRow(ctx, "SELECT current_user").Scan(&superuser))
+	admin := testutil.NewRole(t, f.admin, "NOLOGIN CREATEROLE")
+	f.grant(t, fmt.Sprintf("GRANT %s TO %s", pgx.Identifier{admin}.Sanitize(), pgx.Identifier{f.owner}.Sanitize()))
+	f.grant(t, fmt.Sprintf("CREATE TABLE %s.super_owned (id int PRIMARY KEY)", f.schema))
+
+	for table, owner := range map[string]string{"super_owned": superuser, "target": f.owner} {
+		_, err := preflight.CheckPrivileges(ctx, f.engine, f.schema, table, preflight.Requirement{Tier: preflight.TierAlterInPlace})
+		var privErr *preflight.PrivilegeError
+		require.ErrorAs(t, err, &privErr, table)
+		assert.Equal(t, preflight.TierAlterInPlace, privErr.Tier, table)
+		assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.%s OWNER TO <role>", pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{table}.Sanitize()), privErr.Grant, table)
+		assert.NotContains(t, err.Error(), "GRANT ", table)
+		assert.Contains(t, err.Error(), fmt.Sprintf("the table's owner %s is a superuser or holds administrative power", owner), table)
+	}
 }
 
 // A view owned by a role the engine lacks membership in is ErrNotTable,
