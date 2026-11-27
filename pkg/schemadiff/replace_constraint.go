@@ -25,10 +25,13 @@ import (
 // attaching the new index in one ALTER TABLE, which renames the index to the
 // constraint's name. A failed build leaves the old constraint in place.
 //
-// A CHECK or FOREIGN KEY is replaced by dropping the old one and adding the
-// new one NOT VALID in one ALTER TABLE, then validating it on its own: new
-// writes are checked by one rule or the other at every moment, and the scan
-// takes no lock that blocks them.
+// A CHECK is replaced by dropping the old one and adding the new one NOT
+// VALID in one ALTER TABLE, then validating it on its own: new writes are
+// checked by one rule or the other at every moment, and the scan takes no
+// lock that blocks them.
+//
+// A FOREIGN KEY keeps the drop and re-add, so the plan's foreign-key drop
+// policy still sees the drop it makes.
 
 // replacementIndexSuffix ends the temporary name a replaced key's new index
 // is built under.
@@ -45,8 +48,7 @@ type inPlaceReplacement struct {
 
 // replacedInPlace names the constraints of a table diff that are replaced
 // in place, keyed by constraint name. A partitioned parent keeps the drop
-// and re-add, since the server refuses USING INDEX and NOT VALID foreign
-// keys there. So does a table whose diff drops or retypes a column: a
+// and re-add, since the server refuses USING INDEX there. So does a table whose diff drops or retypes a column: a
 // dropped column takes the constraints that read it with it, and a retype
 // re-checks the constraints that are still in place.
 //
@@ -96,6 +98,17 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, live
 		replaced[con.Name] = inPlaceReplacement{}
 	}
 	return replaced, nil
+}
+
+// replacesPrimaryKey reports whether the plan replaces the table's primary
+// key in place.
+func replacesPrimaryKey(replaced map[string]inPlaceReplacement, liveCons map[string]Constraint) bool {
+	for name := range replaced {
+		if liveCons[name].Primary {
+			return true
+		}
+	}
+	return false
 }
 
 // refuseReferencedKeyReplacement refuses to replace a primary key or unique
@@ -148,12 +161,13 @@ func isKeyReplacementBuild(ix Index, con Constraint) (bool, error) {
 // refusal names the same statement, since the replacement must not drop an
 // index it did not build and reuse its name.
 func replacementIndexTaken(schema, constraint string, ix Index) error {
+	drop := pgx.Identifier{schema, ix.Name}.Sanitize()
 	if ix.Invalid {
 		return unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, and an unfinished build of that index is on the table, likely left by an earlier attempt; once pg_stat_progress_create_index shows no backend building it, run DROP INDEX CONCURRENTLY %s and plan again",
-			ErrUnsupportedChange, constraint, ix.Name, pgx.Identifier{schema, ix.Name}.Sanitize())
+			ErrUnsupportedChange, constraint, ix.Name, drop)
 	}
 	return unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, and a valid index the desired table does not declare already holds that name, likely an earlier attempt's build for another definition; run DROP INDEX CONCURRENTLY %s and plan again",
-		ErrUnsupportedChange, constraint, ix.Name, pgx.Identifier{schema, ix.Name}.Sanitize())
+		ErrUnsupportedChange, constraint, ix.Name, drop)
 }
 
 // isKey reports a primary key or unique constraint: one that owns an index.
@@ -169,7 +183,7 @@ func isRule(con Constraint) bool {
 
 // sameConstraintFamily reports whether desired can replace live in one
 // statement: both are primary keys, both are unique constraints, or both
-// are rules of the same kind. A live key's IndexDef is not introspected, so
+// are CHECKs. A live key's IndexDef is not introspected, so
 // a live unique constraint is told apart from an exclusion constraint by the
 // definition the server decompiles for it.
 func sameConstraintFamily(live, desired Constraint) bool {
@@ -178,8 +192,8 @@ func sameConstraintFamily(live, desired Constraint) bool {
 		return live.Primary
 	case isKey(desired):
 		return !live.Primary && strings.HasPrefix(live.Def, "UNIQUE ")
-	case isRule(desired):
-		return isRule(live) && live.ForeignKey == desired.ForeignKey
+	case isRule(desired) && !desired.ForeignKey:
+		return isRule(live) && !live.ForeignKey
 	}
 	return false
 }
@@ -207,7 +221,7 @@ func replaceInPlaceChanges(table, schema string, had, con Constraint, r inPlaceR
 	if isKey(con) {
 		return replaceKeyChanges(table, schema, had, con, r.built)
 	}
-	return replaceRuleChanges(table, schema, had, con)
+	return replaceRuleChanges(table, had, con), nil
 }
 
 // dropsOrRetypesColumn reports whether the diff drops a live column or
@@ -252,25 +266,15 @@ func replaceKeyChanges(table, schema string, had, con Constraint, built bool) ([
 
 // replaceRuleChanges drops had and adds con NOT VALID in one statement, then
 // validates con on its own.
-func replaceRuleChanges(table, schema string, had, con Constraint) ([]Change, error) {
+func replaceRuleChanges(table string, had, con Constraint) []Change {
 	name := pgx.Identifier{con.Name}.Sanitize()
 	sql := "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{had.Name}.Sanitize() +
 		", ADD CONSTRAINT " + name + " " + con.Def + notValidSuffix
-	var references *ForeignKeyReference
-	if con.ForeignKey {
-		qualified, err := statement.QualifyForeignKeyReferences(sql, schema)
-		if err != nil {
-			return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
-		}
-		sql = qualified
-		references = con.References
-	}
 	return []Change{
 		{
 			SQL:         sql,
 			Kind:        addConstraintKind(con),
 			Destructive: true,
-			References:  references,
 			Drops:       &DroppedObject{Kind: DroppedConstraint, Name: had.Name, Definition: had.Def},
 		},
 		{
@@ -278,5 +282,5 @@ func replaceRuleChanges(table, schema string, had, con Constraint) ([]Change, er
 			Kind:      validateConstraintKind(con),
 			Validates: addedNotValid(con),
 		},
-	}, nil
+	}
 }

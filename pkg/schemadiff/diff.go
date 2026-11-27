@@ -563,8 +563,17 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	}
 
 	// NOT NULLs to drop, after the columns dropped: a column that is part of
-	// a key the plan drops has lost its NOT NULL's owner by now.
-	changes = append(changes, dropNotNullChanges(table, live, desiredCols)...)
+	// a key the plan drops has lost its NOT NULL's owner by now. A primary
+	// key replaced in place still owns its columns' NOT NULL until the swap
+	// drops the old key, so when the plan replaces one, the NOT NULL drops
+	// wait for the constraints below. The new key is then built and swapped
+	// in while the old one keeps rejecting duplicates, and a column the old
+	// key covered loses its NOT NULL only once nothing requires it.
+	notNullDrops := dropNotNullChanges(table, live, desiredCols)
+	notNullAfterKeySwap := replacesPrimaryKey(replaced, liveCons)
+	if !notNullAfterKeySwap {
+		changes = append(changes, notNullDrops...)
+	}
 
 	// Columns to add. A sequence-backed default (serial) cannot be added:
 	// the desired-side sequence existed only inside the rolled-back
@@ -624,11 +633,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if err != nil {
 				return nil, err
 			}
-			if con.ForeignKey {
-				foreignKeys = append(foreignKeys, replacement...)
-			} else {
-				changes = append(changes, replacement...)
-			}
+			changes = append(changes, replacement...)
 			continue
 		}
 		if ok && validatesInPlace(had, con) {
@@ -657,6 +662,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			}
 			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})
 		}
+	}
+
+	if notNullAfterKeySwap {
+		changes = append(changes, notNullDrops...)
 	}
 
 	// Indexes to create: new, replaced after a definition change, recreated
