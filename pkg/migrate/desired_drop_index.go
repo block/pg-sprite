@@ -91,6 +91,9 @@ func plannedIndexDrop(report plan.Report, ps plan.Statement, st statement.Statem
 		return "", "", fmt.Errorf("%w: planned index drop %q carries no definition of index %s",
 			executor.ErrInvariantViolation, ps.SQL, rel.Name)
 	}
+	if err := checkPlannedReplacement(ps); err != nil {
+		return "", "", err
+	}
 	if len(ps.ExecSQL) != 1 {
 		return "", "", fmt.Errorf("%w: planned index drop %q carries %d execution statements, not the one DROP INDEX CONCURRENTLY",
 			executor.ErrInvariantViolation, ps.SQL, len(ps.ExecSQL))
@@ -108,6 +111,26 @@ func plannedIndexDrop(report plan.Report, ps plan.Statement, st statement.Statem
 	return rel.Name, ps.Drops.Definition, nil
 }
 
+// checkPlannedReplacement refuses a drop whose replacement is named without
+// being carried, or carried under another name. A drop that names its
+// replacement runs only through the check that the replacement is still in
+// place, so one that reaches this path without the replacement it names,
+// such as a plan rebuilt from its JSON report, which leaves the replacement
+// out, would otherwise drop the old index unchecked.
+func checkPlannedReplacement(ps plan.Statement) error {
+	switch {
+	case ps.ReplacedBy == "" && ps.Replacement == nil:
+		return nil
+	case ps.Replacement == nil:
+		return fmt.Errorf("%w: planned index drop %q is replaced by %s but carries no replacement to check before the drop",
+			executor.ErrInvariantViolation, ps.SQL, ps.ReplacedBy)
+	case ps.Replacement.Index != ps.ReplacedBy:
+		return fmt.Errorf("%w: planned index drop %q is replaced by %q but carries the replacement %q",
+			executor.ErrInvariantViolation, ps.SQL, ps.ReplacedBy, ps.Replacement.Index)
+	}
+	return nil
+}
+
 // droppedIndexFailureDetail says what a failed concurrent index drop left
 // behind: nothing when the read before it refused, a different index than
 // the one reviewed when the executor found that after the fact, and an
@@ -119,7 +142,9 @@ func droppedIndexFailureDetail(err error, table, index string) string {
 	case errors.Is(err, executor.ErrDroppedIndexDrift):
 		return fmt.Sprintf("the index changed since the plan was derived, so nothing was dropped on %s; re-plan and review the new plan", table)
 	case errors.Is(err, executor.ErrReplacementIndexDrift):
-		return fmt.Sprintf("the index built to replace %s changed since the plan was derived, so nothing was dropped on %s; re-plan, which builds the replacement again", index, table)
+		return fmt.Sprintf("the index built to replace %s changed since the plan was derived, so nothing was dropped on %s; "+
+			"inspect %s_new: when it is gone, re-plan, which builds it again; when it is invalid or has another definition and no build of it is running, "+
+			"drop it with DROP INDEX CONCURRENTLY, then re-plan", index, table, index)
 	case errors.Is(err, executor.ErrDroppedIndexReplaced):
 		return fmt.Sprintf("an index the plan did not review was dropped: another session gave the name %s to a different index between the check and the drop; "+
 			"inspect the indexes of %s and recreate the dropped one if it should stay", index, table)

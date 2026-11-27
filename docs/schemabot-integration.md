@@ -1174,6 +1174,8 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `Replacement`, the index the plan built under the temporary name and its definition; an adapter
   passes it to `ExecuteReplacedIndexDropConcurrently`, which also refuses, dropping nothing, with
   `replacement-index-drift` when that index is gone, invalid, or no longer has that definition.
+  A drop that carries `ReplacedBy` never runs without its `Replacement`: the migrate path refuses
+  one as an invariant violation, and an adapter that stores plans persists `Replacement` itself.
   `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
   rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
