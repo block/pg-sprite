@@ -73,4 +73,21 @@ by the integration tests in `pkg/executor`:
 - A partitioned, foreign, or view referenced table, or a referenced table inside the tree
   (`partitioned-foreign-key-referenced-table`): the parent's statement would also clone the
   foreign key onto every referenced partition, which the build neither proves nor reads back.
-- Routing from `migrate` and the planner; the entry point is an executor call for now.
+- Desired-state routing (`diff`, `migrate --desired`): a foreign key a desired file adds to a
+  partitioned table plans as the ordinary `NOT VALID` then `VALIDATE` sequence, which
+  PostgreSQL 14–17 refuse, so `diff` refuses it with `unsupported-partitioned-parent`, class
+  `environmental`, and `migrate --desired` refuses the plan.
+
+## Routing from `migrate --alter`
+
+`migrate --alter` (`migrate.Run`) routes a lone `ADD FOREIGN KEY` without `NOT VALID` on a
+partitioned table to `AddPartitionedForeignKeyAsStep` on PostgreSQL 14–17, on the submitted
+statement (`preflight.RoutesToPartitionedForeignKeyBuild`), before the planner's plain-table
+`NOT VALID` then `VALIDATE` steps meet the partitioned-parent refusal. On 18 those steps run as
+they are. A forced run and a submitted `NOT VALID` are not routed. The dry run plans the
+statement with the execution `partitioned-foreign-key-build` and reports the build's shape
+refusals (`not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape`); the checks under
+the build's lock (the parent's constraints, the referenced table, the tree) are reported by the
+apply only. Those are refusals when the build stopped before any partition got the foreign key,
+and failed verdicts after; every other stop is a failed verdict with the executor's code
+([schemabot-integration](schemabot-integration.md#outcomes-of-a-partitioned-foreign-key-build)).

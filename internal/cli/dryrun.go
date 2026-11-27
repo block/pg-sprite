@@ -115,6 +115,12 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		if err = plan.RoutePartitionedKeyBuilds(&report); err != nil {
 			return err
 		}
+		// An ADD FOREIGN KEY before PostgreSQL 18 runs as the partitioned
+		// foreign key build on apply, routed on the submitted statement
+		// before the partitioned-parent policy sees the planner's steps.
+		if err = plan.RoutePartitionedForeignKeyBuilds(&report, facts.Target.ServerMajor()); err != nil {
+			return err
+		}
 		if err = plan.RoutePartitionedParent(&report, facts.Target.ServerMajor()); err != nil {
 			return err
 		}
@@ -157,6 +163,8 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 				admit = migrate.AdmitPartitionedIndexRequest
 			case planner.ExecutionPartitionedKeyBuild:
 				admit = migrate.AdmitPartitionedKeyRequest
+			case planner.ExecutionPartitionedForeignKeyBuild:
+				admit = migrate.AdmitPartitionedForeignKeyRequest
 			}
 			v, refused, admitErr := admit(st, report.Schema, ps.ExecSQL)
 			if admitErr != nil {

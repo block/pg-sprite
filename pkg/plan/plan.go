@@ -67,7 +67,9 @@ import (
 // instead of refusing them, and retires the foreign-key create-shape
 // cause: a new table is created with its foreign keys. Version 27 added the
 // partitioned-key-build execution contract and its part in the fingerprint.
-const FormatVersion = 27
+// Version 28 added the partitioned-foreign-key-build execution contract and
+// its part in the fingerprint.
+const FormatVersion = 28
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -286,13 +288,14 @@ type Report struct {
 // 18, a concurrent drop of the parent's index) stay refused. A refused
 // diff-derived drop of the parent's index then discloses the one drop
 // PostgreSQL accepts (see discloseBlockingIndexDrop). A statement
-// RoutePartitionedKeyBuilds already routed is left as it is. A report on a
-// table that is not partitioned must not pass through here.
+// RoutePartitionedKeyBuilds or RoutePartitionedForeignKeyBuilds already
+// routed is left as it is. A report on a table that is not partitioned must
+// not pass through here.
 func RoutePartitionedParent(report *Report, serverMajor int) error {
 	causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
 	for i := range report.Statements {
 		st := &report.Statements[i]
-		if st.Execution == planner.ExecutionPartitionedKeyBuild {
+		if st.Execution == planner.ExecutionPartitionedKeyBuild || st.Execution == planner.ExecutionPartitionedForeignKeyBuild {
 			continue
 		}
 		routes, err := preflight.RoutesToPartitionedIndexBuild(st.ExecSQL)
@@ -358,6 +361,36 @@ func RoutePartitionedKeyBuilds(report *Report) error {
 		}
 		if routes {
 			routeToPartitionedBuild(st, planner.ExecutionPartitionedKeyBuild)
+		}
+	}
+	return nil
+}
+
+// RoutePartitionedForeignKeyBuilds routes, in a report whose target is a
+// partitioned table on a server of major version serverMajor, every
+// executable statement that is a lone ADD FOREIGN KEY without NOT VALID
+// (preflight.RoutesToPartitionedForeignKeyBuild, which is false from
+// version 18) to the partitioned foreign key build: its one step becomes the
+// statement itself with the execution partitioned-foreign-key-build,
+// because the substitute the planner made for a plain table (ADD ... NOT
+// VALID, then VALIDATE) cannot run on a partitioned parent before version
+// 18. The partitions are not in the plan; the build lists them when it runs.
+// The imperative dry run calls it before RoutePartitionedParent, which
+// leaves the routed statements alone; the declarative plan does not route
+// foreign keys. A report on a table that is not partitioned must not pass
+// through here.
+func RoutePartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
+	for i := range report.Statements {
+		st := &report.Statements[i]
+		if st.Disposition != router.DispositionExecute {
+			continue
+		}
+		routes, err := preflight.RoutesToPartitionedForeignKeyBuild(serverMajor, st.SQL)
+		if err != nil {
+			return err
+		}
+		if routes {
+			routeToPartitionedBuild(st, planner.ExecutionPartitionedForeignKeyBuild)
 		}
 	}
 	return nil
@@ -613,10 +646,11 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 // after a file separator. Explanatory fields
 // (decisions, kind, destructive, reason, cause, guidance) are excluded, so
 // a reworded reason does not change identity but a rerouted or resequenced
-// plan does. A statement that runs as the partitioned index build or the
-// partitioned key build also hashes its execution: its exec_sql is the
-// statement as written, and the same text run literally (a CREATE INDEX
-// CONCURRENTLY, an ALTER TABLE ... ADD PRIMARY KEY) is a different plan.
+// plan does. A statement that runs as the partitioned index build, the
+// partitioned key build, or the partitioned foreign key build also hashes
+// its execution: its exec_sql is the statement as written, and the same text
+// run literally (a CREATE INDEX CONCURRENTLY, an ALTER TABLE ... ADD PRIMARY
+// KEY, an ALTER TABLE ... ADD FOREIGN KEY) is a different plan.
 // A refused drop of a partitioned table's index that carries the
 // blocking-index-drop execution hashes it the same way, so a reviewed plan
 // cannot switch drop forms unnoticed.
@@ -672,12 +706,14 @@ func (r Report) ComputeFingerprint() string {
 
 // hashesExecution reports whether the fingerprint covers a statement's
 // execution: one whose exec_sql is the statement as written and whose
-// execution decides how it runs — the partitioned index and key builds, and
-// the accepted blocking drop of a partitioned table's index. Every other
-// execution is derived from exec_sql and keeps the identity it always had.
+// execution decides how it runs — the partitioned index, key, and foreign
+// key builds, and the accepted blocking drop of a partitioned table's index.
+// Every other execution is derived from exec_sql and keeps the identity it
+// always had.
 func hashesExecution(e planner.Execution) bool {
 	switch e {
-	case planner.ExecutionPartitionedIndexBuild, planner.ExecutionPartitionedKeyBuild, planner.ExecutionBlockingIndexDrop:
+	case planner.ExecutionPartitionedIndexBuild, planner.ExecutionPartitionedKeyBuild,
+		planner.ExecutionPartitionedForeignKeyBuild, planner.ExecutionBlockingIndexDrop:
 		return true
 	default:
 		return false
