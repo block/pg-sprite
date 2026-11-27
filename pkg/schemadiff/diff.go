@@ -170,6 +170,10 @@ type Change struct {
 	// must still be when the drop runs. The old index is dropped only while
 	// it is.
 	Replacement *IndexReplacement `json:"-"`
+	// Renames is set on a ChangeRenameIndex: the live index the rename
+	// gives the desired name and the definition the plan matched it by.
+	// The rename runs only while the index still has that definition.
+	Renames *IndexRename `json:"-"`
 }
 
 // DroppedKind names the kind of object a destructive change removes.
@@ -307,6 +311,16 @@ type IndexAdoption struct {
 	Def   string
 }
 
+// IndexRename is the live index a planned ALTER INDEX ... RENAME TO
+// renames and its definition as introspection reads it (pg_get_indexdef
+// with the schema qualification removed). An index replaced since planning
+// under the same name, such as by a non-unique one, would otherwise take
+// the desired unique index's name.
+type IndexRename struct {
+	Index string
+	Def   string
+}
+
 // IndexReplacement is the index a changed index's replacement built under
 // its temporary name, and the definition, as introspection reads it
 // (pg_get_indexdef with the schema qualification removed), that it must
@@ -329,12 +343,25 @@ type ConstraintValidation struct {
 
 // Diff derives the ordered statement list that converges live onto desired.
 // Order is dependency-correct: drops first (indexes, then constraints, then
-// columns, then NOT NULLs), then column adds and alters, then constraint adds, then index
-// creates — so an added column exists before an index or constraint that
-// references it. A changed index is the exception to drops first: it is
-// replaced in the create bucket, built under a temporary name before the old
-// index is dropped (see replacedIndexes). Within each bucket the order is deterministic: attribute
-// order for columns, name order for constraints and indexes. schema
+// columns, then NOT NULLs), then column adds and alters, then constraint
+// adds, then index creates, then foreign key adds — so an added column
+// exists before an index or constraint that references it. Four kinds of
+// change keep the old object in place until its replacement is, unless the
+// plan also drops or retypes a column:
+//
+//   - A changed index is replaced in the create bucket, built under a
+//     temporary name before the old index is dropped (see replacedIndexes).
+//   - An index whose name alone changes is renamed in the create bucket
+//     with ALTER INDEX ... RENAME TO, and never dropped (see
+//     renamedIndexes).
+//   - A unique index or unique constraint the plan drops, when the plan adds
+//     a unique index or constraint, and a constraint the file declares
+//     again under another name, are dropped after the index creates (see
+//     heldDrops).
+//   - Such a foreign key is dropped after the foreign key adds.
+//
+// Within each bucket the order is deterministic: attribute order for
+// columns, name order for constraints and indexes. schema
 // qualifies the emitted statements' table references. Columns are compared
 // by name only: attribute order carries no semantics in PostgreSQL and is
 // deliberately out of scope for convergence. An invalid index on a plain
@@ -647,7 +674,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			continue
 		}
 		if from, ok := renameTargets[ix.Name]; ok {
-			changes = append(changes, renameIndexChange(schema, from, ix.Name))
+			changes = append(changes, renameIndexChange(schema, liveIdx[from], ix.Name))
 			continue
 		}
 		if indexNeedsCreate(liveIdx, ix) {

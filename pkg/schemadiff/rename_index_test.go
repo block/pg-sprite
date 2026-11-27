@@ -31,6 +31,8 @@ func TestDiffRenamesAnIndexWhoseNameAloneChanges(t *testing.T) {
 			assert.Equal(t, `ALTER INDEX "public".`+quoted(tc.live.Name)+` RENAME TO `+quoted(tc.desired.Name), changes[0].SQL)
 			assert.Equal(t, ChangeRenameIndex, changes[0].Kind)
 			assert.False(t, changes[0].Destructive)
+			assert.Equal(t, &IndexRename{Index: tc.live.Name, Def: tc.live.Def}, changes[0].Renames,
+				"the rename carries the definition it matched, for the run to check")
 		})
 	}
 

@@ -62,11 +62,12 @@ func renameIndexTargets(renamed map[string]Index) map[string]string {
 }
 
 // renameIndexChange is the statement that gives the live index from the
-// desired index's name.
-func renameIndexChange(schema, from, to string) Change {
+// desired index's name, carrying from's definition for the run to check.
+func renameIndexChange(schema string, from Index, to string) Change {
 	return Change{
-		SQL:  "ALTER INDEX " + pgx.Identifier{schema, from}.Sanitize() + " RENAME TO " + pgx.Identifier{to}.Sanitize(),
-		Kind: ChangeRenameIndex,
+		SQL:     "ALTER INDEX " + pgx.Identifier{schema, from.Name}.Sanitize() + " RENAME TO " + pgx.Identifier{to}.Sanitize(),
+		Kind:    ChangeRenameIndex,
+		Renames: &IndexRename{Index: from.Name, Def: from.Def},
 	}
 }
 

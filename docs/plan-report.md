@@ -310,7 +310,7 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `validate-constraint` | Validates a live check constraint left `NOT VALID` whose definition otherwise matches the desired one, the state an interrupted online add leaves behind. Not destructive. |
 | `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Runs as written; the scan takes `SHARE UPDATE EXCLUSIVE`, so reads and writes continue. |
 | `create-index` | Creates an index. A changed index the plan replaces is built under its temporary name, `<name>_new`. |
-| `rename-index` | Renames an index (`ALTER INDEX ... RENAME TO`): a replacement index from its temporary name to the name of the index it replaced, after the old index is dropped, or a live index the desired table declares under another name with an otherwise identical definition. Not destructive. |
+| `rename-index` | Renames an index (`ALTER INDEX ... RENAME TO`): a replacement index from its temporary name to the name of the index it replaced, after the old index is dropped, or a live index the desired table declares under another name with an otherwise identical definition. Not destructive. Execution reads the index again under the table's lock and refuses with `renamed-index-drift`, renaming nothing, if it is invalid, backs a constraint, or no longer has the definition the plan carried. |
 | `add-enum-value` | Adds a label to an enum type (`ALTER TYPE ... ADD VALUE`), placed `BEFORE` the next label the type already carries when the file lists it ahead of one. The only kind a desired enum type file plans. Not destructive. |
 
 ### Advisory kinds (`advisories[].kind`, diff source only)

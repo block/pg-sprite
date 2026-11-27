@@ -228,8 +228,9 @@ func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 		})
 	}
 	changes = append(changes, Change{
-		SQL:  "ALTER INDEX " + pgx.Identifier{schema, r.temp}.Sanitize() + " RENAME TO " + pgx.Identifier{r.want.Name}.Sanitize(),
-		Kind: ChangeRenameIndex,
+		SQL:     "ALTER INDEX " + pgx.Identifier{schema, r.temp}.Sanitize() + " RENAME TO " + pgx.Identifier{r.want.Name}.Sanitize(),
+		Kind:    ChangeRenameIndex,
+		Renames: &IndexRename{Index: r.temp, Def: def},
 	})
 	return changes, nil
 }

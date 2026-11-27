@@ -282,7 +282,7 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		if adopts != nil || validates != nil || dropped != nil {
 			return fmt.Errorf("%w: an index rename carries no adoption, validation, or drop check", ErrInvariantViolation)
 		}
-		return executeIndexRename(ctx, pool, pt, st, b, retry, tracker)
+		return executeIndexRename(ctx, pool, pt, st, b, retry, nil, tracker)
 	}
 	// INV: ST-7 — the executor runs exactly the statement that was gated,
 	// and only against the table the preflight proof verified.
