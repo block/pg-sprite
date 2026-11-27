@@ -126,6 +126,15 @@ func (h heldDrops) holds(ch Change) bool {
 	return false
 }
 
+// dropsForeignKey reports whether ch drops a live foreign key.
+func (h heldDrops) dropsForeignKey(ch Change) bool {
+	if ch.Drops == nil || ch.Drops.Kind != DroppedConstraint {
+		return false
+	}
+	con, ok := h.liveCons[ch.Drops.Name]
+	return ok && con.ForeignKey
+}
+
 // renamedConstraintDefs returns the definitions of the constraints desired
 // adds under names the live table does not have. A live constraint the file
 // no longer names whose definition is among them moved to another name.

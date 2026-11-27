@@ -90,6 +90,18 @@ func TestDiffDropsAUniquenessOnlyAfterItsReplacement(t *testing.T) {
 		}, sqls(changes))
 	})
 
+	t.Run("a foreign key declared again under another name", func(t *testing.T) {
+		live, desired := base(), base()
+		live.Constraints = append(live.Constraints, Constraint{Name: "events_id_fk", Def: "FOREIGN KEY (id) REFERENCES accounts(id)", ForeignKey: true})
+		desired.Constraints = append(desired.Constraints, Constraint{Name: "events_id_fkey", Def: "FOREIGN KEY (id) REFERENCES accounts(id)", ForeignKey: true})
+		changes, err := Diff("public", live, desired)
+		require.NoError(t, err)
+		require.NotEmpty(t, changes)
+		last := changes[len(changes)-1]
+		assert.Equal(t, `ALTER TABLE "public"."events" DROP CONSTRAINT "events_id_fk"`, last.SQL, "the old key is dropped after the new one is added: %v", sqls(changes))
+		assert.Contains(t, changes[0].SQL, "ADD CONSTRAINT events_id_fkey FOREIGN KEY (id)")
+	})
+
 	t.Run("a check constraint declared again under another name", func(t *testing.T) {
 		live, desired := base(), base()
 		live.Constraints = append(live.Constraints, Constraint{Name: "events_id_check", Def: "CHECK ((id > 0))"})

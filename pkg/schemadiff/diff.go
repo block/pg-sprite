@@ -429,13 +429,19 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
 		renamedRules: renamedConstraintDefs(desired, liveCons),
 	}
-	var heldChanges []Change
+	// A held foreign key waits for the foreign keys the plan adds, which
+	// come last; every other held drop goes before them, so a foreign key
+	// the plan adds cannot bind to a key the plan is about to drop.
+	var heldChanges, heldForeignKeys []Change
 	appendDrop := func(ch Change) {
-		if !dropsOrRetypes && held.holds(ch) {
+		switch {
+		case dropsOrRetypes || !held.holds(ch):
+			changes = append(changes, ch)
+		case held.dropsForeignKey(ch):
+			heldForeignKeys = append(heldForeignKeys, ch)
+		default:
 			heldChanges = append(heldChanges, ch)
-			return
 		}
-		changes = append(changes, ch)
 	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
@@ -640,6 +646,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// Foreign keys last, once everything they can reference on this table
 	// exists.
 	changes = append(changes, foreignKeys...)
+	changes = append(changes, heldForeignKeys...)
 
 	return changes, nil
 }
