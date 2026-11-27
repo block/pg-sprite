@@ -475,7 +475,11 @@ func TestDiffKeyConstraintAdoptsTheLiveIndex(t *testing.T) {
 		other := Index{Name: "events_name_key", Def: "CREATE UNIQUE INDEX events_name_key ON events USING btree (name) WHERE (id > 0)"}
 		changes, err := Diff("public", live(other), desired(unique))
 		require.NoError(t, err)
-		assert.Equal(t, rebuild, sqls(changes))
+		assert.Equal(t, []string{
+			"CREATE UNIQUE INDEX events_name_key_new ON public.events USING btree (name)",
+			`DROP INDEX "public"."events_name_key"`,
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key_new"`,
+		}, sqls(changes), "the constraint's index is built before the old index goes (see TestDiffSameNameKindSwapBuildsFirst)")
 	})
 
 	t.Run("an unfinished build", func(t *testing.T) {

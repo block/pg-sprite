@@ -15,13 +15,15 @@ import (
 // index while the new one builds, which for a unique index lets duplicates
 // in. The result maps the live name to the desired index.
 //
-// An unfinished build, an index a new key constraint takes over, an earlier
-// run's build of a replacement, and a desired index already matched are
-// left out, and each index joins at most one pair. Indexes are visited in
+// An unfinished build, an index a new key constraint takes over, a claimed
+// index (an earlier run's build of a replacement, or an index a unique
+// constraint replaces), a desired index a replacement builds, and a desired
+// index already matched are left out, and each index joins at most one
+// pair. Indexes are visited in
 // name order, so two live indexes with the same definition always pair the
 // same way.
 func renamedIndexes(partitioned bool, live, desired []Index, liveIdx, desiredIdx map[string]Index,
-	adopted, resumedBuilds map[string]struct{}) (map[string]Index, error) {
+	adopted, claimed map[string]struct{}, replaced map[string]indexReplacement) (map[string]Index, error) {
 	renamed := make(map[string]Index)
 	taken := make(map[string]bool)
 	for _, ix := range sortedIndexes(live) {
@@ -31,11 +33,14 @@ func renamedIndexes(partitioned bool, live, desired []Index, liveIdx, desiredIdx
 		if _, ok := adopted[ix.Name]; ok {
 			continue
 		}
-		if _, ok := resumedBuilds[ix.Name]; ok {
+		if _, ok := claimed[ix.Name]; ok {
 			continue
 		}
 		for _, want := range sortedIndexes(desired) {
 			if _, exists := liveIdx[want.Name]; exists || taken[want.Name] {
+				continue
+			}
+			if _, built := replaced[want.Name]; built {
 				continue
 			}
 			same, err := sameIndexUnderName(ix, want)

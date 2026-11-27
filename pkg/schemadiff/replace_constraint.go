@@ -32,6 +32,12 @@ import (
 //
 // A FOREIGN KEY keeps the drop and re-add, so the plan's foreign-key drop
 // policy still sees the drop it makes.
+//
+// A unique constraint the desired table declares where the live table has a
+// standalone index of the same name with another definition is built the
+// same way: the new index is built under the temporary name while the old
+// index keeps serving and, for a unique index, keeps rejecting duplicates;
+// then the old index is dropped and the constraint takes over the new one.
 
 // replacementIndexSuffix ends the temporary name a replaced key's new index
 // is built under.
@@ -44,6 +50,12 @@ type inPlaceReplacement struct {
 	// the desired definition, and stopped before the swap. The plan then
 	// swaps that index in without building it again.
 	built bool
+	// fromIndex is set for a unique constraint that takes over from a
+	// standalone index of its name rather than from a constraint.
+	fromIndex bool
+	// index is that standalone index. Its zero value means an earlier run
+	// already dropped it, after building the new index.
+	index Index
 }
 
 // replacedInPlace names the constraints of a table diff that are replaced
@@ -63,6 +75,16 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, live
 	desiredCons := constraintsByName(desired.Constraints)
 	for _, con := range desired.Constraints {
 		had, ok := liveCons[con.Name]
+		if !ok && isUniqueKey(con) {
+			r, swaps, err := indexToConstraint(schema, con, liveCons, liveIdx, desiredIdx, desiredCons)
+			if err != nil {
+				return nil, err
+			}
+			if swaps {
+				replaced[con.Name] = r
+			}
+			continue
+		}
 		if !ok || had.Def == con.Def || validatesInPlace(had, con) || !sameConstraintFamily(had, con) {
 			continue
 		}
@@ -71,17 +93,8 @@ func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, live
 				return nil, err
 			}
 			name := replacementIndexName(con.Name)
-			if _, taken := desiredIdx[name]; taken {
-				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that index",
-					ErrUnsupportedChange, con.Name, name)
-			}
-			if _, taken := desiredCons[name]; taken {
-				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that constraint",
-					ErrUnsupportedChange, con.Name, name)
-			}
-			if _, taken := liveCons[name]; taken {
-				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the live table already names; rename that constraint",
-					ErrUnsupportedChange, con.Name, name)
+			if err := refuseTakenKeyReplacementName(con.Name, name, desiredIdx, desiredCons, liveCons); err != nil {
+				return nil, err
 			}
 			if ix, taken := liveIdx[name]; taken {
 				resumed, err := isKeyReplacementBuild(ix, con)
@@ -109,6 +122,71 @@ func replacesPrimaryKey(replaced map[string]inPlaceReplacement, liveCons map[str
 		}
 	}
 	return false
+}
+
+// indexToConstraint reports whether con, a unique constraint the live table
+// does not have, replaces a standalone index of its name: a valid one whose
+// definition differs from con's index, which a constraint cannot take over
+// as it stands. One with con's index definition is adopted instead (see
+// adoptableIndexes), and an unfinished build keeps the drop and the add. A
+// replacement an earlier run left after dropping the old index is picked up
+// there: a valid index under the temporary name with con's index definition
+// that the desired table does not declare is taken over, not built again.
+func indexToConstraint(schema string, con Constraint, liveCons map[string]Constraint, liveIdx, desiredIdx map[string]Index, desiredCons map[string]Constraint) (inPlaceReplacement, bool, error) {
+	name := replacementIndexName(con.Name)
+	ix, ok := liveIdx[con.Name]
+	if !ok {
+		built, taken := liveIdx[name]
+		if _, declared := desiredIdx[name]; !taken || declared {
+			return inPlaceReplacement{}, false, nil
+		}
+		resumed, err := isKeyReplacementBuild(built, con)
+		if err != nil || !resumed {
+			return inPlaceReplacement{}, false, err
+		}
+		return inPlaceReplacement{fromIndex: true, built: true}, true, nil
+	}
+	if ix.Invalid || ix.Def == con.IndexDef {
+		return inPlaceReplacement{}, false, nil
+	}
+	if err := refuseReferencedIndexDrop(ix, true); err != nil {
+		return inPlaceReplacement{}, false, err
+	}
+	if err := refuseTakenKeyReplacementName(con.Name, name, desiredIdx, desiredCons, liveCons); err != nil {
+		return inPlaceReplacement{}, false, err
+	}
+	r := inPlaceReplacement{fromIndex: true, index: ix}
+	if built, taken := liveIdx[name]; taken {
+		resumed, err := isKeyReplacementBuild(built, con)
+		if err != nil {
+			return inPlaceReplacement{}, false, err
+		}
+		if !resumed {
+			return inPlaceReplacement{}, false, replacementIndexTaken(schema, con.Name, built)
+		}
+		r.built = true
+	}
+	return r, true, nil
+}
+
+// refuseTakenKeyReplacementName refuses a key replacement whose temporary
+// index name the desired table names, or a live constraint holds. A live
+// index under it is handled by the caller, which can tell an earlier run's
+// build from another index.
+func refuseTakenKeyReplacementName(constraint, name string, desiredIdx map[string]Index, desiredCons, liveCons map[string]Constraint) error {
+	if _, taken := desiredIdx[name]; taken {
+		return unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that index",
+			ErrUnsupportedChange, constraint, name)
+	}
+	if _, taken := desiredCons[name]; taken {
+		return unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that constraint",
+			ErrUnsupportedChange, constraint, name)
+	}
+	if _, taken := liveCons[name]; taken {
+		return unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the live table already names; rename that constraint",
+			ErrUnsupportedChange, constraint, name)
+	}
+	return nil
 }
 
 // refuseReferencedKeyReplacement refuses to replace a primary key or unique
@@ -175,6 +253,13 @@ func isKey(con Constraint) bool {
 	return con.IndexDef != ""
 }
 
+// isUniqueKey reports a desired unique constraint. A primary key is left
+// out: its columns are NOT NULL, which the table may not have yet, and a
+// table has only one.
+func isUniqueKey(con Constraint) bool {
+	return isKey(con) && !con.Primary
+}
+
 // isRule reports a CHECK or FOREIGN KEY: a constraint the server can add NOT
 // VALID and validate apart.
 func isRule(con Constraint) bool {
@@ -218,6 +303,9 @@ func replacementIndexName(constraint string) string {
 
 // replaceInPlaceChanges is the plan that replaces had with con in place.
 func replaceInPlaceChanges(table, schema string, had, con Constraint, r inPlaceReplacement) ([]Change, error) {
+	if r.fromIndex {
+		return replaceIndexWithKeyChanges(table, schema, con, r)
+	}
 	if isKey(con) {
 		return replaceKeyChanges(table, schema, had, con, r.built)
 	}
@@ -262,6 +350,41 @@ func replaceKeyChanges(table, schema string, had, con Constraint, built bool) ([
 			Drops:       &DroppedObject{Kind: DroppedConstraint, Name: had.Name, Definition: had.Def},
 		},
 	), nil
+}
+
+// replaceIndexWithKeyChanges builds con's index under its temporary name,
+// drops the standalone index r.index once that build is valid, then
+// attaches the new index as con, which renames it to con's name. Each step
+// a resumed replacement has already taken is left out.
+func replaceIndexWithKeyChanges(table, schema string, con Constraint, r inPlaceReplacement) ([]Change, error) {
+	index := replacementIndexName(con.Name)
+	def, err := statement.RenameIndex(con.IndexDef, index)
+	if err != nil {
+		return nil, fmt.Errorf("name the replacement index of constraint %s: %w", con.Name, err)
+	}
+	var changes []Change
+	if !r.built {
+		create, err := statement.Qualify(def, schema)
+		if err != nil {
+			return nil, fmt.Errorf("qualify the replacement index of constraint %s: %w", con.Name, err)
+		}
+		changes = append(changes, Change{SQL: create, Kind: ChangeCreateIndex})
+	}
+	if r.index.Name != "" {
+		changes = append(changes, Change{
+			SQL:         "DROP INDEX " + pgx.Identifier{schema, r.index.Name}.Sanitize(),
+			Kind:        ChangeDropIndex,
+			Destructive: true,
+			Drops:       &DroppedObject{Kind: DroppedIndex, Name: r.index.Name, Definition: r.index.Def},
+			ReplacedBy:  index,
+			Replacement: &IndexReplacement{Index: index, Def: def},
+		})
+	}
+	return append(changes, Change{
+		SQL:    "ALTER TABLE " + table + " " + addUsingIndexClause(con, index),
+		Kind:   ChangeAddConstraint,
+		Adopts: &IndexAdoption{Index: index, Def: def},
+	}), nil
 }
 
 // replaceRuleChanges drops had and adds con NOT VALID in one statement, then
