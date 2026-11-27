@@ -120,7 +120,7 @@ func TestMigrateDesiredFailsAPartitionedForeignKeyOnAnOrphanRow(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeFailed, result.Outcome)
 	require.Len(t, result.Verdicts, 1)
 	v := result.Verdicts[0]
-	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+	assert.Equal(t, string(executor.CodeDataFault), v.Code)
 	assert.Equal(t, "23503", v.SQLState, "foreign_key_violation: the rows, not the engine, stopped the run")
 	assert.Contains(t, v.ServerError, "events_2026_02", "the server's error names the partition holding the orphan row")
 	_, found := readForeignKeyAdoption(t, pool, schema, "events_account_fk")

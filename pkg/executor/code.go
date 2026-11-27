@@ -134,6 +134,11 @@ const (
 	// CodePartitionedForeignKeyUnsettled: partitions kept appearing without
 	// the foreign key until the build ran out of passes; a rerun resumes.
 	CodePartitionedForeignKeyUnsettled Code = "partitioned-foreign-key-unsettled"
+	// CodePartitionedForeignKeyLeafChanged: a partition's foreign key
+	// changed between its leaf step and the parent's step, which rolled
+	// back before the parent's statement; every partition's foreign key
+	// stays, and a rerun decides each partition again.
+	CodePartitionedForeignKeyLeafChanged Code = "partitioned-foreign-key-leaf-changed"
 	// CodePartitionDetachPending: the partition tree holds a partition
 	// whose concurrent detach did not finish, so no index can be attached
 	// for it.
@@ -394,6 +399,7 @@ func Codes() []Code {
 		CodePartitionedForeignKeySubPartitioned,
 		CodePartitionedForeignKeyNotValidSupported,
 		CodePartitionedForeignKeyUnsettled,
+		CodePartitionedForeignKeyLeafChanged,
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
 		CodeDetachInterrupted,
@@ -623,6 +629,12 @@ func sentinelCode(err error) Code {
 		return CodePartitionedForeignKeyNotValidSupported
 	case errors.Is(err, ErrPartitionedForeignKeyUnsettled):
 		return CodePartitionedForeignKeyUnsettled
+	case errors.Is(err, ErrPartitionedForeignKeyLeafChanged):
+		return CodePartitionedForeignKeyLeafChanged
+	case errors.Is(err, ErrPartitionedForeignKeyViolation):
+		// The rows break the foreign key: the same fault the code names for
+		// any statement, corrected in the data before a rerun.
+		return CodeDataFault
 	case errors.Is(err, ErrPartitionDetachPending):
 		return CodePartitionDetachPending
 	case errors.Is(err, ErrDetachDefaultPartition):

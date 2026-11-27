@@ -155,7 +155,9 @@ func lockAndProveReference(ctx context.Context, tx pgx.Tx, ref fkReference) erro
 // to no parent's, and that it is the one its leaf step recorded. Anything
 // else means the partition changed after its leaf step: the parent's
 // statement could adopt another foreign key or validate a new one under the
-// tree's locks, so the step rolls back.
+// tree's locks, so the step rolls back with
+// ErrPartitionedForeignKeyLeafChanged, and a rerun decides the partition
+// again.
 // INV: ST-7 — the parent adopts exactly the foreign keys the leaf steps made
 // or proved.
 func proveLeafFKRecorded(ctx context.Context, q querier, fk resolvedFK, n partitionNode, rec leafFKResult) error {
@@ -169,12 +171,12 @@ func proveLeafFKRecorded(ctx context.Context, q querier, fk resolvedFK, n partit
 	}
 	matches := requestedForeignKeys(fks, fk.spec, attnums, fk.ref)
 	if len(matches) != 1 {
-		return fmt.Errorf("%w: ST-7: partition %s has %d foreign keys of the requested definition, not the one %s (%d) its leaf step left",
-			ErrInvariantViolation, n.qualified(), len(matches), rec.constraint, rec.constraintOID)
+		return fmt.Errorf("%w: partition %s has %d foreign keys of the requested definition, not the one %s (%d) its leaf step left",
+			ErrPartitionedForeignKeyLeafChanged, n.qualified(), len(matches), rec.constraint, rec.constraintOID)
 	}
 	if !matches[0].isRecorded(rec) {
-		return fmt.Errorf("%w: ST-7: the foreign key of partition %s is %s (%d, validated %t, parent %d), not the validated, unattached %s (%d) its leaf step left",
-			ErrInvariantViolation, n.qualified(), matches[0].name, matches[0].oid, matches[0].validated, matches[0].parentOID,
+		return fmt.Errorf("%w: the foreign key of partition %s is %s (%d, validated %t, parent %d), not the validated, unattached %s (%d) its leaf step left",
+			ErrPartitionedForeignKeyLeafChanged, n.qualified(), matches[0].name, matches[0].oid, matches[0].validated, matches[0].parentOID,
 			rec.constraint, rec.constraintOID)
 	}
 	return nil
