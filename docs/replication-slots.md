@@ -27,16 +27,18 @@ to it. The operator's guide to the route as a whole is [copy-and-swap.md](copy-a
   - [Check the slot](#check-the-slot)
   - [The run stopped at the ceiling](#the-run-stopped-at-the-ceiling)
   - [Free the WAL: resume, drop the slot, or start over](#free-the-wal-resume-drop-the-slot-or-start-over)
+  - [The volume is already full](#the-volume-is-already-full)
   - [The run was killed or the host died](#the-run-was-killed-or-the-host-died)
   - [After a failover](#after-a-failover)
   - [Clean up slots no run owns](#clean-up-slots-no-run-owns)
+  - [For library hosts](#for-library-hosts)
 
 ## Part 1: how it works
 
 ### WAL and when PostgreSQL frees it
 
 Every change PostgreSQL makes is first written to the write-ahead log (WAL), a sequence of
-16 MiB segment files in `pg_wal`. A position in the WAL is an LSN (log sequence number), written
+segment files in `pg_wal`, 16 MiB each by default. A position in the WAL is an LSN (log sequence number), written
 like `0/3F2A1B8`; `pg_current_wal_lsn()` is where the server is writing now.
 
 At each checkpoint PostgreSQL removes or recycles the segments nothing needs any more. A
@@ -92,11 +94,13 @@ PostgreSQL has no limit of its own unless you set one:
 | Server setting | What happens as the slot's retained WAL grows |
 | --- | --- |
 | `max_slot_wal_keep_size = -1` (the default) | Nothing stops it. WAL grows until the volume is full; PostgreSQL then cannot write WAL, and the server shuts down. This is the outage the slot lag ceiling exists to prevent. |
-| `max_slot_wal_keep_size` set to a size | Past the size, `wal_status` goes to `unreserved`, and at the next checkpoint the server removes the WAL and **invalidates the slot**: `wal_status = 'lost'`, `invalidation_reason = 'wal_removed'`. The disk is saved; the slot can no longer stream. |
+| `max_slot_wal_keep_size` set to a size | Past the size, `wal_status` goes to `unreserved`, and at the next checkpoint the server removes the WAL and **invalidates the slot**: `wal_status = 'lost'`, and on PostgreSQL 17 and later `invalidation_reason = 'wal_removed'`. The disk is saved; the slot can no longer stream. |
 | `idle_replication_slot_timeout` (PostgreSQL 18) | A slot left inactive for longer than the timeout is invalidated, with `invalidation_reason = 'idle_timeout'`. |
 
 A lost slot does not lose the schema change: the next pg-sprite run reconciles (see
-[Free the WAL](#free-the-wal-resume-drop-the-slot-or-start-over)).
+[Free the WAL](#free-the-wal-resume-drop-the-slot-or-start-over), and
+[ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash) for the
+guarantee).
 
 ### How pg-sprite uses its slot
 
@@ -111,10 +115,14 @@ The slot's whole life follows the run:
   snapshot)                                     applied)
                          │
                          │ stop: Ctrl-C, SIGTERM, ceiling, error, kill
+                         │ (not an abandoned data fault: that drops it)
                          ▼
                  slot stays, inactive, still holding WAL
                  until a resume, a drop, or --restart
 ```
+
+[ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash) is the
+guarantee behind this lifecycle, and the rest of this section states its parts.
 
 - **Name.** The slot and its single-table publication share one name, `pgsprite_` followed by
   eight hex digits derived from the database, schema, and table (for example
@@ -129,9 +137,12 @@ The slot's whole life follows the run:
 - **Confirmed only after applying.** pg-sprite confirms a position to the server only once the
   changes up to it are on the shadow, so the slot never lets go of a change that has not landed.
 - **Dropped once the swap commits.** On success the slot and publication are gone.
-- **Kept on every stop.** Ctrl-C, `SIGTERM`, the ceiling, an error, or a killed process all leave
-  the slot so the next run can resume without copying again. While it waits, it is inactive and
-  still holding WAL.
+- **Kept on every stop but two.** Ctrl-C, `SIGTERM`, the ceiling, an error, or a killed process
+  all leave the slot so the next run can resume without copying again. While it waits, it is
+  inactive and still holding WAL. The exceptions drop it: a data fault the run abandons (the
+  server rejected the rows as the statement would shape them, so the shadow, the slot, and the
+  checkpoint row all go), and a first progress save that fails, which drops the slot it just
+  made. A data fault the run could not abandon keeps the slot, and its detail says so.
 
 ### The slot lag ceiling
 
@@ -146,7 +157,7 @@ naming one of three causes:
 | --- | --- | --- | --- |
 | `stream-behind` | Unconfirmed WAL | One reading over the ceiling | pg-sprite cannot keep up with the source's write rate. |
 | `wal-retained` | Retained WAL | Over the ceiling for longer than the server's release interval plus a cycle | pg-sprite keeps up, but an open transaction pins the WAL, or the cluster writes more than the ceiling holds in 15–30 seconds. |
-| `wal-retained-hard-limit` | Retained WAL | One reading over three times the ceiling | The same as `wal-retained`, too far over to wait. |
+| `wal-retained-hard-limit` | Retained WAL | One reading over three times the ceiling, before that grace has passed | The same as `wal-retained`, too far over to wait. |
 
 The ceiling does three other things:
 
@@ -156,13 +167,23 @@ The ceiling does three other things:
   ceiling the volume cannot hold is refused before anything is built.
 - **It is a stop, not a cap.** PostgreSQL does not enforce it, the slot can be over it by the time
   a cycle reads it, and a busy slot peaks at about twice its ceiling. Leave the volume room for
-  about three times the ceiling.
+  about three times the ceiling plus a catch-up cycle of the cluster's WAL;
+  [copy-and-swap.md](copy-and-swap.md#slot-lag-ceiling) owns the sizing and the flag's syntax.
 
 **Stopping frees no WAL.** The stopped run's slot stays, and it keeps growing for as long as the
 source takes writes. The ceiling ends the run; you still have to resume it, drop the slot, or
 start over (Part 2).
 
 ## Part 2: runbook
+
+Before you start:
+
+- Run every command and query here against the **primary** that holds the slot, connected
+  directly, not through a connection pooler. Set `PGSPRITE_URL` the way
+  [copy-and-swap.md](copy-and-swap.md#run-it) does for the run itself.
+  `pg_current_wal_lsn()` raises an error on a standby.
+- Dropping a slot by hand needs a role that may: a superuser, a role with the `REPLICATION`
+  attribute, or the platform's replication role on a managed service.
 
 ### Your controls
 
@@ -172,17 +193,17 @@ start over (Part 2).
 | `--slot-lag-ceiling SIZE` | Sets the stop threshold, the copy's pace, and the WAL the preflight reserves. Default `1GiB`. | Raise it for a busy cluster, with free space for about three times the value. |
 | `--free-disk SIZE` | The free space on the source volume; the preflight requires the shadow plus the ceiling. | Every copy-and-swap. Measure it; never pass a made-up value. |
 | Ctrl-C or `SIGTERM`, once | Stops the run cleanly: saves the copy's progress and exits. The slot stays. | Pausing a run. Resume soon. |
-| Run the same command again | Resumes from the saved progress and drains the slot. | After any stop. |
-| `--restart SCHEMA.TABLE` | Discards the shadow, the slot, and the saved progress, then runs from the beginning. | Starting over; also the CLI's way to free a stopped run's WAL and disk at once. |
+| Run the same command again | Resumes from the saved progress and drains the slot. | After a stop whose detail says the same statement resumes. A divergence stop, or a data fault the run could not abandon, stops again on a rerun; its detail says to use `--restart`. |
+| `--restart SCHEMA.TABLE` | Discards the shadow, the slot, and the saved progress, then runs from the beginning in the same command, with a new copy and a new slot. | Starting over. On a volume that is nearly full, drop the slot by hand instead: `--restart` starts filling it again at once. |
 | `pg-sprite reap` | Drops `pgsprite_` slots no in-flight run owns. Never touches a slot a run's row names. | Cleaning up after a run that ended before its row was written, or whose cleanup did not finish. |
-| `pg_drop_replication_slot('<name>')` | Drops a stopped run's slot by hand. Frees the WAL at once; the shadow and saved progress stay. | Disk is running out and you cannot resume now. |
-| `max_slot_wal_keep_size` (server) | PostgreSQL's own hard limit for every slot on the server. | A backstop under the ceiling. It invalidates any slot past it, not only pg-sprite's. |
+| `pg_drop_replication_slot('<name>')` | Drops a stopped run's slot by hand. The server frees the WAL at its next checkpoint; the shadow and saved progress stay. | Disk is running out and you cannot resume now. |
+| `max_slot_wal_keep_size` (server) | PostgreSQL's own hard limit for every slot on the server. | A backstop above the run's own hard limit: more than three times the ceiling plus a catch-up cycle of the cluster's WAL (`decode.RetainedHardLimit` gives the first figure). Set lower, it invalidates healthy runs, which then reconcile and compare every chunk. It invalidates any slot past it, not only pg-sprite's. |
 
 ### Check the slot
 
 While a run goes, or after it stops:
 
-```sql copy Copy SQL
+```sql
 SELECT slot_name,
        active,
        wal_status,
@@ -190,8 +211,11 @@ SELECT slot_name,
        pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS unconfirmed,
        catalog_xmin
 FROM pg_replication_slots
-WHERE slot_name LIKE 'pgsprite_%';
+WHERE starts_with(slot_name, 'pgsprite_');
 ```
+
+The engine's own slots are named exactly `pgsprite_` and eight hex digits; another slot that
+starts with `pgsprite_` is not one it created.
 
 - `active = t`: a run is streaming from it. `retained` and `unconfirmed` rise while the copy runs
   and fall as it catches up.
@@ -200,7 +224,7 @@ WHERE slot_name LIKE 'pgsprite_%';
 
 To see which table a slot belongs to and where the run stopped:
 
-```sql copy Copy SQL
+```sql
 SELECT schema_name, table_name, slot_name, phase, watermark, updated_at
 FROM pgsprite.pgsprite_checkpoint
 ORDER BY updated_at DESC;
@@ -219,17 +243,23 @@ holding WAL while you decide.
 2. **Look for a transaction pinning the WAL** (for `wal-retained` and
    `wal-retained-hard-limit` first; it is worth a look for `stream-behind` too):
 
-   ```sql copy Copy SQL
+   ```sql
    SELECT pid, usename, application_name, state, xact_start, left(query, 80) AS query
    FROM pg_stat_activity
    WHERE backend_xid IS NOT NULL
+     AND application_name <> 'pg-sprite'
    ORDER BY xact_start;
 
    SELECT gid, prepared, owner, database FROM pg_prepared_xacts ORDER BY prepared;
    ```
 
-   End the transaction with its owner, or with `SELECT pg_terminate_backend(<pid>)`
-   (`COMMIT PREPARED` or `ROLLBACK PREPARED` for a prepared one).
+   The oldest `xact_start` is the one that pins the WAL. Ask its owner to finish it. If you
+   must end it yourself, `SELECT pg_terminate_backend(<pid>)` **rolls back everything that
+   transaction did**, and its client sees a dropped connection, so confirm with the owner
+   first. A prepared transaction has no session: its owner decides between `COMMIT PREPARED`
+   and `ROLLBACK PREPARED`. Once it ends, the slot's `restart_lsn` moves at the server's next
+   running-transactions record, about 15 seconds later, and the segments go at the next
+   checkpoint, not at once.
 3. **Resume** by running the same command again:
    - `stream-behind`: resume when the write rate drops. If the slot's unconfirmed WAL is already
      close to the ceiling, the resume can stop again at once; resume with a higher ceiling, above
@@ -255,26 +285,44 @@ next run has to redo:
 
 | Option | Frees | Next run | Cost |
 | --- | --- | --- | --- |
-| **Resume** (run the same command) | The WAL, as the run confirms it | Continues from the saved progress | None: nothing is copied twice. |
-| **Drop the slot by hand** | The WAL, at once | Reconciles, then continues | Compares every chunk already copied against the source and recopies the ones that differ. Takes time in proportion to the rows copied. The shadow keeps its disk. |
-| **`--restart SCHEMA.TABLE`** | The WAL, the shadow's disk, and the saved progress | Starts from the beginning | The whole copy again. |
+| **Resume** (run the same command) | The WAL, as the run confirms it | Continues from the saved progress | None: nothing is copied twice. Only after a stop whose detail says the same statement resumes (see [Your controls](#your-controls)). |
+| **Drop the slot by hand** | The WAL, at the server's next checkpoint | Reconciles, then continues | Compares every chunk already copied against the source and recopies the ones that differ. Takes time in proportion to the rows copied. The shadow keeps its disk. |
+| **`--restart SCHEMA.TABLE`** | The slot's WAL and the shadow's disk, but the same command then builds a new shadow and slot | Starts from the beginning | The whole copy again. |
 
 Dropping the slot by hand does **not** throw the schema change away: the shadow and the checkpoint
 row stay, and the next run creates a fresh slot and repairs the gap by comparison instead of
-copying everything again. Only `--restart` starts from scratch.
+copying everything again. Only `--restart` starts from scratch. On a volume that is nearly
+full, the hand drop is the one that gives room back: `--restart` starts a new copy and a new
+slot in the same command.
 
-To drop a stopped run's slot by hand:
+To drop a stopped run's slot by hand, first confirm no run is going:
 
-```sql copy Copy SQL
--- 1. Make sure no run is streaming from it (active must be false).
-SELECT slot_name, active, active_pid FROM pg_replication_slots WHERE slot_name = 'pgsprite_b32f988b';
+- `pg-sprite status` shows no `START_REPLICATION SLOT` query for the slot, and the checkpoint
+  row's `updated_at` (the query in [Check the slot](#check-the-slot)) has stopped advancing.
+- The slot reads `active = false`:
 
--- 2. Drop it. This frees the WAL at the next checkpoint.
+  ```sql
+  SELECT slot_name, active, active_pid FROM pg_replication_slots WHERE slot_name = 'pgsprite_b32f988b';
+  ```
+
+`active = false` alone is not enough: a run that is still going has short gaps with no stream
+open, between its catch-up and its swap. The server refuses to drop a slot that is held, so a
+drop cannot cut a stream, but a drop in such a gap makes the run reconcile. Then drop it:
+
+```sql
 SELECT pg_drop_replication_slot('pgsprite_b32f988b');
 ```
 
-Leave the publication of the same name in place; the next run uses it. If `active` is true, a
-run is still going: stop it with Ctrl-C or `SIGTERM` rather than dropping the slot under it.
+The server removes the WAL at its next checkpoint. To have it sooner, run `CHECKPOINT` (a
+superuser, or a role granted `pg_checkpoint` on PostgreSQL 15 and later). Leave the
+publication of the same name in place; the next run uses it.
+
+If `active` is true, look at what holds the slot. If a run is still going, stop it with Ctrl-C
+or `SIGTERM` rather than dropping the slot under it. If the process that ran it is gone
+(killed, or its host lost), the server's stream process for it holds the slot until
+`wal_sender_timeout` passes; see [The run was killed or the host died](#the-run-was-killed-or-the-host-died).
+Once you know that process is gone, `SELECT pg_terminate_backend(<active_pid>)` ends the
+stream process, which holds no data of its own, and the slot can be dropped.
 
 To start over, which discards everything the stopped run built:
 
@@ -285,6 +333,19 @@ pg-sprite migrate --copy-and-swap --free-disk 50GiB --restart public.orders \
 
 `--restart` runs the change again from the beginning in the same command; the CLI has no command
 that only discards. A library caller can discard without running with `Runner.Discard`.
+
+### The volume is already full
+
+When the volume fills, PostgreSQL cannot write WAL and the server shuts down, so none of the
+SQL above runs until it is back:
+
+1. **Free or add space first.** Grow the volume, or move files that are not the database's off
+   it. Never delete files in `pg_wal` by hand: the server needs them to start, and removing
+   them can lose committed data.
+2. **Start the server.**
+3. **Drop the slot by hand**, as in the previous section, and run `CHECKPOINT` so the server
+   removes the WAL now. The schema change is not lost: the next run reconciles.
+4. **Rerun** once the volume has room for the run, with `--free-disk` measured again.
 
 ### The run was killed or the host died
 
@@ -303,7 +364,16 @@ clean save:
 
 The slot lives on the primary that created it. If the database fails over to a standby the slot
 did not reach, the slot is gone on the new primary. The next run sees the slot missing and
-reconciles, as after a hand drop.
+reconciles, as after a hand drop. If the slot did reach the new primary (a synchronized slot),
+the next run resumes from it as after any stop; pg-sprite does not yet check that the slot's
+writer changed behind it, so it takes the slot's word.
+
+If the old primary comes back as a server of its own with its copy of the slot, that slot holds
+WAL there. `pg-sprite reap` keeps a slot while its own database's checkpoint row names it, and
+the old primary's copy of the row still does, so drop that slot there by hand, as above, once
+you have confirmed no run uses that server.
+[ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash) states the
+cleanup guarantee for slots no row owns.
 
 ### Clean up slots no run owns
 
@@ -320,3 +390,18 @@ engine did not create, so it never frees a stopped run's slot. It drops slots an
 only: shadow tables, checkpoint rows, and table data are never touched. Free a stopped run's slot by resuming,
 dropping it by hand, or `--restart`, as above. The full report is in
 [cli.md](cli.md#drop-orphan-slots).
+
+### For library hosts
+
+A host that runs copy-and-swap through `pkg/migrate` or `pkg/schemachange` can route on the same
+decisions as this page, from typed errors rather than the CLI's prose:
+
+- A ceiling stop is a `*decode.SlotLagExceededError`. Its `Cause` names one of the three causes,
+  and `Cause.RetainsWAL()` is true for the two where a transaction or the write rate pins the
+  WAL, the ones whose remedy is to look for the transaction, then raise the ceiling.
+- A lost slot is a `*decode.SlotLostError`, matched with `errors.Is(err, decode.ErrSlotLost)`;
+  the next run reconciles.
+- A resume refused because the old stream still holds the slot carries the refusal cause
+  `schemachange.CauseResumeSlotHeld` (`resume-slot-held`); retry after `wal_sender_timeout`.
+- `decode.RetainedHardLimit(ceiling)` is the retained WAL a run stops at regardless of grace,
+  the figure to size a volume and `max_slot_wal_keep_size` by.
