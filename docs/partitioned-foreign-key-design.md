@@ -89,6 +89,17 @@ key the build's static admission takes; one it does not, such as an `ON DELETE` 
 keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, class
 `environmental`, before anything runs. On 18 nothing is routed.
 
+The plan's routing reads the statement, not the catalog, so the refusals the build makes from the
+catalog are not in the plan. A foreign key to a partitioned, foreign, or view table, including
+one that references the partitioned table itself or one of its partitions, and a tree with a
+sub-partitioned partition plan as the build and are refused (`capability-boundary`) when the run
+reaches the statement; a tree with a foreign-table partition or a detach pending fails there with
+`foreign-table-partition` or `partition-detach-pending`. The build stops before it touches a
+partition, but the statements planned ahead of it have committed by then, so
+a desired file that also adds a column keeps the column, and the next plan is the foreign key
+alone, refused the same way. Leave such a foreign key out of the desired file until the build
+carries it.
+
 ## Routing from `migrate --alter`
 
 `migrate --alter` (`migrate.Run`) routes a lone `ADD FOREIGN KEY` without `NOT VALID` on a

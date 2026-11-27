@@ -298,6 +298,21 @@ func TestRoutePartitionedForeignKeyBuildsRoutesAForeignKeyThatWouldBeRefused(t *
 		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, st.Decisions[0].SaferSQLExecution)
 	})
 
+	// The imperative route does not gate on the build's shape admission:
+	// the dry run runs that admission after the routing, so a shape the build
+	// refuses meets the build's own refusal, which names the clause, instead
+	// of the partitioned-parent refusal, which says to upgrade the server.
+	t.Run("a shape the build refuses is still routed", func(t *testing.T) {
+		const onDeleteColumns = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region) ON DELETE SET NULL (account_id)`
+		r := fkReport()
+		r.Statements[0].SQL = onDeleteColumns
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, []string{onDeleteColumns}, r.Statements[0].ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, r.Statements[0].Execution)
+	})
+
 	t.Run("not routed before 18 is refused", func(t *testing.T) {
 		r := fkReport()
 		require.NoError(t, plan.RoutePartitionedParent(&r, 16))

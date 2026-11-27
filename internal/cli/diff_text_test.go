@@ -292,7 +292,7 @@ func TestPlanTextCommentsOutAPartitionedForeignKeyBuild(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, writePlanText(&out, report))
 	text := out.String()
-	assert.Contains(t, text, "-- only the engine runs this build, one partition at a time, without blocking writes: use pg-sprite migrate --desired or pg-sprite migrate --alter\n"+
+	assert.Contains(t, text, "-- only the engine runs this build, one partition at a time while the table keeps taking writes, then a brief ACCESS EXCLUSIVE lock on the referenced table: use pg-sprite migrate --desired or pg-sprite migrate --alter\n"+
 		"-- "+sql+";\n")
 	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
 		assert.True(t, line == "" || strings.HasPrefix(line, "--"), "no build is runnable as written: %q", line)

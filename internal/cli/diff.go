@@ -240,7 +240,7 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 		// Run as written, the statement validates every partition while it
 		// holds SHARE ROW EXCLUSIVE on the whole tree, so it is commented out
 		// like a refusal.
-		if _, err := fmt.Fprintln(out, "-- only the engine runs this build, one partition at a time, without blocking writes: use pg-sprite migrate --desired or pg-sprite migrate --alter"); err != nil {
+		if _, err := fmt.Fprintln(out, "-- only the engine runs this build, one partition at a time while the table keeps taking writes, then a brief ACCESS EXCLUSIVE lock on the referenced table: use pg-sprite migrate --desired or pg-sprite migrate --alter"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
