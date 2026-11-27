@@ -883,13 +883,27 @@ transaction: the step's own `LOCK TABLE` on the tree takes those locks first und
 `lock_timeout`, the step defers to another pass a leaf no leaf step covered (the statement would
 build its index under the lock), and after the statement it reads back that every leaf's adopted
 constraint is the one its leaf step recorded on the same index OID, rolling back with an invariant
-violation otherwise, so the window only changes the catalog; a primary key over a column the parent
-allows to be NULL is refused before any leaf is touched
-(`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitionedKeyParentStepLocks`,
+violation otherwise, so the window only changes the catalog, and the proof and the read-back read
+every leaf in a fixed number of statements, so the number of statements, and of round trips,
+under the lock does not grow with the number of partitions (the lock itself and each read still
+cover every partition); a primary key over a column the parent allows to be NULL is refused before any leaf is
+touched and again under the tree's lock, a NOT VALID not-null constraint (PostgreSQL 18) counting
+as allowing NULL (`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitionedKeyParentStepJudgesEveryLeaf`,
+`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`,
+`TestAddPartitionedKeyParentStepRoundTrips`, `TestAddPartitionedKeyParentStepLocks`,
 `TestAddPartitionedKeyPrimaryKeyOnline`,
 `TestAddPartitionedKeyRefusals/a_primary_key_over_a_column_the_parent_allows_to_be_NULL`).
+The leaf step of an online partitioned `FOREIGN KEY` (`ensureLeafForeignKey`, unexported) runs
+the leaf's `ADD FOREIGN KEY ... NOT VALID` in a brief transaction under both bounds: it holds
+`SHARE ROW EXCLUSIVE` on the leaf and then on the referenced table, the order the server's own
+statement takes them, and scans nothing; its `VALIDATE CONSTRAINT` holds `SHARE UPDATE EXCLUSIVE`
+on the leaf and `ROW SHARE` on the referenced table under the caller's `ValidateBudget`
+(`TestLeafForeignKeyStatementsLockModes`,
+`TestEnsureLeafForeignKeyTakesTheLeafBeforeTheReferencedTable`,
+`TestEnsureLeafForeignKeyAddGivesUpAtTheLockBudgetBehindAWriter`,
+`TestEnsureLeafForeignKeyValidateGivesUpAtItsLockTimeout`).
 The online partitioned `FOREIGN KEY` (`AddPartitionedForeignKey`) takes `SHARE ROW EXCLUSIVE` on
-one leaf and on the referenced table only for the leaf's `ADD FOREIGN KEY ... NOT VALID`, in a
+one leaf and then on the referenced table only for the leaf's `ADD FOREIGN KEY ... NOT VALID`, in a
 brief transaction under both bounds; the leaf's `VALIDATE CONSTRAINT` scans under `SHARE UPDATE
 EXCLUSIVE`, bounded by the caller's `ValidateBudget`, while writers keep committing
 (`TestEnsureLeafForeignKeyValidatesUnderAnOpenWriter`, `TestAddPartitionedForeignKeyOnline`). The
@@ -1576,18 +1590,26 @@ identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-
 `ADD PRIMARY KEY` or `ADD UNIQUE` on the preflighted partitioned table and renders the parent's
 statement from the admitted kind, name, and columns alone; it refuses a tree holding a partition
 with its detach pending before any leaf step, since a key given to a partition leaving the tree
-would not stay the parent's (`TestAddPartitionedKeyRefusals/a_partition_with_its_detach_pending`);
+would not stay the parent's (`TestAddPartitionedKeyRefusals/a_partition_with_its_detach_pending`),
+and refuses one again under the tree's lock;
 under the tree's lock, before that statement, it proves the parent's name still resolves to the
-table it resolved and that every leaf has exactly one constraint of the requested key, attached
-to nothing, which is the constraint and index its leaf step recorded
-(`TestAddPartitionedKeyParentStepFailsClosed`). `AddPartitionedForeignKey` admits only a named
-`ADD FOREIGN KEY` on the preflighted partitioned table and renders every statement from
-the admitted columns, referenced table and columns, and rules alone; each leaf statement runs
-under a lock that holds the leaf in the tree and, for the `ADD`, the referenced table under its
-name; under the tree's lock, before the parent's statement, it proves the parent's and the
-referenced table's names still resolve to the tables it resolved and that every leaf has exactly
-one foreign key of the requested definition, validated and attached to nothing, which is the one
-its leaf step recorded (`TestAddPartitionedForeignKeyParentStepFailsClosed`).
+table it resolved and that every leaf has exactly one constraint of the requested key, not
+deferrable and attached to nothing, which is the constraint and index its leaf step recorded
+(`TestAddPartitionedKeyParentStepFailsClosed`,
+`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`). The leaf step of an online partitioned
+`FOREIGN KEY` (`ensureLeafForeignKey`, unexported) locks the leaf `SHARE UPDATE EXCLUSIVE` in the
+transaction of its `ADD` and of its `VALIDATE`, proves the leaf in the tree, and decides again from
+the leaf's foreign keys before each statement and after it: the leaf has exactly one foreign key
+of the requested definition, on the referenced table's OID the build resolved, adopted by nothing,
+which is the one the step decided on (`TestEnsureLeafForeignKeyFindsOneThatLandsAfterTheRead`,
+`TestEnsureLeafForeignKeyRefusesASecondThatLandsBeforeTheValidate`). `AddPartitionedForeignKey`
+admits only a named `ADD FOREIGN KEY` on the preflighted partitioned table and renders every
+statement from the admitted columns, referenced table and columns, and rules alone; each leaf
+statement runs under a lock that holds the leaf in the tree and, for the `ADD`, the referenced
+table under its name; under the tree's lock, before the parent's statement, it proves the parent's
+and the referenced table's names still resolve to the tables it resolved and that every leaf has
+exactly one foreign key of the requested definition, validated and attached to nothing, which is
+the one its leaf step recorded (`TestAddPartitionedForeignKeyParentStepFailsClosed`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
