@@ -118,6 +118,13 @@ func partitionedForeignKeyFailureVerdict(st statement.Statement, err error) verd
 			"cannot be established from the client; inspect the foreign keys of %s and its partitions, then run the same statement again to resume", v.Table)
 		return v
 	}
+	if executor.Code(v.Code) == executor.CodePartitionedForeignKeyNotValidSupported {
+		// Permanent for the build, but not for this front door: Run routes a
+		// rerun on PostgreSQL 18 to the ordinary NOT VALID then VALIDATE route.
+		v.Detail = fmt.Sprintf("the server became PostgreSQL 18 or later after the statement was routed to the partitioned foreign key build, "+
+			"which that version does not need; run the same statement again, and it takes the ordinary NOT VALID then VALIDATE route on %s", v.Table)
+		return v
+	}
 	if executor.Code(v.Code).Permanent() {
 		// A permanent cause fails a rerun the same way until it is fixed.
 		v.Detail = fmt.Sprintf("the partitioned foreign key build stopped on a cause that a rerun does not clear (%s); steps before the stop may have committed, "+
