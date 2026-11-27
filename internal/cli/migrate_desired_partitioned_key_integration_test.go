@@ -268,3 +268,60 @@ CREATE TABLE events (
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, result.Reason)
 	assert.Zero(t, indexCountIn(t, pool, schema), "the refusal built no index")
 }
+
+// A desired file that adds a column and a primary key to a table with a
+// sub-partitioned partition plans the column add ahead of the key build.
+// The build refuses such a tree from the catalog alone, so the plan is
+// refused whole before anything runs, in the dry run and the run alike: had
+// the run reached the build, the column add would already have committed and
+// the table could never converge.
+func TestMigrateDesiredRefusesAKeyOnASubPartitionedTableBeforeAnythingRuns(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (
+		    id         bigint NOT NULL,
+		    created_at date NOT NULL
+		) PARTITION BY RANGE (created_at);
+		CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+		    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')
+		    PARTITION BY RANGE (created_at);
+		CREATE TABLE %[1]s.events_2026_01 PARTITION OF %[1]s.events_2026
+		    FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')`, schema))
+	require.NoError(t, err)
+	const desired = `
+CREATE TABLE events (
+    id         bigint NOT NULL,
+    created_at date NOT NULL,
+    note       text,
+    CONSTRAINT events_pkey PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);`
+
+	report := desiredKeyPlan(t, url, schema, desired)
+	require.Len(t, report.Statements, 2)
+	assert.Equal(t, schemadiff.ChangeAddColumn, report.Statements[0].Kind, "the column add is planned ahead of the key")
+	assert.Equal(t, planner.ExecutionPartitionedKeyBuild, report.Statements[1].Execution)
+
+	dryRun, dryRunErr := runDesiredKey(t, url, schema, desired, "--dry-run")
+	require.ErrorIs(t, dryRunErr, verdict.ErrRefused)
+	result, err := runDesiredKey(t, url, schema, desired)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	assert.Equal(t, verdict.OutcomeRefused, result.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, result.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, result.Class)
+	assert.Empty(t, result.Verdicts, "no statement was attempted")
+	assert.Equal(t, result, dryRun, "the dry run must report the refusal the run reports")
+
+	var notes int
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT count(*)
+		  FROM pg_attribute
+		 WHERE attrelid = format('%I.events', $1::text)::regclass
+		   AND attname = 'note'
+		   AND NOT attisdropped`, schema).Scan(&notes))
+	assert.Zero(t, notes, "the column add planned ahead of the key did not commit")
+	assert.Zero(t, indexCountIn(t, pool, schema), "the refusal built no index")
+}

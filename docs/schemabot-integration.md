@@ -814,8 +814,8 @@ step rolls back, every partition's foreign key stays, and the rerun adopts them.
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
 as this build; the plan statement carries `execution: partitioned-index-build`. The same wiring
-serves the key build, which `migrate.Run` alone routes a lone `ADD PRIMARY KEY` or `ADD UNIQUE`
-on a partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
+serves the key build, which both route a lone `ADD PRIMARY KEY` or `ADD UNIQUE` on a
+partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
 a foreign key on a partitioned table to before PostgreSQL 18 (`partitioned-foreign-key-build`).
 Each build takes
 the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
@@ -862,6 +862,14 @@ the build refuses, such as a `DEFERRABLE` one, is not routed: its plan statement
 with `unsupported-partitioned-parent`. A primary key over a column the table allows to be `NULL`
 is planned after the `SET NOT NULL` the file implies, so `partitioned-key-nullable-column` is
 not reached from a desired file unless the column loses `NOT NULL` between the two statements.
+`migrate.RunDesired` also runs the build's catalog admission for every key the plan routes
+before its first statement (`migrate.AdmitPlanPartitionedKeys`, which `migrate --desired
+--dry-run` calls too): a key that lacks a partition key column, or a tree with a sub-partitioned
+partition, refuses the whole plan with the verdict the table below gives it, so a statement
+planned ahead of the key never commits first. A host that assembles its own report routes a
+desired plan's keys with `plan.RouteDesiredPartitionedKeyBuilds`, which routes only shapes the
+build admits; `plan.RoutePartitionedKeyBuilds` is the imperative dry run's router, which routes
+every key and relies on the build's admission afterward.
 A forced run meets
 cause `parent-blocking-index-build`, and `ADD CONSTRAINT ... USING INDEX` meets
 `parent-index-adoption`, as before.
