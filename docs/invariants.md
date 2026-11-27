@@ -1802,8 +1802,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   on its own. An unforced lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned parent
   through `migrate --alter` is not refused either: it runs as the partitioned key build (each
   partition's key built concurrently and constrained, then the parent's `ADD CONSTRAINT` adopts
-  them). On PostgreSQL before 18, an unforced lone named `ADD FOREIGN KEY` on a partitioned
-  parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
+  them); a key a desired file adds runs as the same build when the build admits its shape
+  (`plan.RouteDesiredPartitionedKeyBuilds`, gated by `executor.AdmitPartitionedKeyShape`), one it
+  does not keeps the planner's steps and is refused, and a key the build's catalog admission
+  refuses (a partition key column left out, a sub-partitioned partition) refuses the whole
+  desired plan before its first statement. On PostgreSQL before 18, an unforced lone named
+  `ADD FOREIGN KEY` on a partitioned parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
   build (each partition's foreign key added `NOT VALID` and validated, then the parent's
   `ADD CONSTRAINT` adopts them); a foreign key a desired file adds runs as the same build when
   the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`), and one it does
@@ -1817,6 +1821,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   sequence-executor admission, which refuses every index-building step on a parent because each
   build is its own executor entry point (`BuildPartitionedIndexAsStep` for the index,
   `AddPartitionedKeyAsStep` for the key, `AddPartitionedForeignKeyAsStep` for the foreign key);
+  for a desired key, the routing in `diffplan.Plan` and the whole-plan admission
+  `migrate.AdmitPlanPartitionedKeys`, which `RunDesired` and the desired dry run call;
   the concurrent drop by preflight and plan reporting,
   since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
   the relation kind, and `GateWithCatalog` in `pkg/migrate` for the imperative `DROP INDEX`.
