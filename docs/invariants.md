@@ -902,6 +902,20 @@ on the leaf and `ROW SHARE` on the referenced table under the caller's `Validate
 `TestEnsureLeafForeignKeyTakesTheLeafBeforeTheReferencedTable`,
 `TestEnsureLeafForeignKeyAddGivesUpAtTheLockBudgetBehindAWriter`,
 `TestEnsureLeafForeignKeyValidateGivesUpAtItsLockTimeout`).
+The online partitioned `FOREIGN KEY` (`AddPartitionedForeignKey`) takes `SHARE ROW EXCLUSIVE` on
+one leaf and then on the referenced table only for the leaf's `ADD FOREIGN KEY ... NOT VALID`, in a
+brief transaction under both bounds; the leaf's `VALIDATE CONSTRAINT` scans under `SHARE UPDATE
+EXCLUSIVE`, bounded by the caller's `ValidateBudget`, while writers keep committing
+(`TestEnsureLeafForeignKeyValidatesUnderAnOpenWriter`, `TestAddPartitionedForeignKeyOnline`). The
+parent's plain `ADD FOREIGN KEY` takes `SHARE ROW EXCLUSIVE` on the parent and every leaf, and
+`ACCESS EXCLUSIVE` on the referenced table, in one brief transaction: the step's own `LOCK TABLE`
+takes the tree's locks first under `lock_timeout`, a leaf no leaf step covered defers the statement
+to another pass (it would validate that leaf under the locks), for a bounded number of passes
+(`TestAddPartitionedForeignKeySettlesAPartitionCreatedMidRun`,
+`TestAddPartitionedForeignKeyRunsOutOfPasses`), and after the statement the step
+reads back that every leaf's adopted foreign key is the one its leaf step validated, under the
+same OID, rolling back with an invariant violation otherwise
+(`TestAddPartitionedForeignKeyParentStepLocks`, `TestAddPartitionedForeignKeyParentStepFailsClosed`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1590,7 +1604,20 @@ transaction of its `ADD` and of its `VALIDATE`, proves the leaf in the tree, and
 the leaf's foreign keys before each statement and after it: the leaf has exactly one foreign key
 of the requested definition, on the referenced table's OID the build resolved, adopted by nothing,
 which is the one the step decided on (`TestEnsureLeafForeignKeyFindsOneThatLandsAfterTheRead`,
-`TestEnsureLeafForeignKeyRefusesASecondThatLandsBeforeTheValidate`).
+`TestEnsureLeafForeignKeyRefusesASecondThatLandsBeforeTheValidate`). `AddPartitionedForeignKey`
+admits only a named `ADD FOREIGN KEY` on the preflighted partitioned table and renders every
+statement from the admitted columns, referenced table and columns, and rules alone; each leaf
+statement runs under a lock that holds the leaf in the tree, and the `ADD`'s read-back proves the
+referenced table by OID; it refuses a referenced table that is a partition of the target
+(`TestAddPartitionedForeignKeyRefusals/a_referenced_table_that_is_a_partition_of_the_target`);
+under the tree's lock, before the parent's statement, it proves the parent's
+and the referenced table's names still resolve to the tables it resolved and that every leaf has
+exactly one foreign key of the requested definition, validated and attached to nothing, which is
+the one its leaf step recorded, refusing a leaf changed since its leaf step as
+`partitioned-foreign-key-leaf-changed`, which a rerun gets past
+(`TestAddPartitionedForeignKeyParentStepFailsClosed`); a rerun reports the parent's foreign key
+done only when every partition carries one it adopted
+(`TestRequireAdoptedFKEverywhereRefusesAPartitionTheParentsDidNotAdopt`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
