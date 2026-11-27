@@ -55,7 +55,7 @@ func TestRunDesiredNarrowedPrimaryKeyOverDuplicateRowsLeavesNoKey(t *testing.T) 
 		FROM pg_constraint con
 		JOIN pg_class rel ON rel.oid = con.conrelid
 		JOIN pg_namespace n ON n.oid = rel.relnamespace
-		WHERE n.nspname = $1 AND rel.relname = 'accounts'`, schema).Scan(&constraints))
+		WHERE n.nspname = $1 AND rel.relname = 'accounts' AND con.contype IN ('p', 'u')`, schema).Scan(&constraints))
 	assert.Zero(t, constraints, "the old key was dropped and the new one was never added")
 	var valid bool
 	require.NoError(t, pool.QueryRow(t.Context(), `
