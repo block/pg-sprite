@@ -100,6 +100,45 @@ const (
 	// holding the build's table lock started, so the build cannot confirm
 	// the lock is its own; nothing was created.
 	CodeTableLockUnconfirmed Code = "table-lock-unconfirmed"
+	// CodePartitionedForeignKeyNameTaken: the name a partitioned table's
+	// foreign key needs on a partition is held by another constraint; the
+	// occupant is left for an operator.
+	CodePartitionedForeignKeyNameTaken Code = "partitioned-foreign-key-name-taken"
+	// CodePartitionedForeignKeyConflict: a partition already has foreign
+	// keys of the requested definition the parent's could not adopt as the
+	// only one; nothing was added to it.
+	CodePartitionedForeignKeyConflict Code = "partitioned-foreign-key-conflict"
+	// CodePartitionedForeignKeyReferencedTable: the foreign key references a
+	// table that is not a plain table outside the partition tree; nothing
+	// was created.
+	CodePartitionedForeignKeyReferencedTable Code = "partitioned-foreign-key-referenced-table"
+	// CodeNotAddForeignKey: the statement handed to the partitioned foreign
+	// key build is not one ALTER TABLE with a single ADD FOREIGN KEY.
+	CodeNotAddForeignKey Code = "not-add-foreign-key"
+	// CodePartitionedForeignKeyUnsupportedShape: the partitioned foreign key
+	// statement names no constraint or carries a clause the build cannot
+	// carry to every partition; nothing was created.
+	CodePartitionedForeignKeyUnsupportedShape Code = "partitioned-foreign-key-unsupported-shape"
+	// CodePartitionedForeignKeyParentConflict: the partitioned table already
+	// has another constraint under the requested name, or the requested
+	// foreign key under another name; nothing was created.
+	CodePartitionedForeignKeyParentConflict Code = "partitioned-foreign-key-parent-conflict"
+	// CodePartitionedForeignKeySubPartitioned: a partition of the target is
+	// itself partitioned, which the partitioned foreign key build does not
+	// take; nothing was created.
+	CodePartitionedForeignKeySubPartitioned Code = "partitioned-foreign-key-sub-partitioned"
+	// CodePartitionedForeignKeyNotValidSupported: the server accepts NOT
+	// VALID on a partitioned table's foreign key, so the ordinary NOT VALID
+	// then VALIDATE route adds it online; nothing was created.
+	CodePartitionedForeignKeyNotValidSupported Code = "partitioned-foreign-key-not-valid-supported"
+	// CodePartitionedForeignKeyUnsettled: partitions kept appearing without
+	// the foreign key until the build ran out of passes; a rerun resumes.
+	CodePartitionedForeignKeyUnsettled Code = "partitioned-foreign-key-unsettled"
+	// CodePartitionedForeignKeyLeafChanged: a partition's foreign key
+	// changed between its leaf step and the parent's step, which rolled
+	// back before the parent's statement; every partition's foreign key
+	// stays, and a rerun decides each partition again.
+	CodePartitionedForeignKeyLeafChanged Code = "partitioned-foreign-key-leaf-changed"
 	// CodePartitionDetachPending: the partition tree holds a partition
 	// whose concurrent detach did not finish, so no index can be attached
 	// for it.
@@ -351,6 +390,16 @@ func Codes() []Code {
 		CodeForeignTablePartition,
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
+		CodePartitionedForeignKeyNameTaken,
+		CodePartitionedForeignKeyConflict,
+		CodePartitionedForeignKeyReferencedTable,
+		CodeNotAddForeignKey,
+		CodePartitionedForeignKeyUnsupportedShape,
+		CodePartitionedForeignKeyParentConflict,
+		CodePartitionedForeignKeySubPartitioned,
+		CodePartitionedForeignKeyNotValidSupported,
+		CodePartitionedForeignKeyUnsettled,
+		CodePartitionedForeignKeyLeafChanged,
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
 		CodeDetachInterrupted,
@@ -426,6 +475,14 @@ func (c Code) Permanent() bool {
 		CodeForeignTablePartition,
 		CodeUniqueIndexPartitionKey,
 		CodeTableLockUnconfirmed,
+		CodePartitionedForeignKeyNameTaken,
+		CodePartitionedForeignKeyConflict,
+		CodePartitionedForeignKeyReferencedTable,
+		CodeNotAddForeignKey,
+		CodePartitionedForeignKeyUnsupportedShape,
+		CodePartitionedForeignKeyParentConflict,
+		CodePartitionedForeignKeySubPartitioned,
+		CodePartitionedForeignKeyNotValidSupported,
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
 		CodePartitionedIndexTablespace,
@@ -554,6 +611,30 @@ func sentinelCode(err error) Code {
 		return CodeUniqueIndexPartitionKey
 	case errors.Is(err, ErrTableLockUnconfirmed):
 		return CodeTableLockUnconfirmed
+	case errors.Is(err, ErrPartitionedForeignKeyNameTaken):
+		return CodePartitionedForeignKeyNameTaken
+	case errors.Is(err, ErrPartitionedForeignKeyConflict):
+		return CodePartitionedForeignKeyConflict
+	case errors.Is(err, ErrPartitionedForeignKeyReferencedTable):
+		return CodePartitionedForeignKeyReferencedTable
+	case errors.Is(err, ErrNotAddForeignKey):
+		return CodeNotAddForeignKey
+	case errors.Is(err, ErrPartitionedForeignKeyUnsupportedShape):
+		return CodePartitionedForeignKeyUnsupportedShape
+	case errors.Is(err, ErrPartitionedForeignKeyParentConflict):
+		return CodePartitionedForeignKeyParentConflict
+	case errors.Is(err, ErrPartitionedForeignKeySubPartitioned):
+		return CodePartitionedForeignKeySubPartitioned
+	case errors.Is(err, ErrPartitionedForeignKeyNotValidSupported):
+		return CodePartitionedForeignKeyNotValidSupported
+	case errors.Is(err, ErrPartitionedForeignKeyUnsettled):
+		return CodePartitionedForeignKeyUnsettled
+	case errors.Is(err, ErrPartitionedForeignKeyLeafChanged):
+		return CodePartitionedForeignKeyLeafChanged
+	case errors.Is(err, ErrPartitionedForeignKeyViolation):
+		// The rows break the foreign key: the same fault the code names for
+		// any statement, corrected in the data before a rerun.
+		return CodeDataFault
 	case errors.Is(err, ErrPartitionDetachPending):
 		return CodePartitionDetachPending
 	case errors.Is(err, ErrDetachDefaultPartition):

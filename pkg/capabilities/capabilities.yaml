@@ -218,6 +218,18 @@ rows:
       migrate: supported
       diff: supported
     reason_notes: "Supported on version 18 and later; refused on 14–17 with an environmental class"
+  - id: add-foreign-key-on-a-partitioned-parent
+    area: "constraints"
+    operation: "`ADD FOREIGN KEY` on a **partitioned parent**"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_planned_flow"
+    maturity: "ga"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "PostgreSQL 14–17 refuse `ADD FOREIGN KEY ... NOT VALID` on a partitioned table, and the plain statement validates every partition under `SHARE ROW EXCLUSIVE` on the whole tree, so on those versions a lone named `ADD CONSTRAINT name FOREIGN KEY (columns) REFERENCES schema.table (columns)` from `migrate --alter`, or a foreign key a desired file adds, runs as the partitioned foreign key build: each partition is given the foreign key `NOT VALID` and validated under `SHARE UPDATE EXCLUSIVE` while writes continue, then the parent's plain `ADD CONSTRAINT` adopts them in one brief transaction that holds `ACCESS EXCLUSIVE` on the referenced table. A rerun resumes from the partitions already finished. On PostgreSQL 18 the ordinary `NOT VALID` then `VALIDATE` sequence runs instead (previous row). `--force` runs the plain statement as written under the brief budgets. Every refusal and failure code, with its class, is in [the integration guide's outcomes table](schemabot-integration.md#outcomes-of-a-partitioned-foreign-key-build-1), and which of them a desired plan reports only when it runs is in [partitioned-foreign-key-design.md](partitioned-foreign-key-design.md#routing-from-a-desired-file)"
   - id: exclude-constraints-and-unrecognized-constraint-forms
     area: "constraints"
     operation: "`EXCLUDE` constraints (and unrecognized constraint forms)"
@@ -449,7 +461,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "A desired file may declare a foreign key to an unqualified table that exists in the target schema, or to its own table. `diff` shows a matching foreign key as no change. A key the file adds to a live table plans as `add-foreign-key` and runs as two autocommitted steps: `ADD CONSTRAINT ... NOT VALID`, a brief `SHARE ROW EXCLUSIVE` lock on both tables that checks no existing row, then `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing. A row that breaks the key fails the validation with the key left `NOT VALID`, still enforced for new writes; once the rows are fixed, the next plan is that one validation. A `CREATE TABLE` that declares a foreign key runs as written, since the new table is empty, under the same brief lock budget as every create. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table. Export refuses both sides by default. A caller that opts in with `RenderOptions.ForeignKeys` gets each table's own foreign keys written out, and must render the referencing tables too, because an incoming FK lives in the referencing table's file. Export still refuses an FK into another schema, an FK from a table to itself whose referenced columns have no immediate primary key or `UNIQUE` constraint (only a standalone unique index, or only a deferrable constraint beside one), and an FK on a table rendered with `RenderOptions.RowSecurity` (`statement.ErrRowSecurityForeignKey`)"
+    reason_notes: "A desired file may declare a foreign key to an unqualified table that exists in the target schema, or to its own table. `diff` shows a matching foreign key as no change. A key the file adds to a live table plans as `add-foreign-key` and runs as two autocommitted steps: `ADD CONSTRAINT ... NOT VALID`, a brief `SHARE ROW EXCLUSIVE` lock on both tables that checks no existing row, then `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing. A row that breaks the key fails the validation with the key left `NOT VALID`, still enforced for new writes; once the rows are fixed, the next plan is that one validation. On a partitioned table before PostgreSQL 18 the key plans and runs as the partitioned foreign key build instead (see the `ADD FOREIGN KEY` on a partitioned parent row). A `CREATE TABLE` that declares a foreign key runs as written, since the new table is empty, under the same brief lock budget as every create. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table. Export refuses both sides by default. A caller that opts in with `RenderOptions.ForeignKeys` gets each table's own foreign keys written out, and must render the referencing tables too, because an incoming FK lives in the referencing table's file. Export still refuses an FK into another schema, an FK from a table to itself whose referenced columns have no immediate primary key or `UNIQUE` constraint (only a standalone unique index, or only a deferrable constraint beside one), and an FK on a table rendered with `RenderOptions.RowSecurity` (`statement.ErrRowSecurityForeignKey`)"
   - id: declarative-foreign-key-drop
     area: "declarative_model"
     operation: "Foreign keys a desired file no longer declares"

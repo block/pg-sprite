@@ -179,11 +179,11 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 }
 
 // admissionSentinels is the closed set of the sequence executor's and the
-// partitioned index build's static admission refusals, decided from the
-// statement's text before anything runs, and the build's refusal of a unique
-// index that misses a partition key, decided from the catalog before the
-// build creates anything, that the imperative front door maps
-// to a refusal verdict.
+// partitioned index and foreign key builds' static admission refusals,
+// decided from the statement's text before anything runs, and the build's
+// refusal of a unique index that misses a partition key, decided from the
+// catalog before the build creates anything, that the imperative front door
+// maps to a refusal verdict.
 // admissionRefusal walks this set for membership before it classifies, so
 // the predicate and the classification cannot disagree.
 func admissionSentinels() []error {
@@ -193,10 +193,47 @@ func admissionSentinels() []error {
 		executor.ErrIfNotExistsUnsupported,
 		executor.ErrPartitionedIndexTablespace,
 		executor.ErrUniqueIndexPartitionKey,
+		executor.ErrNotAddForeignKey,
+		executor.ErrPartitionedForeignKeyUnsupportedShape,
 		executor.ErrDetachDefaultPartition,
 		executor.ErrNotAddKeyConstraint,
 		executor.ErrPartitionedKeyUnsupportedShape,
 	}
+}
+
+// partitionedForeignKeySentinels is the closed set of the partitioned
+// foreign key build's catalog refusals that the imperative front door maps to
+// a refusal verdict when the build returned them before it gave any
+// partition the foreign key (partitionedForeignKeyRefusalVerdict checks
+// that): the parent stands in the way, the referenced table is one the build
+// does not take, or a partition is itself partitioned. The build reads these
+// before it touches a partition, and the tree again on a later pass, so the
+// same error after a partition got its foreign key is a failed verdict
+// instead.
+func partitionedForeignKeySentinels() []error {
+	return []error{
+		executor.ErrPartitionedForeignKeyParentConflict,
+		executor.ErrPartitionedForeignKeyReferencedTable,
+		executor.ErrPartitionedForeignKeySubPartitioned,
+	}
+}
+
+// partitionedForeignKeyRefusal classifies a partitioned foreign key build's
+// catalog refusal. A parent that already has another constraint under the
+// name, or the same foreign key under another name, is a catalog collision:
+// environmental, since the same statement runs once the table changes. A
+// referenced table that is partitioned, foreign, a view, or inside the tree,
+// and a sub-partitioned partition, are shapes the build does not take yet: a
+// capability boundary. ok is false for an error outside
+// partitionedForeignKeySentinels().
+func partitionedForeignKeyRefusal(err error) (verdict.Refusal, bool) {
+	if !isInSentinelSet(err, partitionedForeignKeySentinels()) {
+		return verdict.Refusal{}, false
+	}
+	if errors.Is(err, executor.ErrPartitionedForeignKeyParentConflict) {
+		return verdict.Environmental(verdict.ReasonUnsupportedStatement), true
+	}
+	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 }
 
 // admissionRefusal classifies an imperative admission refusal: decided from

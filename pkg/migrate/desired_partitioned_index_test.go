@@ -63,4 +63,20 @@ func TestAdmitPartitionedIndexBuild(t *testing.T) {
 		assert.Equal(t, "planned statement 1 of 1 adds a key constraint to a partitioned table and Options.Connection is not configured; nothing was executed",
 			stopped.Detail)
 	})
+
+	t.Run("a plan with the foreign key build and no connection stops with the sentinel", func(t *testing.T) {
+		report := plan.Report{Schema: "billing", Table: "orders", Statements: []plan.Statement{
+			{
+				SQL:       "ALTER TABLE billing.orders ADD CONSTRAINT orders_account_fk FOREIGN KEY (account_id) REFERENCES billing.accounts (id)",
+				Backend:   router.BackendNative,
+				Execution: planner.ExecutionPartitionedForeignKeyBuild,
+			},
+		}}
+		stopped, admitted, err := admitPartitionedIndexBuild(t.Context(), nil, report, Options{})
+		require.ErrorIs(t, err, ErrConnectionRequired)
+		assert.False(t, admitted)
+		assert.Equal(t, verdict.OutcomeFailed, stopped.Outcome)
+		assert.Empty(t, stopped.Verdicts, "no statement was attempted")
+		assert.Contains(t, stopped.Detail, "planned statement 1 of 1 adds a foreign key to a partitioned table")
+	})
 }

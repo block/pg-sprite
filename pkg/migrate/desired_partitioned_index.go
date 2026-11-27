@@ -13,8 +13,9 @@ import (
 )
 
 // admitPartitionedIndexBuild is the part of desired-state admission for a
-// plan that builds an index on a partitioned table, or adds a primary key or
-// unique constraint to one as the partitioned key build. Either build needs
+// plan that builds an index on a partitioned table, or adds a primary key,
+// unique constraint or foreign key to one as the partitioned key or
+// foreign key build. Every such build needs
 // Options.Connection, wired to the pool's database, which only a run that
 // reaches the statement would otherwise find out. Prove it here, before any
 // statement runs, so a missing or misdirected connection stops the plan whole
@@ -54,8 +55,8 @@ func admitPartitionedIndexBuild(ctx context.Context, pool *pgxpool.Pool, report 
 }
 
 // firstPartitionedBuild returns the position of the first planned statement
-// that runs as the partitioned index build or the partitioned key build,
-// what it does in words, and whether there is one.
+// that runs as the partitioned index, key or foreign key build, what it
+// does in words, and whether there is one.
 func firstPartitionedBuild(report plan.Report) (int, string, bool) {
 	for i, ps := range report.Statements {
 		switch ps.Execution {
@@ -63,6 +64,8 @@ func firstPartitionedBuild(report plan.Report) (int, string, bool) {
 			return i, "builds an index on a partitioned table", true
 		case planner.ExecutionPartitionedKeyBuild:
 			return i, "adds a key constraint to a partitioned table", true
+		case planner.ExecutionPartitionedForeignKeyBuild:
+			return i, "adds a foreign key to a partitioned table", true
 		}
 	}
 	return 0, "", false

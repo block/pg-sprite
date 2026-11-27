@@ -237,6 +237,18 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 		// on the whole tree, so it is commented out like a refusal.
 		return writeEngineOnlyBuild(out, ps)
 	}
+	if ps.Execution == planner.ExecutionPartitionedForeignKeyBuild {
+		// Run as written, the statement validates every partition while it
+		// holds SHARE ROW EXCLUSIVE on the whole tree, so it is commented out
+		// like a refusal.
+		if _, err := fmt.Fprintln(out, "-- only the engine runs this build, one partition at a time while the table keeps taking writes, then a brief ACCESS EXCLUSIVE lock on the referenced table: use pg-sprite migrate --desired or pg-sprite migrate --alter"); err != nil {
+			return fmt.Errorf("write plan: %w", err)
+		}
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
+			return fmt.Errorf("write plan: %w", err)
+		}
+		return nil
+	}
 	if len(ps.ExecSQL) > 0 && ps.ExecSQL[0] != ps.SQL {
 		if _, err := fmt.Fprintf(out, "-- safer form the engine would run (not equivalent; each step in its own transaction — see %s):\n",
 			onlineDDLReferenceURL); err != nil {

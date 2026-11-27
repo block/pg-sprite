@@ -893,6 +893,29 @@ as allowing NULL (`TestAddPartitionedKeyParentStepFailsClosed`, `TestAddPartitio
 `TestAddPartitionedKeyParentStepRoundTrips`, `TestAddPartitionedKeyParentStepLocks`,
 `TestAddPartitionedKeyPrimaryKeyOnline`,
 `TestAddPartitionedKeyRefusals/a_primary_key_over_a_column_the_parent_allows_to_be_NULL`).
+The leaf step of an online partitioned `FOREIGN KEY` (`ensureLeafForeignKey`, unexported) runs
+the leaf's `ADD FOREIGN KEY ... NOT VALID` in a brief transaction under both bounds: it holds
+`SHARE ROW EXCLUSIVE` on the leaf and then on the referenced table, the order the server's own
+statement takes them, and scans nothing; its `VALIDATE CONSTRAINT` holds `SHARE UPDATE EXCLUSIVE`
+on the leaf and `ROW SHARE` on the referenced table under the caller's `ValidateBudget`
+(`TestLeafForeignKeyStatementsLockModes`,
+`TestEnsureLeafForeignKeyTakesTheLeafBeforeTheReferencedTable`,
+`TestEnsureLeafForeignKeyAddGivesUpAtTheLockBudgetBehindAWriter`,
+`TestEnsureLeafForeignKeyValidateGivesUpAtItsLockTimeout`).
+The online partitioned `FOREIGN KEY` (`AddPartitionedForeignKey`) takes `SHARE ROW EXCLUSIVE` on
+one leaf and then on the referenced table only for the leaf's `ADD FOREIGN KEY ... NOT VALID`, in a
+brief transaction under both bounds; the leaf's `VALIDATE CONSTRAINT` scans under `SHARE UPDATE
+EXCLUSIVE`, bounded by the caller's `ValidateBudget`, while writers keep committing
+(`TestEnsureLeafForeignKeyValidatesUnderAnOpenWriter`, `TestAddPartitionedForeignKeyOnline`). The
+parent's plain `ADD FOREIGN KEY` takes `SHARE ROW EXCLUSIVE` on the parent and every leaf, and
+`ACCESS EXCLUSIVE` on the referenced table, in one brief transaction: the step's own `LOCK TABLE`
+takes the tree's locks first under `lock_timeout`, a leaf no leaf step covered defers the statement
+to another pass (it would validate that leaf under the locks), for a bounded number of passes
+(`TestAddPartitionedForeignKeySettlesAPartitionCreatedMidRun`,
+`TestAddPartitionedForeignKeyRunsOutOfPasses`), and after the statement the step
+reads back that every leaf's adopted foreign key is the one its leaf step validated, under the
+same OID, rolling back with an invariant violation otherwise
+(`TestAddPartitionedForeignKeyParentStepLocks`, `TestAddPartitionedForeignKeyParentStepFailsClosed`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -1575,7 +1598,26 @@ under the tree's lock, before that statement, it proves the parent's name still 
 table it resolved and that every leaf has exactly one constraint of the requested key, not
 deferrable and attached to nothing, which is the constraint and index its leaf step recorded
 (`TestAddPartitionedKeyParentStepFailsClosed`,
-`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`).
+`TestAddPartitionedKeyParentStepRefusesChangesSinceTheLeafSteps`). The leaf step of an online partitioned
+`FOREIGN KEY` (`ensureLeafForeignKey`, unexported) locks the leaf `SHARE UPDATE EXCLUSIVE` in the
+transaction of its `ADD` and of its `VALIDATE`, proves the leaf in the tree, and decides again from
+the leaf's foreign keys before each statement and after it: the leaf has exactly one foreign key
+of the requested definition, on the referenced table's OID the build resolved, adopted by nothing,
+which is the one the step decided on (`TestEnsureLeafForeignKeyFindsOneThatLandsAfterTheRead`,
+`TestEnsureLeafForeignKeyRefusesASecondThatLandsBeforeTheValidate`). `AddPartitionedForeignKey`
+admits only a named `ADD FOREIGN KEY` on the preflighted partitioned table and renders every
+statement from the admitted columns, referenced table and columns, and rules alone; each leaf
+statement runs under a lock that holds the leaf in the tree, and the `ADD`'s read-back proves the
+referenced table by OID; it refuses a referenced table that is a partition of the target
+(`TestAddPartitionedForeignKeyRefusals/a_referenced_table_that_is_a_partition_of_the_target`);
+under the tree's lock, before the parent's statement, it proves the parent's
+and the referenced table's names still resolve to the tables it resolved and that every leaf has
+exactly one foreign key of the requested definition, validated and attached to nothing, which is
+the one its leaf step recorded, refusing a leaf changed since its leaf step as
+`partitioned-foreign-key-leaf-changed`, which a rerun gets past
+(`TestAddPartitionedForeignKeyParentStepFailsClosed`); a rerun reports the parent's foreign key
+done only when every partition carries one it adopted
+(`TestRequireAdoptedFKEverywhereRefusesAPartitionTheParentsDidNotAdopt`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
@@ -1760,15 +1802,22 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   on its own. An unforced lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned parent
   through `migrate --alter` is not refused either: it runs as the partitioned key build (each
   partition's key built concurrently and constrained, then the parent's `ADD CONSTRAINT` adopts
-  them). `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
+  them). On PostgreSQL before 18, an unforced lone named `ADD FOREIGN KEY` on a partitioned
+  parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
+  build (each partition's foreign key added `NOT VALID` and validated, then the parent's
+  `ADD CONSTRAINT` adopts them); a foreign key a desired file adds runs as the same build when
+  the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`), and one it does
+  not keeps the `NOT VALID` plan and is refused. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
   refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
   concurrent idiom PostgreSQL rejects for it. The plan keeps a desired-state drop of a
   partitioned index refused; a desired-state run lifts only that refusal, running the plain
   `DROP INDEX` under the acknowledgements and pin [RF-12](#rf-12) records. *Enforced:* preflight (`RefusesPartitionedParent`,
-  with `RoutesToPartitionedIndexBuild` and `RoutesToPartitionedKeyBuild` naming the two shapes
-  that are routed instead) and sequence-executor admission, which refuses every index-building
-  step on a parent because each build is its own executor entry point (`BuildPartitionedIndexAsStep`
-  for the index, `AddPartitionedKeyAsStep` for the key); the concurrent drop by preflight and plan reporting,
+  with `RoutesToPartitionedIndexBuild`, `RoutesToPartitionedKeyBuild`, and
+  `RoutesToPartitionedForeignKeyBuild` naming the three shapes that are routed instead) and
+  sequence-executor admission, which refuses every index-building step on a parent because each
+  build is its own executor entry point (`BuildPartitionedIndexAsStep` for the index,
+  `AddPartitionedKeyAsStep` for the key, `AddPartitionedForeignKeyAsStep` for the foreign key);
+  the concurrent drop by preflight and plan reporting,
   since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
   the relation kind, and `GateWithCatalog` in `pkg/migrate` for the imperative `DROP INDEX`.
   *Source:* PostgreSQL relation-kind and version capabilities.
