@@ -167,7 +167,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, checkErr
 		}
 		if targetFacts.Partitioned() {
-			if err := plan.RoutePartitionedParent(&report, targetFacts.ServerMajor()); err != nil {
+			if err := routePartitionedTarget(&report, targetFacts.ServerMajor()); err != nil {
 				return plan.Report{}, err
 			}
 			if err := refuseDesiredPartitionedIndexTablespace(ds, report); err != nil {
@@ -178,6 +178,19 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	report.ExtensionSchemas = ds.ExtensionSchemas()
 	report.Fingerprint = report.ComputeFingerprint()
 	return report, nil
+}
+
+// routePartitionedTarget applies the partitioned-parent routing to a plan
+// whose target table is partitioned, on a server of major version
+// serverMajor. The order is the contract: a foreign key the file adds is
+// routed to the partitioned foreign key build first, because before
+// PostgreSQL 18 RoutePartitionedParent refuses the planner's NOT VALID step
+// on a partitioned table and leaves a routed statement alone.
+func routePartitionedTarget(report *plan.Report, serverMajor int) error {
+	if err := plan.RouteDesiredPartitionedForeignKeyBuilds(report, serverMajor); err != nil {
+		return err
+	}
+	return plan.RoutePartitionedParent(report, serverMajor)
 }
 
 // requireReferencesForAddedKeys checks the REFERENCES privilege for each
