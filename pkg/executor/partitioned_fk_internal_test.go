@@ -302,6 +302,91 @@ func TestAddPartitionedForeignKeySettlesAPartitionCreatedMidRun(t *testing.T) {
 	})
 }
 
+// A partition created before every parent's step, each time every partition
+// already has its validated foreign key, keeps the parent's step from ever
+// adding: the build runs out of passes with this build's own retryable
+// error, keeps every partition's foreign key, and a rerun once partitions
+// stop appearing adopts them all.
+func TestAddPartitionedForeignKeyRunsOutOfPasses(t *testing.T) {
+	withPartitionedFKServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFKFixture) {
+		f := newFixture(t)
+		f.events(t)
+		created := 0
+		tracker, err := progress.NewTracker(&fkHookClock{hook: func() bool {
+			if !f.everyLeafHasValidatedFK(t) {
+				return false
+			}
+			created++
+			f.exec(t, fmt.Sprintf(`
+				CREATE TABLE %%[1]s.events_2026_%02[1]d PARTITION OF %%[1]s.events
+				    FOR VALUES FROM ('2026-%02[1]d-01') TO ('2026-%02[2]d-01')`, 3+created, 4+created))
+			return false
+		}})
+		require.NoError(t, err)
+		tracker.Start(1, progress.OperationBrief)
+
+		rep, err := f.addAt(t, addEventsAccountFK, RunStep{Tracker: tracker, Step: 1})
+
+		require.ErrorIs(t, err, ErrPartitionedForeignKeyUnsettled)
+		assert.Equal(t, CodePartitionedForeignKeyUnsettled, OutcomeCode(err))
+		assert.False(t, OutcomeCode(err).Permanent())
+		assert.Equal(t, maxPartitionedForeignKeyPasses, rep.Passes)
+		assert.Equal(t, maxPartitionedForeignKeyPasses, created, "one partition appeared before each parent's step")
+		assert.Empty(t, f.foreignKeys(t, "events"), "the parent has no foreign key")
+
+		again, err := f.add(t, addEventsAccountFK)
+
+		require.NoError(t, err)
+		assert.Equal(t, 3+maxPartitionedForeignKeyPasses, again.Partitions)
+		f.requireAdopted(t, again)
+	})
+}
+
+// everyLeafHasValidatedFK reports whether every partition of events has at
+// least one foreign key and all of them are validated.
+func (f partitionedFKFixture) everyLeafHasValidatedFK(t *testing.T) bool {
+	t.Helper()
+	tree, err := listPartitionTree(t.Context(), f.pool, f.oid(t, "events"))
+	require.NoError(t, err)
+	for _, n := range tree {
+		fks := f.foreignKeys(t, n.name)
+		if len(fks) == 0 {
+			return false
+		}
+		for _, k := range fks {
+			if !k.validated {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// A rerun finds the parent's foreign key done only when every partition
+// carries one the parent's adopted; a parent foreign key no partition's
+// foreign key belongs to is refused, not reported done.
+func TestRequireAdoptedFKEverywhereRefusesAPartitionTheParentsDidNotAdopt(t *testing.T) {
+	withPartitionedFKServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFKFixture) {
+		f := newFixture(t)
+		f.events(t)
+		_, err := f.add(t, addEventsAccountFK)
+		require.NoError(t, err)
+		target := indexTarget{schema: f.schema, table: "events", tableOID: f.oid(t, "events")}
+		parent := f.foreignKeys(t, "events")["events_account_fk"]
+		january := f.foreignKeys(t, "events_2026_01")
+
+		partitions, err := requireAdoptedFKEverywhere(t.Context(), f.pool, target, catalogFK{oid: parent.oid, name: "events_account_fk"})
+
+		require.NoError(t, err)
+		assert.Equal(t, 3, partitions)
+		for name, k := range january {
+			// A leaf's own constraint OID adopted nothing on the partitions.
+			_, err = requireAdoptedFKEverywhere(t.Context(), f.pool, target, catalogFK{oid: k.oid, name: name})
+			require.ErrorIs(t, err, ErrInvariantViolation)
+		}
+	})
+}
+
 // Every refusal is typed, and each comes before the build creates anything.
 func TestAddPartitionedForeignKeyRefusals(t *testing.T) {
 	withPartitionedFKServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFKFixture) {
@@ -362,6 +447,17 @@ func TestAddPartitionedForeignKeyRefusals(t *testing.T) {
 				    id bigint PRIMARY KEY
 				) PARTITION BY RANGE (id)`)
 			refuse(t, f, `ALTER TABLE %[1]s.events ADD CONSTRAINT events_region_fk FOREIGN KEY (account_id) REFERENCES %[1]s.regions (id)`,
+				ErrPartitionedForeignKeyReferencedTable, CodePartitionedForeignKeyReferencedTable)
+		})
+
+		// A partition of the target is a plain table the resolve takes, but
+		// the parent's foreign key would then reference a part of itself,
+		// so the tree read refuses it before any leaf step.
+		t.Run("a referenced table that is a partition of the target", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			f.exec(t, `CREATE UNIQUE INDEX events_2026_01_id ON %[1]s.events_2026_01 (id)`)
+			refuse(t, f, `ALTER TABLE %[1]s.events ADD CONSTRAINT events_self_fk FOREIGN KEY (account_id) REFERENCES %[1]s.events_2026_01 (id)`,
 				ErrPartitionedForeignKeyReferencedTable, CodePartitionedForeignKeyReferencedTable)
 		})
 
@@ -452,13 +548,18 @@ func (f partitionedFKFixture) replaceFebruaryFK(t *testing.T, constraint string)
 }
 
 // The parent's step adds the parent's foreign key only over exactly the leaf
-// foreign keys the leaf steps recorded, and reads back that it adopted them;
-// any other state rolls it back with an invariant violation.
+// foreign keys the leaf steps recorded, and reads back that it adopted them.
+// A leaf changed since its leaf step is refused, before the ADD, as
+// ErrPartitionedForeignKeyLeafChanged, which a rerun gets past; an ADD that
+// did anything but adopt the recorded foreign keys rolls back with an
+// invariant violation.
 func TestAddPartitionedForeignKeyParentStepFailsClosed(t *testing.T) {
 	withPartitionedFKServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFKFixture) {
 		// A leaf whose foreign key was replaced after its leaf step still has
 		// one the parent could adopt, but not the one the run validated, so
-		// the proof under the tree's lock refuses before the ADD.
+		// the proof under the tree's lock refuses before the ADD. The read-back
+		// after the ADD would refuse too, as an invariant violation; the typed
+		// refusal shows the proof, not the read-back, stopped the step.
 		t.Run("the proof refuses a leaf foreign key replaced after its leaf step", func(t *testing.T) {
 			f := newFixture(t)
 			f.events(t)
@@ -468,9 +569,26 @@ func TestAddPartitionedForeignKeyParentStepFailsClosed(t *testing.T) {
 
 			err := proveLeafFKRecorded(t.Context(), f.pool, fk, feb, leaves[feb.oid])
 
-			require.ErrorIs(t, err, ErrInvariantViolation)
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyLeafChanged)
 			_, err = adoptLeafFKs(t.Context(), f.begin(t), target, fk, leaves)
-			require.ErrorIs(t, err, ErrInvariantViolation)
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyLeafChanged)
+			assert.NotErrorIs(t, err, ErrInvariantViolation)
+		})
+
+		// A second foreign key of the definition beside the recorded one would
+		// leave the parent's statement to choose which one to adopt.
+		t.Run("the proof refuses a second matching foreign key added after the leaf step", func(t *testing.T) {
+			f := newFixture(t)
+			f.events(t)
+			_, fk, leaves := f.recordLeafFKs(t)
+			feb := f.leaf(t, "events_2026_02")
+			f.exec(t, `
+				ALTER TABLE %[1]s.events_2026_02
+				    ADD CONSTRAINT feb_other_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)`)
+
+			err := proveLeafFKRecorded(t.Context(), f.pool, fk, feb, leaves[feb.oid])
+
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyLeafChanged)
 		})
 
 		// The same change made while a whole build runs, between its leaf
@@ -489,14 +607,23 @@ func TestAddPartitionedForeignKeyParentStepFailsClosed(t *testing.T) {
 
 			_, err := f.addAt(t, addEventsAccountFK, at)
 
-			require.ErrorIs(t, err, ErrInvariantViolation)
-			assert.Equal(t, CodeInvariantViolation, OutcomeCode(err))
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyLeafChanged)
+			assert.Equal(t, CodePartitionedForeignKeyLeafChanged, OutcomeCode(err))
+			assert.False(t, OutcomeCode(err).Permanent(), "a rerun gets past the change")
 			assert.Empty(t, f.foreignKeys(t, "events"), "the parent has no foreign key")
 			for _, leaf := range []string{"events_2026_01", "events_2026_02", "events_2026_03"} {
 				for name, k := range f.foreignKeys(t, leaf) {
 					assert.Zero(t, k.parentOID, "foreign key %s on %s is adopted by nothing", name, leaf)
 				}
 			}
+
+			// The rerun takes the operator's foreign key on February as that
+			// leaf's and adopts every leaf.
+			rep, err := f.add(t, addEventsAccountFK)
+
+			require.NoError(t, err)
+			assert.Equal(t, PartitionForeignKeyFound, partitionFKActions(rep)["events_2026_02"])
+			f.requireAdopted(t, rep)
 		})
 
 		// A leaf whose recorded foreign key is gone makes the parent's ADD

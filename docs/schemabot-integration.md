@@ -767,6 +767,47 @@ read of the tree refuses before any partition is touched. The codes of its own r
 | `partitioned-key-conflict` | the refused partition is untouched; earlier partitions keep their key constraints | no, permanent | The partition already has a key constraint that conflicts with the requested one: two that match it, one on the same columns of another kind or definition or `DEFERRABLE`, one already attached to a parent's constraint, or another primary key. An operator resolves the partition's constraint, then the same statement resumes |
 | `partitioned-key-nullable-column` | nothing when the parent's column allows NULL; otherwise the refused partition is untouched, or keeps a built index with no constraint when a column lost `NOT NULL` during the step, and earlier partitions keep their key constraints | no, permanent | A primary key column allows NULL on the parent or a partition, or its not-null constraint is `NOT VALID` (PostgreSQL 18), so adding the key would scan the table under `ACCESS EXCLUSIVE`. An operator makes the columns `NOT NULL`, or validates the constraint, then the same statement resumes and reuses any built index |
 
+### Outcomes of a partitioned foreign key build
+
+`executor.AddPartitionedForeignKey` (and `AddPartitionedForeignKeyAsStep`) adds a `FOREIGN KEY`
+to a partitioned table online on PostgreSQL 14 to 17, under the table's advisory lock. It first
+gives every partition the foreign key (`ADD FOREIGN KEY ... NOT VALID`, a catalog change, then
+`VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes go on), then adds
+the parent's foreign key, which adopts them, in one brief transaction. No planner or CLI route
+calls it yet; a library caller may call it directly, and `AdmitPartitionedForeignKeyShape`
+checks a statement's shape without a connection. The design is in
+[partitioned-foreign-key-design](partitioned-foreign-key-design.md).
+
+It stops at the first error and keeps every partition's foreign key, and **running the same
+statement again resumes from them**: a validated one is found, a `NOT VALID` one is validated
+where it stands. A `NOT VALID` foreign key a stop leaves on a partition still enforces new writes
+to that partition, so an operator who lists its constraints sees it and leaves it for the rerun.
+The codes it shares with the builds above (`not-partitioned-table`, `foreign-table-partition`,
+`partition-detach-pending`, `table-lock-unconfirmed`, `invariant-violation`,
+`commit-outcome-unknown`, `budget-lock-exceeded`, `budget-statement-exceeded`, `execution-failed`,
+and `*dbconn.TableLockHeldError`) route as in [the partitioned index build
+table](#outcomes-of-a-partitioned-index-build), with "whatever was finished" meaning the
+partitions' foreign keys. The codes of its own, and `data-fault`, route as follows:
+
+| Outcome | Persists | Retry | Orchestrator action |
+| --- | --- | --- | --- |
+| `not-add-foreign-key` | nothing | no, permanent | The statement is not one `ALTER TABLE` with a single `ADD FOREIGN KEY`; fix the caller, not the database |
+| `partitioned-foreign-key-unsupported-shape` | nothing | no, permanent | The constraint has no name, or a clause the build cannot carry to every partition (an unqualified referenced table, no referenced column list, an `ON DELETE` column list, `NOT VALID`, `ONLY`, a repeated column). Fix the statement |
+| `partitioned-foreign-key-not-valid-supported` | nothing | no, permanent | The server is PostgreSQL 18 or later, where the ordinary online route works on a partitioned table: run `ADD FOREIGN KEY ... NOT VALID`, then `VALIDATE CONSTRAINT` |
+| `partitioned-foreign-key-referenced-table` | nothing | no, permanent | The foreign key references a partitioned table, a foreign table, a view, or a partition of the target. Surface to an operator |
+| `partitioned-foreign-key-parent-conflict` | nothing | no, permanent | The parent has another constraint under the name, or the requested foreign key under another name. An operator resolves it, then the same statement resumes |
+| `partitioned-foreign-key-sub-partitioned` | nothing when the tree is first read; every partition's foreign key when a later pass finds it | no, permanent | A partition is itself partitioned; the build takes only leaf partitions directly under the target. Surface to an operator |
+| `partitioned-foreign-key-name-taken` | the refused partition is untouched; earlier partitions keep their foreign keys | no, permanent | The name the foreign key needs on a partition is held by another constraint. Nothing is renamed or dropped; an operator renames or drops the occupant, then the same statement resumes |
+| `partitioned-foreign-key-conflict` | the refused partition is untouched; earlier partitions keep their foreign keys | no, permanent | The partition has two foreign keys of the requested definition, or one already attached to a parent's. An operator drops the extra one or detaches the other parent's, then the same statement resumes |
+| `data-fault` | the partition's foreign key, `NOT VALID` and enforced for new writes; earlier partitions keep theirs | no, permanent | Rows of the partition break the foreign key (`executor.ErrPartitionedForeignKeyViolation`, naming the partition and the constraint). Correct the rows, then the same statement validates it in place. The server error in the chain carries the offending key value in its detail, so keep it off shared surfaces |
+| `partitioned-foreign-key-leaf-changed` | every partition's foreign key | yes | A partition's foreign key was dropped, replaced, or joined by another of the same definition between its leaf step and the parent's step, which rolled back before the parent's statement. Retry the same statement; it decides each partition again. If it repeats, find what else changes the partition's constraints |
+| `partitioned-foreign-key-unsettled` | every partition's foreign key | yes, after a wait | Partitions kept appearing without the foreign key faster than the build covered them. Retry the same statement; if it repeats, involve an operator to stop whatever is creating partitions |
+
+A deadlock (SQLSTATE 40P01) in the parent's step is `execution-failed`. The step takes
+the tree's locks before the referenced table's, the server's own order, so it meets one only
+against a transaction that read the referenced table and then writes the partitioned table; the
+step rolls back, every partition's foreign key stays, and the rerun adopts them.
+
 ### Wiring the build through `migrate.Run` and `migrate.RunDesired`
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs

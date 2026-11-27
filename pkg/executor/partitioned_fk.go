@@ -28,8 +28,9 @@ import (
 
 // Typed refusals of the partitioned foreign key build as a whole. Each is
 // returned before the build creates anything, except
-// ErrPartitionedForeignKeyUnsettled, which leaves every partition's finished
-// foreign key in place for a rerun to adopt.
+// ErrPartitionedForeignKeyUnsettled and ErrPartitionedForeignKeyLeafChanged,
+// which leave every partition's finished foreign key in place for a rerun to
+// adopt.
 var (
 	// ErrNotAddForeignKey is returned when the statement is not one ALTER
 	// TABLE with exactly one ADD FOREIGN KEY subcommand.
@@ -56,6 +57,14 @@ var (
 	// number of passes. Every partition's finished foreign key stays, and a
 	// rerun resumes.
 	ErrPartitionedForeignKeyUnsettled = errors.New("partitions kept appearing without the foreign key until the build ran out of passes")
+	// ErrPartitionedForeignKeyLeafChanged is returned when the parent's step
+	// finds, under the tree's lock, that a partition no longer carries the
+	// foreign key its leaf step left: something dropped, replaced, or added
+	// a foreign key of the definition on that partition while the build
+	// ran. The step rolls back before the parent's statement, every
+	// partition's foreign key stays, and a rerun decides each partition
+	// again from what it finds.
+	ErrPartitionedForeignKeyLeafChanged = errors.New("a partition's foreign key changed after its leaf step, before the parent's foreign key was added")
 	// ErrPartitionedForeignKeyNotValidSupported is returned on PostgreSQL 18
 	// and later, which accepts ADD FOREIGN KEY ... NOT VALID on a
 	// partitioned table and validates it with VALIDATE CONSTRAINT under
@@ -250,8 +259,11 @@ func admitPartitionedFK(sql string, pt preflight.PreflightedTable) (partitionedF
 // ALTER TABLE with one named ADD CONSTRAINT ... FOREIGN KEY over distinct
 // columns, referencing a schema-qualified table's listed columns, with no ON
 // DELETE column list, NOT VALID, or ONLY. It needs no
-// connection, so a dry run learns the refusals the build would return before
-// it runs anything. The refusals are the build's own, typed.
+// connection, so a dry run learns the shape refusals the build would return
+// before it runs anything: ErrNotAddForeignKey and
+// ErrPartitionedForeignKeyUnsupportedShape, typed. A statement the parser
+// rejects, such as MATCH PARTIAL or more than one statement, is returned as
+// the parser's error, untyped.
 func AdmitPartitionedForeignKeyShape(sql string) error {
 	_, _, err := admitPartitionedFKShape(sql)
 	return err
