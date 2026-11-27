@@ -586,7 +586,8 @@ fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults, and its `Pace` left zero, since a
 live run paces its copy by its own stream's lag and refuses a caller's; `CheckpointInterval` is how often
-a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
+a copy in progress saves its landed watermark, beside the one save it makes as soon as it first lands
+past where the run began (zero takes the Runner's default); and `OnCheckpoint` is
 the run's phase signal. A `Copier` value the copier would refuse and a negative interval are
 wiring errors refused before the preflight, like the missing connection: an error with no
 verdict, matched with `errors.Is(err, schemachange.ErrInvalidOptions)` (a refused `Copier`

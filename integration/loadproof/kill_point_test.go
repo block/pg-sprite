@@ -56,10 +56,10 @@ func (f copyFill) halfway() bool {
 }
 
 // reached reports whether a poll that read cp and fill has seen the run at
-// the kill point. Mid-copy is a row in copying whose watermark is short of
-// the key space, with the shadow at least half filled, so the killed copy
-// leaves rows in the shadow for the rerun to carry on from; mid-verify is
-// a row in verifying, the pass that follows the copy and the catch-up.
+// the kill point. Mid-copy is a row in copying carrying a saved watermark
+// short of the key space, with the shadow at least half filled, so the
+// rerun has a save to resume from and rows above it to clear; mid-verify
+// is a row in verifying, the pass that follows the copy and the catch-up.
 func (k killPoint) reached(cp checkpoint.Checkpoint, fill copyFill) bool {
 	switch k {
 	case killMidCopy:
@@ -71,16 +71,62 @@ func (k killPoint) reached(cp checkpoint.Checkpoint, fill copyFill) bool {
 	}
 }
 
-// midCopyKill is killMidCopy's rule: the row in copying, its watermark not
-// complete, and the shadow at least half filled.
+// midCopyKill is killMidCopy's rule: the row in copying, a watermark saved
+// and not complete, and the shadow at least half filled. A watermark short
+// of the key space is below the table's highest key, since the chunk past
+// it holds the keys above.
 func midCopyKill(cp checkpoint.Checkpoint, fill copyFill) bool {
 	if cp.Phase != checkpoint.PhaseCopying {
 		return false
 	}
-	if cp.Watermark.Complete() {
+	if !partialWatermark(cp.Watermark) {
 		return false
 	}
 	return fill.halfway()
+}
+
+// partialWatermark reports whether w is a saved watermark short of the key
+// space.
+func partialWatermark(w copier.Watermark) bool {
+	return w.Valid() && !w.Complete()
+}
+
+// errRestartedCopy reports a rerun of a killed copy whose saves show it
+// did not resume from the watermark the killed run saved.
+var errRestartedCopy = errors.New("the rerun did not resume the copy from the killed run's save")
+
+// checkResumedFrom holds the rerun of a copy killed with killedAt saved to
+// the first save the poll saw it make: there must be one, and it must be
+// at or above killedAt, since a copy resumed from killedAt lands only keys
+// above it and a copy started over saves a watermark below it first.
+func checkResumedFrom(killedAt int64, firstSaved copier.Watermark) error {
+	if !firstSaved.Valid() {
+		return fmt.Errorf("%w: the poll saw no copying save from the rerun, so it cannot tell where the copy resumed; seed more rows (LOAD_PROOF_ROWS)", errRestartedCopy)
+	}
+	if firstSaved.Value() < killedAt {
+		return fmt.Errorf("%w: its first save is at key %d, below %d, where the killed run's save stood", errRestartedCopy, firstSaved.Value(), killedAt)
+	}
+	return nil
+}
+
+// errCopyReentered reports a run that resumed past the copy and copied
+// again.
+var errCopyReentered = errors.New("a run resumed past the copy entered copying again")
+
+// checkNoCopyAfterVerify holds the phases the checkpoint poll saw, in the
+// order it saw them across every run, to the resume rule for a verifying
+// row: once the row has stood in verifying, no run copies again.
+func checkNoCopyAfterVerify(phases []checkpoint.Phase) error {
+	verified := false
+	for i, p := range phases {
+		switch {
+		case p == checkpoint.PhaseVerifying:
+			verified = true
+		case verified && p == checkpoint.PhaseCopying:
+			return fmt.Errorf("%w: the poll saw %v, copying at position %d after verifying", errCopyReentered, phases, i)
+		}
+	}
+	return nil
 }
 
 // exitSignal is the signal that ended the process, zero when it exited on
@@ -100,8 +146,8 @@ var errNotKilled = errors.New("the run did not end where the harness killed it")
 
 // checkKilledAt holds a killed run to the kill point: the binary died of
 // SIGKILL, not of its own accord, and the checkpoint row it left stands in
-// the phase the poll saw — for a kill mid-copy, with a watermark short of
-// the key space — so the kill landed inside the phase. stdout is the
+// the phase the poll saw — for a kill mid-copy, with a saved watermark
+// short of the key space — so the kill landed inside the phase. stdout is the
 // binary's, quoted when it exited on its own.
 func checkKilledAt(point killPoint, cp checkpoint.Checkpoint, signal syscall.Signal, code int, stdout string) error {
 	if signal != syscall.SIGKILL {
@@ -114,28 +160,31 @@ func checkKilledAt(point killPoint, cp checkpoint.Checkpoint, signal syscall.Sig
 	if point == killMidCopy && cp.Watermark.Complete() {
 		return fmt.Errorf("%w: the row in copying carries the complete watermark, so the copy had ended before the kill", errNotKilled)
 	}
+	if point == killMidCopy && !cp.Watermark.Valid() {
+		return fmt.Errorf("%w: the row in copying carries no watermark, so the killed copy saved nothing to resume from", errNotKilled)
+	}
 	return nil
 }
 
 // The binary is killed mid-copy only once the shadow is half filled and
-// while the row's watermark is short of the key space, landed or not: at a
-// smoke size the copy ends before its first periodic save, so the row
-// still carries none.
-func TestMidCopyKillNeedsAHalfFilledShadowAndAnIncompleteWatermark(t *testing.T) {
+// the row carries a saved watermark short of the key space, so the rerun
+// has a save to resume from: a row with nothing saved yet is not killed.
+func TestMidCopyKillNeedsAHalfFilledShadowAndAPartialSave(t *testing.T) {
 	half := copyFill{ShadowBytes: 4 << 20, SourceBytes: 8 << 20}
+	partial := copier.NewWatermark(2002)
 	cases := map[string]struct {
 		cp   checkpoint.Checkpoint
 		fill copyFill
 		want bool
 	}{
-		"half filled, nothing saved yet":    {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, half, true},
-		"half filled, a partial watermark":  {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: copier.NewWatermark(2002)}, half, true},
+		"half filled, nothing saved yet":    {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, half, false},
+		"half filled, a partial watermark":  {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: partial}, half, true},
 		"half filled, the complete mark":    {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: copier.NewWatermark(math.MaxInt64)}, half, false},
-		"a quarter filled":                  {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, copyFill{ShadowBytes: 2 << 20, SourceBytes: 8 << 20}, false},
-		"no source read":                    {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, copyFill{}, false},
+		"a quarter filled":                  {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: partial}, copyFill{ShadowBytes: 2 << 20, SourceBytes: 8 << 20}, false},
+		"no source read":                    {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: partial}, copyFill{}, false},
 		"catching up with the shadow full":  {checkpoint.Checkpoint{Phase: checkpoint.PhaseCatchingUp}, copyFill{ShadowBytes: 8 << 20, SourceBytes: 8 << 20}, false},
 		"verifying with the shadow full":    {checkpoint.Checkpoint{Phase: checkpoint.PhaseVerifying}, copyFill{ShadowBytes: 8 << 20, SourceBytes: 8 << 20}, false},
-		"the shadow larger than the source": {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, copyFill{ShadowBytes: 9 << 20, SourceBytes: 8 << 20}, true},
+		"the shadow larger than the source": {checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: partial}, copyFill{ShadowBytes: 9 << 20, SourceBytes: 8 << 20}, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -187,7 +236,6 @@ func TestCheckKilledAtHoldsTheKillInsideItsPhase(t *testing.T) {
 	copying := checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: copier.NewWatermark(2002)}
 	verifying := checkpoint.Checkpoint{Phase: checkpoint.PhaseVerifying, Watermark: copier.NewWatermark(math.MaxInt64)}
 	require.NoError(t, checkKilledAt(killMidCopy, copying, syscall.SIGKILL, -1, ""))
-	require.NoError(t, checkKilledAt(killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, syscall.SIGKILL, -1, ""))
 	require.NoError(t, checkKilledAt(killMidVerify, verifying, syscall.SIGKILL, -1, ""))
 
 	refused := map[string]struct {
@@ -199,6 +247,7 @@ func TestCheckKilledAtHoldsTheKillInsideItsPhase(t *testing.T) {
 		"ended by another signal":      {killMidVerify, verifying, syscall.SIGTERM},
 		"the copy had moved on":        {killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCatchingUp}, syscall.SIGKILL},
 		"the copy had completed":       {killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: copier.NewWatermark(math.MaxInt64)}, syscall.SIGKILL},
+		"the copy had saved nothing":   {killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, syscall.SIGKILL},
 		"the verify pass had cut over": {killMidVerify, checkpoint.Checkpoint{Phase: checkpoint.PhaseCutover}, syscall.SIGKILL},
 	}
 	for name, tc := range refused {
@@ -206,4 +255,32 @@ func TestCheckKilledAtHoldsTheKillInsideItsPhase(t *testing.T) {
 			require.ErrorIs(t, checkKilledAt(tc.point, tc.cp, tc.signal, 0, `{"outcome":"executed-via-copy-and-swap"}`), errNotKilled)
 		})
 	}
+}
+
+// The rerun of a copy killed with key 2002 saved resumed it when its first
+// save the poll saw is at or above 2002, the complete watermark included;
+// a first save below 2002 is a copy started over, and no save seen leaves
+// the resume unproven.
+func TestCheckResumedFromHoldsTheRerunToTheKilledSave(t *testing.T) {
+	const killedAt = 2002
+	require.NoError(t, checkResumedFrom(killedAt, copier.NewWatermark(4004)))
+	require.NoError(t, checkResumedFrom(killedAt, copier.NewWatermark(killedAt)))
+	require.NoError(t, checkResumedFrom(killedAt, copier.NewWatermark(math.MaxInt64)))
+	require.ErrorIs(t, checkResumedFrom(killedAt, copier.NewWatermark(1001)), errRestartedCopy)
+	require.ErrorIs(t, checkResumedFrom(killedAt, copier.Watermark{}), errRestartedCopy)
+}
+
+// Once the poll has seen the row in verifying, a later sighting of copying
+// is a run that copied again; the phases before the first verifying, and
+// every other phase after it, are allowed.
+func TestCheckNoCopyAfterVerifyRefusesACopyAfterVerifying(t *testing.T) {
+	resumed := []checkpoint.Phase{
+		checkpoint.PhaseCopying, checkpoint.PhaseCatchingUp, checkpoint.PhaseVerifying,
+		checkpoint.PhaseCatchingUp, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone,
+	}
+	require.NoError(t, checkNoCopyAfterVerify(resumed))
+	recopied := []checkpoint.Phase{
+		checkpoint.PhaseCopying, checkpoint.PhaseVerifying, checkpoint.PhaseCopying, checkpoint.PhaseVerifying,
+	}
+	require.ErrorIs(t, checkNoCopyAfterVerify(recopied), errCopyReentered)
 }

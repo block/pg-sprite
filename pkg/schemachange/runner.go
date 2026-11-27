@@ -112,7 +112,10 @@ type RunOptions struct {
 	Restart bool
 	// CheckpointInterval is how often the copy in progress saves its
 	// landed watermark, so a run that stops mid-copy resumes from the last
-	// save rather than from the start (TM-3). Zero means the default.
+	// save rather than from the start (TM-3). The copy also saves once as
+	// soon as it first lands past the watermark the run began from, so a
+	// copy shorter than the interval still leaves a save to resume from.
+	// Zero means the default.
 	CheckpointInterval time.Duration
 	// Sleep waits between periodic saves, and in a live run between the
 	// polls that wait for the catch-up to pass a marker and for a stopped
@@ -126,7 +129,8 @@ type RunOptions struct {
 	// the checkpoint row with the row as saved, and is the run's one
 	// progress signal: the phase saves call it on the caller's goroutine,
 	// the periodic watermark saves on the copy's saving goroutine, so it
-	// must be safe to call from either, and the periodic calls arrive at
+	// must be safe to call from either, and the periodic calls arrive once
+	// the copy first lands past where the run began and then at
 	// CheckpointInterval, not as the copy lands rows. An error it returns
 	// stops the run there, with the row as the last save left it, so a
 	// test can stop a run at any transition and resume it (TM-3 fault
@@ -377,7 +381,8 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 //
 // A quiesced run's phases then run in order — the write fence on the
 // source, installed over the one a stopped run left; copy, saving the
-// landed watermark every CheckpointInterval and when the copy ends; one
+// landed watermark once its first chunk past the row's lands, every
+// CheckpointInterval after, and when the copy ends; one
 // verification pass through the complete watermark under
 // checksum.DivergenceAbort; the cutover gate; the row saved in
 // PhaseCutover; the swap; the old table drop, or under KeepOld the fence
