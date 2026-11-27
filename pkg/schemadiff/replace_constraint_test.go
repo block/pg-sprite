@@ -82,46 +82,76 @@ func TestDiffReplacesADeferrableKeyInPlace(t *testing.T) {
 		changes[1].SQL)
 }
 
-// A CHECK or FOREIGN KEY whose definition changes is swapped in one
-// statement that adds the new rule NOT VALID, so new writes are checked by
-// one rule or the other at every moment. The existing rows are scanned
-// afterwards by a VALIDATE that blocks no writes.
-func TestDiffReplacesARuleInPlace(t *testing.T) {
-	t.Run("a check", func(t *testing.T) {
-		live := base()
-		live.Constraints = append(live.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"})
-		desired := base()
-		desired.Constraints = append(desired.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 2))"})
-		changes, err := Diff("public", live, desired)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check", ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 2)) NOT VALID`,
-			`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`,
-		}, sqls(changes))
-		assert.True(t, changes[0].Destructive)
-		assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: "events_name_check", Definition: "CHECK ((length((name)::text) > 0))"}, changes[0].Drops)
-		assert.False(t, changes[1].Destructive)
-		require.NotNil(t, changes[1].Validates, "the VALIDATE names the rule it settles")
-	})
+// A CHECK whose definition changes is swapped in one statement that adds the
+// new rule NOT VALID, so new writes are checked by one rule or the other at
+// every moment. The existing rows are scanned afterwards by a VALIDATE that
+// blocks no writes.
+func TestDiffReplacesACheckInPlace(t *testing.T) {
+	live := base()
+	live.Constraints = append(live.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"})
+	desired := base()
+	desired.Constraints = append(desired.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 2))"})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check", ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 2)) NOT VALID`,
+		`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`,
+	}, sqls(changes))
+	assert.True(t, changes[0].Destructive)
+	assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: "events_name_check", Definition: "CHECK ((length((name)::text) > 0))"}, changes[0].Drops)
+	assert.False(t, changes[1].Destructive)
+	require.NotNil(t, changes[1].Validates, "the VALIDATE names the rule it settles")
+}
 
-	t.Run("a foreign key", func(t *testing.T) {
-		live := base()
-		live.Constraints = append(live.Constraints, Constraint{
-			Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true,
-		})
-		desired := base()
-		desired.Constraints = append(desired.Constraints, Constraint{
-			Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id) ON DELETE CASCADE", ForeignKey: true,
-		})
-		changes, err := Diff("public", live, desired)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			`ALTER TABLE public.events DROP CONSTRAINT events_owner_fkey, ADD CONSTRAINT events_owner_fkey FOREIGN KEY (id) REFERENCES public.owners (id) ON DELETE CASCADE NOT VALID`,
-			`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`,
-		}, sqls(changes))
-		assert.True(t, changes[0].Destructive)
-		assert.NotNil(t, changes[0].Drops)
+// A FOREIGN KEY whose definition changes keeps its drop and re-add, so the
+// drop is planned as a foreign-key drop and the plan's foreign-key drop
+// policy decides it, as it does for a key the file no longer declares.
+func TestDiffKeepsAChangedForeignKeysDropAndAdd(t *testing.T) {
+	live := base()
+	live.Constraints = append(live.Constraints, Constraint{
+		Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true,
 	})
+	desired := base()
+	desired.Constraints = append(desired.Constraints, Constraint{
+		Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id) ON DELETE CASCADE", ForeignKey: true,
+	})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_owner_fkey"`,
+		`ALTER TABLE public.events ADD CONSTRAINT events_owner_fkey FOREIGN KEY (id) REFERENCES public.owners (id) ON DELETE CASCADE`,
+	}, sqls(changes))
+	assert.Equal(t, ChangeDropForeignKey, changes[0].Kind, "the drop is the one the foreign-key drop policy reads")
+}
+
+// A primary key narrowed to fewer columns, on a table whose file also lets a
+// column it drops be NULL, is replaced in place like any other key. The old
+// key owns that column's NOT NULL until the swap drops it, so the DROP NOT
+// NULL comes after the swap: the new key is built while the old one keeps
+// rejecting duplicates, and a build that fails leaves the old key and the
+// NOT NULL in place.
+func TestDiffDropsANarrowedPrimaryKeysNotNullAfterTheSwap(t *testing.T) {
+	live := keyed()
+	live.Constraints[0] = Constraint{Name: "events_pkey", Def: "PRIMARY KEY (id, name)", Primary: true}
+	desired := keyed()
+	desired.Constraints[0] = Constraint{
+		Name: "events_pkey", Def: "PRIMARY KEY (id)", Primary: true,
+		IndexDef: "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)",
+	}
+	for i := range desired.Columns {
+		if desired.Columns[i].Name == "name" {
+			desired.Columns[i].NotNull = false
+		}
+	}
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	got := sqls(changes)
+	require.Len(t, got, 3, "%v", got)
+	assert.Contains(t, got[0], "CREATE UNIQUE INDEX events_pkey_new")
+	assert.Contains(t, got[1], `DROP CONSTRAINT "events_pkey"`)
+	assert.Contains(t, got[1], "USING INDEX")
+	assert.Equal(t, `ALTER TABLE "public"."events" ALTER COLUMN "name" DROP NOT NULL`, got[2],
+		"the NOT NULL the old key owned is dropped once the key is swapped")
 }
 
 // A replaced key's new index is built under the constraint's name with a
