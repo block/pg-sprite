@@ -129,3 +129,27 @@ func TestQualifyForeignKeyReferences(t *testing.T) {
 	_, err := QualifyForeignKeyReferences(`CREATE INDEX i ON t (a)`, "app")
 	require.ErrorIs(t, err, ErrDisallowedStatement)
 }
+
+// Adding a foreign key locks the table it references, so the executor reads
+// the referenced tables from both grammar forms of a CREATE TABLE and an
+// ALTER TABLE, each once, as spelled.
+func TestForeignKeyReferencedTables(t *testing.T) {
+	tables, err := ForeignKeyReferencedTables(`ALTER TABLE orders
+		ADD CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES app.users (id) NOT VALID,
+		ADD COLUMN store_id bigint REFERENCES stores (id),
+		ADD CONSTRAINT orders_buyer_fk FOREIGN KEY (buyer_id) REFERENCES app.users (id) NOT VALID`)
+	require.NoError(t, err)
+	assert.Equal(t, []TableName{{Schema: "app", Name: "users"}, {Name: "stores"}}, tables)
+
+	tables, err = ForeignKeyReferencedTables(`CREATE TABLE orders (id bigint PRIMARY KEY,
+		user_id bigint REFERENCES users (id), FOREIGN KEY (id) REFERENCES app.ledgers (id))`)
+	require.NoError(t, err)
+	assert.Equal(t, []TableName{{Name: "users"}, {Schema: "app", Name: "ledgers"}}, tables)
+
+	tables, err = ForeignKeyReferencedTables(`ALTER TABLE orders ADD COLUMN note text`)
+	require.NoError(t, err)
+	assert.Empty(t, tables)
+	tables, err = ForeignKeyReferencedTables(`DROP TABLE orders`)
+	require.NoError(t, err)
+	assert.Empty(t, tables)
+}

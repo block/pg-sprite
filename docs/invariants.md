@@ -833,7 +833,13 @@ cancelled wait leaves is a detach-pending partition, which the server keeps cons
 through the table leave it out, rows in its range are refused) and the executor detects from
 `pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors; `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+native and copy-and-swap executors; before a native step, a create step that adds a foreign key, or a table drop
+first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
+lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
+`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, and then
+requests its lock under its lock budget either way, so the wait adds at most `HolderWait` to the bound and never
+fails a step (`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
+`TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then
@@ -1802,8 +1808,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   on its own. An unforced lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned parent
   through `migrate --alter` is not refused either: it runs as the partitioned key build (each
   partition's key built concurrently and constrained, then the parent's `ADD CONSTRAINT` adopts
-  them). On PostgreSQL before 18, an unforced lone named `ADD FOREIGN KEY` on a partitioned
-  parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
+  them); a key a desired file adds runs as the same build when the build admits its shape
+  (`plan.RouteDesiredPartitionedKeyBuilds`, gated by `executor.AdmitPartitionedKeyShape`), one it
+  does not keeps the planner's steps and is refused, and a key the build's catalog admission
+  refuses (a partition key column left out, a sub-partitioned partition) refuses the whole
+  desired plan before its first statement. On PostgreSQL before 18, an unforced lone named
+  `ADD FOREIGN KEY` on a partitioned parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
   build (each partition's foreign key added `NOT VALID` and validated, then the parent's
   `ADD CONSTRAINT` adopts them); a foreign key a desired file adds runs as the same build when
   the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`), and one it does
@@ -1817,6 +1827,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   sequence-executor admission, which refuses every index-building step on a parent because each
   build is its own executor entry point (`BuildPartitionedIndexAsStep` for the index,
   `AddPartitionedKeyAsStep` for the key, `AddPartitionedForeignKeyAsStep` for the foreign key);
+  for a desired key, the routing in `diffplan.Plan` and the whole-plan admission
+  `migrate.AdmitPlanPartitionedKeys`, which `RunDesired` and the desired dry run call;
   the concurrent drop by preflight and plan reporting,
   since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
   the relation kind, and `GateWithCatalog` in `pkg/migrate` for the imperative `DROP INDEX`.

@@ -72,6 +72,8 @@ func TestDesiredDestructivePlanDoesNotApplySafePrefix(t *testing.T) {
 }
 
 // A conflicting lock exhausts the brief lock budget without applying the column addition.
+// The holder takes SHARE, as a CREATE INDEX does: a lock that strong is not
+// waited out, so the step goes straight to requesting its own.
 func TestSupabaseLockBudget(t *testing.T) {
 	pool := fixture(t)
 	table := seedDDLTable(t, pool, "pgsprite_lock_budget")
@@ -86,7 +88,7 @@ func TestSupabaseLockBudget(t *testing.T) {
 			assert.NoError(t, err)
 		}
 	})
-	_, err = tx.Exec(t.Context(), "LOCK TABLE "+table+" IN ACCESS SHARE MODE")
+	_, err = tx.Exec(t.Context(), "LOCK TABLE "+table+" IN SHARE MODE")
 	require.NoError(t, err)
 	st, err := statement.ParseOne("ALTER TABLE " + table + " ADD COLUMN blocked text")
 	require.NoError(t, err)

@@ -20,6 +20,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // results is the run's record, written as results.json whether the proof
@@ -43,9 +44,10 @@ type results struct {
 	// after a failed run can be found.
 	SlotName         string `json:"slot_name,omitempty"`
 	PeakSlotLagBytes int64  `json:"peak_slot_lag_bytes"`
-	// Verdict is the binary's stdout when it is JSON, as a verdict is;
-	// Stdout holds it as text when it is not, a usage error or a crash,
-	// so the record is written either way.
+	// Verdict is the binary's stdout when it is JSON, as a verdict is, or
+	// the verdict the library proof's last call returned; Stdout holds the
+	// binary's stdout as text when it is not JSON, a usage error or a
+	// crash, so the record is written either way.
 	Verdict json.RawMessage `json:"verdict,omitempty"`
 	Stdout  string          `json:"stdout,omitempty"`
 	Rows    rowsInfo        `json:"rows"`
@@ -188,6 +190,17 @@ func (r *results) recordOutput(output []byte) {
 	r.Stdout = string(trimmed)
 }
 
+// recordVerdict keeps a verdict migrate.Run returned, encoded as the binary
+// prints it, so both proofs' records carry the same verdict fields.
+func (r *results) recordVerdict(v verdict.Verdict) error {
+	output, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("encode verdict: %w", err)
+	}
+	r.recordOutput(output)
+	return nil
+}
+
 // write writes the results as indented JSON to path.
 func (r *results) write(path string) error {
 	data, err := json.MarshalIndent(r, "", "  ")
@@ -248,4 +261,51 @@ func TestResultsKeepAVerdictAsJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &back))
 	assert.Equal(t, map[string]string{"outcome": "executed-via-copy-and-swap"}, back.Verdict)
 	assert.Nil(t, back.Stdout)
+}
+
+// A copy-and-swap verdict's verification figures reach the record as
+// structured fields, so a reader compares settled, unsettled, and carried
+// counts across runs without parsing the verdict's prose.
+func TestResultsKeepAVerdictsVerificationFigures(t *testing.T) {
+	res := newResults(config{Binary: "bin/pg-sprite", Rows: 10})
+	res.recordOutput([]byte(`{
+  "outcome": "executed-via-copy-and-swap",
+  "verification": {"rows": 52693, "chunks": 26, "settled": 25, "unsettled": 1, "carried": 3}
+}` + "\n"))
+	path := filepath.Join(t.TempDir(), "results.json")
+	require.NoError(t, res.write(path))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var back struct {
+		Verdict verdict.Verdict `json:"verdict"`
+	}
+	require.NoError(t, json.Unmarshal(data, &back))
+	require.NotNil(t, back.Verdict.Verification)
+	assert.Equal(t, verdict.Verification{Rows: 52693, Chunks: 26, Settled: 25, Unsettled: 1, Carried: 3},
+		*back.Verdict.Verification)
+}
+
+// The library proof's verdict comes from migrate.Run, not the binary's
+// stdout, and reaches the record with the same verification object, so
+// results-library.json compares with results.json field for field.
+func TestResultsKeepALibraryVerdictsVerificationFigures(t *testing.T) {
+	res := newResults(config{Rows: 10})
+	require.NoError(t, res.recordVerdict(verdict.Verdict{
+		Outcome:      verdict.OutcomeExecutedViaCopyAndSwap,
+		Verification: &verdict.Verification{Rows: 52693, Chunks: 26, Settled: 25, Unsettled: 1, Carried: 3},
+	}))
+	path := filepath.Join(t.TempDir(), "results-library.json")
+	require.NoError(t, res.write(path))
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var back struct {
+		Verdict struct {
+			Outcome      string         `json:"outcome"`
+			Verification map[string]int `json:"verification"`
+		} `json:"verdict"`
+	}
+	require.NoError(t, json.Unmarshal(data, &back))
+	assert.Equal(t, string(verdict.OutcomeExecutedViaCopyAndSwap), back.Verdict.Outcome)
+	assert.Equal(t, map[string]int{"rows": 52693, "chunks": 26, "settled": 25, "unsettled": 1, "carried": 3},
+		back.Verdict.Verification)
 }
