@@ -70,3 +70,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: gh api --method PUT "repos/$REPO/actions/workflows/slot-release-proof.yml/enable"
+
+  # GitHub opens no issue when a scheduled run fails; it only emails whoever
+  # last edited the schedule. After every scheduled run, whatever the proof's
+  # outcome, this keeps one labelled issue in step with it: a run that does not
+  # pass opens the issue (or comments on the open one) with the run's link and
+  # the majors that failed, and the next run that passes closes it. Anything
+  # other than success counts as not passing: a cancelled or skipped proof
+  # proved nothing that week. On-demand and pull-request runs never touch the
+  # issue, so a branch's red run is not reported as main's. CI's unit job runs
+  # the script's own test (make test-slot-release-proof-issue) on every PR.
+  report:
+    needs: [proof]
+    if: github.event_name == 'schedule' && always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # check out the script
+      actions: read # list this run's jobs to name the failed majors
+      issues: write # create the label, open, comment on, and close the issue
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open, update, or close the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          PROOF_RESULT: ${{ needs.proof.result }}
+        run: scripts/slot-release-proof-issue.sh "$PROOF_RESULT"
