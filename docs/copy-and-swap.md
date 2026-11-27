@@ -196,8 +196,12 @@ the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
 slot and the saved progress stay, so running the same command again resumes the run:
 
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
-  pg-sprite fell behind the source's writes. Resume once the write rate drops; the resume
-  drains the backlog from the slot.
+  pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
+  stop, and a resume reads the slot on its first catch-up cycle, before it has read through
+  the backlog, so a resume under the same ceiling stops again unless it reads through the
+  backlog within that cycle. Once the write rate drops, resume with a higher ceiling, above
+  the unconfirmed WAL the detail reports, and with room on the volume for that much WAL; or
+  start over with `--restart SCHEMA.TABLE`, which drops the slot and the WAL it holds.
 - **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
   for longer than it takes to release WAL pg-sprite has confirmed. Look for a transaction holding
   it back first: an open write transaction (`pg_stat_activity` where `backend_xid IS NOT
