@@ -2,7 +2,6 @@ package loadproof_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -293,9 +292,7 @@ func TestLoadProofLibrary(t *testing.T) {
 	w := watch.stop()
 	res.recordWatch(w, started)
 	v := final.verdict
-	output, err := json.Marshal(v)
-	require.NoError(t, err)
-	res.recordOutput(output)
+	require.NoError(t, res.recordVerdict(v))
 	// As in the binary proof, the load is recorded before any judgement.
 	res.recordLoad(load.Snapshot(), atExit)
 

@@ -66,3 +66,32 @@ func TestRoutePartitionedTargetRoutesAForeignKeyBeforeTheParentRefusal(t *testin
 		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
 	})
 }
+
+// A desired file that adds a primary key to a partitioned table plans it as
+// a plain table's concurrent unique build and USING INDEX attach, which the
+// partitioned-parent refusal rejects. The plan must route the statement to
+// the partitioned key build before that refusal sees it; without the key
+// routing the whole plan is refused.
+func TestRoutePartitionedTargetRoutesAKeyBeforeTheParentRefusal(t *testing.T) {
+	const sql = `ALTER TABLE app.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`
+	steps := []string{
+		`CREATE UNIQUE INDEX CONCURRENTLY events_pkey ON app.events (id, created_at)`,
+		`ALTER TABLE app.events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_pkey`,
+	}
+	r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+			SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+		}},
+		ExecSQL:   steps,
+		Execution: planner.ExecutionAutocommit,
+	}}}
+	require.NoError(t, routePartitionedTarget(&r, 16))
+	assert.Equal(t, router.DispositionExecute, r.Disposition)
+	assert.Equal(t, []string{sql}, r.Statements[0].ExecSQL)
+	assert.Equal(t, planner.ExecutionPartitionedKeyBuild, r.Statements[0].Execution)
+}

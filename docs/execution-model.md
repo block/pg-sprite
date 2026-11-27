@@ -67,6 +67,17 @@ autocommit-each-step has two shapes in the executor:
   which is scoped to that transaction — functionally it is still one
   statement, one transaction, committed immediately, rolled back
   atomically on failure.
+
+  Before a brief step first requests its lock, it checks `pg_locks` for a
+  reader or writer that has held a conflicting lock on a table the step
+  locks for a while. A step that queued behind one would hold every later
+  query of the table behind itself, so it waits outside the lock queue
+  instead, for up to 30 s (`RetryPolicy.HolderWait`), and reports the
+  holder in progress as `lock_holder_wait`. Then it requests its lock as
+  usual, whether or not the holder has finished, so the wait can delay a
+  step but never fails one. It never ends another session. A step that
+  takes only `SHARE UPDATE EXCLUSIVE` conflicts with no reader or writer,
+  so it does not wait.
 - **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is
   true autocommit on a dedicated budgeted session: it refuses to run inside
   any transaction block and internally manages multiple transactions of its
