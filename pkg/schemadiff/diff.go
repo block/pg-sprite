@@ -165,6 +165,10 @@ type Change struct {
 	// desired definition before the old one goes; what the desired
 	// definition drops from the old one, the drop removes.
 	ReplacedBy string `json:"-"`
+	// Replacement is set with ReplacedBy: the index the drop's replacement
+	// must still be when the drop runs. The old index is dropped only while
+	// it is.
+	Replacement *IndexReplacement `json:"-"`
 }
 
 // DroppedKind names the kind of object a destructive change removes.
@@ -302,6 +306,17 @@ type IndexAdoption struct {
 	Def   string
 }
 
+// IndexReplacement is the index a changed index's replacement built under
+// its temporary name, and the definition, as introspection reads it
+// (pg_get_indexdef with the schema qualification removed), that it must
+// still have when the old index is dropped. A replacement that is gone,
+// invalid, or rebuilt with another definition by then would leave the table
+// without the desired index once the old one goes.
+type IndexReplacement struct {
+	Index string `json:"index"`
+	Def   string `json:"def"`
+}
+
 // ConstraintValidation is a NOT VALID constraint a planned VALIDATE
 // CONSTRAINT validates, and the definition, as introspection reads it
 // (pg_get_constraintdef, NOT VALID suffix included), that the constraint
@@ -393,12 +408,18 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	for _, r := range replacedIdx {
 		resumedBuilds[r.temp] = struct{}{}
 	}
+	for name, r := range replaced {
+		if r.built {
+			resumedBuilds[replacementIndexName(name)] = struct{}{}
+		}
+	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
 	// adopts stays: the constraint takes it over below. A replaced index is
 	// dropped in the create bucket, once its replacement is built, and an
-	// earlier run's build of a replacement stays to be renamed.
+	// earlier run's build of a replacement stays to be renamed, or, for a
+	// key, to be swapped in.
 	for _, ix := range live.Indexes {
 		if _, ok := adopted[ix.Name]; ok {
 			continue
@@ -427,12 +448,19 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// One left NOT VALID with the desired definition is validated below
 	// instead, and one replaced in place is dropped by the statement that
 	// adds its replacement.
+	droppedForeignKeys := make(map[string]bool)
 	for _, con := range live.Constraints {
 		if _, ok := replaced[con.Name]; ok {
 			continue
 		}
 		want, ok := desiredCons[con.Name]
 		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
+			if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
+				return nil, err
+			}
+			if con.ForeignKey {
+				droppedForeignKeys[con.Name] = true
+			}
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:        dropConstraintKind(con),
@@ -521,8 +549,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			continue
 		}
 		had, ok := liveCons[con.Name]
-		if _, inPlace := replaced[con.Name]; inPlace {
-			replacement, err := replaceInPlaceChanges(table, schema, had, con)
+		if r, inPlace := replaced[con.Name]; inPlace {
+			replacement, err := replaceInPlaceChanges(table, schema, had, con, r)
 			if err != nil {
 				return nil, err
 			}

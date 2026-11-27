@@ -39,6 +39,8 @@ func TestDiffChangedIndexIsReplaced(t *testing.T) {
 	assert.True(t, drop.Destructive)
 	assert.Equal(t, "events_name_idx_new", drop.ReplacedBy)
 	assert.Equal(t, &DroppedObject{Kind: DroppedIndex, Name: "events_name_idx", Definition: liveNameIndex}, drop.Drops)
+	assert.Equal(t, &IndexReplacement{Index: "events_name_idx_new", Def: builtNameIndex}, drop.Replacement,
+		"the drop carries the index it must find in place, as introspection reads it")
 	assert.False(t, changes[0].Destructive)
 	assert.False(t, changes[2].Destructive)
 	assert.Empty(t, changes[0].ReplacedBy)
@@ -58,6 +60,7 @@ func TestDiffChangedIndexResumesAfterTheBuild(t *testing.T) {
 		`ALTER INDEX "public"."events_name_idx_new" RENAME TO "events_name_idx"`,
 	}, sqls(changes))
 	assert.Equal(t, "events_name_idx_new", changes[0].ReplacedBy)
+	assert.Equal(t, &IndexReplacement{Index: "events_name_idx_new", Def: builtNameIndex}, changes[0].Replacement)
 }
 
 // A run that stopped after dropping the old index has only the rename left.
@@ -110,7 +113,7 @@ func TestDiffChangedIndexRefusesATakenReplacementName(t *testing.T) {
 			live: func(m *Model) {
 				m.Indexes = append(m.Indexes, Index{Name: "events_name_idx_new", Def: "CREATE INDEX events_name_idx_new ON events USING btree (id)"})
 			},
-			want: "which a live index on the table already names; rename that index",
+			want: `a valid index the desired table does not declare already holds that name, likely an earlier attempt's build for another definition; run DROP INDEX CONCURRENTLY "public"."events_name_idx_new" and plan again`,
 		},
 		{
 			name: "an unfinished build of another definition",

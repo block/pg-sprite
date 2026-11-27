@@ -172,15 +172,17 @@ func refuseTakenReplacementName(index, temp string, desiredIdx map[string]Index,
 // index with another definition holds. An invalid one is most likely the
 // failed build of an earlier attempt at another definition; the refusal
 // names the statement that clears it, since no plan can tell an abandoned
-// build from one still running. A valid one is an index of the table's own,
-// which the replacement must not drop and reuse the name of.
+// build from one still running. A valid one the desired table does not
+// declare is most likely an earlier attempt's build for a definition the file
+// no longer asks for; the refusal names the same statement, since the
+// replacement must not drop an index it did not build and reuse its name.
 func replacementIndexHeld(schema, index string, ix Index) error {
 	if ix.Invalid {
 		return unsupported(CauseReplacementIndexName, "%w: index %q is replaced by building its new definition as %q, and an unfinished build of another definition is on the table under that name, likely left by an earlier attempt; once pg_stat_progress_create_index shows no backend building it, run DROP INDEX CONCURRENTLY %s and plan again",
 			ErrUnsupportedChange, index, ix.Name, pgx.Identifier{schema, ix.Name}.Sanitize())
 	}
-	return unsupported(CauseReplacementIndexName, "%w: index %q is replaced by building its new definition as %q, which a live index on the table already names; rename that index",
-		ErrUnsupportedChange, index, ix.Name)
+	return unsupported(CauseReplacementIndexName, "%w: index %q is replaced by building its new definition as %q, and a valid index the desired table does not declare already holds that name, likely an earlier attempt's build for another definition; run DROP INDEX CONCURRENTLY %s and plan again",
+		ErrUnsupportedChange, index, ix.Name, pgx.Identifier{schema, ix.Name}.Sanitize())
 }
 
 // sameIndexUnderName reports whether built, read under its own name, has
@@ -204,11 +206,11 @@ func sameIndexUnderName(built, want Index) (bool, error) {
 // taken is left out.
 func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 	var changes []Change
+	def, err := statement.RenameIndex(r.want.Def, r.temp)
+	if err != nil {
+		return nil, fmt.Errorf("name the replacement of index %s: %w", r.want.Name, err)
+	}
 	if r.build {
-		def, err := statement.RenameIndex(r.want.Def, r.temp)
-		if err != nil {
-			return nil, fmt.Errorf("name the replacement of index %s: %w", r.want.Name, err)
-		}
 		create, err := statement.Qualify(def, schema)
 		if err != nil {
 			return nil, fmt.Errorf("qualify the replacement of index %s: %w", r.want.Name, err)
@@ -222,6 +224,7 @@ func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 			Destructive: true,
 			Drops:       &DroppedObject{Kind: DroppedIndex, Name: r.live.Name, Definition: r.live.Def},
 			ReplacedBy:  r.temp,
+			Replacement: &IndexReplacement{Index: r.temp, Def: def},
 		})
 	}
 	changes = append(changes, Change{
