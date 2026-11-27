@@ -51,7 +51,7 @@ const (
 // field also bumps this version so strict consumers can detect the new shape.
 // The precision of a derived number, such as Detail.Percent, is not part of
 // the contract and changes without a bump.
-const FormatVersion = 8
+const FormatVersion = 9
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -141,6 +141,25 @@ type Detail struct {
 	// signal to project from, and once a counter has reached the estimate
 	// it is measured against.
 	ETA *time.Duration `json:"eta_ns,omitempty"`
+	// LockHolderWait is set while the step waits, before it requests its
+	// lock, for a transaction that has held a lock reads or writes take on
+	// a table the step locks, and nil otherwise.
+	LockHolderWait *LockHolderWait `json:"lock_holder_wait,omitempty"`
+}
+
+// LockHolderWait describes a step waiting outside PostgreSQL's lock queue.
+// Requesting the lock now would queue the step behind the holder, and every
+// later reader and writer of the table behind the step, so the step waits up
+// to Limit for the holder to finish, then requests its lock either way.
+type LockHolderWait struct {
+	// PID is the backend of the transaction that has held its lock longest.
+	PID uint32 `json:"pid"`
+	// Table is the schema-qualified table it holds the lock on.
+	Table string `json:"table"`
+	// Waited is how long the step has waited so far.
+	Waited time.Duration `json:"waited_ns"`
+	// Limit is the longest the step waits.
+	Limit time.Duration `json:"limit_ns"`
 }
 
 // Snapshot is one immutable progress observation. For a terminal phase the
@@ -282,6 +301,19 @@ func (t *Tracker) SetAttempt(attempt int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.detail.Attempt = attempt
+}
+
+// SetLockHolderWait records the step's wait outside the lock queue, or
+// clears it when wait is nil. The tracker keeps its own copy.
+func (t *Tracker) SetLockHolderWait(wait *LockHolderWait) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if wait == nil {
+		t.detail.LockHolderWait = nil
+		return
+	}
+	held := *wait
+	t.detail.LockHolderWait = &held
 }
 
 // SetConcurrentBuild enables on-demand server progress for pid. The executor
