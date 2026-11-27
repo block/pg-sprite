@@ -76,9 +76,10 @@ func TestDiffChangedIndexResumesAfterTheDrop(t *testing.T) {
 
 // A failed build of the replacement leaves an invalid index under the
 // temporary name. The next plan carries the same build, as it does for any
-// unfinished build of the desired definition under the desired name, so the
-// concurrent build path proves and clears the leftover; the old index stays
-// until the build succeeds.
+// unfinished build of the desired definition under the desired name, and
+// reports the leftover as one the build meets: the build refuses while the
+// leftover holds the name, until it is proven abandoned and dropped. The old
+// index stays until the build succeeds.
 func TestDiffChangedIndexRebuildsAFailedReplacement(t *testing.T) {
 	live := base()
 	live.Indexes = append(live.Indexes, Index{Name: "events_name_idx_new", Def: builtNameIndex, Invalid: true})
@@ -90,6 +91,7 @@ func TestDiffChangedIndexRebuildsAFailedReplacement(t *testing.T) {
 		`DROP INDEX "public"."events_name_idx"`,
 		`ALTER INDEX "public"."events_name_idx_new" RENAME TO "events_name_idx"`,
 	}, sqls(changes))
+	assert.Equal(t, []Advisory{{Kind: AdvisoryInvalidIndexRebuild, Index: "events_name_idx_new"}}, Advisories(live, desiredUniqueName()))
 }
 
 // The temporary name is refused when anything else holds it: an index of
@@ -175,4 +177,77 @@ func TestDiffChangedIndexKeepsTheDropAndRebuild(t *testing.T) {
 			`CREATE UNIQUE INDEX events_name_idx ON public.events USING btree (name)`,
 		}, sqls(changes))
 	})
+}
+
+// A DROP INDEX CONCURRENTLY of the old index that stops part-way leaves it
+// invalid beside the valid replacement, which then enforces the rule alone.
+// The plan refuses, naming the statement that finishes the drop, rather than
+// dropping the replacement as an index the desired table does not name.
+func TestDiffChangedIndexRefusesAnInterruptedDropOfTheOldIndex(t *testing.T) {
+	live := base()
+	live.Indexes = []Index{
+		{Name: "events_name_idx", Def: liveNameIndex, Invalid: true},
+		{Name: "events_name_idx_new", Def: builtNameIndex},
+	}
+
+	_, err := Diff("public", live, desiredUniqueName())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	var unsupportedErr *UnsupportedChangeError
+	require.ErrorAs(t, err, &unsupportedErr)
+	assert.Equal(t, CauseReplacementIndexName, unsupportedErr.Cause)
+	assert.Contains(t, err.Error(), `index "events_name_idx" is invalid, and its replacement "events_name_idx_new" is valid with the desired definition`)
+	assert.Contains(t, err.Error(), `run DROP INDEX CONCURRENTLY "public"."events_name_idx" and plan again`)
+}
+
+// A valid index under the temporary name that a new unique constraint
+// adopts belongs to that constraint. The plan adopts it and builds the
+// desired index under its own name; it never renames the adopted index from
+// under the key.
+func TestDiffChangedIndexLeavesAnAdoptedTemporaryNameToItsConstraint(t *testing.T) {
+	live := base()
+	live.Indexes = []Index{{Name: "events_name_idx_new", Def: builtNameIndex}}
+	desired := desiredUniqueName()
+	desired.Constraints = append(desired.Constraints, Constraint{Name: "events_name_idx_new", Def: "UNIQUE (name)", IndexDef: builtNameIndex})
+
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_idx_new" UNIQUE USING INDEX "events_name_idx_new"`,
+		`CREATE UNIQUE INDEX events_name_idx ON public.events USING btree (name)`,
+	}, sqls(changes))
+}
+
+// An index a foreign key references cannot be dropped while the key
+// remains, so a plan that removes or changes one is refused at plan time,
+// naming the key. A changed one would otherwise build its whole replacement
+// before the drop failed, on every run.
+func TestDiffRefusesDroppingAnIndexAForeignKeyReferences(t *testing.T) {
+	referenced := func() Model {
+		m := base()
+		m.Indexes = []Index{{Name: "events_name_idx", Def: wantNameIndex, ReferencedBy: []IncomingForeignKey{
+			{Schema: "public", Table: "tickets", Constraint: "tickets_event_name_fkey"},
+		}}}
+		return m
+	}
+	changed := desiredUniqueName()
+	changed.Indexes[0].Def = "CREATE UNIQUE INDEX events_name_idx ON events USING btree (name) WHERE (id > 0)"
+	removed := base()
+	removed.Indexes = nil
+
+	for name, tc := range map[string]struct {
+		desired Model
+		keep    string
+	}{
+		"changed": {desired: changed, keep: "keep the index's definition"},
+		"removed": {desired: removed, keep: "keep the index"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Diff("public", referenced(), tc.desired)
+			var unsupportedErr *UnsupportedChangeError
+			require.ErrorAs(t, err, &unsupportedErr)
+			assert.Equal(t, CauseReferencedIndex, unsupportedErr.Cause)
+			assert.Contains(t, err.Error(), `index "events_name_idx" is referenced by foreign key "tickets_event_name_fkey" on table "public"."tickets"`)
+			assert.Contains(t, err.Error(), `drop or change "tickets_event_name_fkey" first, or `+tc.keep)
+		})
+	}
 }

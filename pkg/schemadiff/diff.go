@@ -161,8 +161,9 @@ type Change struct {
 	// ReplacedBy is set on the DROP INDEX of a changed index the plan
 	// replaces: the index an earlier statement built under the desired
 	// definition, which is valid before the drop runs and takes the dropped
-	// index's name in the rename after it. The table keeps an index with the
-	// dropped one's guarantee at every moment.
+	// index's name in the rename after it. The table has an index with the
+	// desired definition before the old one goes; what the desired
+	// definition drops from the old one, the drop removes.
 	ReplacedBy string `json:"-"`
 }
 
@@ -409,6 +410,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			continue
 		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
+			_, changed := desiredIdx[ix.Name]
+			if err := refuseReferencedIndexDrop(ix, changed); err != nil {
+				return nil, err
+			}
 			changes = append(changes, Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
 				Kind:        ChangeDropIndex,

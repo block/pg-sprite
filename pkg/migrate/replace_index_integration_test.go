@@ -157,3 +157,40 @@ func TestRunDesiredReplacesAnIndexOnATableOverTheSizeLimit(t *testing.T) {
 	assert.Contains(t, def, "WHERE ((deleted_at IS NULL) AND (qty > 0))")
 	assert.True(t, valid)
 }
+
+// A unique index that a foreign key on another table references cannot be
+// dropped while the key remains, so a desired file that removes it or
+// changes its definition is refused at plan time, naming the key. Nothing is
+// built, and the index and the key stay as they were.
+func TestRunDesiredRefusesDroppingAUniqueIndexAForeignKeyReferences(t *testing.T) {
+	pool, schema := replaceIndexTable(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE UNIQUE INDEX t_name_key ON %[1]s.t (name);
+		CREATE TABLE %[1]s.r (id int PRIMARY KEY, name text CONSTRAINT r_name_fkey REFERENCES %[1]s.t (name))`, schema))
+	require.NoError(t, err)
+	const kept = "CREATE UNIQUE INDEX t_email_lower_key ON t (lower(email)) WHERE deleted_at IS NULL"
+
+	for name, tc := range map[string]struct {
+		desired string
+		keep    string
+	}{
+		"removed": {desired: replaceIndexDesired(kept), keep: "keep the index"},
+		"changed": {desired: replaceIndexDesired(kept + ";\n\tCREATE UNIQUE INDEX t_name_key ON t (name, qty)"), keep: "keep the index's definition"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+				Schema: schema, Desired: parseDesired(t, tc.desired),
+			}, runOptions())
+			require.NoError(t, err)
+			assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+			assert.Contains(t, res.Detail, `index "t_name_key" is referenced by foreign key "r_name_fkey" on table "`+schema+`"."r"`)
+			assert.Contains(t, res.Detail, `drop or change "r_name_fkey" first, or `+tc.keep)
+
+			def, valid := indexState(t, pool, schema, "t_name_key")
+			assert.Equal(t, fmt.Sprintf("CREATE UNIQUE INDEX t_name_key ON %s.t USING btree (name)", schema), def)
+			assert.True(t, valid)
+			assert.NotContains(t, liveIndexes(t, pool, schema), "t_name_key_new", "nothing is built")
+		})
+	}
+}

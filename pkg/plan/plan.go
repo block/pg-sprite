@@ -134,10 +134,13 @@ type Statement struct {
 	// plan replaces rather than drops: the index an earlier statement of the
 	// plan built under the desired definition, valid before the drop runs,
 	// which the rename after the drop gives the dropped index's name (see
-	// schemadiff.Change.ReplacedBy). The table has an index with the dropped
-	// one's guarantee at every moment, so a consumer can tell this drop
-	// from one that removes the guarantee. Explanatory: the fingerprint
-	// covers the statements that build and rename the replacement.
+	// schemadiff.Change.ReplacedBy). The table has an index with the desired
+	// definition before the old one goes, so the drop removes only what the
+	// desired definition no longer asks for. That can still be a guarantee,
+	// as when a unique index becomes non-unique or its predicate narrows, so
+	// the drop stays destructive and a consumer reviews it as one.
+	// Explanatory: the fingerprint covers the statements that build and
+	// rename the replacement.
 	ReplacedBy string `json:"replaced_by,omitempty"`
 	// DropsHelper is the helper CHECK that a SET NOT NULL running as the
 	// online helper-constraint sequence adds and then drops in a later

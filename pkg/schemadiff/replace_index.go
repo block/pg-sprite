@@ -58,8 +58,15 @@ func replacedIndexes(partitioned, dropsOrRetypesColumn bool, schema string, live
 		had, ok := liveIdx[want.Name]
 		switch {
 		case ok && isIndexChange(had, want, adopted):
+		case ok && had.Invalid:
+			if err := refuseInterruptedReplacementDrop(schema, liveIdx, desiredIdx, adopted, had, want, temp); err != nil {
+				return nil, err
+			}
+			continue
 		case !ok:
-			resumed, err := resumesRename(liveIdx, desiredIdx, want, temp)
+			// want's name is free: only the rename of an earlier
+			// replacement may be left.
+			resumed, err := isReplacementBuild(liveIdx, desiredIdx, adopted, want, temp)
 			if err != nil {
 				return nil, err
 			}
@@ -69,6 +76,9 @@ func replacedIndexes(partitioned, dropsOrRetypesColumn bool, schema string, live
 			continue
 		default:
 			continue
+		}
+		if err := refuseReferencedIndexDrop(had, true); err != nil {
+			return nil, err
 		}
 		if err := refuseTakenReplacementName(want.Name, temp, desiredIdx, desiredCons, liveCons); err != nil {
 			return nil, err
@@ -102,10 +112,12 @@ func isIndexChange(had, want Index, adopted map[string]struct{}) bool {
 	return !had.Invalid && had.Def != want.Def
 }
 
-// resumesRename reports whether the table holds only the rename of an earlier
-// replacement of want: want's name is free, and a valid index under temp
-// with want's definition, which the desired table does not name, is on it.
-func resumesRename(liveIdx, desiredIdx map[string]Index, want Index, temp string) (bool, error) {
+// isReplacementBuild reports whether the live index under temp is an
+// earlier replacement's finished build of want: valid, with want's
+// definition, and neither named by the desired table nor taken over by a
+// new key constraint. An index a constraint adopts belongs to that
+// constraint, so a rename would take it from under the key.
+func isReplacementBuild(liveIdx, desiredIdx map[string]Index, adopted map[string]struct{}, want Index, temp string) (bool, error) {
 	built, ok := liveIdx[temp]
 	if !ok || built.Invalid {
 		return false, nil
@@ -113,7 +125,27 @@ func resumesRename(liveIdx, desiredIdx map[string]Index, want Index, temp string
 	if _, named := desiredIdx[temp]; named {
 		return false, nil
 	}
+	if _, taken := adopted[temp]; taken {
+		return false, nil
+	}
 	return sameIndexUnderName(built, want)
+}
+
+// refuseInterruptedReplacementDrop refuses a table whose old index is
+// invalid while an earlier replacement's finished build of want sits under
+// temp. That is what an interrupted DROP INDEX CONCURRENTLY of the old index
+// leaves: the server marks the index invalid before it removes it. The build
+// under temp is then the only index enforcing the rule, and a plan that
+// treated it as an undeclared index would drop it. The plan cannot tell the
+// invalid index from a build still running, so the refusal names the
+// statement that finishes the drop; the next plan is the rename alone.
+func refuseInterruptedReplacementDrop(schema string, liveIdx, desiredIdx map[string]Index, adopted map[string]struct{}, had, want Index, temp string) error {
+	built, err := isReplacementBuild(liveIdx, desiredIdx, adopted, want, temp)
+	if err != nil || !built {
+		return err
+	}
+	return unsupported(CauseReplacementIndexName, "%w: index %q is invalid, and its replacement %q is valid with the desired definition, so an earlier replacement's drop of %q likely stopped part-way; once pg_stat_progress_create_index shows no backend building %q, run DROP INDEX CONCURRENTLY %s and plan again, and the plan renames %q",
+		ErrUnsupportedChange, had.Name, temp, had.Name, had.Name, pgx.Identifier{schema, had.Name}.Sanitize(), temp)
 }
 
 // refuseTakenReplacementName refuses a replacement whose temporary name the
@@ -197,4 +229,22 @@ func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 		Kind: ChangeRenameIndex,
 	})
 	return changes, nil
+}
+
+// refuseReferencedIndexDrop refuses a plan that drops ix while a foreign key
+// references it. PostgreSQL refuses that drop, so a plan that carried it
+// would build whatever came before it, a replacement index included, and
+// then fail the same way on every run. changed says whether the desired
+// table keeps the index under another definition rather than removing it.
+func refuseReferencedIndexDrop(ix Index, changed bool) error {
+	if len(ix.ReferencedBy) == 0 {
+		return nil
+	}
+	ref := ix.ReferencedBy[0]
+	keep := "keep the index"
+	if changed {
+		keep = "keep the index's definition"
+	}
+	return unsupported(CauseReferencedIndex, "%w: index %q is referenced by foreign key %q on table %s, and PostgreSQL does not drop an index a foreign key depends on; drop or change %q first, or %s",
+		ErrUnsupportedChange, ix.Name, ref.Constraint, pgx.Identifier{ref.Schema, ref.Table}.Sanitize(), ref.Constraint, keep)
 }
