@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -123,8 +124,10 @@ func TestEnsureAttachConstraintsGivesTheTableTheParentsChecksAndNotNulls(t *test
 		pool, notices := noticePool(t, f.url)
 		parent, table := f.tableOID(t, "payments"), f.attachTable(t, "payments_2027")
 
+		tracker, err := progress.NewTracker(progress.WallClock{})
+		require.NoError(t, err)
 		var ran []string
-		results, err := ensureAttachConstraints(t.Context(), pool, parent, table, attachProofTestBudget,
+		results, err := ensureAttachConstraints(t.Context(), pool, parent, table, attachProofTestBudget, time.Second, tracker,
 			func(_ progress.Operation, sql string) { ran = append(ran, sql) })
 		require.NoError(t, err)
 		qualified := pgx.Identifier{f.schema, "payments_2027"}.Sanitize()
@@ -162,7 +165,7 @@ func TestEnsureAttachConstraintsGivesTheTableTheParentsChecksAndNotNulls(t *test
 		}
 		assert.Equal(t, 2, proved, "each SET NOT NULL proved its column from the helper CHECK instead of scanning")
 
-		again, err := ensureAttachConstraints(t.Context(), pool, parent, table, attachProofTestBudget, nil)
+		again, err := ensureAttachConstraints(t.Context(), pool, parent, table, attachProofTestBudget, 0, nil, nil)
 		require.NoError(t, err)
 		for _, r := range again {
 			assert.Equal(t, attachConstraintFound, r.action, "a rerun finds %s%s", r.check, r.column)
@@ -184,14 +187,14 @@ func TestEnsureAttachConstraintsFailsOnANullAndResumesOnceFixed(t *testing.T) {
 		parent, table := f.tableOID(t, "payments"), f.attachTable(t, "payments_2027")
 		helper := table.proof(attachProofNotNull, `"id" IS NOT NULL`, "")
 
-		_, err := ensureAttachConstraints(t.Context(), f.pool, parent, table, attachProofTestBudget, nil)
+		_, err := ensureAttachConstraints(t.Context(), f.pool, parent, table, attachProofTestBudget, 0, nil, nil)
 		require.ErrorIs(t, err, errAttachProofViolation)
 		assert.False(t, f.notNull(t, "payments_2027", "id"))
 		validated, exists := f.proofValidated(t, helper)
 		assert.True(t, exists && !validated, "the helper stays, NOT VALID")
 
 		f.exec(t, `UPDATE %[1]s.payments_2027 SET id = 3 WHERE id IS NULL`)
-		results, err := ensureAttachConstraints(t.Context(), f.pool, parent, table, attachProofTestBudget, nil)
+		results, err := ensureAttachConstraints(t.Context(), f.pool, parent, table, attachProofTestBudget, 0, nil, nil)
 		require.NoError(t, err)
 		assert.Contains(t, results, attachConstraintResult{column: "id", action: attachConstraintSetNotNull})
 		assert.True(t, f.notNull(t, "payments_2027", "id"))
@@ -220,7 +223,7 @@ func TestEnsureAttachConstraintsDropsAHelperAStopLeft(t *testing.T) {
 		f.prove(t, "events_2027", helper.name(), helper.expr)
 		f.exec(t, `ALTER TABLE %[1]s.events_2027 ALTER COLUMN id SET NOT NULL`)
 
-		results, err := ensureAttachConstraints(t.Context(), f.pool, f.tableOID(t, "events"), table, attachProofTestBudget, nil)
+		results, err := ensureAttachConstraints(t.Context(), f.pool, f.tableOID(t, "events"), table, attachProofTestBudget, 0, nil, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []attachConstraintResult{{column: "id", action: attachConstraintFound}}, results)
 		_, exists := f.proofValidated(t, helper)
@@ -237,7 +240,7 @@ func TestEnsureAttachConstraintsRefusesAMismatchedTable(t *testing.T) {
 			f := newFixture(t)
 			f.exec(t, paymentsParent)
 			f.exec(t, `ALTER TABLE %[1]s.payments_2027 ADD CONSTRAINT payments_amount_positive CHECK (amount >= 0)`)
-			_, err := ensureAttachConstraints(t.Context(), f.pool, f.tableOID(t, "payments"), f.attachTable(t, "payments_2027"), attachProofTestBudget, nil)
+			_, err := ensureAttachConstraints(t.Context(), f.pool, f.tableOID(t, "payments"), f.attachTable(t, "payments_2027"), attachProofTestBudget, 0, nil, nil)
 			require.ErrorIs(t, err, errAttachProofNameTaken)
 			assert.Equal(t, map[string]bool{"payments_amount_positive": true}, f.checks(t, "payments_2027"), "left as it was")
 		})
@@ -252,7 +255,7 @@ func TestEnsureAttachConstraintsRefusesAMismatchedTable(t *testing.T) {
 				CREATE TABLE %[1]s.events_2027 (
 					day date
 				)`)
-			_, err := ensureAttachConstraints(t.Context(), f.pool, f.tableOID(t, "events"), f.attachTable(t, "events_2027"), attachProofTestBudget, nil)
+			_, err := ensureAttachConstraints(t.Context(), f.pool, f.tableOID(t, "events"), f.attachTable(t, "events_2027"), attachProofTestBudget, 0, nil, nil)
 			require.ErrorIs(t, err, errAttachColumnMissing)
 			assert.Empty(t, f.checks(t, "events_2027"))
 		})

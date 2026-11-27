@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,6 +19,14 @@ func btreeColumn(expr, typeSQL string) attachKeyColumn {
 
 func value(literal string) boundValue {
 	return boundValue{kind: statement.BoundValue, literal: literal}
+}
+
+func listValues(n int) []boundValue {
+	values := make([]boundValue, 0, n)
+	for i := range n {
+		values = append(values, value(fmt.Sprintf("CAST('v%d' AS text)", i)))
+	}
+	return values
 }
 
 var (
@@ -39,12 +48,17 @@ func TestAttachBoundCheckSingleColumnRange(t *testing.T) {
 	assert.Equal(t, `"day" IS NOT NULL`+
 		` AND "day" OPERATOR("pg_catalog".>=) CAST('2027-01-01' AS date)`+
 		` AND "day" OPERATOR("pg_catalog".<) CAST('2027-02-01' AS date)`, check)
-	assert.Equal(t, `NOT ("day" OPERATOR("pg_catalog".>=) CAST('2027-01-01' AS date)`+
+	assert.Equal(t, `NOT ("day" IS NOT NULL`+
+		` AND "day" OPERATOR("pg_catalog".>=) CAST('2027-01-01' AS date)`+
 		` AND "day" OPERATOR("pg_catalog".<) CAST('2027-02-01' AS date))`, exclusion)
 }
 
 // FOR VALUES FROM (1, 10) TO (2, 20) on (a, b): each side as the server's OR
 // arms, since the implication proof does not understand (a, b) >= (1, 10).
+// The DEFAULT exclusion negates the whole check, IS NOT NULL terms
+// included, as the server's DEFAULT constraint does: a row with b NULL
+// belongs in the DEFAULT partition even where its a alone satisfies the
+// arms.
 func TestAttachBoundCheckMultiColumnRangeExpandsArms(t *testing.T) {
 	key := attachKey{strategy: statement.PartitionByRange, columns: []attachKeyColumn{btreeColumn(`"a"`, "integer"), btreeColumn(`"b"`, "integer")}}
 	check, exclusion, err := attachBoundCheck(key, attachBound{
@@ -56,8 +70,8 @@ func TestAttachBoundCheckMultiColumnRangeExpandsArms(t *testing.T) {
 	assert.Equal(t, `"a" IS NOT NULL AND "b" IS NOT NULL`+
 		` AND ("a" OPERATOR("pg_catalog".>) 1 OR ("a" OPERATOR("pg_catalog".=) 1 AND "b" OPERATOR("pg_catalog".>=) 10))`+
 		` AND ("a" OPERATOR("pg_catalog".<) 2 OR ("a" OPERATOR("pg_catalog".=) 2 AND "b" OPERATOR("pg_catalog".<) 20))`, check)
-	assert.Equal(t, `NOT (`+
-		`("a" OPERATOR("pg_catalog".>) 1 OR ("a" OPERATOR("pg_catalog".=) 1 AND "b" OPERATOR("pg_catalog".>=) 10))`+
+	assert.Equal(t, `NOT ("a" IS NOT NULL AND "b" IS NOT NULL`+
+		` AND ("a" OPERATOR("pg_catalog".>) 1 OR ("a" OPERATOR("pg_catalog".=) 1 AND "b" OPERATOR("pg_catalog".>=) 10))`+
 		` AND ("a" OPERATOR("pg_catalog".<) 2 OR ("a" OPERATOR("pg_catalog".=) 2 AND "b" OPERATOR("pg_catalog".<) 20)))`, exclusion)
 }
 
@@ -151,26 +165,33 @@ func TestAttachBoundCheckHash(t *testing.T) {
 func TestAttachBoundCheckRefusesUnprovableShapes(t *testing.T) {
 	rangeKey := attachKey{strategy: statement.PartitionByRange, columns: []attachKeyColumn{btreeColumn(`"a"`, "integer"), btreeColumn(`"b"`, "integer")}}
 	listKey := attachKey{strategy: statement.PartitionByList, columns: []attachKeyColumn{btreeColumn(`"region"`, "text")}}
+	relabeledColumn := btreeColumn(`"region"`, "character varying(20)")
+	relabeledColumn.relabeled = true
+	relabeledListKey := attachKey{strategy: statement.PartitionByList, columns: []attachKeyColumn{relabeledColumn}}
 	hashKey := attachKey{strategy: statement.PartitionByHash, parentLiteral: `'app.t'`, columns: []attachKeyColumn{{expr: `"name"`, typeSQL: "text", collatable: true}}}
+	intHashKey := attachKey{strategy: statement.PartitionByHash, parentLiteral: `'app.t'`, columns: []attachKeyColumn{{expr: `"id"`, typeSQL: "bigint"}}}
 	expression := boundValue{kind: statement.BoundExpression}
-	many := make([]boundValue, maxProvableListValues+1)
-	for i := range many {
-		many[i] = value("1")
-	}
 	tests := []struct {
 		name  string
 		key   attachKey
 		bound attachBound
 	}{
-		{"strategy mismatch", rangeKey, attachBound{strategy: statement.PartitionByList, list: []boundValue{value("1")}}},
+		// A modulus and remainder that would render a valid hash check,
+		// carried on a range bound: only the strategy guard refuses it.
+		{"strategy mismatch", intHashKey, attachBound{strategy: statement.PartitionByRange, modulus: 2, remainder: 0}},
 		{"wrong arity", rangeKey, attachBound{strategy: statement.PartitionByRange, lower: []boundValue{value("1")}, upper: []boundValue{value("2")}}},
 		{"expression value", rangeKey, attachBound{strategy: statement.PartitionByRange, lower: []boundValue{expression, value("1")}, upper: []boundValue{value("2"), value("2")}}},
 		{"value after MINVALUE", rangeKey, attachBound{strategy: statement.PartitionByRange, lower: []boundValue{minValue, value("1")}, upper: []boundValue{value("2"), value("2")}}},
 		{"unbounded both sides", rangeKey, attachBound{strategy: statement.PartitionByRange, lower: []boundValue{minValue, minValue}, upper: []boundValue{maxValue, maxValue}}},
 		{"all columns equal", rangeKey, attachBound{strategy: statement.PartitionByRange, lower: []boundValue{value("1"), value("1")}, upper: []boundValue{value("1"), value("1")}, equalPrefix: 2}},
 		{"list expression", listKey, attachBound{strategy: statement.PartitionByList, list: []boundValue{expression}}},
-		{"list too long to prove", listKey, attachBound{strategy: statement.PartitionByList, list: many}},
+		{"over 100 values on a relabeled key", relabeledListKey, attachBound{strategy: statement.PartitionByList, list: listValues(101)}},
+		{"range starts at MAXVALUE", rangeKey, attachBound{strategy: statement.PartitionByRange, lower: []boundValue{maxValue, maxValue}, upper: []boundValue{maxValue, maxValue}}},
+		{"range ends at MINVALUE", rangeKey, attachBound{strategy: statement.PartitionByRange, lower: []boundValue{minValue, minValue}, upper: []boundValue{minValue, minValue}}},
 		{"collatable hash key", hashKey, attachBound{strategy: statement.PartitionByHash, modulus: 2, remainder: 0}},
+		{"hash MODULUS 0", intHashKey, attachBound{strategy: statement.PartitionByHash, modulus: 0, remainder: 0}},
+		{"hash REMAINDER below 0", intHashKey, attachBound{strategy: statement.PartitionByHash, modulus: 2, remainder: -1}},
+		{"hash REMAINDER not below MODULUS", intHashKey, attachBound{strategy: statement.PartitionByHash, modulus: 2, remainder: 2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

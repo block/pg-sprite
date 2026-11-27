@@ -743,8 +743,8 @@ so "what persists" below is also what the rerun builds on. Route each outcome by
 its own key constraint (a concurrent unique index build, then `ADD CONSTRAINT ... USING INDEX`),
 then adds the parent's constraint, which adopts them, in one brief transaction. `migrate --alter`
 (`migrate.Run`) routes a lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table to
-it ([below](#outcomes-of-a-partitioned-key-build-1)); desired-state plans do not yet, and a
-library caller may call it directly. It stops at the first error and keeps every partition's
+it ([below](#outcomes-of-a-partitioned-key-build-1)), `migrate.RunDesired` runs a key a desired
+file adds the same way, and a library caller may call it directly. It stops at the first error and keeps every partition's
 finished key constraint, and **running the same statement again resumes from them**. The report
 it returns with an error says what the stop left: `leaves` lists the partitions that got their
 constraint, and `changed` is true once a partition's concurrent index build began, which can
@@ -767,10 +767,57 @@ read of the tree refuses before any partition is touched. The codes of its own r
 | `partitioned-key-conflict` | the refused partition is untouched; earlier partitions keep their key constraints | no, permanent | The partition already has a key constraint that conflicts with the requested one: two that match it, one on the same columns of another kind or definition or `DEFERRABLE`, one already attached to a parent's constraint, or another primary key. An operator resolves the partition's constraint, then the same statement resumes |
 | `partitioned-key-nullable-column` | nothing when the parent's column allows NULL; otherwise the refused partition is untouched, or keeps a built index with no constraint when a column lost `NOT NULL` during the step, and earlier partitions keep their key constraints | no, permanent | A primary key column allows NULL on the parent or a partition, or its not-null constraint is `NOT VALID` (PostgreSQL 18), so adding the key would scan the table under `ACCESS EXCLUSIVE`. An operator makes the columns `NOT NULL`, or validates the constraint, then the same statement resumes and reuses any built index |
 
+### Outcomes of a partitioned foreign key build
+
+`executor.AddPartitionedForeignKey` (and `AddPartitionedForeignKeyAsStep`) adds a `FOREIGN KEY`
+to a partitioned table online on PostgreSQL 14 to 17, under the table's advisory lock. It first
+gives every partition the foreign key (`ADD FOREIGN KEY ... NOT VALID`, a catalog change, then
+`VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes go on), then adds
+the parent's foreign key, which adopts them, in one brief transaction. `migrate --alter`
+(`migrate.Run`) routes a lone named `ADD FOREIGN KEY` on a partitioned table to it before
+PostgreSQL 18, and `migrate.RunDesired` runs a foreign key a desired file adds as it when the
+build admits its shape ([design](partitioned-foreign-key-design.md#routing-from-a-desired-file)); a library caller may call it directly, and
+`AdmitPartitionedForeignKeyShape` checks a statement's shape without a connection. The design is in
+[partitioned-foreign-key-design](partitioned-foreign-key-design.md).
+
+It stops at the first error and keeps every partition's foreign key, and **running the same
+statement again resumes from them**: a validated one is found, a `NOT VALID` one is validated
+where it stands. A `NOT VALID` foreign key a stop leaves on a partition still enforces new writes
+to that partition, so an operator who lists its constraints sees it and leaves it for the rerun.
+The codes it shares with the builds above (`not-partitioned-table`, `foreign-table-partition`,
+`partition-detach-pending`, `table-lock-unconfirmed`, `invariant-violation`,
+`commit-outcome-unknown`, `budget-lock-exceeded`, `budget-statement-exceeded`, `execution-failed`,
+and `*dbconn.TableLockHeldError`) route as in [the partitioned index build
+table](#outcomes-of-a-partitioned-index-build), with "whatever was finished" meaning the
+partitions' foreign keys. The codes of its own, and `data-fault`, route as follows:
+
+| Outcome | Persists | Retry | Orchestrator action |
+| --- | --- | --- | --- |
+| `not-add-foreign-key` | nothing | no, permanent | The statement is not one `ALTER TABLE` with a single `ADD FOREIGN KEY`; fix the caller, not the database |
+| `partitioned-foreign-key-unsupported-shape` | nothing | no, permanent | The constraint has no name, or a clause the build cannot carry to every partition (an unqualified referenced table, no referenced column list, an `ON DELETE` column list, `NOT VALID`, `ONLY`, a repeated column). Fix the statement |
+| `partitioned-foreign-key-not-valid-supported` | nothing | no, permanent | The server is PostgreSQL 18 or later, where the ordinary online route works on a partitioned table: run `ADD FOREIGN KEY ... NOT VALID`, then `VALIDATE CONSTRAINT` |
+| `partitioned-foreign-key-referenced-table` | nothing | no, permanent | The foreign key references a partitioned table, a foreign table, a view, or a partition of the target. Surface to an operator |
+| `partitioned-foreign-key-parent-conflict` | nothing | no, permanent | The parent has another constraint under the name, or the requested foreign key under another name. An operator resolves it, then the same statement resumes |
+| `partitioned-foreign-key-sub-partitioned` | nothing when the tree is first read; every partition's foreign key when a later pass finds it | no, permanent | A partition is itself partitioned; the build takes only leaf partitions directly under the target. Surface to an operator |
+| `partitioned-foreign-key-name-taken` | the refused partition is untouched; earlier partitions keep their foreign keys | no, permanent | The name the foreign key needs on a partition is held by another constraint. Nothing is renamed or dropped; an operator renames or drops the occupant, then the same statement resumes |
+| `partitioned-foreign-key-conflict` | the refused partition is untouched; earlier partitions keep their foreign keys | no, permanent | The partition has two foreign keys of the requested definition, or one already attached to a parent's. An operator drops the extra one or detaches the other parent's, then the same statement resumes |
+| `data-fault` | the partition's foreign key, `NOT VALID` and enforced for new writes; earlier partitions keep theirs | no, permanent | Rows of the partition break the foreign key (`executor.ErrPartitionedForeignKeyViolation`, naming the partition and the constraint). Correct the rows, then the same statement validates it in place. The server error in the chain carries the offending key value in its detail, so keep it off shared surfaces |
+| `partitioned-foreign-key-leaf-changed` | every partition's foreign key | yes | A partition's foreign key was dropped, replaced, or joined by another of the same definition between its leaf step and the parent's step, which rolled back before the parent's statement. Retry the same statement; it decides each partition again. If it repeats, find what else changes the partition's constraints |
+| `partitioned-foreign-key-unsettled` | every partition's foreign key | yes, after a wait | Partitions kept appearing without the foreign key faster than the build covered them. Retry the same statement; if it repeats, involve an operator to stop whatever is creating partitions |
+
+A deadlock (SQLSTATE 40P01) in the parent's step is `execution-failed`. The step takes
+the tree's locks before the referenced table's, the server's own order, so it meets one only
+against a transaction that read the referenced table and then writes the partitioned table; the
+step rolls back, every partition's foreign key stays, and the rerun adopts them.
+
 ### Wiring the build through `migrate.Run` and `migrate.RunDesired`
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
-as this build; the plan statement carries `execution: partitioned-index-build`. The build takes
+as this build; the plan statement carries `execution: partitioned-index-build`. The same wiring
+serves the key build, which both route a lone `ADD PRIMARY KEY` or `ADD UNIQUE` on a
+partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
+a foreign key on a partitioned table to before PostgreSQL 18 (`partitioned-foreign-key-build`).
+Each build takes
 the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
 sets `migrate.Options.Connection` to the `dbconn.Config` the pool was dialed with. It must
 reach the pool's database: the lock is an advisory lock, and an advisory lock excludes only
@@ -782,7 +829,7 @@ corrects, so fix the wiring rather than routing either as an outcome:
 
 | Error | How to recognize it | Cause and fix |
 | --- | --- | --- |
-| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset. Set it to the config the pool was dialed with |
+| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset and the statement runs as one of the builds above. Set it to the config the pool was dialed with |
 | `*migrate.PartitionedIndexConnectionMismatchError` | `errors.AsType[*migrate.PartitionedIndexConnectionMismatchError](err)` | `Options.Connection` reaches another database than the pool, whether another database of the cluster or one of the same name on another cluster. Point it at the pool's database |
 
 The mismatch error names `Options.Connection` and carries the database name and the cluster's
@@ -807,8 +854,23 @@ index is built concurrently and given the constraint, then the parent's `ADD CON
 them in one brief transaction. The `migrate --dry-run` plan statement carries
 `execution: partitioned-key-build` (plan `format_version` 27). It needs `migrate.Options.Connection`
 for its table lock session exactly as the partitioned index build does, with the same two wiring
-errors. `migrate.RunDesired` does not route it yet: a desired-state plan refuses the statement
-with `unsupported-partitioned-parent`, cause `parent-concurrent-index-build`. A forced run meets
+errors. A key a desired file adds plans the same way: the `diff` plan statement carries
+`execution: partitioned-key-build`, schema-qualified and named, under the same `format_version`
+27, and `migrate.RunDesired` runs it through `migrate.Run` with the verdicts below, checking
+`Options.Connection` for the whole plan before its first statement. A desired key whose shape
+the build refuses, such as a `DEFERRABLE` one, is not routed: its plan statement stays refused
+with `unsupported-partitioned-parent`. A primary key over a column the table allows to be `NULL`
+is planned after the `SET NOT NULL` the file implies, so `partitioned-key-nullable-column` is
+not reached from a desired file unless the column loses `NOT NULL` between the two statements.
+`migrate.RunDesired` also runs the build's catalog admission for every key the plan routes
+before its first statement (`migrate.AdmitPlanPartitionedKeys`, which `migrate --desired
+--dry-run` calls too): a key that lacks a partition key column, or a tree with a sub-partitioned
+partition, refuses the whole plan with the verdict the table below gives it, so a statement
+planned ahead of the key never commits first. A host that assembles its own report routes a
+desired plan's keys with `plan.RouteDesiredPartitionedKeyBuilds`, which routes only shapes the
+build admits; `plan.RoutePartitionedKeyBuilds` is the imperative dry run's router, which routes
+every key and relies on the build's admission afterward.
+A forced run meets
 cause `parent-blocking-index-build`, and `ADD CONSTRAINT ... USING INDEX` meets
 `parent-index-adoption`, as before.
 
@@ -837,6 +899,45 @@ plan for a partitioned key is not a guarantee the apply runs: the parent's check
 under the build's lock.
 The codes are in [execution-model](execution-model.md#outcome-codes); the design is in
 [partitioned-index-build-design](partitioned-index-build-design.md#primary-key-and-unique-constraints).
+
+## Outcomes of a partitioned foreign key build
+
+On PostgreSQL 14–17, a lone `ALTER TABLE ... ADD CONSTRAINT name FOREIGN KEY (columns)
+REFERENCES schema.table (columns)` on a partitioned table that reaches `migrate.Run` runs as
+`executor.AddPartitionedForeignKey`: each partition is given the foreign key `NOT VALID` and
+validated while writes continue, then the parent's `ADD CONSTRAINT` adopts them in one brief
+transaction that also holds `ACCESS EXCLUSIVE` on the referenced table. The `migrate --dry-run`
+plan statement carries `execution: partitioned-foreign-key-build` (plan `format_version` 28). It
+needs `migrate.Options.Connection` for its table lock session exactly as the partitioned index
+build does, with the same two wiring errors. On PostgreSQL 18 the same statement runs as the
+ordinary `NOT VALID` then `VALIDATE` sequence. A foreign key a desired file adds to a
+partitioned table takes the same route: `diffplan.Plan` gives its `add-foreign-key` statement the
+execution `partitioned-foreign-key-build`, and `migrate.RunDesired` runs it with the verdicts
+below, after checking `migrate.Options.Connection` before any statement runs. A desired foreign
+key whose shape the build does not carry is planned refused instead (`unsupported-partitioned-parent`,
+class `environmental`). A forced run runs the plain
+statement as written, and a submitted `NOT VALID` meets `unsupported-partitioned-parent`, cause
+`parent-not-valid-foreign-key`, as before.
+
+The build stops at the first error and keeps every partition foreign key it finished; **running
+the same statement again resumes from there.** `migrate.Run` maps its stops as follows; every
+refusal row executed nothing and exits 2:
+
+| Executor code | Verdict | Orchestrator action |
+| --- | --- | --- |
+| `not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape` | refused, `unsupported-statement`, `capability-boundary`; the dry run reports it too | The statement is not a lone named foreign key the build can carry to every partition (an unnamed constraint, an unqualified referenced table, no referenced column list, an `ON DELETE` column list, `ONLY`, or a repeated column); change the statement |
+| `partitioned-foreign-key-parent-conflict` | refused, `unsupported-statement`, `environmental`, when returned before any partition got the foreign key; otherwise failed with the code | The parent already has another constraint under the name, or the same foreign key under another name; drop or rename it, then rerun |
+| `partitioned-foreign-key-referenced-table`, `partitioned-foreign-key-sub-partitioned` | refused, `unsupported-statement`, `capability-boundary`, when returned before any partition got the foreign key; otherwise failed with the code | The referenced table is partitioned, foreign, a view, or inside the tree, or a partition is itself partitioned, which the build does not take yet |
+| `partitioned-foreign-key-name-taken`, `partitioned-foreign-key-conflict`, `foreign-table-partition`, `partition-detach-pending` | failed with the code | Something on a partition stands in the way (another constraint under the derived name, more than one matching foreign key, a foreign table, an unfinished detach); an operator removes it, then the same statement resumes |
+| `data-fault` with `sqlstate` `23503` | failed | A partition's rows break the foreign key; `server_error` names the partition. Correct the rows, then rerun; the partitions already validated are not redone |
+| `partitioned-foreign-key-unsettled` | failed with the code | Partitions kept appearing; retry the same statement |
+| `partitioned-foreign-key-not-valid-supported` | failed with the code | The server is PostgreSQL 18 or later, which `migrate.Run` does not route to the build; it appears only if the server changed between the routing and the build. Rerun, and the ordinary route runs |
+| `not-partitioned-table`, `invariant-violation`, `commit-outcome-unknown`, `budget-*`, `*dbconn.TableLockHeldError` | failed, as for the partitioned index build above | Route as in [the partitioned index build table](#outcomes-of-a-partitioned-index-build) |
+
+A failed verdict never claims nothing changed: earlier partitions' foreign keys may have
+committed, so inspect the foreign keys of the table and its partitions, then rerun. The codes are
+in [execution-model](execution-model.md#outcome-codes); the design is in
+[partitioned-foreign-key-design](partitioned-foreign-key-design.md).
 
 ## Execution-mode verdicts and direct execution
 

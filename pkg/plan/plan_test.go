@@ -257,6 +257,140 @@ func TestRoutePartitionedParentRoutesCreateIndexAndRefusesTheRest(t *testing.T) 
 	})
 }
 
+// An ADD FOREIGN KEY on a partitioned table, which the planner substitutes
+// with a plain table's NOT VALID then VALIDATE, routes to the partitioned
+// foreign key build before PostgreSQL 18: its one step becomes the statement
+// and its execution partitioned-foreign-key-build, and RoutePartitionedParent
+// then leaves it executable. Without the routing the same report is refused,
+// which is what a declarative plan, which does not route foreign keys, still
+// gets. On 18 nothing routes and the substitute runs as planned.
+func TestRoutePartitionedForeignKeyBuildsRoutesAForeignKeyThatWouldBeRefused(t *testing.T) {
+	const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts (id)`
+	steps := []string{
+		`ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts (id) NOT VALID`,
+		`ALTER TABLE app.events VALIDATE CONSTRAINT events_account_fk`,
+	}
+	fkReport := func() plan.Report {
+		return plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   steps,
+			Execution: planner.ExecutionAutocommit,
+		}}}
+	}
+
+	t.Run("routed before 18", func(t *testing.T) {
+		r := fkReport()
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		st := r.Statements[0]
+		assert.Equal(t, router.DispositionExecute, st.Disposition)
+		assert.Equal(t, []string{sql}, st.ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, st.Execution)
+		assert.Equal(t, []string{sql}, st.Decisions[0].SaferSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, st.Decisions[0].SaferSQLExecution)
+	})
+
+	// The imperative route does not gate on the build's shape admission:
+	// the dry run runs that admission after the routing, so a shape the build
+	// refuses meets the build's own refusal, which names the clause, instead
+	// of the partitioned-parent refusal, which says to upgrade the server.
+	t.Run("a shape the build refuses is still routed", func(t *testing.T) {
+		const onDeleteColumns = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region) ON DELETE SET NULL (account_id)`
+		r := fkReport()
+		r.Statements[0].SQL = onDeleteColumns
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, []string{onDeleteColumns}, r.Statements[0].ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, r.Statements[0].Execution)
+	})
+
+	t.Run("not routed before 18 is refused", func(t *testing.T) {
+		r := fkReport()
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	})
+
+	t.Run("on 18 the substitute runs", func(t *testing.T) {
+		r := fkReport()
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 18))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 18))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, steps, r.Statements[0].ExecSQL)
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	})
+
+	t.Run("a refused statement is left refused", func(t *testing.T) {
+		r := fkReport()
+		r.Statements[0].Disposition = router.DispositionRewriteRequired
+		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 16))
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	})
+}
+
+// A desired-state plan routes a foreign key the file adds to a partitioned
+// table to the same build before PostgreSQL 18, but only when the build's
+// own admission takes its shape, because a desired run has no admission
+// between the plan and the run: a plan that shows the build must be one the
+// run executes as the build. A shape the build refuses, such as an ON DELETE
+// column list, keeps the planner's NOT VALID step and stays refused.
+func TestRouteDesiredPartitionedForeignKeyBuildsRoutesOnlyAnAdmittedShape(t *testing.T) {
+	fkReport := func(sql string) plan.Report {
+		steps := []string{sql + ` NOT VALID`, `ALTER TABLE app.events VALIDATE CONSTRAINT events_account_fk`}
+		return plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   steps,
+			Execution: planner.ExecutionAutocommit,
+		}}}
+	}
+
+	t.Run("an admitted shape is routed before 18", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts(id)`
+		r := fkReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, []string{sql}, r.Statements[0].ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, r.Statements[0].Execution)
+	})
+
+	t.Run("a shape the build refuses stays refused", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts(id, region) ON DELETE SET NULL (account_id)`
+		r := fkReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedForeignKeyBuilds(&r, 16))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+		assert.Equal(t, verdict.ClassEnvironmental, r.Statements[0].Class)
+		assert.Empty(t, r.Statements[0].Execution, "a refusal carries nothing to run")
+	})
+
+	t.Run("on 18 the substitute runs", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts(id)`
+		r := fkReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedForeignKeyBuilds(&r, 18))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 18))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	})
+}
+
 // A diff-derived drop of a partitioned table's index stays refused, because
 // PostgreSQL has no concurrent drop for it, and discloses the one drop there
 // is: the plain DROP INDEX as its step, with the blocking-index-drop
@@ -319,7 +453,7 @@ func TestRoutePartitionedParentDisclosesTheBlockingIndexDrop(t *testing.T) {
 // to the partitioned key build: its one step becomes the statement and its
 // execution partitioned-key-build, and RoutePartitionedParent then leaves it
 // executable. Without the key routing the same report is refused, which is
-// what a declarative plan, which does not route keys, still gets.
+// what a caller that skips the key routing gets.
 func TestRoutePartitionedKeyBuildsRoutesAKeyThatWouldBeRefused(t *testing.T) {
 	const sql = "ALTER TABLE s.p ADD CONSTRAINT p_pkey PRIMARY KEY (id)"
 	steps := []string{
@@ -367,6 +501,105 @@ func TestRoutePartitionedKeyBuildsRoutesAKeyThatWouldBeRefused(t *testing.T) {
 		require.NoError(t, plan.RoutePartitionedKeyBuilds(&r))
 		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
 	})
+}
+
+// A desired-state plan runs no admission between the plan and the run, so
+// its router sends a key to the build only when the build's shape check
+// accepts it. A key the build would refuse keeps the planner's USING INDEX
+// steps and meets the partitioned-parent refusal.
+func TestRouteDesiredPartitionedKeyBuildsRoutesOnlyAdmittedShapes(t *testing.T) {
+	keyReport := func(sql string) plan.Report {
+		steps := []string{
+			"CREATE UNIQUE INDEX CONCURRENTLY events_key ON app.events (id, created_at)",
+			"ALTER TABLE app.events ADD CONSTRAINT events_key UNIQUE USING INDEX events_key",
+		}
+		return plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   steps,
+			Execution: planner.ExecutionAutocommit,
+		}}}
+	}
+
+	t.Run("a named primary key routes to the build", func(t *testing.T) {
+		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`
+		r := keyReport(sql)
+		require.NoError(t, plan.RouteDesiredPartitionedKeyBuilds(&r))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		st := r.Statements[0]
+		assert.Equal(t, []string{sql}, st.ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, st.Execution)
+		assert.Equal(t, []string{sql}, st.Decisions[0].SaferSQL)
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, st.Decisions[0].SaferSQLExecution)
+	})
+
+	// The build gives each partition a constraint it cannot make
+	// deferrable, so it refuses DEFERRABLE; the plan keeps the refusal.
+	t.Run("a deferrable unique constraint stays refused", func(t *testing.T) {
+		r := keyReport(`ALTER TABLE app.events ADD CONSTRAINT events_key UNIQUE (id, created_at) DEFERRABLE`)
+		require.NoError(t, plan.RouteDesiredPartitionedKeyBuilds(&r))
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	})
+
+	// The build names each partition's constraint after the parent's, so it
+	// refuses an unnamed key. The diff names every key it plans, so this
+	// shape reaches the router only from a caller-built report.
+	t.Run("an unnamed key stays refused", func(t *testing.T) {
+		r := keyReport(`ALTER TABLE app.events ADD UNIQUE (id, created_at)`)
+		require.NoError(t, plan.RouteDesiredPartitionedKeyBuilds(&r))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	})
+
+	// The imperative router routes the same unnamed key, because the
+	// imperative dry run then runs the build's admission and refuses it with
+	// the build's own reason.
+	t.Run("the imperative router routes the unnamed key for its admission", func(t *testing.T) {
+		r := keyReport(`ALTER TABLE app.events ADD UNIQUE (id, created_at)`)
+		require.NoError(t, plan.RoutePartitionedKeyBuilds(&r))
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, r.Statements[0].Execution)
+	})
+}
+
+// A desired file that adds a column beside a key plans both. Either router
+// sends the key to the build and leaves the column add on its own step,
+// since only a lone ADD PRIMARY KEY or ADD UNIQUE is the build's statement.
+func TestKeyRoutingLeavesOtherStatementsAlone(t *testing.T) {
+	executable := func(sql string) plan.Statement {
+		return plan.Statement{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			ExecSQL:     []string{sql},
+			Execution:   planner.ExecutionAutocommit,
+		}
+	}
+	for name, route := range map[string]func(*plan.Report) error{
+		"desired":    plan.RouteDesiredPartitionedKeyBuilds,
+		"imperative": plan.RoutePartitionedKeyBuilds,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{
+				executable(`ALTER TABLE app.events ADD COLUMN note text`),
+				executable(`ALTER TABLE app.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`),
+			}}
+			require.NoError(t, route(&r))
+			assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution, "the column add is not the key build")
+			assert.Equal(t, planner.ExecutionPartitionedKeyBuild, r.Statements[1].Execution)
+		})
+	}
 }
 
 // The partition refusal's class is a property of the cause: an index-adoption
@@ -659,7 +892,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 27 against this test.
+// omissions. A consumer pins format_version 28 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -715,7 +948,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 27,
+		"format_version": 28,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -773,7 +1006,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 27,
+		"format_version": 28,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -798,7 +1031,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 27,
+		"format_version": 28,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -886,6 +1119,27 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 	rewritten.ExecSQL = []string{"CREATE INDEX CONCURRENTLY i ON t (c)"}
 	assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{rewritten, b}),
 		"exec_sql is what runs: identity changes with it")
+}
+
+// An ADD FOREIGN KEY that runs as the partitioned foreign key build is not
+// the same plan as the statement run literally, which validates every
+// partition while it blocks writes to the whole tree.
+func TestFingerprintCoversPartitionedForeignKeyBuildExecution(t *testing.T) {
+	const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES app.accounts (id)`
+	literal := plan.Statement{
+		SQL:         sql,
+		ExecSQL:     []string{sql},
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+	}
+	partitioned := literal
+	partitioned.Execution = planner.ExecutionPartitionedForeignKeyBuild
+
+	assert.NotEqual(t,
+		plan.Fingerprint([]plan.Statement{literal}),
+		plan.Fingerprint([]plan.Statement{partitioned}),
+		"the partitioned foreign key build is not the literal ADD FOREIGN KEY")
 }
 
 // A CREATE INDEX on a partitioned table runs as the partition-by-partition
@@ -1008,7 +1262,7 @@ func TestFingerprintCoversExtensionSchemas(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 27.
+// pinned to format_version 28.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

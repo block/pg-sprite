@@ -74,6 +74,23 @@ func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, st sta
 	})
 }
 
+// AdmitPartitionedForeignKeyRequest is [AdmitRoutedSteps] for a statement
+// routed to the partitioned foreign key build, whose one step is the ADD
+// FOREIGN KEY itself: it runs the build's own static admission, so an
+// unnamed foreign key, or one with a clause the build cannot carry to every
+// partition, is refused in the dry run as it is in the run. The build's
+// checks under its table lock (the parent's constraints, the referenced
+// table, the shape of the tree) are not part of it, so a dry run does not
+// claim them.
+func AdmitPartitionedForeignKeyRequest(st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRouted(st, schema, steps, func(steps []string) error {
+		if len(steps) != 1 {
+			return fmt.Errorf("%w: the partitioned foreign key build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
+		}
+		return executor.AdmitPartitionedForeignKeyShape(steps[0])
+	})
+}
+
 // AdmitCopySwapPartitioning is the dry run's reading of the copy-and-swap
 // route's partition refusal, for a statement routed to the copy-and-swap
 // backend: a target that is a partitioned parent, a partition, or part of

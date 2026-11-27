@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -85,7 +86,8 @@ func (t attachTable) proof(kind attachProofKind, expr, constraint string) attach
 // for each, CHECKs first. Each validation is bounded by b. It stops at the
 // first error and keeps what it finished. The caller holds the parent's
 // advisory table lock (LK-1).
-func ensureAttachConstraints(ctx context.Context, pool *pgxpool.Pool, parentOID uint32, table attachTable, b ValidateBudget, started attachProofStatementStarted) ([]attachConstraintResult, error) {
+func ensureAttachConstraints(ctx context.Context, pool *pgxpool.Pool, parentOID uint32, table attachTable, b ValidateBudget,
+	holderWait time.Duration, tracker *progress.Tracker, started attachProofStatementStarted) ([]attachConstraintResult, error) {
 	tx := briefTx{pool: pool}
 	var (
 		checks   []parentCheck
@@ -104,14 +106,14 @@ func ensureAttachConstraints(ctx context.Context, pool *pgxpool.Pool, parentOID 
 	}
 	results := make([]attachConstraintResult, 0, len(checks)+len(notNulls))
 	for _, c := range checks {
-		res, err := ensureAttachProof(ctx, pool, table.proof(attachProofParent, c.expr, c.name), b, started)
+		res, err := ensureAttachProof(ctx, pool, table.proof(attachProofParent, c.expr, c.name), b, holderWait, tracker, started)
 		if err != nil {
 			return results, fmt.Errorf("give %s the parent's CHECK %s: %w", table.qualified(), c.name, err)
 		}
 		results = append(results, attachConstraintResult{check: c.name, action: checkAction(res.action)})
 	}
 	for _, column := range notNulls {
-		action, err := ensureAttachNotNull(ctx, pool, tx, table, column, b, started)
+		action, err := ensureAttachNotNull(ctx, pool, tx, table, column, b, holderWait, tracker, started)
 		if err != nil {
 			return results, fmt.Errorf("make column %q of %s NOT NULL: %w", column, table.qualified(), err)
 		}
@@ -135,7 +137,8 @@ func checkAction(a attachProofAction) attachConstraintAction {
 // ensureAttachNotNull brings one column to NOT NULL online: the helper CHECK
 // proves it holds no NULL, SET NOT NULL then skips its scan, and the helper
 // is dropped. A column already NOT NULL only has a leftover helper dropped.
-func ensureAttachNotNull(ctx context.Context, pool *pgxpool.Pool, tx briefTx, table attachTable, column string, b ValidateBudget, started attachProofStatementStarted) (attachConstraintAction, error) {
+func ensureAttachNotNull(ctx context.Context, pool *pgxpool.Pool, tx briefTx, table attachTable, column string, b ValidateBudget,
+	holderWait time.Duration, tracker *progress.Tracker, started attachProofStatementStarted) (attachConstraintAction, error) {
 	helper := table.proof(attachProofNotNull, pgx.Identifier{column}.Sanitize()+" IS NOT NULL", "")
 	notNull, err := readAttachColumnNotNull(ctx, tx, table, column)
 	if err != nil {
@@ -143,18 +146,24 @@ func ensureAttachNotNull(ctx context.Context, pool *pgxpool.Pool, tx briefTx, ta
 	}
 	action := attachConstraintFound
 	if !notNull {
-		if _, err := ensureAttachProof(ctx, pool, helper, b, started); err != nil {
+		if _, err := ensureAttachProof(ctx, pool, helper, b, holderWait, tracker, started); err != nil {
 			return "", err
 		}
 		setSQL := "ALTER TABLE " + pgx.Identifier{table.schema, table.name}.Sanitize() +
 			" ALTER COLUMN " + pgx.Identifier{column}.Sanitize() + " SET NOT NULL"
+		// INV: LK-2 — SET NOT NULL takes ACCESS EXCLUSIVE, so it requests its
+		// lock once no long-lived reader or writer holds the table, or once
+		// holderWait runs out.
+		if _, err := waitOutsideLockQueue(ctx, pool, helper.lockedTables(), holderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
+			return "", err
+		}
 		reportAttachProofStatement(started, progress.OperationBrief, setSQL)
 		if err := setAttachNotNull(ctx, tx, helper, column, setSQL); err != nil {
 			return "", err
 		}
 		action = attachConstraintSetNotNull
 	}
-	if err := dropAttachHelper(ctx, tx, helper, started); err != nil {
+	if err := dropAttachHelper(ctx, pool, tx, helper, holderWait, tracker, started); err != nil {
 		return "", err
 	}
 	return action, nil
@@ -221,11 +230,10 @@ func setAttachNotNull(ctx context.Context, tx briefTx, helper attachProof, colum
 		})
 }
 
-// dropAttachHelper drops the helper CHECK, when one is there, in one brief
-// transaction. It drops it only by its derived name, and only a CHECK.
-func dropAttachHelper(ctx context.Context, tx briefTx, helper attachProof, started attachProofStatementStarted) error {
-	dropSQL := "ALTER TABLE " + pgx.Identifier{helper.schema, helper.table}.Sanitize() +
-		" DROP CONSTRAINT " + pgx.Identifier{helper.name()}.Sanitize()
+// dropAttachHelper drops the helper CHECK when one is there
+// (dropAttachProof), reporting the statement only when it runs.
+func dropAttachHelper(ctx context.Context, pool *pgxpool.Pool, tx briefTx, helper attachProof,
+	holderWait time.Duration, tracker *progress.Tracker, started attachProofStatementStarted) error {
 	var present bool
 	if err := tx.read(ctx, "inspect the helper CHECK of "+helper.qualified(), func(ctx context.Context, q querier) error {
 		state, _, err := readAttachProof(ctx, q, helper)
@@ -234,20 +242,8 @@ func dropAttachHelper(ctx context.Context, tx briefTx, helper attachProof, start
 	}); err != nil || !present {
 		return err
 	}
-	reportAttachProofStatement(started, progress.OperationBrief, dropSQL)
-	return tx.run(ctx, "drop the helper CHECK of "+helper.qualified(), catalogReadPath(), true,
-		func(ctx context.Context, tx pgx.Tx) error {
-			if err := lockAndProveAttachProofTable(ctx, tx, helper); err != nil {
-				return err
-			}
-			state, _, err := readAttachProof(ctx, tx, helper)
-			if err != nil || state == attachProofAddNeeded {
-				return err
-			}
-			// INV: LK-2 — dropping a CHECK changes only the catalog.
-			_, err = tx.Exec(ctx, dropSQL)
-			return err
-		})
+	reportAttachProofStatement(started, progress.OperationBrief, helper.dropSQL())
+	return dropAttachProof(ctx, pool, helper, holderWait, tracker)
 }
 
 // attachColumnSQL reads whether a column refuses NULL, and whether its

@@ -70,6 +70,8 @@ func TestRetryPolicyRejectsUnboundedValues(t *testing.T) {
 		// Retries with no backoff would re-enter the lock queue back-to-back.
 		{MaxAttempts: 3, InitialBackoff: 0, MaxBackoff: 0},
 		{MaxAttempts: 2, InitialBackoff: 0, MaxBackoff: time.Second},
+		{MaxAttempts: 1, HolderWait: -time.Millisecond},
+		{MaxAttempts: 1, HolderWait: maxOverallBudget + time.Millisecond},
 	}
 	for _, policy := range tests {
 		require.Error(t, policy.validate())

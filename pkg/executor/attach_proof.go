@@ -66,9 +66,13 @@ var (
 	errAttachProofNameTaken = errors.New("the name the attach proof needs is held by a constraint that is not that CHECK")
 	// errAttachProofViolation is returned when the proof's validation finds
 	// rows that break it: rows of the attached table outside the bound, or
-	// rows of the DEFAULT partition inside it. The CHECK stays NOT VALID and
-	// enforced for new rows.
+	// rows of the DEFAULT partition inside it. The bound proof stays NOT
+	// VALID and enforced for new rows; the DEFAULT partition's is dropped.
 	errAttachProofViolation = errors.New("rows break the attach proof")
+	// errAttachProofNotPlainTable is returned when the table the proof goes
+	// on is not a plain table, such as a partitioned one. The schema is
+	// valid, and the step does not prove it online.
+	errAttachProofNotPlainTable = errors.New("the attach proof goes on a plain table")
 )
 
 // sqlstateCheckConstraintViolation is check_violation.
@@ -177,9 +181,14 @@ type attachProofStatementStarted func(op progress.Operation, sql string)
 // result as it stands, a NOT VALID one is validated, and otherwise the CHECK
 // is added NOT VALID, then validated. A name held by another kind of
 // constraint is refused before anything is added. The ADD and the VALIDATE
-// each prove the table and decide again under its lock. The VALIDATE is
-// bounded by b. The caller holds the parent's advisory table lock (LK-1).
-func ensureAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachProof, b ValidateBudget, started attachProofStatementStarted) (attachProofResult, error) {
+// each prove the table and decide again under its lock. Before the ADD
+// requests its lock, the step waits outside the lock queue, up to
+// holderWait, while a reader or writer holds the table, and reports the
+// wait to tracker, which may be nil. The VALIDATE is bounded by b. Rows that
+// break the DEFAULT partition's proof get its CHECK dropped again, so the
+// writes it would refuse go on; the bound proof's CHECK stays. The caller
+// holds the parent's advisory table lock (LK-1).
+func ensureAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachProof, b ValidateBudget, holderWait time.Duration, tracker *progress.Tracker, started attachProofStatementStarted) (attachProofResult, error) {
 	if err := proof.validate(); err != nil {
 		return attachProofResult{}, err
 	}
@@ -205,6 +214,13 @@ func ensureAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachProo
 	case attachProofValidatePending:
 		result.action = attachProofValidated
 	case attachProofAddNeeded:
+		// INV: LK-2 — the ADD takes ACCESS EXCLUSIVE, so it requests its
+		// lock once no long-lived reader or writer holds the table, or once
+		// holderWait runs out, rather than queue every later statement on
+		// the table behind it.
+		if _, err := waitOutsideLockQueue(ctx, pool, proof.lockedTables(), holderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
+			return attachProofResult{}, err
+		}
 		reportAttachProofStatement(started, progress.OperationBrief, proof.addSQL())
 		ended, addedOID, added, err := addAttachProof(ctx, tx, proof)
 		if err != nil {
@@ -224,10 +240,48 @@ func ensureAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachProo
 	default:
 		return attachProofResult{}, fmt.Errorf("%w: unknown attach proof state %d", ErrInvariantViolation, state)
 	}
-	if err := validateAttachProof(ctx, pool, proof, result.constraintOID, b, started); err != nil {
+	err = validateAttachProof(ctx, pool, proof, result.constraintOID, b, started)
+	if errors.Is(err, errAttachProofViolation) {
+		return attachProofResult{}, attachProofViolationOutcome(ctx, pool, proof, holderWait, tracker, err)
+	}
+	if err != nil {
 		return attachProofResult{}, err
 	}
 	return result, nil
+}
+
+// lockedTables is the one table the proof's ADD and DROP lock, with the
+// reads and writes their ACCESS EXCLUSIVE conflicts with. ONLY: neither
+// statement locks the table's partitions.
+func (p attachProof) lockedTables() []lockedTable {
+	return []lockedTable{{schema: p.schema, table: p.table, modes: readAndWriteLockModes()}}
+}
+
+// attachProofViolationOutcome says what the rows that broke the proof leave
+// and what the operator does next. The bound proof's CHECK stays, refusing
+// only rows the attach would refuse, and the rerun validates it. The
+// DEFAULT partition's is dropped, because until the attach it refuses every
+// write the parent routes there for the new bound.
+func attachProofViolationOutcome(ctx context.Context, pool *pgxpool.Pool, proof attachProof, holderWait time.Duration, tracker *progress.Tracker, violation error) error {
+	// The proofs on the table being attached stay: each refuses only rows
+	// the attach would refuse too. Only the DEFAULT partition's is dropped.
+	switch proof.kind {
+	case attachProofBound:
+		return fmt.Errorf("rows of %s fall outside the new partition's bound; its CHECK %s stays NOT VALID and refuses new rows outside the bound; fix or move those rows, then rerun: %w",
+			proof.qualified(), proof.name(), violation)
+	case attachProofParent:
+		return fmt.Errorf("rows of %s break the parent's CHECK %s, which stays NOT VALID on it and refuses new rows that break it; fix those rows, then rerun: %w",
+			proof.qualified(), proof.name(), violation)
+	case attachProofNotNull:
+		return fmt.Errorf("rows of %s hold NULL in a column the parent declares NOT NULL; the CHECK %s stays NOT VALID and refuses new NULLs; fix those rows, then rerun: %w",
+			proof.qualified(), proof.name(), violation)
+	}
+	if err := dropAttachProof(ctx, pool, proof, holderWait, tracker); err != nil {
+		return fmt.Errorf("rows of the DEFAULT partition %s fall inside the new partition's bound, and dropping its CHECK %s failed, so it still refuses new rows for the bound; drop it, move those rows, then rerun: %w (drop: %w)",
+			proof.qualified(), proof.name(), violation, err)
+	}
+	return fmt.Errorf("rows of the DEFAULT partition %s fall inside the new partition's bound; its CHECK %s was dropped, so its writes go on; move those rows into the new table, then rerun: %w",
+		proof.qualified(), proof.name(), violation)
 }
 
 func reportAttachProofStatement(started attachProofStatementStarted, op progress.Operation, sql string) {
@@ -306,8 +360,7 @@ func validateAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachPr
 		catalogReadPath(), "", before, after)
 	if err = corroborateValidateCancel(ctx, err, b, time.Since(start)); err != nil {
 		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateCheckConstraintViolation {
-			return fmt.Errorf("%w: %s proof %s on %s stays NOT VALID and enforced for new rows: %w",
-				errAttachProofViolation, proof.kind, proof.name(), proof.qualified(), err)
+			return fmt.Errorf("%w: %w", errAttachProofViolation, err)
 		}
 		return fmt.Errorf("validate attach proof %s on %s: %w", proof.name(), proof.qualified(), err)
 	}
@@ -352,7 +405,7 @@ func lockAndProveAttachProofTable(ctx context.Context, tx pgx.Tx, proof attachPr
 		return fmt.Errorf("prove table %s: %w", proof.qualified(), err)
 	}
 	if relkind != "r" {
-		return fmt.Errorf("%w: %s is of kind %q, and an attach proof goes on a plain table", ErrInvariantViolation, proof.qualified(), relkind)
+		return fmt.Errorf("%w: %s is of kind %q", errAttachProofNotPlainTable, proof.qualified(), relkind)
 	}
 	return nil
 }

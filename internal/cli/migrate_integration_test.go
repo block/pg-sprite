@@ -440,8 +440,10 @@ func TestMigrateRefusesOnLockBudgetContention(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
 
-	// An open transaction holding ACCESS SHARE on the table makes the
-	// ALTER's ACCESS EXCLUSIVE unobtainable until rollback.
+	// An open transaction holding SHARE on the table, as a CREATE INDEX
+	// does, makes the ALTER's ACCESS EXCLUSIVE unobtainable until rollback.
+	// The step does not wait out a lock that strong, so it goes straight to
+	// requesting its own.
 	tx, err := pool.Begin(t.Context())
 	require.NoError(t, err)
 	defer func() {
@@ -449,7 +451,7 @@ func TestMigrateRefusesOnLockBudgetContention(t *testing.T) {
 			t.Logf("rollback lock-holding transaction: %v", err)
 		}
 	}()
-	_, err = tx.Exec(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.t", schema))
+	_, err = tx.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN SHARE MODE", schema))
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
