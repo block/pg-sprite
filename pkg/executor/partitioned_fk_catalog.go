@@ -24,8 +24,6 @@ type fkReference struct {
 	attnums []int16
 }
 
-func (r fkReference) qualified() string { return qualifiedName(r.schema, r.table) }
-
 // resolvedFK is the requested foreign key with what the build resolved for
 // it: the referenced table, and the server major whose catalog it reads.
 type resolvedFK struct {
@@ -99,7 +97,10 @@ type catalogFK struct {
 	onDelete string
 	// deleteSetColumns is whether the foreign key's ON DELETE names a
 	// column list (pg_constraint.confdelsetcols, from version 15).
-	deleteSetColumns  bool
+	deleteSetColumns bool
+	// notEnforced is whether the foreign key is NOT ENFORCED
+	// (pg_constraint.conenforced false, from version 18).
+	notEnforced       bool
 	deferrable        bool
 	initiallyDeferred bool
 	validated         bool
@@ -110,7 +111,7 @@ type catalogFK struct {
 
 const foreignKeysSQLFormat = `SELECT k.oid, k.conname, k.confrelid, k.conkey, k.confkey,
 		        k.confmatchtype::pg_catalog.text, k.confupdtype::pg_catalog.text, k.confdeltype::pg_catalog.text,
-		        %s,
+		        %s, %s,
 		        k.condeferrable, k.condeferred, k.convalidated, k.conparentid
 		   FROM pg_catalog.pg_constraint k
 		  WHERE k.conrelid OPERATOR(pg_catalog.=) $1
@@ -118,13 +119,19 @@ const foreignKeysSQLFormat = `SELECT k.oid, k.conname, k.confrelid, k.conkey, k.
 		  ORDER BY k.oid`
 
 // foreignKeysSQL lists a table's foreign keys. Version 14 has no
-// confdelsetcols, and no ON DELETE column lists, so its query reads false in
-// that column's place.
+// confdelsetcols, and no ON DELETE column lists, and versions before 18
+// have no conenforced, and no NOT ENFORCED foreign keys, so their queries
+// read false in those columns' places.
 func foreignKeysSQL(serverMajor int) string {
+	deleteSetColumns := `k.confdelsetcols IS NOT NULL`
 	if serverMajor < 15 {
-		return fmt.Sprintf(foreignKeysSQLFormat, `false`)
+		deleteSetColumns = `false`
 	}
-	return fmt.Sprintf(foreignKeysSQLFormat, `k.confdelsetcols IS NOT NULL`)
+	notEnforced := `NOT k.conenforced`
+	if serverMajor < 18 {
+		notEnforced = `false`
+	}
+	return fmt.Sprintf(foreignKeysSQLFormat, deleteSetColumns, notEnforced)
 }
 
 // readForeignKeys lists the foreign keys of the table relOID.
@@ -138,7 +145,7 @@ func readForeignKeys(ctx context.Context, q querier, relOID uint32, relName stri
 	for rows.Next() {
 		var k catalogFK
 		if err := rows.Scan(&k.oid, &k.name, &k.refOID, &k.key, &k.refKey,
-			&k.match, &k.onUpdate, &k.onDelete, &k.deleteSetColumns,
+			&k.match, &k.onUpdate, &k.onDelete, &k.deleteSetColumns, &k.notEnforced,
 			&k.deferrable, &k.initiallyDeferred, &k.validated, &k.parentOID); err != nil {
 			return nil, fmt.Errorf("scan the foreign keys of %s: %w", relName, err)
 		}
@@ -153,10 +160,10 @@ func readForeignKeys(ctx context.Context, q querier, relOID uint32, relName stri
 // isRequested reports whether the foreign key has the requested
 // definition on a table whose foreign key columns are attnums: the same
 // referenced table and columns, in order, the same MATCH, actions, and
-// deferrability, and no ON DELETE column list. These are what the parent's
-// statement compares before it adopts a partition's foreign key instead of
-// creating and validating one. Whether it is validated or adopted is judged
-// apart.
+// deferrability, no ON DELETE column list, and enforced. These are what the
+// parent's statement compares before it adopts a partition's foreign key
+// instead of creating and validating one. Whether it is validated or adopted
+// is judged apart.
 func (k catalogFK) isRequested(spec partitionedFKSpec, attnums []int16, ref fkReference) bool {
 	return k.refOID == ref.oid &&
 		slices.Equal(k.key, attnums) &&
@@ -171,6 +178,7 @@ func (k catalogFK) sameRules(spec partitionedFKSpec) bool {
 		k.onUpdate == spec.onUpdate &&
 		k.onDelete == spec.onDelete &&
 		!k.deleteSetColumns &&
+		!k.notEnforced &&
 		k.deferrable == spec.deferrable &&
 		k.initiallyDeferred == spec.initiallyDeferred
 }

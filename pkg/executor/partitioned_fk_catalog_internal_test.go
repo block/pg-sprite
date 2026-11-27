@@ -146,6 +146,7 @@ func TestCatalogFKIsRequestedComparesEveryRule(t *testing.T) {
 		"ON UPDATE CASCADE":             func(k *catalogFK) { k.onUpdate = "c" },
 		"ON DELETE RESTRICT":            func(k *catalogFK) { k.onDelete = "r" },
 		"an ON DELETE column list":      func(k *catalogFK) { k.deleteSetColumns = true },
+		"NOT ENFORCED":                  func(k *catalogFK) { k.notEnforced = true },
 		"DEFERRABLE":                    func(k *catalogFK) { k.deferrable = true },
 		"DEFERRABLE INITIALLY DEFERRED": func(k *catalogFK) { k.deferrable, k.initiallyDeferred = true, true },
 	}
