@@ -193,6 +193,19 @@ func refuseKeyTree(target indexTarget, tree []partitionNode) error {
 	if foreign := foreignPartitions(tree); len(foreign) > 0 {
 		return fmt.Errorf("%w: %s under %s", ErrForeignTablePartition, strings.Join(foreign, ", "), parent)
 	}
+	if err := refuseSubPartitioned(target, tree); err != nil {
+		return err
+	}
+	if pending := detachPendingPartitions(tree); len(pending) > 0 {
+		return fmt.Errorf("%w: %s under %s; finish each detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then rerun",
+			ErrPartitionDetachPending, strings.Join(pending, ", "), parent)
+	}
+	return nil
+}
+
+// refuseSubPartitioned refuses a tree with a partition that is itself
+// partitioned, which the build does not take.
+func refuseSubPartitioned(target indexTarget, tree []partitionNode) error {
 	var nested []string
 	for _, n := range tree {
 		if n.subPartitioned() {
@@ -200,11 +213,7 @@ func refuseKeyTree(target indexTarget, tree []partitionNode) error {
 		}
 	}
 	if len(nested) > 0 {
-		return fmt.Errorf("%w: %s under %s", ErrPartitionedKeySubPartitioned, strings.Join(nested, ", "), parent)
-	}
-	if pending := detachPendingPartitions(tree); len(pending) > 0 {
-		return fmt.Errorf("%w: %s under %s; finish each detach with ALTER TABLE ... DETACH PARTITION ... FINALIZE, then rerun",
-			ErrPartitionDetachPending, strings.Join(pending, ", "), parent)
+		return fmt.Errorf("%w: %s under %s", ErrPartitionedKeySubPartitioned, strings.Join(nested, ", "), qualifiedName(target.schema, target.table))
 	}
 	return nil
 }
@@ -217,6 +226,9 @@ func (f *partitionedKeyFlow) ensureLeaves(ctx context.Context, tree []partitionN
 		buildSQL := leafKeyIndexSQL(f.req.spec, n, derivedPartitionIndexName(f.req.spec.name, n.oid))
 		f.startStep(progress.OperationConcurrentIndex, buildSQL)
 		res, err := ensureLeafKey(ctx, f.pool, f.req.spec, n, f.budget)
+		if res.buildStarted {
+			f.rep.Changed = true
+		}
 		if err != nil {
 			return err
 		}

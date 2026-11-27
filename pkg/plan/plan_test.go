@@ -433,6 +433,61 @@ func TestRoutePartitionedParentDisclosesTheBlockingIndexDrop(t *testing.T) {
 	})
 }
 
+// An ADD PRIMARY KEY on a partitioned table, which the planner substitutes
+// with a plain table's concurrent unique build and USING INDEX attach, routes
+// to the partitioned key build: its one step becomes the statement and its
+// execution partitioned-key-build, and RoutePartitionedParent then leaves it
+// executable. Without the key routing the same report is refused, which is
+// what a declarative plan, which does not route keys, still gets.
+func TestRoutePartitionedKeyBuildsRoutesAKeyThatWouldBeRefused(t *testing.T) {
+	const sql = "ALTER TABLE s.p ADD CONSTRAINT p_pkey PRIMARY KEY (id)"
+	steps := []string{
+		"CREATE UNIQUE INDEX CONCURRENTLY p_pkey ON s.p (id)",
+		"ALTER TABLE s.p ADD CONSTRAINT p_pkey PRIMARY KEY USING INDEX p_pkey",
+	}
+	keyReport := func() plan.Report {
+		return plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{
+			SQL:         sql,
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL: steps, SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL:   steps,
+			Execution: planner.ExecutionAutocommit,
+		}}}
+	}
+
+	t.Run("routed", func(t *testing.T) {
+		r := keyReport()
+		require.NoError(t, plan.RoutePartitionedKeyBuilds(&r))
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionExecute, r.Disposition)
+		st := r.Statements[0]
+		assert.Equal(t, router.DispositionExecute, st.Disposition)
+		assert.Equal(t, []string{sql}, st.ExecSQL)
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, st.Execution)
+		assert.Equal(t, []string{sql}, st.Decisions[0].SaferSQL)
+		assert.Equal(t, planner.ExecutionPartitionedKeyBuild, st.Decisions[0].SaferSQLExecution)
+	})
+
+	t.Run("not routed", func(t *testing.T) {
+		r := keyReport()
+		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
+		assert.Equal(t, router.DispositionRefuse, r.Disposition)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	})
+
+	t.Run("a refused statement is left refused", func(t *testing.T) {
+		r := keyReport()
+		r.Statements[0].Disposition = router.DispositionRewriteRequired
+		require.NoError(t, plan.RoutePartitionedKeyBuilds(&r))
+		assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	})
+}
+
 // The partition refusal's class is a property of the cause: an index-adoption
 // refusal is by-design, a pre-18 NOT VALID foreign key is environmental. A
 // registry keyed on the reason alone could not tell them apart.
@@ -723,7 +778,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 26 against this test.
+// omissions. A consumer pins format_version 28 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -1053,6 +1108,25 @@ func TestFingerprintCoversWhatADropRemoves(t *testing.T) {
 	}
 }
 
+// An ADD PRIMARY KEY that runs as the partitioned key build is not the same
+// plan as the statement run literally on a plain table.
+func TestFingerprintCoversPartitionedKeyBuildExecution(t *testing.T) {
+	literal := plan.Statement{
+		SQL:         "ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id)",
+		ExecSQL:     []string{"ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id)"},
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+	}
+	partitioned := literal
+	partitioned.Execution = planner.ExecutionPartitionedKeyBuild
+
+	assert.NotEqual(t,
+		plan.Fingerprint([]plan.Statement{literal}),
+		plan.Fingerprint([]plan.Statement{partitioned}),
+		"the partitioned key build is not the literal ADD CONSTRAINT")
+}
+
 // The extension schemas a plan was derived with are part of its identity:
 // a table that does not exist yet is created from the file's own SQL, whose
 // unqualified names resolve through them. A plan without them hashes as it
@@ -1074,7 +1148,7 @@ func TestFingerprintCoversExtensionSchemas(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 26.
+// pinned to format_version 28.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

@@ -113,6 +113,9 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
+		if changes, facts.NotNullHelpers, err = resumeNotNullHelpers(ctx, pool, ds.Table(), changes); err != nil {
+			return plan.Report{}, err
+		}
 		if err := requireReferencesForAddedKeys(ctx, pool, req.Schema, changes); err != nil {
 			return plan.Report{}, err
 		}
@@ -141,6 +144,9 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	}
 	report.TableExists = &tableExists
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
+		return plan.Report{}, err
+	}
+	if err := recordNotNullScaffolds(ctx, pool, report.Statements); err != nil {
 		return plan.Report{}, err
 	}
 	plan.RefuseForeignKeyDrops(&report)

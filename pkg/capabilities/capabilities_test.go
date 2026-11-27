@@ -21,7 +21,7 @@ func validRow() Row {
 func TestEmbeddedCapabilitiesValidate(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
-	assert.Len(t, rows, 66)
+	assert.Len(t, rows, 67)
 }
 
 // The engine refuses a partitioned parent with its own target-fact reason
@@ -40,6 +40,7 @@ func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{
 		"add-constraint-using-index-on-a-partitioned-parent",
+		"add-primary-key-add-unique-on-a-partitioned-parent",
 	}, got)
 	for _, r := range rows {
 		if strings.Contains(r.Operation, "partitioned parent") && r.RefusalReason != "" {

@@ -595,6 +595,14 @@ type Verdict struct {
 	// committed makes no pass, and an empty table has nothing to compare —
 	// and for every other verdict.
 	Verification *Verification `json:"verification,omitempty"`
+	// RefusedStatements is set on a refused verdict for a desired file that
+	// refused more than one of its statements: every one, in file order,
+	// each with where it starts, so the file's author fixes them in one
+	// edit. The verdict's own class, statement, and detail describe the one
+	// refusal that decides the file's verdict. Empty for every other
+	// verdict, including a file that refused a single statement, which the
+	// verdict names.
+	RefusedStatements []RefusedStatement `json:"refused_statements,omitempty"`
 	// TableCreated is true on an executed verdict whose run created the
 	// table, committing it in the same transaction as its row security, so
 	// automation can tell a create from a run that converged a table that
@@ -708,6 +716,25 @@ type Verdict struct {
 	// refusal of an accepted DROP INDEX would have dropped; nil for every
 	// other verdict.
 	IndexUsage *IndexUsage `json:"index_usage,omitempty"`
+}
+
+// RefusedStatement is one statement a desired file refused and where it
+// starts in the file.
+type RefusedStatement struct {
+	// Statement is the statement's 1-based position in the file.
+	Statement int `json:"statement"`
+	// Line and Column locate the statement's first token, both 1-based,
+	// with the column counted in characters.
+	Line   int `json:"line"`
+	Column int `json:"column"`
+	// Detail is why the statement is refused.
+	Detail string `json:"detail"`
+}
+
+// String names the refused statement by where it starts and why it is
+// refused.
+func (r RefusedStatement) String() string {
+	return fmt.Sprintf("line %d, column %d (statement %d): %s", r.Line, r.Column, r.Statement, r.Detail)
 }
 
 // Verification is what a copy-and-swap run's verification pass compared
@@ -846,6 +873,13 @@ func (v Verdict) String() string {
 	}
 	if v.Detail != "" {
 		fmt.Fprintf(&b, "\n  detail:    %s", v.Detail)
+	}
+	for i, refused := range v.RefusedStatements {
+		label := "refused:"
+		if i > 0 {
+			label = "        "
+		}
+		fmt.Fprintf(&b, "\n  %s   %s", label, refused)
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
