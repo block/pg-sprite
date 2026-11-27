@@ -179,11 +179,11 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 }
 
 // admissionSentinels is the closed set of the sequence executor's and the
-// partitioned index and foreign key builds' static admission refusals, decided from the
-// statement's text before anything runs, and the build's refusal of a unique
-// index that misses a partition key, decided from the catalog before the
-// build creates anything, that the imperative front door maps
-// to a refusal verdict.
+// partitioned index and foreign key builds' static admission refusals,
+// decided from the statement's text before anything runs, and the build's
+// refusal of a unique index that misses a partition key, decided from the
+// catalog before the build creates anything, that the imperative front door
+// maps to a refusal verdict.
 // admissionRefusal walks this set for membership before it classifies, so
 // the predicate and the classification cannot disagree.
 func admissionSentinels() []error {

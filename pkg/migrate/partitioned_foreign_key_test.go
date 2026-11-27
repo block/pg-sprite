@@ -96,7 +96,19 @@ func TestPartitionedForeignKeyFailureVerdictCarriesTheCode(t *testing.T) {
 		assert.Contains(t, v.Detail, "steps before the stop may have committed")
 		assert.Contains(t, v.Detail, "inspect the foreign keys of app.events and its partitions")
 		assert.Contains(t, v.Detail, "run the same statement again")
+		if code.Permanent() {
+			assert.Contains(t, v.Detail, "a cause that a rerun does not clear", string(code))
+		} else {
+			assert.NotContains(t, v.Detail, "a cause that a rerun does not clear", string(code))
+		}
 	}
+
+	// Permanent for the build, yet a rerun through Run clears it: on
+	// PostgreSQL 18 the statement is not routed to the build at all.
+	notValid := partitionedForeignKeyFailureVerdict(st, fmt.Errorf("app.events: %w", executor.ErrPartitionedForeignKeyNotValidSupported))
+	assert.Equal(t, string(executor.CodePartitionedForeignKeyNotValidSupported), notValid.Code)
+	assert.NotContains(t, notValid.Detail, "a cause that a rerun does not clear")
+	assert.Contains(t, notValid.Detail, "takes the ordinary NOT VALID then VALIDATE route on app.events")
 
 	unknown := partitionedForeignKeyFailureVerdict(st, &executor.CommitOutcomeUnknownError{})
 	assert.Contains(t, unknown.Detail, "outcome unknown: a COMMIT did not return success")

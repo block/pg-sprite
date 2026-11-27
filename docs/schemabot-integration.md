@@ -773,9 +773,11 @@ read of the tree refuses before any partition is touched. The codes of its own r
 to a partitioned table online on PostgreSQL 14 to 17, under the table's advisory lock. It first
 gives every partition the foreign key (`ADD FOREIGN KEY ... NOT VALID`, a catalog change, then
 `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` while writes go on), then adds
-the parent's foreign key, which adopts them, in one brief transaction. No planner or CLI route
-calls it yet; a library caller may call it directly, and `AdmitPartitionedForeignKeyShape`
-checks a statement's shape without a connection. The design is in
+the parent's foreign key, which adopts them, in one brief transaction. `migrate --alter`
+(`migrate.Run`) routes a lone named `ADD FOREIGN KEY` on a partitioned table to it before
+PostgreSQL 18, and `migrate.RunDesired` runs a foreign key a desired file adds as it when the
+build admits its shape ([design](partitioned-foreign-key-design.md#routing-from-a-desired-file)); a library caller may call it directly, and
+`AdmitPartitionedForeignKeyShape` checks a statement's shape without a connection. The design is in
 [partitioned-foreign-key-design](partitioned-foreign-key-design.md).
 
 It stops at the first error and keeps every partition's foreign key, and **running the same
@@ -811,7 +813,11 @@ step rolls back, every partition's foreign key stays, and the rerun adopts them.
 ### Wiring the build through `migrate.Run` and `migrate.RunDesired`
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
-as this build; the plan statement carries `execution: partitioned-index-build`. The build takes
+as this build; the plan statement carries `execution: partitioned-index-build`. The same wiring
+serves the key build, which `migrate.Run` alone routes a lone `ADD PRIMARY KEY` or `ADD UNIQUE`
+on a partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
+a foreign key on a partitioned table to before PostgreSQL 18 (`partitioned-foreign-key-build`).
+Each build takes
 the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
 sets `migrate.Options.Connection` to the `dbconn.Config` the pool was dialed with. It must
 reach the pool's database: the lock is an advisory lock, and an advisory lock excludes only
@@ -823,7 +829,7 @@ corrects, so fix the wiring rather than routing either as an outcome:
 
 | Error | How to recognize it | Cause and fix |
 | --- | --- | --- |
-| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset. Set it to the config the pool was dialed with |
+| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset and the statement runs as one of the builds above. Set it to the config the pool was dialed with |
 | `*migrate.PartitionedIndexConnectionMismatchError` | `errors.AsType[*migrate.PartitionedIndexConnectionMismatchError](err)` | `Options.Connection` reaches another database than the pool, whether another database of the cluster or one of the same name on another cluster. Point it at the pool's database |
 
 The mismatch error names `Options.Connection` and carries the database name and the cluster's
