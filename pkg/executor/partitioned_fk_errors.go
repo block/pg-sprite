@@ -22,4 +22,14 @@ var (
 	// table, such as a partitioned table, a foreign table, or a view, or a
 	// partition of the table the foreign key is added to.
 	ErrPartitionedForeignKeyReferencedTable = errors.New("the foreign key references a table the partitioned foreign key build does not take")
+	// ErrPartitionedForeignKeyViolation is returned when a leaf's rows fail
+	// the VALIDATE of its foreign key: the rows need correcting before a
+	// rerun. The foreign key stays NOT VALID on the leaf, still enforced for
+	// new rows, and a rerun validates it where it stands. The server's error
+	// stays in the chain for logs; its Detail names the offending key value,
+	// so it is not for a shared surface.
+	ErrPartitionedForeignKeyViolation = errors.New("rows of the partition violate the foreign key")
 )
+
+// sqlstateForeignKeyViolation is the server's foreign_key_violation.
+const sqlstateForeignKeyViolation = "23503"

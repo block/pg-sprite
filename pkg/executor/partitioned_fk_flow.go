@@ -242,7 +242,7 @@ func refuseFKTree(target indexTarget, ref fkReference, tree []partitionNode) err
 			nested = append(nested, n.qualified())
 		}
 		if n.oid == ref.oid {
-			return fmt.Errorf("%w: %s is a partition of %s", ErrPartitionedForeignKeyReferencedTable, ref.qualified(), parent)
+			return fmt.Errorf("%w: %s is a partition of %s", ErrPartitionedForeignKeyReferencedTable, qualifiedName(ref.schema, ref.table), parent)
 		}
 	}
 	if len(nested) > 0 {

@@ -128,6 +128,28 @@ func adoptLeafFKs(ctx context.Context, tx pgx.Tx, target indexTarget, fk resolve
 	return out, nil
 }
 
+// lockAndProveReference locks the referenced table in SHARE ROW EXCLUSIVE,
+// after the tree's locks, the order the parent's ADD FOREIGN KEY takes them,
+// and proves under it that its name still resolves to the table the build
+// resolved. A rename needs ACCESS EXCLUSIVE, which the lock excludes until
+// the transaction ends, so the statement that names the table binds the one
+// proved here (INV: ST-7).
+func lockAndProveReference(ctx context.Context, tx pgx.Tx, ref fkReference) error {
+	_, err := tx.Exec(ctx, "LOCK TABLE ONLY "+pgx.Identifier{ref.schema, ref.table}.Sanitize()+" IN SHARE ROW EXCLUSIVE MODE")
+	if err != nil {
+		return err
+	}
+	current, found, err := relationByName(ctx, tx, ref.schema, ref.table)
+	if err != nil {
+		return err
+	}
+	if !found || current.oid != ref.oid {
+		return fmt.Errorf("%w: ST-7: %s no longer names the referenced table %d the build resolved",
+			ErrInvariantViolation, qualifiedName(ref.schema, ref.table), ref.oid)
+	}
+	return nil
+}
+
 // proveLeafFKRecorded proves, under the tree's lock, that the partition has
 // exactly one foreign key of the requested definition, validated, attached
 // to no parent's, and that it is the one its leaf step recorded. Anything
