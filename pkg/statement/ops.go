@@ -167,6 +167,9 @@ type Op struct {
 	IndexOptionsUnrenderable bool
 	// Constraint is the constraint family for OpAddConstraint.
 	Constraint ConstraintKind
+	// AddedForeignKey is what an ADD CONSTRAINT ... FOREIGN KEY declares;
+	// nil for every other operation.
+	AddedForeignKey *ForeignKeyClause
 	// NotValid is true for ADD CONSTRAINT ... NOT VALID.
 	NotValid bool
 	// UsingIndex is true for ADD CONSTRAINT ... USING INDEX.
@@ -600,6 +603,9 @@ func addConstraintOp(con *pganalyze.Constraint) Op {
 	}
 	if op.Constraint == ConstraintPrimaryKey || op.Constraint == ConstraintUnique {
 		keyIndexAttributes(&op, con)
+	}
+	if op.Constraint == ConstraintForeignKey {
+		op.AddedForeignKey = foreignKeyClause(con)
 	}
 	return op
 }

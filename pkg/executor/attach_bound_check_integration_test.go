@@ -25,6 +25,9 @@ import (
 // partition ... is implied by existing constraints" for the DEFAULT
 // partition, and "verifying table ..." for each scan. The control test
 // shows the same session reports both scans when the proofs are missing.
+// The server reports the skip only as message text, which carries no
+// SQLSTATE; a major that rewords it fails these tests on every case, and
+// the matching strings here are what to update.
 
 type attachProofFixture struct {
 	pool   *pgxpool.Pool
@@ -165,9 +168,119 @@ func TestAttachBoundCheckLetsAttachSkipItsScans(t *testing.T) {
 			assert.Equal(t, `"day" IS NOT NULL`+
 				` AND "day" OPERATOR("pg_catalog".>=) CAST('2027-01-01' AS date)`+
 				` AND "day" OPERATOR("pg_catalog".<) CAST('2027-02-01' AS date)`, check)
-			assert.Equal(t, `NOT ("day" OPERATOR("pg_catalog".>=) CAST('2027-01-01' AS date)`+
+			assert.Equal(t, `NOT ("day" IS NOT NULL`+
+				` AND "day" OPERATOR("pg_catalog".>=) CAST('2027-01-01' AS date)`+
 				` AND "day" OPERATOR("pg_catalog".<) CAST('2027-02-01' AS date))`, exclusion)
 			requireNoScan(t, notices, "events_2027_01", "events_default")
+		})
+
+		// (tenant, seq) from (1, 10) to (4, 20): the DEFAULT partition holds
+		// (2, NULL). Its tenant alone satisfies both sides' arms, and it
+		// still belongs in the DEFAULT partition, because a NULL in any
+		// range key column routes a row there. The exclusion negates the
+		// IS NOT NULL terms with the rest, as the server's DEFAULT
+		// constraint does, so it validates over that row.
+		t.Run("range on two columns keeps a NULL-key row in the DEFAULT partition", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `
+				CREATE TABLE %[1]s.ledger (
+					tenant integer,
+					seq integer
+				) PARTITION BY RANGE (tenant, seq);
+				CREATE TABLE %[1]s.ledger_default PARTITION OF %[1]s.ledger DEFAULT;
+				CREATE TABLE %[1]s.ledger_next (
+					tenant integer,
+					seq integer
+				);
+				INSERT INTO %[1]s.ledger VALUES (2, NULL), (5, 1);
+				INSERT INTO %[1]s.ledger_next VALUES (1, 10), (3, 1)`)
+			_, _, notices := f.proveAndAttach(t, "ledger_next", "ledger_default", `ALTER TABLE %[1]s.ledger
+				ATTACH PARTITION %[1]s.ledger_next
+				FOR VALUES FROM (1, 10) TO (4, 20)`)
+			requireNoScan(t, notices, "ledger_next", "ledger_default")
+		})
+
+		// 150 values, past the size up to which the implication proof
+		// expands an array element by element: the CHECK carries the
+		// server's array whole, so the proof still matches it. One value
+		// needs quoting and one holds a backslash, which quote_literal
+		// writes as an E'' string.
+		t.Run("list of 150 values on a text key, some needing quoting", func(t *testing.T) {
+			f := newFixture(t)
+			values := []string{`'o''brien'`, `'back\slash'`}
+			for i := range 148 {
+				values = append(values, fmt.Sprintf("'customer_%d'", i))
+			}
+			f.exec(t, `
+				CREATE TABLE %[1]s.accounts (
+					id bigint NOT NULL,
+					owner text
+				) PARTITION BY LIST (owner);
+				CREATE TABLE %[1]s.accounts_default PARTITION OF %[1]s.accounts DEFAULT;
+				CREATE TABLE %[1]s.accounts_named (
+					id bigint NOT NULL,
+					owner text
+				);
+				INSERT INTO %[1]s.accounts VALUES (1, 'someone else'), (2, NULL);
+				INSERT INTO %[1]s.accounts_named VALUES (3, 'o''brien'), (4, 'back\slash'), (5, 'customer_7')`)
+			check, _, notices := f.proveAndAttach(t, "accounts_named", "accounts_default", `ALTER TABLE %[1]s.accounts
+				ATTACH PARTITION %[1]s.accounts_named
+				FOR VALUES IN (`+strings.Join(values, ", ")+`)`)
+			assert.Contains(t, check, `CAST('o''brien' AS text)`)
+			assert.Contains(t, check, `CAST(E'back\\slash' AS text)`)
+			requireNoScan(t, notices, "accounts_named", "accounts_default")
+		})
+
+		// A varchar key compares with text's operator, so the CHECK's array
+		// is coerced to text[] and no longer matches the server's whole;
+		// at 100 values the proof still tests every element one by one.
+		t.Run("list of 100 values on a varchar key", func(t *testing.T) {
+			f := newFixture(t)
+			values := make([]string, 0, 100)
+			for i := range 100 {
+				values = append(values, fmt.Sprintf("'customer_%d'", i))
+			}
+			f.exec(t, `
+				CREATE TABLE %[1]s.accounts (
+					id bigint NOT NULL,
+					owner character varying(20)
+				) PARTITION BY LIST (owner);
+				CREATE TABLE %[1]s.accounts_default PARTITION OF %[1]s.accounts DEFAULT;
+				CREATE TABLE %[1]s.accounts_named (
+					id bigint NOT NULL,
+					owner character varying(20)
+				);
+				INSERT INTO %[1]s.accounts VALUES (1, 'someone else'), (2, NULL);
+				INSERT INTO %[1]s.accounts_named VALUES (3, 'customer_7')`)
+			check, _, notices := f.proveAndAttach(t, "accounts_named", "accounts_default", `ALTER TABLE %[1]s.accounts
+				ATTACH PARTITION %[1]s.accounts_named
+				FOR VALUES IN (`+strings.Join(values, ", ")+`)`)
+			assert.Contains(t, check, `CAST('customer_99' AS character varying(20))`)
+			requireNoScan(t, notices, "accounts_named", "accounts_default")
+		})
+
+		// A timestamptz key: the bound and the CHECK's cast read the
+		// literal in the same session time zone, so they name the same
+		// instant.
+		t.Run("range on timestamp with time zone", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `
+				CREATE TABLE %[1]s.audit (
+					id bigint NOT NULL,
+					at timestamp with time zone
+				) PARTITION BY RANGE (at);
+				CREATE TABLE %[1]s.audit_default PARTITION OF %[1]s.audit DEFAULT;
+				CREATE TABLE %[1]s.audit_2027_01 (
+					id bigint NOT NULL,
+					at timestamp with time zone
+				);
+				INSERT INTO %[1]s.audit VALUES (1, '2026-12-31 23:00+00'), (2, NULL);
+				INSERT INTO %[1]s.audit_2027_01 VALUES (3, '2027-01-15 12:00+00')`)
+			check, _, notices := f.proveAndAttach(t, "audit_2027_01", "audit_default", `ALTER TABLE %[1]s.audit
+				ATTACH PARTITION %[1]s.audit_2027_01
+				FOR VALUES FROM ('2027-01-01 00:00+00') TO ('2027-02-01 00:00+00')`)
+			assert.Contains(t, check, `CAST('2027-01-01 00:00+00' AS timestamp with time zone)`)
+			requireNoScan(t, notices, "audit_2027_01", "audit_default")
 		})
 
 		// (tenant, seq) from (1, 10) to (2, 20): the OR arms the server
@@ -448,6 +561,91 @@ func TestAttachBoundCheckRefusesUnprovableKeys(t *testing.T) {
 			_, _, err := f.derive(t, `ALTER TABLE %[1]s.tags
 				ATTACH PARTITION %[1]s.tags_a
 				FOR VALUES IN ('a')`)
+			require.ErrorIs(t, err, errAttachBoundUnprovable)
+		})
+		// Past 100 values the proof needs the CHECK's array to match the
+		// server's whole, and a varchar key's array is coerced to text[].
+		t.Run("list of 101 values on a varchar key", func(t *testing.T) {
+			f := newFixture(t)
+			values := make([]string, 0, 101)
+			for i := range 101 {
+				values = append(values, fmt.Sprintf("'customer_%d'", i))
+			}
+			f.exec(t, `
+				CREATE TABLE %[1]s.accounts (
+					owner character varying(20)
+				) PARTITION BY LIST (owner);
+				CREATE TABLE %[1]s.accounts_named (
+					owner character varying(20)
+				)`)
+			_, _, err := f.derive(t, `ALTER TABLE %[1]s.accounts
+				ATTACH PARTITION %[1]s.accounts_named
+				FOR VALUES IN (`+strings.Join(values, ", ")+`)`)
+			require.ErrorIs(t, err, errAttachBoundUnprovable)
+		})
+		// The attach proves the bound ANDed with the parent's own
+		// partition constraint (region = 'eu'), which a CHECK of the bound
+		// alone does not imply, so the leaf's attach would scan anyway.
+		t.Run("parent that is itself a partition", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `
+				CREATE TABLE %[1]s.orders (
+					id bigint NOT NULL,
+					region text,
+					day date
+				) PARTITION BY LIST (region);
+				CREATE TABLE %[1]s.orders_eu PARTITION OF %[1]s.orders
+					FOR VALUES IN ('eu')
+					PARTITION BY RANGE (day);
+				CREATE TABLE %[1]s.orders_eu_2027_01 (
+					id bigint NOT NULL,
+					region text,
+					day date
+				)`)
+			_, _, err := f.derive(t, `ALTER TABLE %[1]s.orders_eu
+				ATTACH PARTITION %[1]s.orders_eu_2027_01
+				FOR VALUES FROM ('2027-01-01') TO ('2027-02-01')`)
+			require.ErrorIs(t, err, errAttachBoundUnprovable)
+		})
+		// The server decides a range's equal prefix under the key's
+		// collation; a nondeterministic one can call 'a' and 'A' equal.
+		t.Run("nondeterministic collation", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `
+				CREATE COLLATION %[1]s.case_insensitive (
+					provider = icu,
+					locale = 'und-u-ks-level2',
+					deterministic = false
+				);
+				CREATE TABLE %[1]s.tags (
+					name text COLLATE %[1]s.case_insensitive
+				) PARTITION BY RANGE (name);
+				CREATE TABLE %[1]s.tags_a (
+					name text COLLATE %[1]s.case_insensitive
+				)`)
+			_, _, err := f.derive(t, `ALTER TABLE %[1]s.tags
+				ATTACH PARTITION %[1]s.tags_a
+				FOR VALUES FROM ('a') TO ('b')`)
+			require.ErrorIs(t, err, errAttachBoundUnprovable)
+		})
+		// IS NULL on a composite value tests every field, and the server's
+		// partition constraint tests the value itself.
+		t.Run("composite key", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `
+				CREATE TYPE %[1]s.version AS (
+					major integer,
+					minor integer
+				);
+				CREATE TABLE %[1]s.releases (
+					v %[1]s.version
+				) PARTITION BY RANGE (v);
+				CREATE TABLE %[1]s.releases_1 (
+					v %[1]s.version
+				)`)
+			_, _, err := f.derive(t, `ALTER TABLE %[1]s.releases
+				ATTACH PARTITION %[1]s.releases_1
+				FOR VALUES FROM ('(1,0)') TO ('(2,0)')`)
 			require.ErrorIs(t, err, errAttachBoundUnprovable)
 		})
 		t.Run("cast in the bound", func(t *testing.T) {

@@ -172,6 +172,56 @@ func addsKeyOverColumns(op statement.Op) bool {
 	return op.Constraint == statement.ConstraintPrimaryKey || op.Constraint == statement.ConstraintUnique
 }
 
+// partitionedNotValidForeignKeyMajor is the first PostgreSQL major that
+// accepts ADD FOREIGN KEY ... NOT VALID on a partitioned table.
+const partitionedNotValidForeignKeyMajor = 18
+
+// RoutesToPartitionedForeignKeyBuild reports whether a statement whose target
+// is a partitioned table, on a server of major version serverMajor, is the
+// one ADD FOREIGN KEY that the partitioned foreign key build carries: an
+// ALTER TABLE whose only subcommand adds a foreign key without NOT VALID, on
+// a server before version 18. A front door asks it of the submitted
+// statement, after it knows the target is partitioned and before the steps
+// the planner made for a plain table (ADD ... NOT VALID, then VALIDATE, which
+// PostgreSQL refuses on a partitioned table before version 18) reach
+// RefusesPartitionedParent, and runs the build with the statement itself.
+// From version 18 those steps run as they are, so it is false there. A
+// statement the build's own admission refuses, such as an unnamed foreign
+// key or one with an ON DELETE column list, still routes, so it is refused
+// with the build's reason. A submitted NOT VALID foreign key, and a
+// statement with any other subcommand beside the foreign key, are false and
+// meet RefusesPartitionedParent as before. A statement that does not parse is
+// an error, as it is for RefusesPartitionedParent.
+func RoutesToPartitionedForeignKeyBuild(serverMajor int, sql string) (bool, error) {
+	if serverMajor >= partitionedNotValidForeignKeyMajor {
+		return false, nil
+	}
+	st, err := statement.ParseOne(sql)
+	if err != nil {
+		return false, fmt.Errorf("check partitioned foreign key build routing: %w", err)
+	}
+	if st.Kind() != statement.KindAlterTable {
+		return false, nil
+	}
+	ops, err := statement.ParseOps(sql)
+	if err != nil {
+		return false, fmt.Errorf("check partitioned foreign key build routing: %w", err)
+	}
+	if len(ops) != 1 {
+		return false, nil
+	}
+	return addsValidatedForeignKey(ops[0]), nil
+}
+
+// addsValidatedForeignKey reports whether op adds a foreign key that is
+// validated as it is added, that is, without NOT VALID.
+func addsValidatedForeignKey(op statement.Op) bool {
+	if op.Kind != statement.OpAddConstraint || op.Constraint != statement.ConstraintForeignKey {
+		return false
+	}
+	return !op.NotValid
+}
+
 // CheckPartitionSupport verifies that the execution steps are safe
 // for the target's relation kind. Ordinary tables and leaf partitions pass
 // unchanged. Supported in-place parent ALTER TABLE operations remain available.

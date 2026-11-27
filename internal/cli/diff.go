@@ -228,7 +228,20 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 		// statement leaves the partitions unindexed and the parent's index
 		// invalid, or fails on the name of a build it would resume, so it is
 		// commented out like a refusal.
-		if _, err := fmt.Fprintln(out, "-- only the engine runs this build, one partition at a time: use pg-sprite migrate --desired or pg-sprite migrate --alter"); err != nil {
+		return writeEngineOnlyBuild(out, ps)
+	}
+	if ps.Execution == planner.ExecutionPartitionedKeyBuild {
+		// The build gives each partition the key online and then adds the
+		// parent's constraint, which adopts them. Run as written, the
+		// statement builds every partition's index under ACCESS EXCLUSIVE
+		// on the whole tree, so it is commented out like a refusal.
+		return writeEngineOnlyBuild(out, ps)
+	}
+	if ps.Execution == planner.ExecutionPartitionedForeignKeyBuild {
+		// Run as written, the statement validates every partition while it
+		// holds SHARE ROW EXCLUSIVE on the whole tree, so it is commented out
+		// like a refusal.
+		if _, err := fmt.Fprintln(out, "-- only the engine runs this build, one partition at a time while the table keeps taking writes, then a brief ACCESS EXCLUSIVE lock on the referenced table: use pg-sprite migrate --desired or pg-sprite migrate --alter"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
@@ -253,6 +266,18 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 		}
 	}
 	if _, err := fmt.Fprintf(out, "%s;\n", ps.SQL); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	return nil
+}
+
+// writeEngineOnlyBuild emits a statement only the engine's partition-aware
+// build runs, commented out with the commands that run it.
+func writeEngineOnlyBuild(out io.Writer, ps plan.Statement) error {
+	if _, err := fmt.Fprintln(out, "-- only the engine runs this build, one partition at a time: use pg-sprite migrate --desired or pg-sprite migrate --alter"); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	return nil

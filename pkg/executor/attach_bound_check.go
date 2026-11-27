@@ -43,6 +43,10 @@ type attachKeyColumn struct {
 	typeSQL string
 	// collatable is whether the key's type has a collation.
 	collatable bool
+	// relabeled is whether the key's type may differ from its operator
+	// class's input type, as varchar's does from text's: true for such a
+	// column, and for every expression, whose own type is not read.
+	relabeled bool
 	// The operator class's comparison operators, each as OPERATOR(...).
 	// Unset for a hash key.
 	lt, le, eq, ge, gt string
@@ -81,9 +85,12 @@ type attachBound struct {
 // expression on the attached table that implies its partition constraint,
 // and defaultExclusion, the one on the DEFAULT partition that excludes the
 // new bound, empty for a hash bound, whose parent has no DEFAULT partition.
-// defaultExclusion is NOT of the bound without its IS NOT NULL terms: a row
-// with a NULL key stays in the DEFAULT partition unless the new bound lists
-// NULL.
+// defaultExclusion is the NOT of the bound the server writes for the DEFAULT
+// partition (get_proposed_default_constraint): for a range, NOT of the whole
+// check, IS NOT NULL terms included, so a row with a NULL in any key column
+// stays in the DEFAULT partition whatever its other columns hold; for a
+// list, NOT of the listed values, which a NULL key passes unless the new
+// bound lists NULL.
 func attachBoundCheck(key attachKey, bound attachBound) (check, defaultExclusion string, err error) {
 	if bound.strategy != key.strategy {
 		return "", "", fmt.Errorf("%w: the bound is a %s bound and the table is partitioned by %s",
@@ -136,7 +143,8 @@ func rangeBoundCheck(key attachKey, bound attachBound) (string, string, error) {
 		return "", "", fmt.Errorf("%w: the range bound is unbounded on both sides, so only the IS NOT NULL of its key would describe it",
 			errAttachBoundUnprovable)
 	}
-	return strings.Join(append(notNullTerms(key.columns), terms...), " AND "), negation(terms), nil
+	all := append(notNullTerms(key.columns), terms...)
+	return strings.Join(all, " AND "), negation(all), nil
 }
 
 // checkRangeSide refuses a side the server would not accept as written:
@@ -209,6 +217,10 @@ func rangeOperator(columns []attachKeyColumn, side []boundValue, j int, lower bo
 	return c.lt
 }
 
+// maxExpandedListValues is the server's MAX_SAOP_ARRAY_SIZE: the largest
+// array whose elements the implication proof tests one by one.
+const maxExpandedListValues = 100
+
 // listBoundCheck mirrors get_qual_for_list: key = ANY of the listed values,
 // with IS NULL OR'd in when NULL is listed and IS NOT NULL ANDed in when it
 // is not.
@@ -229,11 +241,15 @@ func listBoundCheck(key attachKey, bound attachBound) (string, string, error) {
 			return "", "", unprovableValue(v)
 		}
 	}
-	// The implication proof expands a constant array into one comparison
-	// per element only up to a limit (MAX_SAOP_ARRAY_SIZE in predtest.c).
-	if len(literals) > maxProvableListValues {
-		return "", "", fmt.Errorf("%w: the list bound has %d values, more than the %d the server's implication proof expands",
-			errAttachBoundUnprovable, len(literals), maxProvableListValues)
+	// The values stay in one array in the statement's order, the array the
+	// server builds, so past the size up to which the implication proof
+	// expands an array element by element it still matches it as a whole.
+	// That match fails for a relabeled key: the parser coerces the CHECK's
+	// array to the operator's input type, and the server's array keeps the
+	// key's type.
+	if c.relabeled && len(literals) > maxExpandedListValues {
+		return "", "", fmt.Errorf("%w: the list bound has %d values, more than the %d the server proves one by one, and the key's type is not its operator class's input type",
+			errAttachBoundUnprovable, len(literals), maxExpandedListValues)
 	}
 	var in string
 	if len(literals) > 0 {
@@ -251,9 +267,6 @@ func listBoundCheck(key attachKey, bound attachBound) (string, string, error) {
 		return c.expr + " IS NOT NULL AND " + in, "NOT (" + in + ")", nil
 	}
 }
-
-// maxProvableListValues is predtest.c's MAX_SAOP_ARRAY_SIZE.
-const maxProvableListValues = 100
 
 // hashBoundCheck mirrors get_qual_for_hash: satisfies_hash_partition of the
 // parent, the modulus, the remainder, and every key column. The server's

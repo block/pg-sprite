@@ -310,6 +310,7 @@ func TestRetryFlagsWireIntoRetryPolicy(t *testing.T) {
 		MaxAttempts:    5,
 		InitialBackoff: 250 * time.Millisecond,
 		MaxBackoff:     2 * time.Second,
+		HolderWait:     executor.DefaultHolderWait,
 	}, c.retryPolicy())
 }
 

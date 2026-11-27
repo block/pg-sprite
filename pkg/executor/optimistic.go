@@ -104,6 +104,19 @@ type RetryPolicy struct {
 	MaxAttempts    int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	// HolderWait is the longest a step waits outside the lock queue,
+	// before its first attempt requests its lock, while a transaction
+	// that has held a lock reads or writes take, on a table the step
+	// locks, keeps holding it. An attempt that queued behind such a
+	// transaction would hold back every later reader and writer of the
+	// table for its whole lock budget. Once the holder finishes, or the
+	// wait runs out, the attempts run as they would without it, so the
+	// wait delays a step but never fails one. Native and sequence steps,
+	// table drops, and create steps that declare a foreign key wait. An
+	// index rename, a concurrent partition detach, and an enum value add
+	// take no lock a reader or writer conflicts with, so they never wait.
+	// Zero requests the lock at once.
+	HolderWait time.Duration
 }
 
 // DefaultRetryPolicy returns the safe native-DDL retry policy used by
@@ -113,6 +126,7 @@ func DefaultRetryPolicy() RetryPolicy {
 		MaxAttempts:    3,
 		InitialBackoff: 100 * time.Millisecond,
 		MaxBackoff:     time.Second,
+		HolderWait:     DefaultHolderWait,
 	}
 }
 
@@ -131,6 +145,9 @@ func (p RetryPolicy) validate() error {
 	}
 	if p.MaxBackoff < p.InitialBackoff {
 		return fmt.Errorf("maximum retry backoff %s must be at least initial backoff %s", p.MaxBackoff, p.InitialBackoff)
+	}
+	if p.HolderWait < 0 || p.HolderWait > maxOverallBudget {
+		return fmt.Errorf("lock holder wait must be between 0 and %s, got %s", maxOverallBudget, p.HolderWait)
 	}
 	return nil
 }
@@ -333,6 +350,17 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 			}
 			return nil
 		}
+	}
+	tables, err := nativeLockedTables(st, pt.Schema(), pt.Table())
+	if err != nil {
+		return err
+	}
+	// INV: LK-2 — the step requests its lock once no long-lived reader or
+	// writer holds one on a table it locks, or once HolderWait runs out,
+	// so it does not sit at the head of the lock queue behind a holder
+	// that is about to finish.
+	if _, err := waitOutsideLockQueue(ctx, pool, tables, retry.HolderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
+		return err
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
 		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, nil)

@@ -76,7 +76,7 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 8,
+		"format_version": 9,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 4,
@@ -141,7 +141,7 @@ func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 8,
+		"format_version": 9,
 		"phase": "running",
 		"step": 3,
 		"total_steps": 4,
@@ -200,7 +200,7 @@ func TestSnapshotJSONShapeForACatchUpStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 8,
+		"format_version": 9,
 		"phase": "running",
 		"step": 3,
 		"total_steps": 4,
