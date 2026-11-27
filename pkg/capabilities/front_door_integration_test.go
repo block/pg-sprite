@@ -318,6 +318,7 @@ var declarativeOnlyClaims = []string{
 	"declarative-not-valid-constraint",
 	"declarative-replace-constraint",
 	"declarative-replace-index",
+	"declarative-rename-index",
 	"declarative-unnamed-check-numbering",
 	"extension-objects-named-unqualified-in-a-desired-file",
 	"declarative-foreign-key-add",
