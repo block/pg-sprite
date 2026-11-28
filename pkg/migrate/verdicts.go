@@ -229,8 +229,12 @@ func refusedDecisionDetail(d planner.Decision) (string, bool) {
 		return fmt.Sprintf("%s changes a column in the partition key of %s, and PostgreSQL never retypes or drops a partition key column; %s",
 			d.Operation, strings.Join(d.PartitionKeyTables, ", "), planner.PartitionKeyHelp), true
 	case planner.ReasonNotNullWithoutDefault:
+		help := planner.NotNullWithoutDefaultHelp
+		if d.NotNullFromType != "" {
+			help = planner.NotNullFromTypeHelp(d.NotNullFromType)
+		}
 		return fmt.Sprintf("%s adds a NOT NULL column with no default to a table that holds rows, "+
-			"and PostgreSQL refuses it because every existing row would hold NULL; %s", d.Operation, planner.NotNullWithoutDefaultHelp), true
+			"and PostgreSQL refuses it because every existing row would hold NULL; %s", d.Operation, help), true
 	case planner.ReasonCascadingDrop:
 		return fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views, row-level security policies, or other tables' foreign keys, "+
 			"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+

@@ -407,6 +407,13 @@ type Decision struct {
 	// includes the column, each schema-qualified with every identifier
 	// quoted, present exactly for partition-key decisions.
 	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
+	// NotNullFromType is the added column's type, as the statement spells
+	// it, when that type is what makes the column NOT NULL: a domain that
+	// declares NOT NULL, on a column that spells neither NOT NULL nor
+	// PRIMARY KEY. Present only for not-null-without-default decisions.
+	// Adding a nullable column of that type is impossible, so the manual
+	// path is the type's base type instead (see NotNullFromTypeHelp).
+	NotNullFromType string `json:"not_null_from_type,omitempty"`
 	// DependentFix is the manual path for the views, policies, and
 	// triggers that block the change, which depends on what the change
 	// would do with those dependents out of the way. Like Kind, it is not part
@@ -920,6 +927,30 @@ func dependentFix(op statement.Op, facts Facts) DependentFix {
 const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
 	"or add it without NOT NULL, backfill it, then set NOT NULL"
 
+// NotNullFromTypeHelp is the operator-facing manual path for a
+// not-null-without-default decision whose NOT NULL comes from the column's
+// type, typeName. Neither manual path of NotNullWithoutDefaultHelp exists
+// for it: the column cannot be added without NOT NULL, and PostgreSQL
+// rewrites the table to check every row against a type that declares
+// constraints, whatever default the column is given.
+func NotNullFromTypeHelp(typeName string) string {
+	return "the column's type, " + typeName + ", declares NOT NULL itself, and PostgreSQL rewrites the table " +
+		"to check every row against it whatever default the column is given; add the column with the type's base type instead"
+}
+
+// notNullFromType returns the type op spells for its column when that type
+// is what makes the added column NOT NULL: the column spells neither NOT
+// NULL nor PRIMARY KEY, so only its type can. It returns "" otherwise.
+func notNullFromType(op statement.Op) string {
+	if op.DeclaresNotNull || slices.Contains(op.InlineConstraints, statement.ConstraintPrimaryKey) {
+		return ""
+	}
+	if op.NewTypeSchema != "" {
+		return op.NewTypeSchema + "." + op.NewType
+	}
+	return op.NewType
+}
+
 // NullFillCandidates names the columns the operations of one ALTER TABLE
 // add with no DEFAULT of their own, the ones whose existing rows may be
 // left NULL: a front door reads Facts.NullFilledColumns only for these.
@@ -1220,7 +1251,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case fillsNotNullWithNull(op, facts):
-			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
+			d.Route, d.Reason, d.NotNullFromType = RouteRefuse, ReasonNotNullWithoutDefault, notNullFromType(op)
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
 		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:

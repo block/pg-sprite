@@ -1297,6 +1297,32 @@ func TestClassifyRefusesANotNullColumnNothingFillsOnATableWithRows(t *testing.T)
 	assert.Equal(t, planner.RouteNative, d.Route)
 }
 
+// A refused NOT NULL column whose statement never spells NOT NULL takes it
+// from its type, a domain, so the refusal names that type: the manual
+// paths of a spelled NOT NULL do not exist for it. A spelled NOT NULL or an
+// inline PRIMARY KEY names no type.
+func TestClassifyNamesTheTypeANotNullColumnTakesItsNotNullFrom(t *testing.T) {
+	for sql, want := range map[string]string{
+		"ALTER TABLE customers ADD COLUMN tier tier_required":                  "tier_required",
+		"ALTER TABLE customers ADD COLUMN tier billing.tier_required":          "billing.tier_required",
+		"ALTER TABLE customers ADD COLUMN tier billing.tier_required NOT NULL": "",
+		"ALTER TABLE customers ADD COLUMN tier text NOT NULL":                  "",
+		"ALTER TABLE customers ADD COLUMN tier bigint PRIMARY KEY":             "",
+	} {
+		facts := planner.Facts{
+			NullFilledColumns: map[string]bool{"tier": true},
+			ColumnTypes:       map[string]string{"id": "bigint", "email": "text"},
+			AddColumnProofs:   map[string]statement.AddColumnProof{"tier": statement.AddColumnInPlace},
+		}
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, planner.ReasonNotNullWithoutDefault, d.Reason, sql)
+		assert.Equal(t, want, d.NotNullFromType, sql)
+	}
+	assert.Equal(t, "the column's type, billing.tier_required, declares NOT NULL itself, and PostgreSQL rewrites the table "+
+		"to check every row against it whatever default the column is given; add the column with the type's base type instead",
+		planner.NotNullFromTypeHelp("billing.tier_required"))
+}
+
 // The columns whose rows may be left NULL are the ones added with no
 // DEFAULT of their own that the table does not already have, NOT NULL or
 // not, since a domain or an inline PRIMARY KEY can make a column NOT NULL

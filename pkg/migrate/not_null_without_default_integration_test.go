@@ -99,16 +99,17 @@ func TestRunJudgesANotNullColumnByWhatTheServerFillsItWith(t *testing.T) {
 		"SELECT pg_catalog.array_agg(DISTINCT tier::text) FROM %s.customers", schema)).Scan(&tiers))
 	assert.Equal(t, []string{"free"}, tiers)
 
-	for column, add := range map[string]string{
-		"plan":   "ADD COLUMN plan %[1]s.tier_required",
-		"seq_id": "ADD COLUMN seq_id bigint PRIMARY KEY",
+	for column, refused := range map[string]struct{ add, help string }{
+		"plan":   {"ADD COLUMN plan %[1]s.tier_required", planner.NotNullFromTypeHelp(schema + ".tier_required")},
+		"seq_id": {"ADD COLUMN seq_id bigint PRIMARY KEY", planner.NotNullWithoutDefaultHelp},
 	} {
 		v, err = migrate.Run(t.Context(), pool,
-			parseOne(t, fmt.Sprintf("ALTER TABLE %[1]s.customers "+add, schema)), runOptions())
-		require.NoError(t, err, add)
+			parseOne(t, fmt.Sprintf("ALTER TABLE %[1]s.customers "+refused.add, schema)), runOptions())
+		require.NoError(t, err, refused.add)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome, v.Detail)
 		assert.Contains(t, v.Detail, "ADD COLUMN "+column+" adds a NOT NULL column with no default to a table that holds rows")
-		assert.Empty(t, v.ExecutedSQL, add)
+		assert.Contains(t, v.Detail, refused.help, refused.add)
+		assert.Empty(t, v.ExecutedSQL, refused.add)
 	}
 	v, err = migrate.Run(t.Context(), pool,
 		parseOne(t, fmt.Sprintf("ALTER TABLE %s.customers ADD COLUMN note text", schema)), runOptions())
