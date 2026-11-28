@@ -563,7 +563,12 @@ fence function's `format` in the writer's session — are qualified too, pinned 
 `TestCutoverBackendReadsResolveToTheRealCatalog` and
 `TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`; the resume's shadow size read in
 `MeasureResumeHeld`, which runs on the caller's pool, qualifies every function, relation, and
-operator, the `pg_total_relation_size(oid)` call included), `pkg/migrate`
+operator, the `pg_total_relation_size(oid)` call included — a planted
+`pg_total_relation_size(oid)` and a lookalike `name = name` on a shadowing
+`<schema>, pg_catalog` path do not change the size it reads,
+`TestMeasureResumeHeldReadsTheRealShadowSizeUnderAPlantedSizeFunction` and
+`TestMeasureResumeHeldSizesTheShadowAloneUnderALookalikeNameEquals`, and every name in the
+query is checked qualified by `TestShadowBytesSQLQualifiesEveryName`), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
@@ -837,10 +842,12 @@ native and copy-and-swap executors; before a native step, a create step that add
 an attach proof's `ADD` or `DROP` of its CHECK, or the online `ATTACH PARTITION` itself
 (`pkg/executor/attach_proof.go`, `pkg/executor/attach_partition.go`) first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
 lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
-`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, and then
-requests its lock under its lock budget either way, so the wait adds at most `HolderWait` to the bound and never
-fails a step (`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
-`TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, then
+requests its lock under its lock budget once the holder is gone, and ends without requesting it, with
+`executor.LingeringHolderError`, when the holder is still there, so the wait adds at most `HolderWait` to the bound
+and never queues a step behind a holder it outlasted (`pkg/executor/lock_holder_wait.go`;
+`TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
+`TestExecuteNativeEndsWithoutQueueingWhenAReaderOutlastsTheWait`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then
@@ -1534,7 +1541,16 @@ did not commit is measured as any resume, pinned by
 admission mints reports `FinishesCommittedSwap`, and a `Runner` that finds a row asking for
 more under its lock refuses it as `finish-admission-stale` before it writes, pinned by
 `TestRunRefusesAFinishOnlyTargetOnceTheRowIsDone` and
-`TestRunRefusesAFinishOnlyTargetOnARowWhoseSwapDidNotCommit`), chained by type —
+`TestRunRefusesAFinishOnlyTargetOnARowWhoseSwapDidNotCommit`; the figure for each
+row state — no row, a `done` or incompatible row, a missing shadow, a materialized view under
+the shadow's name, a quiesced run or a row naming no slot beside the route's slot, and a
+committed swap, with or without the row naming the route's slot — is pinned by
+`TestMeasureResumeHeldOverTheRowStates`, a zero shape refused before any read by
+`TestMeasureResumeHeldRefusesAZeroShapeWithoutReadingAnything`, another database's
+relation by `TestMeasureResumeHeldCountsNoTableOfAnotherDatabase`, a failed shadow read
+returned rather than counted as nothing by `TestMeasureResumeHeldReturnsAShadowReadThatFails`,
+and desired-state admission's discount by
+`TestRunDesiredCopySwapResumeIsAskedOnlyForTheDiskLeftToGrow`), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last; `pkg/schemachange` `CheckCopySwap` runs the chain with the
 resume measure as one call, which `pkg/migrate` calls; and before them `pkg/schemachange` `CheckPool`, which

@@ -269,6 +269,7 @@ CREATE TABLE orders (
 	assert.True(t, st.Destructive)
 	assert.Equal(t, router.DispositionRefuse, st.Disposition)
 	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, st.Reason)
+	assert.Equal(t, verdict.CauseUndeclarableForeignKey, st.RefusalCause)
 	assert.Empty(t, st.ExecSQL)
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
@@ -310,6 +311,7 @@ CREATE UNIQUE INDEX orders_code_idx ON orders (code);`)
 	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_parent_fkey", schema), drop.SQL)
 	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
 	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
+	assert.Equal(t, verdict.CauseUndeclarableForeignKey, drop.RefusalCause)
 	assert.Empty(t, drop.ExecSQL)
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
@@ -347,6 +349,42 @@ CREATE TABLE orders (
 	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_user_id_fkey", schema), validate.SQL)
 	assert.Equal(t, router.DispositionExecute, validate.Disposition)
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
+}
+
+// A foreign key changed under the same name in a plan that also drops a
+// column cannot share one statement with its replacement, so the drop would
+// run before the new key is added and leave writes checked against no key in
+// between. The drop is shown for review and refused with the cause that
+// names that kind of drop, so the remedy offered is a new name for the key.
+func TestPlanChangedForeignKeyBesideAColumnDropIsRefused(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id),
+			legacy text
+		)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	var drop *plan.Statement
+	for i, st := range report.Statements {
+		if st.Kind == schemadiff.ChangeDropForeignKey {
+			drop = &report.Statements[i]
+		}
+	}
+	require.NotNil(t, drop, "the key's drop is its own statement beside the column drop")
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), drop.SQL)
+	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
+	assert.Equal(t, verdict.CauseChangedForeignKey, drop.RefusalCause)
+	assert.Empty(t, drop.ExecSQL)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
 
 // A foreign key the file declares changed under a new name is added and

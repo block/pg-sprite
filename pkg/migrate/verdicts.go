@@ -447,7 +447,9 @@ func WithServerError(v verdict.Verdict, err error) verdict.Verdict {
 // failure belongs to the refusal contract rather than the operational-error
 // exit: a static admission refusal (decided before anything executed), a
 // replica identity re-check that stopped a drop before anything committed,
-// or a budget cancellation of a non-substituted attempt. An *InvalidIndexError
+// a budget cancellation of a non-substituted attempt, or a non-substituted
+// attempt that never requested its lock because a transaction held the table
+// through the whole wait outside the lock queue. An *InvalidIndexError
 // is never a refusal, even when a budget cancellation is buried inside it —
 // invalid-index debris is the one outcome that needs an operator, and its
 // typed error carries the recovery guidance a budget verdict would conceal.
@@ -464,6 +466,17 @@ func execRefusal(st statement.Statement, err error,
 	}
 	if _, ok := errors.AsType[*executor.InvalidIndexError](err); ok {
 		return verdict.Verdict{}, false
+	}
+	if holderErr, ok := errors.AsType[*executor.LingeringHolderError](err); ok && !substituted {
+		// The step ended before its first attempt, so nothing executed, and
+		// the lock it never requested is what the lock budget bounds: the
+		// refusal is the lock budget's, naming the transaction in the way.
+		return verdict.Verdict{
+			Statement: st.SQL(),
+			Table:     qualified(st),
+			Forced:    forced,
+			Detail:    holderErr.Error() + "; nothing was executed, and the statement runs unchanged once that transaction ends",
+		}.WithRefusal(budgetExceededRefusal().WithCause(verdict.CauseLockBudget)), true
 	}
 	var budgetErr *executor.BudgetError
 	if !substituted && errors.As(err, &budgetErr) {
