@@ -382,6 +382,12 @@ type Decision struct {
 	// of the plan-report contract: it selects the help the engine's own
 	// text renders.
 	DependentFix DependentFix `json:"-"`
+	// ReadsInTimeZone names the session time zone a change between
+	// timestamp and timestamptz reads every stored value in, so the
+	// engine's text can say which instant each value becomes. Empty for
+	// any other operation, or when the zone was not read. Like Kind, it is
+	// not part of the plan-report contract.
+	ReadsInTimeZone string `json:"-"`
 }
 
 // DependentFix is the manual path for a change PostgreSQL refuses while a
@@ -599,6 +605,16 @@ type Facts struct {
 	// an ordinary table or a partition, none for a partitioned parent.
 	// StorageUnread when the fact was not read, as in an offline lint.
 	Storage TableStorage
+	// SessionTimeZone is the TimeZone setting the engine's sessions run
+	// with (preflight.SessionTimeZone): the zone a change between
+	// timestamp and timestamptz reads every stored value in. Empty when
+	// the fact was not read, as in an offline lint.
+	SessionTimeZone string
+	// IndexedColumns are the columns an index reads, on the table or on a
+	// table below it (preflight.IndexedColumns). Nil when the fact was not
+	// read, as in an offline lint; a column absent from a non-nil map has
+	// no index.
+	IndexedColumns map[string]bool
 }
 
 // TableStorage is what a live read says about a table's own storage.
@@ -699,6 +715,12 @@ func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []s
 func dependentFix(op statement.Op, facts Facts) DependentFix {
 	if op.Kind == statement.OpDropColumn {
 		return DependentFixRewriteDependents
+	}
+	// The operator runs the manual path in a session of their own, whose
+	// time zone the plan did not read, so a change between timestamp and
+	// timestamptz is not promised to stay in place there.
+	if swapsTimeZone(op, facts) {
+		return DependentFixExpandContract
 	}
 	if route, _, _ := classifyTypeChange(op, facts); route == RouteNative {
 		return DependentFixRecreateAroundChange
@@ -1082,6 +1104,9 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 
 	case statement.OpAlterColumnType:
 		d.Route, d.Reason, d.Unverified = classifyTypeChange(op, facts)
+		if swapsTimeZone(op, facts) {
+			d.ReadsInTimeZone = facts.SessionTimeZone
+		}
 
 	case statement.OpSetNotNull:
 		// Native pattern: prove the invariant with a NOT VALID CHECK plus
@@ -1265,10 +1290,80 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op, collationKept)) {
+	old, next := parseTypeText(oldType), targetTypeShape(op, collationKept)
+	if timeZoneSwap(old, next) {
+		return classifyTimeZoneSwap(op, next, facts)
+	}
+	if binaryCoercible(old, next) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
+}
+
+// classifyTimeZoneSwap classifies a change between timestamp and
+// timestamptz. PostgreSQL reads each stored value in the session time
+// zone, and keeps the stored bytes only when that zone is UTC: in any
+// other zone every value moves by the zone's offset and the table is
+// rewritten. Even in UTC every index on the column is rebuilt under the
+// change's exclusive lock, since the index's operator class changes with
+// the type, a precision below the maximum rounds every value, and an
+// array's elements are converted one by one. So the change is a relabel
+// only in UTC, for a scalar column no index reads, to an unspecified or
+// maximum precision. A zone or an index that was not read fails closed to
+// the rewrite route, marked unverified.
+func classifyTimeZoneSwap(op statement.Op, next typeShape, facts Facts) (Route, Reason, bool) {
+	if op.HasUsing || next.array || !keepsTemporalPrecision(nil, next.mods) {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	if facts.SessionTimeZone == "" {
+		return RouteCopyAndSwap, ReasonTypeRewrite, true
+	}
+	if !utcTimeZone(facts.SessionTimeZone) {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	if facts.IndexedColumns == nil {
+		return RouteCopyAndSwap, ReasonTypeRewrite, true
+	}
+	if facts.IndexedColumns[op.Column] {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	return RouteNative, ReasonBinaryCoercible, false
+}
+
+// swapsTimeZone reports whether op changes a column between timestamp and
+// timestamptz, reading each stored value in the session time zone: a
+// USING expression decides the conversion itself.
+func swapsTimeZone(op statement.Op, facts Facts) bool {
+	if op.Kind != statement.OpAlterColumnType || op.HasUsing {
+		return false
+	}
+	live, ok := facts.ColumnTypes[op.Column]
+	if !ok {
+		return false
+	}
+	return timeZoneSwap(parseTypeText(live), targetTypeShape(op, true))
+}
+
+// timeZoneSwap reports whether old to next changes timestamp to
+// timestamptz or timestamptz to timestamp, as scalars or as arrays.
+func timeZoneSwap(old, next typeShape) bool {
+	if old.array != next.array {
+		return false
+	}
+	return (old.name == "timestamp" && next.name == "timestamptz") ||
+		(old.name == "timestamptz" && next.name == "timestamp")
+}
+
+// utcTimeZone reports whether zone is one of the names PostgreSQL resolves
+// to UTC with no offset and no daylight saving time. The set is
+// deliberately narrow: a zone that is not on it is treated as one that
+// moves the stored values.
+func utcTimeZone(zone string) bool {
+	switch zone {
+	case "UTC", "Etc/UTC":
+		return true
+	}
+	return false
 }
 
 // typeShape is a normalized type family plus its modifiers and whether it
