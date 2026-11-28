@@ -530,12 +530,19 @@ const (
 	// decode.SlotLagWALRetainedHardLimit's.
 	CauseSlotLagWALRetainedHardLimit Cause = "wal-retained-hard-limit"
 	// CauseChangedForeignKey: under ReasonDeclarativeForeignKey, the plan
-	// drops a foreign key it changes under the same name before the new key
-	// is added, because the two cannot share one statement: the table is
-	// partitioned, or the plan also retypes a column or drops one beside an
-	// added column that may rewrite the table. Declaring the
-	// changed key under a new name adds it before the old one is dropped.
+	// drops a foreign key it changes under the same name on a partitioned
+	// table before the new key is added, because the server refuses a
+	// NOT VALID foreign key there and the two cannot share one statement.
+	// Declaring the changed key under a new name adds it before the old one
+	// is dropped.
 	CauseChangedForeignKey Cause = "changed-foreign-key"
+	// CauseColumnFirstForeignKey: under ReasonDeclarativeForeignKey, the plan
+	// drops a foreign key ahead of the key it adds or validates because it
+	// also retypes a column, or drops one beside an added column that may
+	// rewrite the table, and such a plan runs its drops first. A new name for
+	// the key does not help; applying the column change on its own first,
+	// and the foreign key change after it, does.
+	CauseColumnFirstForeignKey Cause = "column-first-foreign-key"
 	// CauseUndeclarableForeignKey: under ReasonDeclarativeForeignKey, the
 	// plan drops a live foreign key a desired file cannot declare, one into
 	// another schema or one from a table to itself through a standalone

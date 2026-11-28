@@ -385,7 +385,8 @@ CREATE TABLE orders (
 // statement with its replacement: the column drop runs first, so the key's
 // drop would leave writes checked against no key until the new one is added.
 // The drop is shown for review and refused with the cause that names that
-// kind of drop, so the remedy offered is a new name for the key.
+// kind of drop, so the remedy offered is the column change on its own first:
+// a new name for the key would still be dropped first.
 func TestPlanChangedForeignKeyBesideAColumnDropAndRewritingAddIsRefused(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
@@ -413,7 +414,7 @@ CREATE TABLE orders (
 	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), drop.SQL)
 	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
 	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
-	assert.Equal(t, verdict.CauseChangedForeignKey, drop.RefusalCause)
+	assert.Equal(t, verdict.CauseColumnFirstForeignKey, drop.RefusalCause)
 	assert.Empty(t, drop.ExecSQL)
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }

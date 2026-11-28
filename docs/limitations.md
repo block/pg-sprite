@@ -89,13 +89,16 @@ per-operation status.
   and re-added `NOT VALID` in one statement, so every write stays checked by
   one key or the other, and then validated; if rows break the new key, it stays
   `NOT VALID`, checking every new write, until the rows are fixed and the next
-  plan validates it. On a partitioned table, or in a plan that also drops or
-  retypes a column, the drop would come before the add and leave writes
-  checked against no key, so it is refused. So is the drop of a key a file
-  cannot declare: one into another
-  schema, or one from a table to itself whose referenced columns are unique
-  only through a standalone unique index. Both refusals use
-  `declarative-foreign-key`. Export refuses foreign keys unless the caller
+  plan validates it. On a partitioned table the drop would come before the
+  add and leave writes checked against no key, so it is refused; declare the
+  changed key under a new name. A plan that also retypes a column, or drops
+  one beside an added column that may rewrite the table, runs its drops
+  first, so it refuses the drop of every key it changes or replaces while it
+  adds or validates one, whatever the new key's name; apply the column change
+  on its own first. The drop of a key a file cannot declare is refused too:
+  one into another schema, or one from a table to itself whose referenced
+  columns are unique only through a standalone unique index. All three
+  refusals use `declarative-foreign-key`, each with its own cause. Export refuses foreign keys unless the caller
   opts in with `RenderOptions.ForeignKeys`.
 - **Changed stored generated expressions** are planned but not executed:
   `diff` shows one `SET EXPRESSION` statement (PostgreSQL 17+) refused with

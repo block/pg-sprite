@@ -380,7 +380,7 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(CauseCopyAndSwapNotEnabled), string(CauseCopyAndSwapRunStopped),
 		string(CauseSlotLagStreamBehind), string(CauseSlotLagWALRetained),
 		string(CauseSlotLagWALRetainedHardLimit),
-		string(CauseChangedForeignKey), string(CauseUndeclarableForeignKey),
+		string(CauseChangedForeignKey), string(CauseColumnFirstForeignKey), string(CauseUndeclarableForeignKey),
 		string(CausePinnedRefusedPreview),
 	}
 	for _, r := range Reasons() {
