@@ -430,7 +430,8 @@ func ownerMembershipRefusal(f accessFacts, object string, tier Tier) *PrivilegeE
 	}
 	// A membership grant hands the role every privilege the owner holds on
 	// any version, so the transfer is offered wherever the grant is.
-	transfer := fmt.Sprintf("if the owner is an administrative role, transfer the %s instead: %s", object, transferSQL)
+	transfer := fmt.Sprintf("the grant hands the engine role every privilege %s holds; to give it only this %s, transfer the %s instead: %s",
+		f.owner, object, object, transferSQL)
 	if f.versionNum >= pg16 {
 		set := "FALSE"
 		if tier >= TierCopyAndSwap || f.ownerSet {

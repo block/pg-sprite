@@ -185,6 +185,9 @@ func TestCheckPrivilegesRemediatesNonInheritingMembership(t *testing.T) {
 	if pg16 {
 		assert.Equal(t, fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE, SET TRUE",
 			pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
+		assert.Equal(t, fmt.Sprintf("the grant hands the engine role every privilege %s holds; to give it only this table, transfer the table instead: ALTER TABLE %s OWNER TO <role>",
+			f.owner, pgx.Identifier{f.schema, "target"}.Sanitize()), privErr.Hint,
+			"an ordinary owner is offered the transfer as the narrower alternative, not as a condition the engine already checked")
 	} else {
 		assert.Equal(t, fmt.Sprintf("ALTER ROLE %s INHERIT",
 			pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
