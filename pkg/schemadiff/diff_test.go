@@ -136,6 +136,20 @@ func TestDiffRefusesCollationChanges(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// A type change on a column with an explicit collation carries the
+// collation in its TYPE clause, so the retyped column keeps it: without the
+// clause PostgreSQL gives the column the new type's default.
+func TestDiffTypeChangeKeepsTheColumnsCollation(t *testing.T) {
+	collated := func(typ string) Model {
+		return Model{Table: "words", Columns: []Column{{Name: "tag", Type: typ, Collation: `pg_catalog."C"`}}}
+	}
+	changes, err := Diff("public", collated("character varying(20)"), collated("character varying(40)"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."words" ALTER COLUMN "tag" TYPE character varying(40) COLLATE pg_catalog."C"`,
+	}, sqls(changes))
+}
+
 func TestDiffAddColumn(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns, Column{

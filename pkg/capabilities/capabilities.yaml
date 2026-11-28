@@ -533,7 +533,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: not-native-safe-rewrite-required
-    reason_notes: "Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite"
+    reason_notes: "Exported and compared, not converged. `pull` writes a column's collation as a schema-qualified `COLLATE` clause, and a file that keeps it plans the table's other changes. A collation delta is a typed refusal: converging it rewrites the column and rebuilds its indexes"
   - id: table-storage-parameters
     area: "declarative_model"
     operation: "Table storage parameters (`WITH (fillfactor = ...)`, `toast.*`)"
