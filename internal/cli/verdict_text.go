@@ -29,6 +29,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 			fmt.Fprintf(&b, "\n  %s     %s", pal.bold("owner:"), v.Owner)
 		}
 	}
+	if v.Cause != verdict.CauseNone {
+		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("cause:"), v.Cause)
+	}
 	fmt.Fprintf(&b, "\n  %s %s", pal.bold("statement:"), v.Statement)
 	if v.Attempts > 0 {
 		fmt.Fprintf(&b, "\n  %s  %d", pal.bold("attempts:"), v.Attempts)

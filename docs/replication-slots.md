@@ -151,7 +151,8 @@ unless you pass `--slot-lag-ceiling SIZE` (`CopySwapOptions.SlotLagCeilingBytes`
 library). It protects the source's volume from a run that has fallen behind.
 
 pg-sprite checks the slot once per catch-up cycle and stops with a failed verdict (exit 1)
-naming one of three causes:
+naming one of three causes. With `--json`, the verdict carries `"code": "slot-lag-exceeded"` and
+the cause as `cause`, so a wrapper routes on those fields rather than on the detail's prose:
 
 | Cause | Measure | When it trips | What it usually means |
 | --- | --- | --- | --- |
@@ -419,7 +420,9 @@ decisions as this page, from typed errors rather than the CLI's prose:
 
 - A ceiling stop is a `*decode.SlotLagExceededError`. Its `Cause` names one of the three causes,
   and `Cause.RetainsWAL()` is true for the two where a transaction or the write rate pins the
-  WAL, the ones whose remedy is to look for the transaction, then raise the ceiling.
+  WAL, the ones whose remedy is to look for the transaction, then raise the ceiling. The
+  `pkg/migrate` verdict for the stop is `failed` with code `executor.CodeSlotLagExceeded`
+  (`slot-lag-exceeded`) and the same cause token in `Verdict.Cause`.
 - A lost slot is a `*decode.SlotLostError`, matched with `errors.Is(err, decode.ErrSlotLost)`;
   the next run reconciles.
 - A resume refused because the old stream still holds the slot carries the refusal cause

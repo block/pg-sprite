@@ -194,7 +194,8 @@ while pg-sprite keeps up (see below); a ceiling well below the default stops a b
 not more safely.
 
 The run stops with a failed verdict (exit 1) whose detail says which of three causes ended it;
-the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
+with `--json` the verdict's `code` is `slot-lag-exceeded` and its `cause` is that cause's token,
+and the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
 slot and the saved progress stay for the next run to resume from, though a resume under the
 same ceiling can stop again, depending on the cause:
 

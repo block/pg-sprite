@@ -265,6 +265,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 	want := map[executor.Code]bool{
 		executor.CodeBudgetLockExceeded:                     false,
 		executor.CodeBudgetStatementExceeded:                false,
+		executor.CodeSlotLagExceeded:                        false,
 		executor.CodeBlockingOutcomeUnknown:                 false,
 		executor.CodeCommitOutcomeUnknown:                   false,
 		executor.CodeDropOutcomeUnknown:                     false,
