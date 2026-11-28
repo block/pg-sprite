@@ -200,7 +200,7 @@ func TestRunRefusesChangingAColumnAChildsViewReads(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 			assert.Equal(t, []string{fmt.Sprintf(`"%s"."admin_mail"`, schema)}, v.DependentViews)
-			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by "%s"."admin_mail"`, schema))
+			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by view "%s"."admin_mail"`, schema))
 			assert.Equal(t, "character varying(50)", columnType(t, pool, schema, "admins", "email"))
 		})
 	}
