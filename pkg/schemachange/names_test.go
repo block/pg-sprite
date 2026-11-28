@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
 // The hash keys on the qualified name: the same table in two schemas derives
@@ -25,6 +27,26 @@ func TestDerivedNamesShareOneHash(t *testing.T) {
 	assert.Equal(t, "_pgsprite_"+hash+"_old", OldName("public", "widgets"))
 	assert.Equal(t, "_pgsprite_"+hash+"_old_"+nameHash("widgets_pkey"), OldDependentName("public", "widgets", "widgets_pkey"))
 	assert.NotEqual(t, OldDependentName("public", "widgets", "widgets_pkey"), OldDependentName("public", "widgets", "widgets_sku_idx"))
+}
+
+// Every name a deriver produces has the shape the managed-table listing
+// hides, so a stopped run's shadow, a --keep-old retained source, and the
+// retained source's renamed dependents are never offered to a directory
+// owner as undeclared tables. The sources span schemas, a long name, and a
+// quoted mixed-case name, since the hash must stay lowercase hex for all.
+func TestEveryDerivedNameIsAnEngineRelationName(t *testing.T) {
+	assert.Equal(t, "_pgsprite_c74da4a21f58f903_old", OldName("public", "orders"),
+		"the retained source of public.orders, as the docs and the predicate's tests spell it")
+	for _, source := range [][2]string{
+		{"public", "orders"},
+		{"sales", "Order Lines"},
+		{"public", strings.Repeat("t", 63)},
+	} {
+		schema, table := source[0], source[1]
+		assert.True(t, schemadiff.IsEngineRelationName(ShadowName(schema, table)), "shadow of %s.%s", schema, table)
+		assert.True(t, schemadiff.IsEngineRelationName(OldName(schema, table)), "retained %s.%s", schema, table)
+		assert.True(t, schemadiff.IsEngineRelationName(OldDependentName(schema, table, table+"_pkey")), "retained dependent of %s.%s", schema, table)
+	}
 }
 
 // Every derived name is a fixed 30 or 47 bytes regardless of how long the

@@ -32,7 +32,12 @@ const listManagedTablesSQL = `
 // set pull enumerates before it exports each one. Ordinary tables and
 // partitioned parents are listed, INHERITS children among them; partitions
 // are represented by their parent's PARTITION BY and extension members
-// belong to their extension, so neither is a table an owner declares. Views,
+// belong to their extension, so neither is a table an owner declares. The
+// copy-and-swap route's own tables — a stopped run's shadow, a source
+// retained under --keep-old — are the engine's, named as
+// IsEngineRelationName matches, and are not listed either: a listing that
+// named them would have a directory owner declare or drop a rollback copy
+// or a resumable run's shadow. Views,
 // materialized views, foreign tables, and sequences are outside the
 // declarative model and are not listed. The listing is the candidate set,
 // not the set of files pull writes: a listed table whose shape Render
@@ -58,6 +63,9 @@ func ListManagedTables(ctx context.Context, pool *pgxpool.Pool, schema string) (
 		var table string
 		if err := rows.Scan(&table); err != nil {
 			return nil, fmt.Errorf("scan managed table in schema %q: %w", schema, err)
+		}
+		if IsEngineRelationName(table) {
+			continue
 		}
 		tables = append(tables, table)
 	}
