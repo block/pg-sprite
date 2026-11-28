@@ -338,3 +338,43 @@ func TestCreateFailureDetailNamesWhatTheStepLeft(t *testing.T) {
 	assert.Contains(t, unverified, "unproven")
 	assert.NotContains(t, unverified, "the step's bounded attempt failed and rolled back")
 }
+
+// A pin of the fingerprint a dry run gives its refused preview of a
+// destructive plan is refused like any other mismatch, but the refusal names
+// the value to pin instead of blaming a change to the table or the file.
+func TestCheckPlanPinNamesThePlanWhenTheRefusedPreviewIsPinned(t *testing.T) {
+	exists := true
+	report := plan.Report{
+		Schema:      "app",
+		Table:       "t",
+		TableExists: &exists,
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{
+			{SQL: "ALTER TABLE app.t ADD COLUMN v text", Disposition: router.DispositionExecute},
+			{
+				SQL: "ALTER TABLE app.t DROP COLUMN legacy", Destructive: true, Disposition: router.DispositionExecute,
+				Drops: &schemadiff.DroppedObject{Kind: schemadiff.DroppedColumn, Name: "legacy", Definition: "legacy bigint"},
+			},
+		},
+	}
+	report.Fingerprint = report.ComputeFingerprint()
+	preview := report
+	plan.RefuseDestructive(&preview)
+	require.NotEqual(t, report.Fingerprint, preview.Fingerprint)
+
+	res, ok := CheckPlanPin(preview.Fingerprint, report)
+	require.False(t, ok)
+	assert.Equal(t, verdict.ReasonPlanFingerprintMismatch, res.Reason)
+	assert.Equal(t, verdict.CausePinnedRefusedPreview, res.Cause)
+	assert.Equal(t, fmt.Sprintf(
+		"the pinned fingerprint %s identifies a dry run's refused preview of this plan, which no run executes; "+
+			"pin the plan's own fingerprint, %s", preview.Fingerprint, report.Fingerprint), res.Detail)
+
+	res, ok = CheckPlanPin("sha256:older", report)
+	require.False(t, ok)
+	assert.Equal(t, verdict.CauseNone, res.Cause, "any other pin still blames a change")
+	assert.Contains(t, res.Detail, "the live table or the desired schema changed")
+
+	_, ok = CheckPlanPin(report.Fingerprint, report)
+	assert.True(t, ok)
+}

@@ -560,7 +560,11 @@ refused (plan-fingerprint-mismatch)
   for and a dry run cannot carry. For those, the dry run prints the refusal
   the pinned run gives instead of the flags. In `--json` output on a
   destructive plan, `fingerprint` covers the refused plan and cannot be
-  pinned: pin `pinnable_fingerprint`, the same value the text output prints.
+  pinned: pin `pinnable_fingerprint`, the same value the text output prints
+  under `fingerprint:`. A run pinned to the refused plan's fingerprint refuses
+  with `plan-fingerprint-mismatch` and cause `pinned-refused-preview`, and its
+  detail names the fingerprint to pin instead of saying the table or the file
+  changed.
   A dry run compares `--expect-fingerprint` as the run does and refuses with
   `plan-fingerprint-mismatch` on a difference, for a table, a row security
   file, an enum type file, and a non-destructive plan alike.

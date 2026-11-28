@@ -68,11 +68,9 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 	w.entry("plan:")
 	w.printf("  %s — %s, %s to run, %d refused\n", targetText(report),
 		countNoun(len(report.Statements), "statement"), countNoun(steps, "step"), refused)
-	if report.Fingerprint != "" {
-		// The pin a migrate --desired run takes to execute exactly this
-		// plan, which a plan that drops live structure needs.
+	if fingerprint := pinFingerprint(report); fingerprint != "" {
 		w.entry("fingerprint:")
-		w.printf("  %s\n", report.Fingerprint)
+		w.printf("  %s\n", fingerprint)
 	}
 	w.entry("diff:")
 	w.printf("  nothing was executed\n")
@@ -112,4 +110,16 @@ func writeAdvisoryDiagnostics(w *stickyWriter, advisories []schemadiff.Advisory)
 // is the greenfield case, and the plan is the full desired schema.
 func diffRefused(report plan.Report) bool {
 	return report.Disposition != router.DispositionExecute
+}
+
+// pinFingerprint is the fingerprint the text output prints: the pin a
+// migrate --desired run takes to execute exactly this plan, which a plan that
+// drops live structure needs. A dry run's refused preview of such a plan has
+// a fingerprint of its own that no run executes, so the text prints the
+// plan's, which a run accepts.
+func pinFingerprint(report plan.Report) string {
+	if report.PinnableFingerprint != "" {
+		return report.PinnableFingerprint
+	}
+	return report.Fingerprint
 }

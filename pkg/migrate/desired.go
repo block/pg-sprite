@@ -817,10 +817,27 @@ func CheckPlanPin(expected string, report plan.Report) (DesiredResult, bool) {
 	if expected == "" || len(report.Statements) == 0 || expected == report.Fingerprint {
 		return DesiredResult{}, true
 	}
+	if pinsRefusedPreview(expected, report) {
+		return DesiredResult{Plan: report}.refused(pinnedRefusedPreviewRefusal(), fmt.Sprintf(
+			"the pinned fingerprint %s identifies a dry run's refused preview of this plan, which no run executes; "+
+				"pin the plan's own fingerprint, %s",
+			expected, report.Fingerprint)), false
+	}
 	return DesiredResult{Plan: report}.refused(fingerprintMismatchRefusal(), fmt.Sprintf(
 		"the plan derived at execution time (fingerprint %s) is not the pinned plan (fingerprint %s); "+
 			"the live table or the desired schema changed since the plan was reviewed — re-review the new plan",
 		report.Fingerprint, expected)), false
+}
+
+// pinsRefusedPreview reports whether expected is the fingerprint a
+// desired-state dry run gives its refused preview of report. That preview
+// withdraws a plan holding a destructive statement, so its fingerprint
+// identifies a plan no run executes, and a pin of it means the operator
+// copied the wrong value rather than that the table or the file changed.
+func pinsRefusedPreview(expected string, report plan.Report) bool {
+	preview := report
+	plan.RefuseDestructive(&preview)
+	return preview.PinnableFingerprint != "" && expected == preview.Fingerprint
 }
 
 // destructiveAcknowledged reports whether the request names the plan's table

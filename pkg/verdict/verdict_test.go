@@ -372,6 +372,7 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(CauseSlotLagStreamBehind), string(CauseSlotLagWALRetained),
 		string(CauseSlotLagWALRetainedHardLimit),
 		string(CauseChangedForeignKey), string(CauseUndeclarableForeignKey),
+		string(CausePinnedRefusedPreview),
 	}
 	for _, r := range Reasons() {
 		toks = append(toks, string(r))
