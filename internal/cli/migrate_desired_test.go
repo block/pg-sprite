@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
-	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/stretchr/testify/assert"
@@ -57,26 +55,11 @@ func TestMigrateDesiredRejectsInvalidDeclarationBeforeConnecting(t *testing.T) {
 	assert.Empty(t, out.String())
 }
 
-func TestRowSecurityVerdictPreservesUnknownCommit(t *testing.T) {
-	err := &executor.RowSecurityOutcomeUnknownError{Err: context.Canceled}
-	v := rowSecurityVerdict("public.documents", executor.RowSecurityReport{}, err)
-	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
-	assert.Equal(t, string(executor.CodeRowSecurityOutcomeUnknown), v.Code)
-	assert.Empty(t, v.ExecutedSQL)
-	assert.Equal(t, err.Error(), v.Detail)
-}
-
-func TestRowSecurityVerdictPreservesCancellation(t *testing.T) {
-	v := rowSecurityVerdict("public.documents", executor.RowSecurityReport{}, context.Canceled)
-	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
-	assert.Equal(t, string(executor.OutcomeCode(context.Canceled)), v.Code)
-	assert.Empty(t, v.ExecutedSQL)
-}
-
 func TestMigrateDesiredWriterFailure(t *testing.T) {
 	cmd := MigrateCmd{JSON: true}
 	want := errors.New("closed output")
-	err := cmd.emit(failingDesiredWriter{want}, rowSecurityVerdict("public.documents", executor.RowSecurityReport{}, nil))
+	err := cmd.emit(failingDesiredWriter{want}, verdict.Verdict{Table: "public.documents", Outcome: verdict.OutcomeExecuted,
+		ExecutedSQL: []string{}, Detail: "already converged: row security matches; nothing to run"})
 	require.ErrorIs(t, err, want)
 }
 

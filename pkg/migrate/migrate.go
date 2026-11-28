@@ -129,7 +129,8 @@ type Options struct {
 	// from when a statement needs one the pool cannot supply: a CREATE INDEX,
 	// ADD PRIMARY KEY, or ADD UNIQUE on a partitioned table, or an ADD
 	// FOREIGN KEY on one before PostgreSQL 18, takes the parent's table lock
-	// on a session of its own. It must reach the database the pool was
+	// on a session of its own, and so does a row security change through
+	// [RunRowSecurity] or [RunReviewedRowSecurity]. It must reach the database the pool was
 	// dialed with, which the run proves before it opens anything; a run that
 	// needs it and finds it unset
 	// returns [ErrConnectionRequired]. The CLI always sets it. A statement

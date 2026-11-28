@@ -3,11 +3,13 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	neturl "net/url"
 	"strings"
 	"testing"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
@@ -44,6 +46,41 @@ func TestMigrateDesiredRLSLockTimeoutPreservesState(t *testing.T) {
 	assert.Equal(t, string(executor.CodeBudgetLockExceeded), v.Code)
 	assert.Equal(t, "55P03", v.SQLState)
 	assert.Equal(t, "canceling statement due to lock timeout", v.ServerError)
+	assert.Empty(t, v.ExecutedSQL)
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}
+
+// Another session holds the table's advisory lock, as a copy-and-swap run
+// does for its whole life. The row security change takes that lock before
+// it reads the checkpoint row and never waits for it, so the run ends at
+// once in a failed verdict naming no executed SQL, exits as an operational
+// error rather than a refusal, and leaves the table as it was.
+func TestMigrateDesiredRLSStopsAtOnceWhileTheTableLockIsHeld(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	holder, err := dbconn.AcquireTableLock(t.Context(), dbconn.Config{URL: url}, schema, "documents")
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, holder.Release(context.WithoutCancel(t.Context()))) })
+	cmd := desiredCommand(t, url, schema, `CREATE TABLE documents (
+ id int PRIMARY KEY,
+ owner_id int NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 7);`)
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	held, ok := errors.AsType[*dbconn.TableLockHeldError](err)
+	require.True(t, ok, "want the held lock's error, got %v", err)
+	assert.Equal(t, holder.BackendPID(), held.Holder.PID)
+	require.NotErrorIs(t, err, verdict.ErrRefused)
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+	assert.Equal(t, schema+".documents", v.Table)
 	assert.Empty(t, v.ExecutedSQL)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
@@ -219,6 +256,12 @@ func TestMigrateDesiredRLSPrivilegeRefusals(t *testing.T) {
 				require.NoError(t, err)
 			})
 			_, err = pool.Exec(t.Context(), "GRANT USAGE, CREATE ON SCHEMA "+pgx.Identifier{schema}.Sanitize()+" TO "+role)
+			require.NoError(t, err)
+			// The run takes the table's lock on a session of its own, which
+			// reads its own start from pg_stat_activity. The session logs in
+			// as the superuser and sets the role, and a role sees another
+			// role's session details only with pg_read_all_stats.
+			_, err = pool.Exec(t.Context(), "GRANT pg_read_all_stats TO "+role)
 			require.NoError(t, err)
 			if owner {
 				_, err = pool.Exec(t.Context(), "ALTER TABLE "+pgx.Identifier{schema, "documents"}.Sanitize()+" OWNER TO "+role)

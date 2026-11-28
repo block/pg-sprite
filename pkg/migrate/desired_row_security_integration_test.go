@@ -123,7 +123,7 @@ func TestRunDesiredWithRowSecurityRefusesWhatItDoesNotChange(t *testing.T) {
 			assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 			assert.Equal(t, tc.reason, res.Reason)
 			assert.Equal(t, tc.class, res.Class)
-			assert.Contains(t, res.Detail, "executor.ExecuteDesiredRowSecurity")
+			assert.Contains(t, res.Detail, "migrate.RunRowSecurity")
 			assert.Empty(t, res.Verdicts)
 			after, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
 			require.NoError(t, err)

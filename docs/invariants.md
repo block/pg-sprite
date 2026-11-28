@@ -799,7 +799,12 @@ and rival-backend tests), so a run whose lock went to another engine cannot stam
 checkpoint over the newer engine's row; `pkg/schemachange` `Runner.Discard` takes the table's
 lock itself before it reads the row or drops anything, and a held lock refuses it at once with
 `TableLockHeldError`, touching nothing, so a discard cannot overlap a run on the table
-(`TestRunnerDiscardRefusesWhileARunHoldsTheTableLock`); `pkg/migrate` `Run` and `RunDesired` prove, before the
+(`TestRunnerDiscardRefusesWhileARunHoldsTheTableLock`); `pkg/migrate` `RunRowSecurity` and
+`RunReviewedRowSecurity` take the table's lock the same way, from `Options.Connection` proven to
+reach the pool's database, before they read the checkpoint row, and run the row security
+change under the session's `Bind` context, so a run in progress stops the change at once with
+`TableLockHeldError`, nothing executed
+(`TestRunRowSecurityStopsAtOnceWhileTheTableLockIsHeld`); `pkg/migrate` `Run` and `RunDesired` prove, before the
 preflight and before the lock session opens, that `CopySwapOptions.Connection` reaches the
 pool's database (the cluster's system identifier and `current_database()` on both sides), and
 stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
@@ -1210,9 +1215,13 @@ table while the catalog shows the run's shadow or retained source. Every other d
 on the table reads the row the same way before it does: `refuseOverStoppedRun` for an index
 rename, the accepted blocking passthrough, and a reviewed plan's index drop;
 `refuseEmptyPlanOverStoppedRun` for an empty plan in `RunDesired` and
-`RunDesiredWithRowSecurity`; `AdmitRowSecurityStoppedRun` before a row security file's atomic
-change; and `AdmitStoppedRun` and `AdmitPlanStoppedRun` in the dry runs, which end in the
-refusal the apply gives. `ALTER TYPE ... ADD VALUE` is exempt: it locks no table and changes
+`RunDesiredWithRowSecurity`; `RunRowSecurity` and `RunReviewedRowSecurity` before a row
+security file's atomic change, which read the row under the table's lock (LK-1), taken first
+and never waited for, so no run starts on the table between the read and the change's commit
+(`TestRunRowSecurityStopsAtOnceWhileTheTableLockIsHeld`); and `AdmitStoppedRun`,
+`AdmitPlanStoppedRun`, and `AdmitRowSecurityStoppedRun` in the dry runs, which end in the
+refusal the apply gives. The row security executors read no row themselves: a host reaches them
+through the migrate doors. `ALTER TYPE ... ADD VALUE` is exempt: it locks no table and changes
 nothing in a table's model; so is a reviewed plan's blocking drop of a partitioned table's
 index, since no copy-and-swap run can stop on a partitioned table. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
