@@ -150,6 +150,98 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 	return refuseDropBelow(ctx, tx, st, d, target)
 }
 
+// PublishedColumnError is the dropped-object drift of a column drop that a
+// publication's column list or row filter names, on the table or on a
+// partition below it, read under the table's lock. The planner refuses
+// such a drop first, so a publication found here was created or changed
+// after planning. The server would refuse the drop too, with an untyped
+// error; this names the publications so the operator knows what to change.
+// A publication does not go with the column, so it is not one of the
+// dependents a planned drop lists.
+type PublishedColumnError struct {
+	// Table is the quoted name of the table the drop runs on.
+	Table string
+	// Column is the dropped column.
+	Column string
+	// Publications are the publications that name the column, unquoted.
+	Publications []string
+}
+
+func (e *PublishedColumnError) Error() string {
+	return fmt.Sprintf("%v: %s", ErrDroppedObjectDrift, e.Reason())
+}
+
+// Unwrap makes the error an ErrDroppedObjectDrift, so its outcome code is
+// dropped-object-drift.
+func (e *PublishedColumnError) Unwrap() error { return ErrDroppedObjectDrift }
+
+// Reason says which publications name the column and what clears them.
+func (e *PublishedColumnError) Reason() string {
+	quoted := make([]string, 0, len(e.Publications))
+	for _, name := range e.Publications {
+		quoted = append(quoted, pgx.Identifier{name}.Sanitize())
+	}
+	noun := "publication"
+	if len(quoted) > 1 {
+		noun = "publications"
+	}
+	return fmt.Sprintf("%s %s now names column %s of %s in its column list or row filter, which the plan did not review, "+
+		"and the server refuses the drop while it does; take the column out of the publication, then re-plan",
+		noun, strings.Join(quoted, ", "), e.Column, e.Table)
+}
+
+// refusePublishedColumnDrops locks st's table in ACCESS EXCLUSIVE, the
+// lock a column drop takes anyway, and refuses with a
+// *PublishedColumnError while a publication names one of columns. It runs
+// for every native column drop, planned or submitted with --alter, since
+// a publication can start naming the column in the window between the
+// plan's read and the drop.
+func refusePublishedColumnDrops(ctx context.Context, tx pgx.Tx, st statement.Statement, columns []string) error {
+	target, err := lockForCheck(ctx, tx, st, "check the publications that name the columns it drops")
+	if err != nil {
+		return err
+	}
+	for _, column := range columns {
+		names, err := publicationsNamingColumn(ctx, tx, target, column)
+		if err != nil {
+			return fmt.Errorf("read the publications that name column %s of %s before dropping it: %w", column, target, err)
+		}
+		if len(names) > 0 {
+			return &PublishedColumnError{Table: target, Column: column, Publications: names}
+		}
+	}
+	return nil
+}
+
+// publicationsNamingColumn reads the publications whose column list or row
+// filter names column of table (a quoted name) or of a partition below it.
+func publicationsNamingColumn(ctx context.Context, tx pgx.Tx, table, column string) ([]string, error) {
+	// INV: CO-9 — every catalog name is pg_catalog-qualified and the table
+	// is resolved by its quoted name. pg_partition_tree lists nothing for a
+	// table that is not partitioned, so the table itself is matched on its
+	// own.
+	const q = `
+		SELECT DISTINCT p.pubname::pg_catalog.text
+		FROM pg_catalog.pg_depend d
+		JOIN pg_catalog.pg_publication_rel pr ON pr.oid OPERATOR(pg_catalog.=) d.objid
+		JOIN pg_catalog.pg_publication p ON p.oid OPERATOR(pg_catalog.=) pr.prpubid
+		JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) d.refobjid
+		     AND a.attnum OPERATOR(pg_catalog.=) d.refobjsubid
+		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
+		  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+		  AND (d.refobjid OPERATOR(pg_catalog.=) $1::pg_catalog.regclass
+		       OR d.refobjid OPERATOR(pg_catalog.=) ANY (
+		          SELECT t.relid FROM pg_catalog.pg_partition_tree($1::pg_catalog.regclass) t))
+		  AND a.attname OPERATOR(pg_catalog.=) $2
+		ORDER BY 1`
+	rows, err := tx.Query(ctx, q, table, column)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 // refuseDropBelow refuses a drop on a table with tables below it, read
 // under the table's lock, unless the drop is a column or constraint drop
 // on a partitioned table whose every descendant is a declarative

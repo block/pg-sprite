@@ -137,11 +137,20 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 				return plan.Report{}, err
 			}
 			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
+			facts.MaterializedViews = deps.MaterializedViews
+			facts.ViewReaders = deps.ViewReaders
 			facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 			facts.DependentTriggers = planner.ColumnDependents(deps.Triggers)
+			facts.DependentPublications = planner.ColumnDependents(deps.Publications)
 			facts.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
 			facts.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
 			facts.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)
+			if facts.SessionTimeZone, err = preflight.SessionTimeZone(ctx, pool); err != nil {
+				return plan.Report{}, err
+			}
+			if facts.KeyedColumns, err = preflight.KeyedColumns(ctx, pool, req.Schema, ds.Table()); err != nil {
+				return plan.Report{}, err
+			}
 		}
 	}
 	report.TableExists = &tableExists

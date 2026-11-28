@@ -229,6 +229,14 @@ type DroppedObject struct {
 	// refuses a drop that would take along anything the plan did not list;
 	// an entry the table has lost since is no reason to refuse.
 	Dependents []string `json:"dependents,omitempty"`
+	// DependentObjects are Dependents as typed values, in the same order,
+	// set wherever a column drop is rendered: by Diff for a plan and by
+	// ReadDroppedObject for the live object. A host matches one by kind and
+	// name against the other drops of its plan, and quotes its name, without
+	// splitting a rendered entry, whose name can hold the separator.
+	// In-process only: the JSON plan carries Dependents, and execution
+	// checks only those.
+	DependentObjects []Dependent `json:"-"`
 	// Replacement, for a constraint, is the index that replaces it, which
 	// the run attaches from the plan's [Change.Replacement]. The constraint
 	// is dropped only while that index is still in place.
@@ -616,7 +624,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 				Destructive: true,
 				Drops: &DroppedObject{
 					Kind: DroppedColumn, Name: col.Name, Definition: col.DroppedDefinition(),
-					Dependents: DependentLines(col.Dependents),
+					Dependents: DependentLines(col.Dependents), DependentObjects: slices.Clone(col.Dependents),
 				},
 			})
 		}

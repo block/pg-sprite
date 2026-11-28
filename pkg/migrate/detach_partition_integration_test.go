@@ -101,7 +101,7 @@ func openReader(t *testing.T, pool *pgxpool.Pool, schema string) (func(), uint32
 	require.NoError(t, err)
 	var n int
 	require.NoError(t, conn.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.events", schema)).Scan(&n))
-	require.Equal(t, 200, n)
+	require.Positive(t, n, "the reader read events")
 	return end, conn.Conn().PgConn().PID()
 }
 

@@ -12,12 +12,24 @@ import (
 
 // ColumnDependents names, per column, the objects whose definitions read
 // it and that PostgreSQL will not let a type change or a drop of the
-// column outlive: views, row-level security policies, triggers, generated
-// columns, and partition keys.
+// column outlive: views, row-level security policies, triggers,
+// publications, generated columns, and partition keys.
 type ColumnDependents struct {
 	// Views are the views and materialized views that read the column,
 	// each rendered "schema"."view".
 	Views DependentObjects
+	// MaterializedViews names the materialized views among Views and
+	// ViewReaders, rendered the same way, sorted, each once. Recreating
+	// one runs its query to fill it again, so the manual path names it
+	// apart from a plain view.
+	MaterializedViews []string
+	// ViewReaders maps each view in Views to the views and materialized
+	// views that read it, directly or through other views, rendered the
+	// same way, each to its longest chain of views from the view: 1 for a
+	// view that reads it itself. PostgreSQL refuses to drop a view another
+	// view reads, so the readers have to go first, and dropping the deeper
+	// ones before the shallower never drops a view another still reads.
+	ViewReaders map[string]map[string]int
 	// Policies are the row-level security policies whose USING or WITH
 	// CHECK expression reads the column, each rendered
 	// "policy" ON "schema"."table", the form DROP POLICY takes. A policy
@@ -29,6 +41,12 @@ type ColumnDependents struct {
 	// form DROP TRIGGER takes. A trigger whose function reads the column
 	// records no dependency on it and does not block the change.
 	Triggers DependentObjects
+	// Publications are the publications whose column list or row filter
+	// for the table names the column, each rendered "publication", the
+	// form ALTER PUBLICATION takes. A publication that publishes the
+	// table without a column list or row filter records no dependency on
+	// the column and does not block the change.
+	Publications DependentObjects
 	// GeneratedColumns are the generated columns whose expression reads
 	// the column, each rendered "schema"."table"."column".
 	GeneratedColumns DependentObjects
@@ -60,7 +78,7 @@ type DependentObjects struct {
 }
 
 // ReadColumnDependents reads which views, materialized views, policies,
-// triggers, generated columns, and partition keys read each column of
+// triggers, publications, generated columns, and partition keys read each column of
 // schema.table, and the same-named column of every table below it. A
 // column only a table below has is left out: no change to the table
 // reaches it.
@@ -77,7 +95,7 @@ type DependentObjects struct {
 // from the dropped table loses it. Partitions never declare a column of
 // their own, so a drop reaches every partition. The dependency is the one
 // pg_depend records to the column: from the view's rewrite rule, the
-// policy, the trigger, or the generated column (from its expression on
+// policy, the trigger, the publication's entry for the table, or the generated column (from its expression on
 // PostgreSQL 15 and later, from the generated column itself before that),
 // and from the column to its own table for a partition key column. A
 // trigger a partition clones from a parent's trigger in the tree is named
@@ -87,14 +105,22 @@ type DependentObjects struct {
 // at execution stays the backstop for a dependent created after it.
 func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table string) (ColumnDependents, error) {
 	name := pgx.Identifier{schema, table}.Sanitize()
-	tables, root, err := readDependentTree(ctx, pool, schema, table)
+	tables, root, materialized, err := readDependentTree(ctx, pool, schema, table)
 	if err != nil {
 		return ColumnDependents{}, fmt.Errorf("read the objects that depend on the columns of %s: %w", name, err)
 	}
+	readers, readerMaterialized, err := readViewReaders(ctx, pool, tables)
+	if err != nil {
+		return ColumnDependents{}, fmt.Errorf("read the views that read the views on %s: %w", name, err)
+	}
+	materialized = slices.Compact(slices.Sorted(slices.Values(append(materialized, readerMaterialized...))))
 	deps := ColumnDependents{
+		MaterializedViews:     materialized,
+		ViewReaders:           readers,
 		Views:                 newDependentObjects(),
 		Policies:              newDependentObjects(),
 		Triggers:              newDependentObjects(),
+		Publications:          newDependentObjects(),
 		GeneratedColumns:      newDependentObjects(),
 		PartitionKeys:         newDependentObjects(),
 		GeneratedColumnCopies: newDependentObjects(),
@@ -115,6 +141,7 @@ func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table
 		dependentView:         deps.Views,
 		dependentPolicy:       deps.Policies,
 		dependentTrigger:      deps.Triggers,
+		dependentPublication:  deps.Publications,
 		dependentGenerated:    deps.GeneratedColumns,
 		dependentPartitionKey: deps.PartitionKeys,
 	}
@@ -195,24 +222,30 @@ type dependentColumn struct {
 
 // dependentName names one dependent of a kind: a view or a partitioned
 // table by relation alone, a policy or a trigger by member and the table
-// it is defined on, and a generated column by member and its table.
+// it is defined on, a publication by member alone, and a generated column
+// by member and its table.
 type dependentName struct{ kind, schema, relation, member string }
 
 // The kinds of dependent readDependentTree reports.
 const (
-	dependentView         = "view"
-	dependentPolicy       = "policy"
-	dependentTrigger      = "trigger"
-	dependentGenerated    = "generated"
-	dependentPartitionKey = "partition-key"
+	dependentView = "view"
+	// dependentMaterializedView is read as a view, and its name is kept
+	// in ColumnDependents.MaterializedViews.
+	dependentMaterializedView = "materialized-view"
+	dependentPolicy           = "policy"
+	dependentTrigger          = "trigger"
+	dependentPublication      = "publication"
+	dependentGenerated        = "generated"
+	dependentPartitionKey     = "partition-key"
 )
 
 // readDependentTree reads schema.table and every table below it, each
 // with its name, its parents, its live columns' inheritance counts and
 // whether each is generated, and the objects that read each column, in one statement so the facts come from one
 // snapshot. root is the table's oid; a table that does not exist
-// yields no tables.
-func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table string) (map[uint32]*dependentTable, uint32, error) {
+// yields no tables. materialized names, rendered and sorted, the
+// dependent views that are materialized views.
+func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table string) (tables map[uint32]*dependentTable, root uint32, materialized []string, err error) {
 	// INV: CO-9 — every relation, function, and operator is
 	// pg_catalog-qualified.
 	rows, err := pool.Query(ctx, `WITH RECURSIVE root(oid) AS (
@@ -240,7 +273,8 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) tree.oid
 			AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped
 		LEFT JOIN LATERAL (
-			SELECT 'view'::pg_catalog.text AS kind, n.nspname, v.relname,
+			SELECT CASE WHEN v.relkind OPERATOR(pg_catalog.=) 'm' THEN 'materialized-view' ELSE 'view' END::pg_catalog.text AS kind,
+				n.nspname, v.relname,
 				NULL::pg_catalog.name AS member
 			FROM pg_catalog.pg_depend d
 			JOIN pg_catalog.pg_rewrite r ON r.oid OPERATOR(pg_catalog.=) d.objid
@@ -277,6 +311,15 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 				JOIN tree parent ON parent.oid OPERATOR(pg_catalog.=) pt.tgrelid
 				WHERE pt.oid OPERATOR(pg_catalog.=) tg.tgparentid
 			  )
+			UNION
+			SELECT 'publication'::pg_catalog.text, '', '', pub.pubname
+			FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_publication_rel pr ON pr.oid OPERATOR(pg_catalog.=) d.objid
+			JOIN pg_catalog.pg_publication pub ON pub.oid OPERATOR(pg_catalog.=) pr.prpubid
+			WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
+			  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refobjid OPERATOR(pg_catalog.=) tree.oid
+			  AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
 			UNION
 			SELECT 'generated'::pg_catalog.text, n.nspname, c.relname, g.attname
 			FROM pg_catalog.pg_depend d
@@ -321,11 +364,10 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 			  AND c.relkind OPERATOR(pg_catalog.=) 'p'
 		) deps ON true`, schema, table)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer rows.Close()
-	tables := map[uint32]*dependentTable{}
-	var root uint32
+	tables = map[uint32]*dependentTable{}
 	for rows.Next() {
 		var oid uint32
 		var isRoot bool
@@ -336,7 +378,7 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		var kind, depSchema, depRelation, member *string
 		if err := rows.Scan(&oid, &isRoot, &tableSchema, &relation, &parents, &column, &c.local, &c.inhcount, &c.generated,
 			&kind, &depSchema, &depRelation, &member); err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		if isRoot {
 			root = oid
@@ -356,18 +398,111 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		}
 		d := dependentName{kind: *kind, schema: *depSchema, relation: *depRelation}
 		switch *kind {
+		case dependentMaterializedView:
+			d.kind = dependentView
+			materialized = append(materialized, d.render())
 		case dependentView, dependentPartitionKey:
 		case dependentPolicy, dependentTrigger, dependentGenerated:
 			d.member = *member
+		case dependentPublication:
+			// A publication is a database object, not a table's: one that
+			// lists the column on two tables of the tree is named once.
+			d = dependentName{kind: *kind, member: *member}
 		default:
-			return nil, 0, fmt.Errorf("column %s of table %d has a dependent of unknown kind %q", column, oid, *kind)
+			return nil, 0, nil, fmt.Errorf("column %s of table %d has a dependent of unknown kind %q", column, oid, *kind)
 		}
 		existing.dependents = append(existing.dependents, d)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
-	return tables, root, nil
+	slices.Sort(materialized)
+	return tables, root, slices.Compact(materialized), nil
+}
+
+// maxViewDepth bounds the walk over views that read views. PostgreSQL
+// records no cycle among views, so the bound only keeps a catalog it does
+// not expect from walking forever.
+const maxViewDepth = 64
+
+// readViewReaders reads, for each view that reads a column in tables, the
+// views and materialized views that read it, directly or through other
+// views, each with its longest distance from the view. It also names the
+// readers that are materialized views.
+func readViewReaders(ctx context.Context, pool *pgxpool.Pool, tables map[uint32]*dependentTable) (map[string]map[string]int, []string, error) {
+	var schemas, relations []string
+	for _, t := range tables {
+		for _, c := range t.columns {
+			for _, d := range c.dependents {
+				if d.kind == dependentView {
+					schemas, relations = append(schemas, d.schema), append(relations, d.relation)
+				}
+			}
+		}
+	}
+	if len(schemas) == 0 {
+		return nil, nil, nil
+	}
+	// INV: CO-9 — every relation, function, and operator is
+	// pg_catalog-qualified.
+	rows, err := pool.Query(ctx, `WITH RECURSIVE roots(oid) AS (
+			SELECT DISTINCT v.oid
+			FROM ROWS FROM (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[])) AS r(nspname, relname)
+			JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) r.nspname
+			JOIN pg_catalog.pg_class v ON v.relnamespace OPERATOR(pg_catalog.=) n.oid
+				AND v.relname OPERATOR(pg_catalog.=) r.relname
+		),
+		walk(root, oid, depth) AS (
+			SELECT oid, oid, 0 FROM roots
+			UNION
+			SELECT walk.root, rv.oid, walk.depth OPERATOR(pg_catalog.+) 1
+			FROM walk
+			JOIN pg_catalog.pg_depend d ON d.refobjid OPERATOR(pg_catalog.=) walk.oid
+				AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass
+			JOIN pg_catalog.pg_rewrite r ON r.oid OPERATOR(pg_catalog.=) d.objid
+			JOIN pg_catalog.pg_class rv ON rv.oid OPERATOR(pg_catalog.=) r.ev_class
+			WHERE rv.oid OPERATOR(pg_catalog.<>) walk.oid
+			  AND rv.relkind OPERATOR(pg_catalog.=) ANY ('{v,m}'::pg_catalog."char"[])
+			  AND walk.depth OPERATOR(pg_catalog.<) $3
+		)
+		SELECT rn.nspname::pg_catalog.text, rc.relname::pg_catalog.text,
+			n.nspname::pg_catalog.text, c.relname::pg_catalog.text,
+			c.relkind OPERATOR(pg_catalog.=) 'm', pg_catalog.max(walk.depth)::pg_catalog.int4
+		FROM walk
+		JOIN pg_catalog.pg_class rc ON rc.oid OPERATOR(pg_catalog.=) walk.root
+		JOIN pg_catalog.pg_namespace rn ON rn.oid OPERATOR(pg_catalog.=) rc.relnamespace
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) walk.oid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE walk.depth OPERATOR(pg_catalog.>) 0
+		GROUP BY rn.nspname, rc.relname, n.nspname, c.relname, c.relkind`, schemas, relations, maxViewDepth)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	readers := map[string]map[string]int{}
+	var materialized []string
+	for rows.Next() {
+		var rootSchema, rootRelation, schema, relation string
+		var isMaterialized bool
+		var depth int32
+		if err := rows.Scan(&rootSchema, &rootRelation, &schema, &relation, &isMaterialized, &depth); err != nil {
+			return nil, nil, err
+		}
+		root := dependentName{kind: dependentView, schema: rootSchema, relation: rootRelation}.render()
+		reader := dependentName{kind: dependentView, schema: schema, relation: relation}.render()
+		if readers[root] == nil {
+			readers[root] = map[string]int{}
+		}
+		readers[root][reader] = int(depth)
+		if isMaterialized {
+			materialized = append(materialized, reader)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return readers, materialized, nil
 }
 
 // droppedCopies returns the tables whose copy of column a recursive DROP
@@ -423,7 +558,8 @@ func setDependents(into map[string][]string, column string, deps []dependentName
 // render quotes every identifier of the name: "schema"."view" for a view
 // and "schema"."table" for a partitioned table, "policy" ON
 // "schema"."table" for a policy and "trigger" ON "schema"."table" for a
-// trigger, the forms their DROP statements take, and
+// trigger, the forms their DROP statements take, "publication" for a
+// publication, the form ALTER PUBLICATION takes, and
 // "schema"."table"."column" for a generated column.
 func (d dependentName) render() string {
 	switch d.kind {
@@ -431,6 +567,8 @@ func (d dependentName) render() string {
 		return pgx.Identifier{d.member}.Sanitize() + " ON " + pgx.Identifier{d.schema, d.relation}.Sanitize()
 	case dependentGenerated:
 		return pgx.Identifier{d.schema, d.relation, d.member}.Sanitize()
+	case dependentPublication:
+		return pgx.Identifier{d.member}.Sanitize()
 	default:
 		return pgx.Identifier{d.schema, d.relation}.Sanitize()
 	}

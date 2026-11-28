@@ -206,10 +206,13 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // Options.Connection is unset or reaches another database than the pool. A
 // plan whose partitioned key build the live catalog already refuses, for a
 // partition key column the key leaves out or a sub-partitioned partition, is
-// refused before anything runs ([AdmitPlanPartitionedKeys]). An empty plan
-// is executed with nothing to run, unless the table has a copy-and-swap run
-// stopped short of done: its shape may match only because that run swapped
-// it in, so it is refused with cause
+// refused before anything runs ([AdmitPlanPartitionedKeys]), and a plan whose
+// partitioned foreign key build would refuse the referenced table or the
+// partition tree is refused or stopped whole by the build's own catalog
+// checks ([AdmitPlanPartitionedForeignKeys]). An empty plan is executed with
+// nothing to run, unless the table has a copy-and-swap run stopped short of
+// done: its shape may match only because that run swapped it in, so it is
+// refused with cause
 // copy-and-swap-run-stopped and the stopped statement is finished through
 // [Run]. Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
@@ -367,6 +370,13 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return stopped, nil
 	}
 	stopped, admitted, err = AdmitPlanPartitionedKeys(ctx, pool, report)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
+	}
+	stopped, admitted, err = AdmitPlanPartitionedForeignKeys(ctx, pool, report)
 	if err != nil {
 		return stopped, err
 	}
@@ -914,6 +924,11 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 			return r.WithCause(ps.RefusalCause), detail(foreignKeyDropRefusalDetail(ps.RefusalCause))
 		}
 		if err == nil {
+			if d, ok := firstRefusedDecision(ps.Decisions); ok {
+				if why, specific := refusedDecisionDetail(d); specific {
+					return r, detail("has no safe path: " + why)
+				}
+			}
 			return r, detail("has no safe path")
 		}
 		// Keep the statement's own reason where it has one; the class

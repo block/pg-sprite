@@ -25,6 +25,15 @@ const (
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
+	// CodeSlotLagExceeded: a live copy-and-swap run stopped because its
+	// replication slot crossed the slot lag ceiling; the checkpoint row and
+	// the slot stay for a resume. A failed verdict carrying it names the
+	// measure that crossed in its Cause. It is not permanent: a run stopped
+	// on retained WAL can resume under the same ceiling once the
+	// transaction holding the WAL ends or the write rate drops, and a run
+	// whose stream fell behind is refused at its resume rather than stopped
+	// here again, so no retry reproduces this code by itself.
+	CodeSlotLagExceeded Code = "slot-lag-exceeded"
 	// CodeRowSecurityPlanChanged requires a fresh preview and SQL review before retry.
 	CodeRowSecurityPlanChanged Code = "row-security-plan-changed"
 	// CodeRowSecurityRefused requires a declaration, target, or privilege change.
@@ -328,6 +337,11 @@ const (
 	// again under the table's lock; nothing was validated. Re-plan against
 	// the constraint as it stands.
 	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
+	// CodeTimeZoneDrift: a native change between timestamp and timestamptz
+	// reached a session whose time zone is not UTC, read inside the
+	// change's own transaction; nothing ran. The planner routes the change
+	// native only in UTC, so plan again in the zone the engine runs in.
+	CodeTimeZoneDrift Code = "time-zone-drift"
 	// CodeRenamedIndexDrift: the relation an ALTER INDEX ... RENAME TO
 	// names is no longer a plain index on the preflighted table, read
 	// again under the table's lock — gone, not an index, on another table,
@@ -386,6 +400,7 @@ func Codes() []Code {
 	return []Code{
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
+		CodeSlotLagExceeded,
 		CodeBlockingOutcomeUnknown,
 		CodeCommitOutcomeUnknown,
 		CodeDropOutcomeUnknown,
@@ -463,6 +478,7 @@ func Codes() []Code {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -545,6 +561,7 @@ func (c Code) Permanent() bool {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -753,6 +770,8 @@ func sentinelCode(err error) Code {
 		return CodeDroppedColumnPartitionDependent
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
+	case errors.Is(err, ErrTimeZoneDrift):
+		return CodeTimeZoneDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
 		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrEnumTypeDrift):
