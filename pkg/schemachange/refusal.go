@@ -198,14 +198,23 @@ const (
 	// fingerprints of another statement.
 	CauseResumeRowMismatch RefusalCause = "resume-row-mismatch"
 	// CauseResumeRowDecoding means the checkpoint row handed to a resume
-	// was written by the other kind of run (ST-3): the quiesced runner was
-	// handed a row that names a slot or publication, or is in a phase only
-	// a run that decodes WAL enters; or the live runner was handed a row
-	// that names no slot. Continuing a decoding row without its slot would
-	// leave the slot as nobody's and the changes it carried unapplied, and
-	// a quiesced row names no position a stream could start from, so the
-	// row is refused either way.
+	// is one neither kind of run writes (ST-3): it names a slot without a
+	// publication or a publication without a slot, or it names neither
+	// and stands in a phase only a run that decodes WAL enters. Nothing
+	// says which kind of run made it, so neither continues it. A row the
+	// other kind of run wrote is CauseResumeModeMismatch.
 	CauseResumeRowDecoding RefusalCause = "resume-row-decoding"
+	// CauseResumeModeMismatch means the checkpoint row handed to a resume
+	// was written by the other kind of run (ST-3): the quiesced runner was
+	// handed a row that names a slot and publication, a live run's; or the
+	// live runner was handed a row that names neither, a quiesced run's,
+	// whose source the stopped run left fenced. Continuing a decoding row
+	// without its slot would leave the slot as nobody's and the changes it
+	// carried unapplied, and a quiesced row names no position a stream
+	// could start from, so the row is refused either way and nothing is
+	// written. The stopped run is finished by a run of its own kind, or
+	// discarded (Runner.Discard).
+	CauseResumeModeMismatch RefusalCause = "resume-mode-mismatch"
 	// CauseShadowUnrecorded means a relation already bears the target's
 	// derived shadow name while no checkpoint row records a run for the
 	// target (ST-2). The row is the only record of which statement a shadow
@@ -317,6 +326,7 @@ func RefusalCauses() []RefusalCause {
 		CauseFinishAdmissionStale,
 		CauseResumeRowMismatch,
 		CauseResumeRowDecoding,
+		CauseResumeModeMismatch,
 		CauseShadowUnrecorded,
 		CauseResumeShadowGone,
 		CauseResumeSlotForeign,
@@ -362,7 +372,7 @@ func (c RefusalCause) Invariant() string {
 		return "ST-4"
 	case CauseResumeRowMismatch, CauseShadowUnrecorded, CauseResumeShadowGone:
 		return "ST-2"
-	case CauseResumeSlotForeign, CauseResumeRowDecoding, CauseResumeSlotBacklog:
+	case CauseResumeSlotForeign, CauseResumeRowDecoding, CauseResumeModeMismatch, CauseResumeSlotBacklog:
 		return "ST-3"
 	default:
 		return ""
@@ -372,8 +382,9 @@ func (c RefusalCause) Invariant() string {
 // Class is the routing class of the cause, from docs/refusal-classes.md:
 // what kind of boundary the importer is looking at. A cause that describes
 // a lock, a proof, a relation, a slot, or a row whose state moved under the
-// operation is environmental — state outside the engine stopped a
-// supportable change. A statement the engine declines to carry as written
+// operation, or a stopped run of the other kind that holds the table, is
+// environmental — state outside the engine stopped a supportable change.
+// A statement the engine declines to carry as written
 // — a conversion the copy cannot reproduce, a re-added or new column it
 // cannot fill, a new identity or sequence the swap cannot carry — is a capability
 // boundary. Every other cause is an invariant violation: an
@@ -393,7 +404,8 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
 		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
 		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld, CauseResumeSlotBacklog,
-		CauseRestartSwapCommitted, CauseCopyConversionDrift, CauseFinishAdmissionStale:
+		CauseRestartSwapCommitted, CauseCopyConversionDrift, CauseFinishAdmissionStale,
+		CauseResumeModeMismatch:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewColumn, CauseStatementNewSequence:
 		return refusal.ClassCapabilityBoundary

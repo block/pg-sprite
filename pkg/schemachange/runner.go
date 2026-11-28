@@ -240,9 +240,10 @@ func (o RunOptions) livePoll() time.Duration {
 //     renamed shadow holds every row the source held at the swap (CO-1,
 //     ST-4). No fence is installed.
 //
-// The two runs never resume each other's rows: a row that names a slot is
-// a live run's, one that names none a quiesced run's, and a Runner that
-// finds the other kind refuses it as resume-row-decoding (ST-3).
+// The two runs never resume each other's rows: a row that names a slot and
+// publication is a live run's, one that names neither a quiesced run's, and
+// a Runner that finds the other kind refuses it as resume-mode-mismatch
+// (ST-3). A row neither kind writes is refused as resume-row-decoding.
 type Runner struct {
 	cfg   dbconn.Config
 	store *checkpoint.Store
@@ -381,9 +382,11 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 //     sets RunOptions.ReplaceDone, under which a done row whose retained
 //     source is gone is deleted here, inside this run's lock session, and
 //     the run starts fresh; a failed row is refused either way.
-//   - A row of the other kind of run — one naming a slot, or in a phase
-//     only a live run enters, met by a quiesced Runner; one naming none,
-//     met by a live Runner — is refused as resume-row-decoding.
+//   - A row of the other kind of run — one naming a slot and publication,
+//     met by a quiesced Runner; one naming neither, met by a live Runner —
+//     is refused as resume-mode-mismatch, and a row neither kind writes —
+//     one naming a slot or a publication alone, or naming neither in a
+//     phase only a live run enters — as resume-row-decoding.
 //
 // A quiesced run's phases then run in order — the write fence on the
 // source, installed over the one a stopped run left; copy, saving the

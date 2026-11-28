@@ -429,6 +429,33 @@ measure that crossed the ceiling: `stream-behind`, `wal-retained`, or
 says how to resume, and a consumer branches on `code` and `cause`, not on the
 detail's wording ([replication slots](replication-slots.md#the-slot-lag-ceiling)).
 
+### Refused: a stopped run of the other mode (`copy-and-swap-refused`) — exit 2
+
+A run resumes only in the mode it started in. Here a `--block-writes` run of
+the retype was killed mid-copy, and the same statement is run again without
+`--block-writes`. A live run cannot continue it, because the fenced run captured
+no writes for a stream to replay, so it is refused with cause
+`resume-mode-mismatch`, class `environmental`, before anything changes. The
+stopped run's fence still stands, so `writes_blocked` is `true`, and the detail
+names the flag to add and the command that abandons the run instead. The
+reverse, a stopped live run met by a `--block-writes` run, is refused the same
+way, with the detail telling you to run without `--block-writes` and no
+`writes_blocked`:
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE public.orders ALTER COLUMN qty TYPE bigint' --copy-and-swap --free-disk 2GiB --json
+{
+  "outcome": "refused",
+  "reason": "copy-and-swap-refused",
+  "class": "environmental",
+  "cause": "resume-mode-mismatch",
+  "statement": "ALTER TABLE public.orders ALTER COLUMN qty TYPE bigint",
+  "table": "public.orders",
+  "detail": "a copy-and-swap run of this statement on public.orders stopped with the table's writes blocked, and this run would stream writes through a replication slot instead, so it cannot continue that run; finish the stopped run by running the same command again with --block-writes public.orders added (CopySwapOptions.BlockWrites), or abandon it with pg-sprite discard public.orders (schemachange.Runner.Discard); until then the source stays fenced and every write to it fails with SQLSTATE 55006; nothing was executed",
+  "writes_blocked": true
+}
+```
+
 ### Refused: no online rewrite exists (`rewrite-required`) — exit 2
 
 The column and its constraint arrive in one statement, so no online
@@ -520,7 +547,8 @@ cause `copy-and-swap-disk-headroom` when the shadow and its indexes would not
 fit the declared space, or, for a live run, would not fit beside the slot lag
 ceiling), and either logical decoding on the server or
 `--block-writes SCHEMA.TABLE`, which names the table whose writes it blocks
-until the swap. The verdict's outcome is distinct
+until the swap (and, if the run stops or is killed first, until it is finished
+or discarded). The verdict's outcome is distinct
 from `executed-natively`, `detail` says what the verification pass
 covered and what became of the retained source, and `swap_lsn` is the
 server's WAL position read inside the swap transaction, under its lock,

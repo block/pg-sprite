@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // sourceHold is what a copy-and-swap run holds on its source while it is
@@ -63,6 +64,35 @@ func fenceAfterStop(ctx context.Context, store *checkpoint.Store, st statement.S
 	}
 }
 
+// modeMismatchVerdict is the refusal of a run that found a stopped run of
+// the same statement on its table made in the other mode
+// (schemachange.CauseResumeModeMismatch). The Runner refuses before it
+// writes anything, so the stopped run's hold stands as it was, and hold —
+// the hold this run took on — says which mode the stopped run was in: a
+// live run (holdSlot) met a run that blocked writes, whose fence still
+// refuses every write, and a blocked-writes run met a live run, whose slot
+// still pins WAL. The detail is written for the CLI operator, with the
+// library's option beside each flag, and names the two ways out: the same
+// statement run again in the stopped run's mode finishes it, and discard
+// abandons it.
+func modeMismatchVerdict(st statement.Statement, r verdict.Refusal, hold sourceHold) verdict.Verdict {
+	table := qualified(st)
+	if hold == holdSlot {
+		v := refusedVerdict(st, r, fmt.Sprintf("a copy-and-swap run of this statement on %s stopped with the table's writes blocked, "+
+			"and this run would stream writes through a replication slot instead, so it cannot continue that run; "+
+			"finish the stopped run by running the same command again with --block-writes %s added (CopySwapOptions.BlockWrites), "+
+			"or abandon it with pg-sprite discard %s (schemachange.Runner.Discard); until then the source stays fenced and every write to it fails with SQLSTATE %s; nothing was executed",
+			table, table, table, schemachange.WriteFenceSQLState))
+		v.WritesBlocked = true
+		return v
+	}
+	return refusedVerdict(st, r, fmt.Sprintf("a copy-and-swap run of this statement on %s stopped while streaming the table's writes through a replication slot, "+
+		"and this run would block writes instead, so it cannot continue that run; "+
+		"finish the stopped run by running the same command again without --block-writes (CopySwapOptions.BlockWrites empty), "+
+		"or abandon it with pg-sprite discard %s (schemachange.Runner.Discard); until then its replication slot stays and pins WAL on the server; nothing was executed",
+		table, table))
+}
+
 // ErrBlockWritesNotSupported is returned by [RunDesired] when
 // Options.CopySwap.BlockWrites is set. The acknowledgement names a table,
 // but on the declarative front door the derived plan, not the operator,
@@ -96,7 +126,7 @@ func checkBlockWritesAck(st statement.Statement, ack string) error {
 // unconditional, as the force and restart audits are: an audit trail must
 // not depend on diagnostics being enabled.
 func auditBlockWrites(audit *slog.Logger, st statement.Statement) {
-	audit.Warn("block-writes run acknowledged; every write to the table will be refused until the swap",
+	audit.Warn("block-writes run acknowledged; every write to the table will be refused until the swap, and after a stop or crash until the run is finished or discarded",
 		"table", qualified(st),
 		"sqlstate", schemachange.WriteFenceSQLState)
 }

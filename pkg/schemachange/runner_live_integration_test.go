@@ -19,6 +19,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/refusal"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -296,9 +297,10 @@ func TestRunnerCancelledWithACauseWhileCatchingUpReadsAsCancelled(t *testing.T) 
 }
 
 // A row a quiesced run wrote is refused by a live run, and a row a live
-// run wrote is refused by a quiesced run, both as resume-row-decoding:
-// the two never continue each other's rows (ST-3). Nothing of the stopped
-// run is touched by the refusal.
+// run wrote is refused by a quiesced run, both as resume-mode-mismatch, an
+// environmental refusal: the two never continue each other's rows (ST-3),
+// and the stopped run is finished by a run of its own kind or discarded.
+// Nothing of the stopped run is touched by the refusal.
 func TestRunnerRefusesTheOtherKindOfRunsRow(t *testing.T) {
 	t.Run("quiesced row under a live target", func(t *testing.T) {
 		f := newDecodingFixture(t, 100)
@@ -314,7 +316,8 @@ func TestRunnerRefusesTheOtherKindOfRunsRow(t *testing.T) {
 
 		_, err = f.runLive(t, schemachange.RunOptions{})
 		require.Error(t, err)
-		assert.Equal(t, schemachange.CauseResumeRowDecoding, schemachange.RefusalCauseOf(err))
+		assert.Equal(t, schemachange.CauseResumeModeMismatch, schemachange.RefusalCauseOf(err))
+		assert.Equal(t, refusal.ClassEnvironmental, schemachange.RefusalCauseOf(err).Class())
 		_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
 		require.NoError(t, err)
 		assert.False(t, found, "no slot was made for a row that names none")
@@ -332,7 +335,8 @@ func TestRunnerRefusesTheOtherKindOfRunsRow(t *testing.T) {
 		require.NoError(t, err)
 		_, err = r.Run(t.Context(), f.pool, quiesced, f.liveStatement(t))
 		require.Error(t, err)
-		assert.Equal(t, schemachange.CauseResumeRowDecoding, schemachange.RefusalCauseOf(err))
+		assert.Equal(t, schemachange.CauseResumeModeMismatch, schemachange.RefusalCauseOf(err))
+		assert.Equal(t, refusal.ClassEnvironmental, schemachange.RefusalCauseOf(err).Class())
 		_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
 		require.NoError(t, err)
 		assert.True(t, found, "the live run's slot is left for the live run to resume")

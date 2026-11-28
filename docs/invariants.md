@@ -1358,11 +1358,16 @@ as `resume-row-mismatch` before discarding anything (refuses-a-row-naming-anothe
 test); the slot
 is dropped once the swap has committed, before the old table is settled, and a run resumed on
 a swapped row drops the slot it left too). Each runner refuses the other kind's row as
-`resume-row-decoding`: a quiesced target's run never creates a slot and refuses a row naming a
-slot or publication, or standing in `catching_up` or `reconciling`, since a run without the
-slot would leave it behind as nobody's; a decoding target's run refuses a row that names no
-slot, since the source behind it was fenced, not captured, and no stream could replay what it
-missed (refuses-a-row-that-names-a-slot, refuses-the-other-kind-of-runs-row tests).
+`resume-mode-mismatch`, an `environmental` refusal that writes nothing: a quiesced target's
+run never creates a slot and refuses a row naming a slot and publication, since a run without
+the slot would leave it behind as nobody's; a decoding target's run refuses a row that names
+neither, since the source behind it was fenced, not captured, and no stream could replay what
+it missed. A row neither kind writes — a slot or a publication named alone, or neither named in
+`catching_up` or `reconciling` — is refused by both as `resume-row-decoding`
+(refuses-a-row-that-names-a-slot, refuses-a-row-that-names-a-slot-without-a-publication,
+refuses-a-row-in-a-decoding-phase, refuses-the-other-kind-of-runs-row tests, and the front
+door's stopped-mid-copy tests, which hold that a run of the other mode is told the flag and
+`pg-sprite discard` rather than an engine fault).
 *Source:* [low-level-design § Postgres-specific risks](low-level-design.md#postgres-specific-risks-to-design-around).
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash

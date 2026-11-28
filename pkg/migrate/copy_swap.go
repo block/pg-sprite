@@ -92,7 +92,8 @@ type CopySwapOptions struct {
 	// run lasts. The run then takes the write fence instead of a
 	// replication slot and needs no logical decoding from the server; every
 	// write that reaches the fence fails, so the table is offline for
-	// writes until the swap. It must name the resolved target table as
+	// writes until the swap, and stays offline after a stop or a crash
+	// until the run is finished or discarded. It must name the resolved target table as
 	// SCHEMA.TABLE, the same way Restart does, so the declaration cannot be
 	// left on a script and fence another table by accident; a value naming
 	// any other table returns [ErrBlockWritesMismatch], an [AcknowledgementMismatchError]. Empty runs the
@@ -427,6 +428,9 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 		if !ok {
 			return verdict.Verdict{}, fmt.Errorf("%w: shadow refusal carries unclassified cause %q",
 				executor.ErrInvariantViolation, cause)
+		}
+		if cause == schemachange.CauseResumeModeMismatch {
+			return modeMismatchVerdict(st, r, hold), nil
 		}
 		v := refusedVerdict(st, r, err.Error())
 		if cause == schemachange.CauseResumeSlotBacklog {

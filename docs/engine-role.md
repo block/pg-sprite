@@ -99,9 +99,12 @@ A copy-and-swap run that blocks writes (`--block-writes`; a quiesced target to
 `pkg/schemachange.Runner`) does not take the caller's word that nothing writes the table: it
 installs a statement-level `BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE` trigger,
 `pgsprite_write_fence`, on the source before its first checkpoint save, and
-every write the trigger sees is refused with SQLSTATE `55006` (`object_in_use`) and a message
-naming the table. The trigger is enabled `ALWAYS`, so it fires for a session running under
-`session_replication_role = replica` as well. The writers that run in that role are the apply
+every write the trigger sees is refused with SQLSTATE `55006` (`object_in_use`), a message
+naming the table, and a hint naming the two ways to lift the fence of a run that has stopped:
+the same `pg-sprite migrate` again with `--block-writes SCHEMA.TABLE`, or
+`pg-sprite discard SCHEMA.TABLE`. Every fenced run replaces the function, so the hint a database
+shows follows the engine version of its latest fenced run. The trigger is enabled `ALWAYS`, so
+it fires for a session running under `session_replication_role = replica` as well. The writers that run in that role are the apply
 worker of a logical-replication subscription that writes into the source, and a bulk restore
 run with triggers disabled; a fence enabled for origin sessions only would let their writes
 through to be lost with the old table at the swap. For a subscription apply worker the

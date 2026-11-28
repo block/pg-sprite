@@ -55,7 +55,7 @@ Every example on this page that runs a copy-and-swap carries the flag.
 
 | | Live (default) | Offline (`--block-writes SCHEMA.TABLE`) |
 | --- | --- | --- |
-| Application writes during the run | Keep working. pg-sprite reads them from the WAL through a logical replication slot and replays them onto the shadow. | Refused. pg-sprite fences the table with a trigger, and every write fails with SQLSTATE `55006` until the swap commits. |
+| Application writes during the run | Keep working. pg-sprite reads them from the WAL through a logical replication slot and replays them onto the shadow. | Refused. pg-sprite fences the table with a trigger, and every write fails with SQLSTATE `55006` until the swap commits. If the run stops or is killed first, writes keep failing until you finish or discard it ([below](#stop-resume-and-start-over)). |
 | Server requirements | `wal_level = logical`, a free replication slot, and two free WAL senders | None beyond the copy itself |
 | Holds on the server while it runs | A replication slot, which keeps WAL until pg-sprite consumes it | A trigger on the table |
 | Run time | Copy, then catch up with the writes made meanwhile, verify, swap | Copy, verify, swap |
@@ -295,3 +295,19 @@ pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_
 
 A stopped live run keeps its replication slot, and the slot keeps WAL on the server. Resume it,
 start it over, or discard it promptly rather than leaving it.
+
+A stopped offline run keeps its write fence, whether it stopped cleanly or was killed, so the
+table stays offline for writes until you resume or discard it. The fence keeps the shadow a
+true copy of the table; it is not left behind by mistake. The application's writes fail with a
+hint that names the table and both ways out:
+
+```text
+ERROR:  public.orders is quiesced for a copy-and-swap schema change; the write is refused
+HINT:  A pg-sprite copy-and-swap blocks writes to public.orders until the run finishes, and the block stays when the run stops or is killed. If no run is in progress, finish it by running the same pg-sprite migrate again with --block-writes public.orders, or abandon it with pg-sprite discard public.orders.
+```
+
+A run resumes only in the mode it started in. Running the stopped statement again without
+`--block-writes` after an offline run, or with it after a live run, is refused with cause
+`resume-mode-mismatch` (class `environmental`) before anything changes, and the detail names the
+flag to add or drop and `pg-sprite discard SCHEMA.TABLE`. The fence or slot of the stopped run
+stays as it was.
