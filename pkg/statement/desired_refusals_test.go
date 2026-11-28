@@ -215,6 +215,13 @@ func TestParseDesiredFileReportsAMissingTableBesideItsRefusals(t *testing.T) {
 		assert.Equal(t, 2, refused.Refusals[0].Line)
 		assert.ErrorIs(t, refused.Refusals[0], ErrDisallowedStatement)
 	})
+	t.Run("only refused statements", func(t *testing.T) {
+		_, err := ParseDesiredFile("CREATE DOMAIN email AS text;\nCREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1';\n")
+		refused, ok := errors.AsType[*RefusedStatementsError](err)
+		require.True(t, ok, "the error lists the refused statements: %v", err)
+		assert.Len(t, refused.Refusals, 2)
+		assert.NotErrorIs(t, err, ErrNoCreateTable, "removing the refused statements is the remedy, not adding a table")
+	})
 	t.Run("a refused table", func(t *testing.T) {
 		_, err := ParseDesiredFile("CREATE TABLE prod.orders (id bigint PRIMARY KEY);\n")
 		require.ErrorIs(t, err, ErrQualifiedName)

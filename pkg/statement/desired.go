@@ -224,7 +224,9 @@ func (ds DesiredSchema) WithExtensionSchemas(schemas ...string) (DesiredSchema, 
 // it. Foreign keys are admitted for planning when the table they reference
 // is unqualified, or is the table itself; desired-state execution adds,
 // drops, and changes them (see docs/limitations.md). Anything else is
-// refused with a typed error.
+// refused with a typed error. A file that refuses statements and declares
+// no table beside statements that need one returns an error matching both
+// RefusedStatementsError and ErrNoCreateTable.
 func ParseDesired(sql string) (DesiredSchema, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
@@ -291,11 +293,14 @@ func parseDesiredTree(source *desiredSource, stmts []fileStatement) (DesiredSche
 			}
 		}
 	}
-	// A file with no CREATE TABLE also reports its refused statements, so
-	// its author fixes both in one edit. A refused CREATE TABLE still names
-	// the file's table, so this reports only a file that declares none.
+	// A file with no CREATE TABLE beside statements that need one, such as
+	// an index, also reports its refused statements, so its author fixes
+	// both in one edit. A file whose every statement is refused is not
+	// missing a table: removing those statements is its remedy. A refused
+	// CREATE TABLE still names the file's table, so this reports only a
+	// file that declares none.
 	if err := refused.err(); err != nil {
-		if ds.table == "" {
+		if ds.table == "" && len(ds.statements) > 0 {
 			return DesiredSchema{}, errors.Join(err, ErrNoCreateTable)
 		}
 		return DesiredSchema{}, err

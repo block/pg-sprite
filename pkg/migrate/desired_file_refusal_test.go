@@ -3,6 +3,7 @@ package migrate
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -118,6 +119,23 @@ func TestDesiredFileRefusalOfOneStatementListsNone(t *testing.T) {
 	require.True(t, ok, "%v", err)
 	assert.Equal(t, "COMMENT ON TABLE t IS 'x'", v.Statement)
 	assert.Empty(t, v.RefusedStatements)
+}
+
+// A file that refuses a statement and also declares no table for its other
+// statements says both in its verdict, so a CLI user adds the table and fixes
+// the statement in one edit.
+func TestDesiredFileRefusalNamesAMissingTableBesideItsRefusal(t *testing.T) {
+	_, err := statement.ParseDesiredFile("CREATE INDEX orders_placed_at ON orders (placed_at);\nALTER TABLE orders ADD COLUMN note text;\n")
+	v, ok := DesiredFileRefusal(err, "unused")
+	require.True(t, ok, "%v", err)
+	assert.Equal(t, "ALTER TABLE orders ADD COLUMN note text", v.Statement)
+	assert.Contains(t, v.Detail, "the file also declares no CREATE TABLE")
+	assert.True(t, strings.HasSuffix(v.Detail, "; nothing was planned or executed"), v.Detail)
+
+	_, err = statement.ParseDesiredFile("CREATE TABLE t (id int);\nCOMMENT ON TABLE t IS 'x';\n")
+	v, ok = DesiredFileRefusal(err, "unused")
+	require.True(t, ok, "%v", err)
+	assert.NotContains(t, v.Detail, "declares no CREATE TABLE", "a file with its table says nothing about a missing one")
 }
 
 // An input error outranks every refusal beside it: the file takes no verdict,
