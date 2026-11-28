@@ -103,10 +103,12 @@ func TestDiffReplacesACheckInPlace(t *testing.T) {
 	require.NotNil(t, changes[1].Validates, "the VALIDATE names the rule it settles")
 }
 
-// A FOREIGN KEY whose definition changes keeps its drop and re-add, so the
-// drop is planned as a foreign-key drop and the plan's foreign-key drop
-// policy decides it, as it does for a key the file no longer declares.
-func TestDiffKeepsAChangedForeignKeysDropAndAdd(t *testing.T) {
+// A FOREIGN KEY whose definition changes under the same name is replaced in
+// one statement that drops the old key and adds the new one NOT VALID, then
+// validated: every write is checked by one key or the other throughout. The
+// statement is destructive and names the key it drops. A partitioned parent,
+// which cannot take a NOT VALID foreign key, keeps the drop and re-add.
+func TestDiffReplacesAChangedForeignKeyInOneStatement(t *testing.T) {
 	live := base()
 	live.Constraints = append(live.Constraints, Constraint{
 		Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true,
@@ -118,10 +120,22 @@ func TestDiffKeepsAChangedForeignKeysDropAndAdd(t *testing.T) {
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_owner_fkey"`,
-		`ALTER TABLE public.events ADD CONSTRAINT events_owner_fkey FOREIGN KEY (id) REFERENCES public.owners (id) ON DELETE CASCADE`,
+		`ALTER TABLE public.events DROP CONSTRAINT events_owner_fkey, ADD CONSTRAINT events_owner_fkey FOREIGN KEY (id) REFERENCES public.owners (id) ON DELETE CASCADE NOT VALID`,
+		`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`,
 	}, sqls(changes))
-	assert.Equal(t, ChangeDropForeignKey, changes[0].Kind, "the drop is the one the foreign-key drop policy reads")
+	assert.Equal(t, ChangeAddForeignKey, changes[0].Kind)
+	assert.True(t, changes[0].Destructive)
+	assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: "events_owner_fkey", Definition: "FOREIGN KEY (id) REFERENCES owners(id)"}, changes[0].Drops)
+	assert.Equal(t, ChangeValidateForeignKey, changes[1].Kind)
+	require.NotNil(t, changes[1].Validates, "the VALIDATE names the key it settles")
+
+	live.PartitionKey = "RANGE (id)"
+	desired.PartitionKey = "RANGE (id)"
+	changes, err = Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Len(t, changes, 2)
+	assert.Equal(t, ChangeDropForeignKey, changes[0].Kind, "a partitioned parent drops the old key on its own")
+	assert.Equal(t, ChangeAddForeignKey, changes[1].Kind)
 }
 
 // A primary key narrowed to fewer columns, on a table whose file also lets a

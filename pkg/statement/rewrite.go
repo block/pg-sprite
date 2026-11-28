@@ -315,3 +315,40 @@ func detachPartitionCmd(node *pganalyze.Node) *pganalyze.PartitionCmd {
 	}
 	return cmd.GetDef().GetPartitionCmd()
 }
+
+// WithKeyIndexOptions returns sql, a single ALTER TABLE ... ADD CONSTRAINT
+// of a primary key or unique constraint, carrying the WITH (...) storage
+// parameters of indexDef, the CREATE INDEX of the index the key owns. A key
+// read back with pg_get_constraintdef leaves its index's storage parameters
+// out, so an add rendered from that definition alone would build an index
+// without them. sql comes back unchanged when indexDef has none, and an
+// error names a statement of any other shape.
+func WithKeyIndexOptions(sql, indexDef string) (string, error) {
+	ixNode, err := parseSingle(indexDef)
+	if err != nil {
+		return "", err
+	}
+	ix := ixNode.GetIndexStmt()
+	if ix == nil {
+		return "", fmt.Errorf("%w: %q", ErrNotCreateIndex, indexDef)
+	}
+	if len(ix.GetOptions()) == 0 {
+		return sql, nil
+	}
+	node, err := parseSingle(sql)
+	if err != nil {
+		return "", err
+	}
+	cmds := node.GetAlterTableStmt().GetCmds()
+	if len(cmds) != 1 || cmds[0].GetAlterTableCmd().GetSubtype() != pganalyze.AlterTableType_AT_AddConstraint {
+		return "", fmt.Errorf("%w: %q is not a single ADD CONSTRAINT", ErrDisallowedStatement, sql)
+	}
+	con := cmds[0].GetAlterTableCmd().GetDef().GetConstraint()
+	switch con.GetContype() {
+	case pganalyze.ConstrType_CONSTR_PRIMARY, pganalyze.ConstrType_CONSTR_UNIQUE:
+	default:
+		return "", fmt.Errorf("%w: %q adds no primary key or unique constraint", ErrDisallowedStatement, sql)
+	}
+	con.Options = ix.GetOptions()
+	return deparseOne(node)
+}

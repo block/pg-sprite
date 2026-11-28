@@ -47,18 +47,18 @@ const eventsAttachParent = `
 	CREATE INDEX events_2027_id_idx ON %[1]s.events_2027 (id);
 	INSERT INTO %[1]s.events_2027 VALUES (2, '2027-03-01'), (3, '2027-09-01')`
 
-const attachEvents2027 = `ALTER TABLE events
+const attachEvents2027Unqualified = `ALTER TABLE events
 	ATTACH PARTITION events_2027
 	FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')`
 
-// attachTarget derives the proofs of attachEvents2027, adds and validates
+// attachTarget derives the proofs of attachEvents2027Unqualified, adds and validates
 // them unless skip names one, and returns the step's target, with the
 // statement unqualified under the fixture's schema.
 func (f attachProofFixture) attachTarget(t *testing.T, skip ...attachProofKind) attachPartitionTarget {
 	t.Helper()
-	st, err := statement.ParseOne(attachEvents2027)
+	st, err := statement.ParseOne(attachEvents2027Unqualified)
 	require.NoError(t, err)
-	attach, ok, err := statement.AttachedPartition(attachEvents2027)
+	attach, ok, err := statement.AttachedPartition(attachEvents2027Unqualified)
 	require.NoError(t, err)
 	require.True(t, ok)
 	parentOID := f.parentOIDOf(t, "events")
@@ -158,7 +158,7 @@ func TestAttachPartitionOnlineAttachesWithoutAScanAndDropsTheProofs(t *testing.T
 			func(_ progress.Operation, sql string) { ran = append(ran, sql) })
 		require.NoError(t, err)
 		assert.Equal(t, attachPartitionResult{action: attachPartitionAttached, bound: events2027Bound}, res)
-		assert.Equal(t, []string{attachEvents2027, target.bound.dropSQL(), target.deflt.dropSQL()}, ran)
+		assert.Equal(t, []string{attachEvents2027Unqualified, target.bound.dropSQL(), target.deflt.dropSQL()}, ran)
 		requireNoScan(t, notices(), "events_2027", "events_default")
 		assert.Equal(t, events2027Bound, f.partitionBound(t, "events_2027"))
 		assert.Empty(t, f.proofConstraints(t, "events_2027"))
@@ -179,9 +179,9 @@ func TestAttachPartitionOnlineWithoutADefaultPartition(t *testing.T) {
 		f := newFixture(t)
 		f.exec(t, strings.Replace(eventsAttachParent,
 			"CREATE TABLE %[1]s.events_default PARTITION OF %[1]s.events DEFAULT;\n\tINSERT INTO %[1]s.events VALUES (1, '2030-06-01');", "", 1))
-		st, err := statement.ParseOne(attachEvents2027)
+		st, err := statement.ParseOne(attachEvents2027Unqualified)
 		require.NoError(t, err)
-		attach, _, err := statement.AttachedPartition(attachEvents2027)
+		attach, _, err := statement.AttachedPartition(attachEvents2027Unqualified)
 		require.NoError(t, err)
 		parentOID := f.parentOIDOf(t, "events")
 		check, _, err := deriveAttachBoundCheck(t.Context(), briefTx{pool: f.pool}, parentOID, attach.Bound)

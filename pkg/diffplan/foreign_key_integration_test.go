@@ -46,16 +46,22 @@ func planOrders(t *testing.T, ctx context.Context, pool *pgxpool.Pool, schema, d
 	return report
 }
 
-// requireForeignKeyRefusal asserts the statement is planned and refused with
-// the declarative foreign-key reason, so the drop is reviewable but never
-// executes.
-func requireForeignKeyRefusal(t *testing.T, st plan.Statement) {
+// requireForeignKeyDrop asserts the statement drops the orders key to users
+// as a destructive, checked drop that runs: the drop carries the definition
+// it read, so the run refuses a key replaced under the name since.
+func requireForeignKeyDrop(t *testing.T, schema string, st plan.Statement) {
 	t.Helper()
-	assert.Equal(t, router.DispositionRefuse, st.Disposition)
-	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, st.Reason)
-	assert.Equal(t, verdict.ClassCapabilityBoundary, st.Class)
-	assert.Empty(t, st.Backend)
-	assert.Empty(t, st.ExecSQL)
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, st.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), st.SQL)
+	assert.True(t, st.Destructive)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, []string{st.SQL}, st.ExecSQL)
+	assert.Equal(t, &schemadiff.DroppedObject{
+		Kind:       schemadiff.DroppedConstraint,
+		Name:       "orders_user_id_fkey",
+		Definition: "FOREIGN KEY (user_id) REFERENCES users(id)",
+	}, st.Drops)
+	assert.Empty(t, st.Reason)
 }
 
 const ordersWithForeignKey = `
@@ -216,8 +222,8 @@ CREATE TABLE %[2]s (
 }
 
 // A live foreign key the desired file no longer declares is planned as a
-// destructive drop and refused with the declarative foreign-key reason.
-func TestPlanUndeclaredLiveForeignKeyIsShownAndRefused(t *testing.T) {
+// destructive drop that runs, as the revert of a change that added it does.
+func TestPlanUndeclaredLiveForeignKeyIsDropped(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -229,11 +235,149 @@ func TestPlanUndeclaredLiveForeignKeyIsShownAndRefused(t *testing.T) {
 	report := planOrders(t, t.Context(), pool, schema, ordersWithoutForeignKey)
 
 	require.Len(t, report.Statements, 1)
+	requireForeignKeyDrop(t, schema, report.Statements[0])
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+}
+
+// A live foreign key into another schema cannot be declared, since a desired
+// file names tables unqualified, so the diff plans its drop whatever the file
+// says. The drop is shown for review and refused, so planning an unrelated
+// change to the table never removes a key its author had no way to keep.
+func TestPlanDropOfAForeignKeyIntoAnotherSchemaIsRefused(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	other := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[2]s.regions (id bigint PRIMARY KEY);
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL,
+			region_id bigint CONSTRAINT orders_region_id_fkey REFERENCES %[2]s.regions (id)
+		)`, schema, other))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL,
+    region_id bigint
+);`)
+
+	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
 	assert.Equal(t, schemadiff.ChangeDropForeignKey, st.Kind)
-	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), st.SQL)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_region_id_fkey", schema), st.SQL)
 	assert.True(t, st.Destructive)
-	requireForeignKeyRefusal(t, st)
+	assert.Equal(t, router.DispositionRefuse, st.Disposition)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, st.Reason)
+	assert.Empty(t, st.ExecSQL)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+}
+
+// A live foreign key from a table to itself whose referenced column is
+// unique only through a standalone unique index cannot be declared either:
+// the file's CREATE TABLE would declare the key before the index exists. A
+// file that keeps the index and adds an unrelated column still plans the
+// key's drop, and the drop is shown for review and refused, so the change
+// never removes a key its author had no way to keep.
+func TestPlanDropOfASelfReferencingForeignKeyOnAStandaloneIndexIsRefused(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			code text NOT NULL,
+			parent_code text
+		);
+		CREATE UNIQUE INDEX orders_code_idx ON %[1]s.orders (code);
+		ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_parent_fkey FOREIGN KEY (parent_code) REFERENCES %[1]s.orders (code)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    code text NOT NULL,
+    parent_code text,
+    note text
+);
+CREATE UNIQUE INDEX orders_code_idx ON orders (code);`)
+
+	var drop *plan.Statement
+	for i, st := range report.Statements {
+		if st.Kind == schemadiff.ChangeDropForeignKey {
+			drop = &report.Statements[i]
+		}
+	}
+	require.NotNil(t, drop, "the diff plans the drop of the key the file cannot declare")
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_parent_fkey", schema), drop.SQL)
+	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
+	assert.Empty(t, drop.ExecSQL)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+}
+
+// A foreign key whose definition changes under the same name is replaced by
+// one statement that drops the live key and adds the new one NOT VALID, then
+// validated on its own. Every write is checked by one key or the other at
+// every moment, so nothing is refused; the statement is destructive, naming
+// the key it drops, so the plan is reviewed as one that drops a key.
+func TestPlanChangedForeignKeyIsReplacedInOneStatement(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id)
+		)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	require.Len(t, report.Statements, 2)
+	replace := report.Statements[0]
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, replace.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %[1]s.orders DROP CONSTRAINT orders_user_id_fkey, ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) ON DELETE CASCADE NOT VALID", schema), replace.SQL)
+	assert.Equal(t, router.DispositionExecute, replace.Disposition)
+	assert.True(t, replace.Destructive, "the statement drops the live key")
+	require.NotNil(t, replace.Drops)
+	assert.Equal(t, "orders_user_id_fkey", replace.Drops.Name)
+	validate := report.Statements[1]
+	assert.Equal(t, schemadiff.ChangeValidateForeignKey, validate.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_user_id_fkey", schema), validate.SQL)
+	assert.Equal(t, router.DispositionExecute, validate.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+}
+
+// A foreign key the file declares changed under a new name is added and
+// validated before the old key is dropped, so every write is checked
+// against a key throughout, and a validation that fails leaves the old key
+// standing.
+func TestPlanForeignKeyMovedToANewNameIsAddedBeforeTheOldOneIsDropped(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id)
+		)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL CONSTRAINT orders_user_id_cascade_fkey REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	require.Len(t, report.Statements, 2)
+	add := report.Statements[0]
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, add.Kind)
+	assert.Equal(t, router.DispositionExecute, add.Disposition)
+	assert.Equal(t, []string{
+		fmt.Sprintf("ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_cascade_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) ON DELETE CASCADE NOT VALID", schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."orders" VALIDATE CONSTRAINT "orders_user_id_cascade_fkey"`, schema),
+	}, add.ExecSQL)
+	requireForeignKeyDrop(t, schema, report.Statements[1])
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // A foreign key whose referenced table does not exist cannot be planned: the
@@ -407,9 +551,9 @@ func TestPlanGreenfieldTableWithForeignKeyIsCreated(t *testing.T) {
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
-// Statements without a foreign key in the same plan still execute; only the
-// foreign-key drop is refused, and admission is all-or-nothing.
-func TestPlanForeignKeyDropRefusalLeavesOtherStatementsRouted(t *testing.T) {
+// A foreign-key drop beside another change routes like the other change, so
+// the whole plan executes.
+func TestPlanForeignKeyDropBesideAnotherChangeExecutes(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -432,8 +576,8 @@ CREATE TABLE orders (
 	require.Contains(t, kinds, schemadiff.ChangeAddColumn)
 	require.Contains(t, kinds, schemadiff.ChangeDropForeignKey)
 	assert.Equal(t, router.DispositionExecute, kinds[schemadiff.ChangeAddColumn].Disposition)
-	requireForeignKeyRefusal(t, kinds[schemadiff.ChangeDropForeignKey])
-	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	requireForeignKeyDrop(t, schema, kinds[schemadiff.ChangeDropForeignKey])
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // A stand-in's indexes never take a name the desired file uses. LIKE ...

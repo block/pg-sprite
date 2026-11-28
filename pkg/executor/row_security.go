@@ -82,6 +82,8 @@ func PreviewRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 // authorizes only a no-op. The supplied SQL is compared, never executed directly.
 // This binds execution to SQL, not to a snapshot of the earlier live definition.
 // Budgets, admission, verification and atomicity match ExecuteRowSecurity.
+// It reads no copy-and-swap checkpoint row: a caller first refuses a run
+// stopped on the table with migrate.AdmitRowSecurityStoppedRun.
 func ExecuteReviewedRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, reviewed []string, b Budget) (RowSecurityReport, error) {
 	return runRowSecurity(ctx, pool, schema, desired, b, rowSecurityReviewed, slices.Clone(reviewed))
 }
@@ -103,6 +105,8 @@ func (e *RowSecurityOutcomeUnknownError) Unwrap() error { return e.Err }
 // deltas. Budget.StatementTimeout also bounds the entire attempt, including
 // connection acquisition, scratch inspection, and lock waits. No retries occur.
 // The caller must have table-owner and scratch-schema creation privileges.
+// It reads no copy-and-swap checkpoint row: a caller first refuses a run
+// stopped on the table with migrate.AdmitRowSecurityStoppedRun.
 func ExecuteRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
 	return runRowSecurity(ctx, pool, schema, desired, b, rowSecurityExecute, nil)
 }

@@ -71,7 +71,11 @@ import (
 // its part in the fingerprint.
 // Version 29 added the rename-index kind and the replaced_by statement
 // field, which a changed index the diff replaces rather than drops carries.
-const FormatVersion = 29
+// Version 30 runs the drop-foreign-key kind instead of refusing it, and
+// narrows the declarative-foreign-key reason to the drop of a key a desired
+// file cannot declare, or changes under the same name where it cannot be
+// replaced in one statement.
+const FormatVersion = 30
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -110,8 +114,12 @@ type Statement struct {
 	Kind schemadiff.ChangeKind `json:"kind,omitempty"`
 	// Adopts is the index a diff-derived ADD CONSTRAINT ... USING INDEX
 	// takes over and the definition it must still have when execution
-	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
-	// of the JSON: the SQL already identifies the change.
+	// attaches it (see schemadiff.Change.Adopts). A diff-derived ADD
+	// CONSTRAINT of a primary key or unique constraint that runs as a
+	// concurrent build and then ADD CONSTRAINT ... USING INDEX carries the
+	// index its build leaves (schemadiff.Change.AddsKey), which its attach
+	// step checks. Nil otherwise, and out of the JSON: the SQL already
+	// identifies the change.
 	Adopts *schemadiff.IndexAdoption `json:"-"`
 	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
 	// validates and the definition it must still have when execution
