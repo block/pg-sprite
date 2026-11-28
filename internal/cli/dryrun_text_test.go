@@ -837,7 +837,7 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	assert.NotContains(t, out.String(), "Debian")
 }
 
-// A foreign-key drop in a desired-state plan says in words that it is not
+// The drop of a foreign key into another schema says in words why it is not
 // applied declaratively, so the reader of the diff knows the change is shown
 // for review only.
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
@@ -857,6 +857,6 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	// The renderer wraps prose; compare with whitespace collapsed.
 	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — dropping a foreign key is not supported for desired-state apply yet; "+
-		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
+	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also drops or retypes a column, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; "+
+		"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter")
 }

@@ -433,7 +433,8 @@ func TestRunSequenceOperatorCancelOfValidateIsNotBudgetExhaustion(t *testing.T) 
 		var cancelled bool
 		err := pool.QueryRow(t.Context(),
 			`SELECT pg_cancel_backend(pid) FROM pg_stat_activity
-			  WHERE query LIKE 'ALTER TABLE %' AND query LIKE '%VALIDATE CONSTRAINT%' AND state = 'active'`).Scan(&cancelled)
+			  WHERE query LIKE 'ALTER TABLE %' AND query LIKE '%VALIDATE CONSTRAINT%' AND state = 'active'
+			    AND strpos(query, $1) > 0`, schema).Scan(&cancelled)
 		return err == nil && cancelled
 	}, 30*time.Second, 50*time.Millisecond, "the validate's backend must be found and cancelled")
 

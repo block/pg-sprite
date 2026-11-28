@@ -136,6 +136,20 @@ func TestDiffRefusesCollationChanges(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// A type change on a column with an explicit collation carries the
+// collation in its TYPE clause, so the retyped column keeps it: without the
+// clause PostgreSQL gives the column the new type's default.
+func TestDiffTypeChangeKeepsTheColumnsCollation(t *testing.T) {
+	collated := func(typ string) Model {
+		return Model{Table: "words", Columns: []Column{{Name: "tag", Type: typ, Collation: `pg_catalog."C"`}}}
+	}
+	changes, err := Diff("public", collated("character varying(20)"), collated("character varying(40)"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."words" ALTER COLUMN "tag" TYPE character varying(40) COLLATE pg_catalog."C"`,
+	}, sqls(changes))
+}
+
 func TestDiffAddColumn(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns, Column{
@@ -368,6 +382,35 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, changes)
 	})
+}
+
+// An added primary key or unique constraint records the index it owns, under
+// its own name, so a plan that builds that index and attaches it in a later
+// step can check that the index under that name is still the one the build
+// left. A CHECK owns no index and records none.
+func TestDiffAddedKeyRecordsItsIndex(t *testing.T) {
+	base := func() Model {
+		return Model{Table: "events", Columns: []Column{{Name: "id", Type: "bigint", NotNull: true}, {Name: "name", Type: "text"}}}
+	}
+	for _, con := range []Constraint{
+		{Name: "events_pkey", Def: "PRIMARY KEY (id)", Primary: true, IndexDef: "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)"},
+		{Name: "events_name_key", Def: "UNIQUE (name)", IndexDef: "CREATE UNIQUE INDEX events_name_key ON events USING btree (name)"},
+	} {
+		desired := base()
+		desired.Constraints = []Constraint{con}
+		changes, err := Diff("public", base(), desired)
+		require.NoError(t, err)
+		require.Len(t, changes, 1, con.Name)
+		assert.Equal(t, &IndexAdoption{Index: con.Name, Def: con.IndexDef}, changes[0].AddsKey, con.Name)
+		assert.Nil(t, changes[0].Adopts, "%s: the add itself takes over no live index", con.Name)
+	}
+
+	desired := base()
+	desired.Constraints = []Constraint{{Name: "events_name_check", Def: "CHECK ((length(name) > 0))"}}
+	changes, err := Diff("public", base(), desired)
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	assert.Nil(t, changes[0].AddsKey)
 }
 
 // An added CHECK or FOREIGN KEY records the definition it has once added NOT

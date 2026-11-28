@@ -195,10 +195,14 @@ not more safely.
 
 The run stops with a failed verdict (exit 1) whose detail says which of three causes ended it;
 the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
-slot and the saved progress stay, so running the same command again resumes the run:
+slot and the saved progress stay for the next run to resume from, though a resume under the
+same ceiling can stop again, depending on the cause:
 
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
-  pg-sprite fell behind the source's writes.
+  pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
+  stop, and a resume reads the slot on its first catch-up cycle, before it has read through
+  the backlog, so a resume under the same ceiling stops again unless it reads through the
+  backlog within that cycle.
 - **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
   for longer than it takes to release WAL pg-sprite has confirmed: an open or prepared
   transaction holds it back, or the cluster writes more WAL per release interval and cycle than

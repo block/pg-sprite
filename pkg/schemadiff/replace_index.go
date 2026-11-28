@@ -77,7 +77,7 @@ func replacedIndexes(partitioned, dropsOrRetypesColumn bool, schema string, live
 		default:
 			continue
 		}
-		if err := refuseReferencedIndexDrop(had, true); err != nil {
+		if err := refuseReferencedIndexDrop(schema, desired.Table, had, true, nil); err != nil {
 			return nil, err
 		}
 		if err := refuseTakenReplacementName(want.Name, temp, desiredIdx, desiredCons, liveCons); err != nil {
@@ -238,13 +238,23 @@ func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 // refuseReferencedIndexDrop refuses a plan that drops ix while a foreign key
 // references it. PostgreSQL refuses that drop, so a plan that carried it
 // would build whatever came before it, a replacement index included, and
-// then fail the same way on every run. changed says whether the desired
-// table keeps the index under another definition rather than removing it.
-func refuseReferencedIndexDrop(ix Index, changed bool) error {
-	if len(ix.ReferencedBy) == 0 {
+// then fail the same way on every run. A foreign key on the table itself
+// that the plan drops first, named in dropped, no longer depends on ix by
+// the time it is dropped. changed says whether the desired table keeps the
+// index under another definition rather than removing it.
+func refuseReferencedIndexDrop(schema, table string, ix Index, changed bool, dropped map[string]bool) error {
+	var ref *IncomingForeignKey
+	for i := range ix.ReferencedBy {
+		r := &ix.ReferencedBy[i]
+		if r.Schema == schema && r.Table == table && dropped[r.Constraint] {
+			continue
+		}
+		ref = r
+		break
+	}
+	if ref == nil {
 		return nil
 	}
-	ref := ix.ReferencedBy[0]
 	keep := "keep the index"
 	if changed {
 		keep = "keep the index's definition"

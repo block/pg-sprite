@@ -74,3 +74,61 @@ func TestSlotReleaseProofRunsOnEverySupportedMajor(t *testing.T) {
 	require.True(t, ok, "slot-release-proof.yml has a proof job")
 	assert.Equal(t, supported, job.Strategy.Matrix.PG)
 }
+
+// GitHub opens no issue for a failed scheduled run, so the workflow's report
+// job does. It must wait for every matrix job and run whatever their outcome
+// (always()), or a failed proof would skip the very job that reports it; it
+// must run only on the schedule, so a branch's red run is not filed as main's;
+// and only it may write issues. The script finds the failed majors by the
+// proof jobs' names, so the name format is pinned too.
+func TestSlotReleaseProofReportJobFilesScheduledFailures(t *testing.T) {
+	type job struct {
+		Name     string            `yaml:"name"`
+		Needs    []string          `yaml:"needs"`
+		If       string            `yaml:"if"`
+		Perms    map[string]string `yaml:"permissions"`
+		Strategy struct {
+			Matrix map[string]any `yaml:"matrix"`
+		} `yaml:"strategy"`
+		Steps []struct {
+			Env map[string]string `yaml:"env"`
+			Run string            `yaml:"run"`
+		} `yaml:"steps"`
+	}
+	var workflow struct {
+		Perms map[string]string `yaml:"permissions"`
+		Jobs  map[string]job    `yaml:"jobs"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(readRepoFile(t, ".github", "workflows", "slot-release-proof.yml")), &workflow))
+	report, ok := workflow.Jobs["report"]
+	require.True(t, ok, "slot-release-proof.yml has a report job")
+
+	var matrixJobs []string
+	for name, j := range workflow.Jobs {
+		if j.Strategy.Matrix != nil {
+			matrixJobs = append(matrixJobs, name)
+		}
+	}
+	require.NotEmpty(t, matrixJobs, "the workflow has a matrix job")
+	assert.ElementsMatch(t, matrixJobs, report.Needs, "the report job needs every matrix job")
+	assert.Equal(t, "github.event_name == 'schedule' && always()", report.If)
+
+	assert.Equal(t, map[string]string{"contents": "read"}, workflow.Perms, "the workflow-level token stays read-only")
+	assert.Equal(t, map[string]string{"contents": "read", "actions": "read", "issues": "write"}, report.Perms)
+	for name, j := range workflow.Jobs {
+		if name != "report" {
+			assert.NotContains(t, j.Perms, "issues", "only the report job touches issues; %s does", name)
+		}
+	}
+
+	assert.Equal(t, "slot release proof (PostgreSQL ${{ matrix.pg }})", workflow.Jobs["proof"].Name,
+		"scripts/slot-release-proof-issue.sh reads the failed majors from this name")
+	var reported bool
+	for _, step := range report.Steps {
+		if step.Run == `scripts/slot-release-proof-issue.sh "$PROOF_RESULT"` {
+			reported = true
+			assert.Equal(t, "${{ needs.proof.result }}", step.Env["PROOF_RESULT"], "the script is given the proof's result")
+		}
+	}
+	assert.True(t, reported, "the report job runs scripts/slot-release-proof-issue.sh")
+}

@@ -190,7 +190,7 @@ Before you start:
 | Control | What it does | When to use it |
 | --- | --- | --- |
 | `--block-writes SCHEMA.TABLE` | Runs offline: no slot at all, writes to the table fail until the swap. | The table can go without writes for the run, or the server lacks logical decoding. |
-| `--slot-lag-ceiling SIZE` | Sets the stop threshold, the copy's pace, and the WAL the preflight reserves. Default `1GiB`. | Raise it for a busy cluster, with free space for about three times the value. |
+| `--slot-lag-ceiling SIZE` | Sets the stop threshold, the copy's pace, and the WAL the preflight reserves. Default `1GiB`. | Raise it for a busy cluster, or to resume after a `stream-behind` stop, with free space for about three times the value. |
 | `--free-disk SIZE` | The free space on the source volume; the preflight requires the shadow plus the ceiling. | Every copy-and-swap. Measure it; never pass a made-up value. |
 | Ctrl-C or `SIGTERM`, once | Stops the run cleanly: saves the copy's progress and exits. The slot stays. | Pausing a run. Resume soon. |
 | Run the same command again | Resumes from the saved progress and drains the slot. | After a stop whose detail says the same statement resumes. A divergence stop, or a data fault the run could not abandon, stops again on a rerun; its detail says to use `--restart`. |
@@ -262,9 +262,16 @@ holding WAL while you decide.
    running-transactions record, about 15 seconds later, and the segments go at the next
    checkpoint, not at once.
 3. **Resume** by running the same command again:
-   - `stream-behind`: resume when the write rate drops. If the slot's unconfirmed WAL is already
-     close to the ceiling, the resume can stop again at once; resume with a higher ceiling, above
-     what the slot holds, if the volume has room.
+   - `stream-behind`: the slot keeps the unconfirmed WAL over the ceiling after the stop, and
+     the resume reads the slot on its first catch-up cycle, before it has read through that
+     backlog, so a resume under the same ceiling stops again unless it reads through it within
+     that cycle. Once the write rate drops, resume with a higher ceiling, with margin above the
+     slot's `unconfirmed` as [Check the slot](#check-the-slot) reads it at the resume, not the
+     figure in the detail: the stopped slot keeps adding the cluster's writes to it. Do this only
+     if the volume has room. Otherwise drop the slot by hand, which keeps the shadow and the saved
+     progress and gives the next run a fresh slot with nothing unconfirmed, or start over with
+     `--restart`, which drops the slot and the WAL it holds and is checked against `--free-disk`
+     as a fresh run (see [Free the WAL](#free-the-wal-resume-drop-the-slot-or-start-over)).
    - `wal-retained` or `wal-retained-hard-limit` with the transaction ended: resume as is.
    - Either one with no transaction to blame: the cluster writes more than the ceiling holds.
      Resume with a higher ceiling, above the retained WAL the detail reports:

@@ -261,8 +261,10 @@ func TestCopySwapRunVerdict(t *testing.T) {
 	// A slot that retained more WAL than the ceiling with no transaction
 	// holding it back stops a resume under the same ceiling again, so the
 	// remedy names the setting to raise on both front doors. A stream that
-	// fell behind catches up on a plain resume once the write rate allows,
-	// and its remedy names no ceiling.
+	// fell behind leaves its slot holding more unconfirmed WAL than the
+	// ceiling, which a resume's first catch-up cycle reads before the stream
+	// has read through it, so its remedy names the ceiling, the hand drop of
+	// the slot, and the restart.
 	t.Run("a slot over the ceiling on retained WAL names the ceiling to raise", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetained,
 			Retained: 2 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
@@ -284,12 +286,17 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
 	})
 
-	t.Run("a stream behind the ceiling resumes without naming the ceiling", func(t *testing.T) {
+	t.Run("a stream behind the ceiling names the ceiling to raise and the restart", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagStreamBehind,
 			Retained: 2 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
-		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 		assert.Contains(t, v.Detail, "resumes from the row")
-		assert.NotContains(t, v.Detail, "--slot-lag-ceiling")
+		assert.Contains(t, v.Detail, "raise the slot-lag ceiling (--slot-lag-ceiling SIZE) with margin above the slot's unconfirmed WAL as pg_replication_slots reads it then")
+		assert.Contains(t, v.Detail, "the resume counts that ceiling against --free-disk beside the shadow")
+		assert.Contains(t, v.Detail, "drop the slot by hand (pg_drop_replication_slot), which keeps the shadow and the checkpoint row")
+		assert.Contains(t, v.Detail, "(--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot")
+		assert.Contains(t, v.Detail, "checked against --free-disk as a fresh run")
 	})
 
 	t.Run("a cancelled run is coded as cancelled by the caller", func(t *testing.T) {

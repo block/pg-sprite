@@ -25,13 +25,13 @@ import (
 // attaching the new index in one ALTER TABLE, which renames the index to the
 // constraint's name. A failed build leaves the old constraint in place.
 //
-// A CHECK is replaced by dropping the old one and adding the new one NOT
-// VALID in one ALTER TABLE, then validating it on its own: new writes are
-// checked by one rule or the other at every moment, and the scan takes no
-// lock that blocks them.
-//
-// A FOREIGN KEY keeps the drop and re-add, so the plan's foreign-key drop
-// policy still sees the drop it makes.
+// A CHECK or FOREIGN KEY is replaced by dropping the old one and adding the
+// new one NOT VALID in one ALTER TABLE, then validating it on its own: new
+// writes are checked by one rule or the other at every moment, and the scan
+// takes no lock that blocks them. The statement is destructive and names the
+// constraint it drops, so a review of the plan sees the drop. A VALIDATE that
+// fails leaves the new rule NOT VALID, still checking every new write, and
+// the next plan validates it again once the rows are fixed.
 
 // replacementIndexSuffix ends the temporary name a replaced key's new index
 // is built under.
@@ -48,7 +48,8 @@ type inPlaceReplacement struct {
 
 // replacedInPlace names the constraints of a table diff that are replaced
 // in place, keyed by constraint name. A partitioned parent keeps the drop
-// and re-add, since the server refuses USING INDEX there. So does a table whose diff drops or retypes a column: a
+// and re-add, since the server refuses USING INDEX and NOT VALID foreign
+// keys there. So does a table whose diff drops or retypes a column: a
 // dropped column takes the constraints that read it with it, and a retype
 // re-checks the constraints that are still in place.
 //
@@ -182,8 +183,8 @@ func isRule(con Constraint) bool {
 }
 
 // sameConstraintFamily reports whether desired can replace live in one
-// statement: both are primary keys, both are unique constraints, or both
-// are CHECKs. A live key's IndexDef is not introspected, so
+// statement: both are primary keys, both are unique constraints, both are
+// CHECKs, or both are foreign keys. A live key's IndexDef is not introspected, so
 // a live unique constraint is told apart from an exclusion constraint by the
 // definition the server decompiles for it.
 func sameConstraintFamily(live, desired Constraint) bool {
@@ -192,8 +193,8 @@ func sameConstraintFamily(live, desired Constraint) bool {
 		return live.Primary
 	case isKey(desired):
 		return !live.Primary && strings.HasPrefix(live.Def, "UNIQUE ")
-	case isRule(desired) && !desired.ForeignKey:
-		return isRule(live) && !live.ForeignKey
+	case isRule(desired):
+		return isRule(live) && live.ForeignKey == desired.ForeignKey
 	}
 	return false
 }
@@ -221,7 +222,7 @@ func replaceInPlaceChanges(table, schema string, had, con Constraint, r inPlaceR
 	if isKey(con) {
 		return replaceKeyChanges(table, schema, had, con, r.built)
 	}
-	return replaceRuleChanges(table, had, con), nil
+	return replaceRuleChanges(table, schema, had, con)
 }
 
 // dropsOrRetypesColumn reports whether the diff drops a live column or
@@ -266,15 +267,25 @@ func replaceKeyChanges(table, schema string, had, con Constraint, built bool) ([
 
 // replaceRuleChanges drops had and adds con NOT VALID in one statement, then
 // validates con on its own.
-func replaceRuleChanges(table string, had, con Constraint) []Change {
+func replaceRuleChanges(table, schema string, had, con Constraint) ([]Change, error) {
 	name := pgx.Identifier{con.Name}.Sanitize()
 	sql := "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{had.Name}.Sanitize() +
 		", ADD CONSTRAINT " + name + " " + con.Def + notValidSuffix
+	var references *ForeignKeyReference
+	if con.ForeignKey {
+		qualified, err := statement.QualifyForeignKeyReferences(sql, schema)
+		if err != nil {
+			return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
+		}
+		sql = qualified
+		references = con.References
+	}
 	return []Change{
 		{
 			SQL:         sql,
 			Kind:        addConstraintKind(con),
 			Destructive: true,
+			References:  references,
 			Drops:       &DroppedObject{Kind: DroppedConstraint, Name: had.Name, Definition: had.Def},
 		},
 		{
@@ -282,5 +293,5 @@ func replaceRuleChanges(table string, had, con Constraint) []Change {
 			Kind:      validateConstraintKind(con),
 			Validates: addedNotValid(con),
 		},
-	}
+	}, nil
 }
