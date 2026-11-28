@@ -62,6 +62,7 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
   - [Accepted blocking refusal (`index-statement`) — exit 3](#accepted-blocking-refusal-index-statement--exit-3)
   - [Failed mid-sequence (`execution-failed`) — exit 1](#failed-mid-sequence-execution-failed--exit-1)
   - [Data fault in a copy-and-swap run (`data-fault`) — exit 1](#data-fault-in-a-copy-and-swap-run-data-fault--exit-1)
+  - [Refused: the table changed under a stopped copy-and-swap run (`resume-source-changed`) — exit 2](#refused-the-table-changed-under-a-stopped-copy-and-swap-run-resume-source-changed--exit-2)
   - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
   - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
   - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
@@ -174,7 +175,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; a desired-state plan that drops anything is refused whole until the run pins the reviewed plan with `--expect-fingerprint` and names its table with `--allow-destructive` ([Apply a reviewed drop](cli.md#apply-a-reviewed-drop), [execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan drops a foreign key it does not run. Cause `changed-foreign-key`: the file changes the key under the same name where the new key cannot be added in the same statement; declare it under a new name. Cause `undeclarable-foreign-key`: a desired file cannot declare the key (one into another schema, or onto its own table through a standalone unique index); the plan still shows the statement, and `migrate --alter` runs it. |
-| `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), a copy-and-swap run stopped on the table keeps any other statement from running (cause `copy-and-swap-run-stopped`, class `environmental` — run the stopped statement again to finish it), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. A table refused with `copy-and-swap-pk-unsupported` because it has no primary key also carries `"guidance": "add-integer-primary-key"`, and its `detail` links the [steps to add one online](primary-keys.md#add-a-primary-key-online). |
+| `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), a copy-and-swap run stopped on the table keeps any other statement from running (cause `copy-and-swap-run-stopped`, class `environmental` — run the stopped statement again to finish it, or, before its cutover, start it over with `--restart SCHEMA.TABLE` or abandon it with `pg-sprite discard SCHEMA.TABLE`), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. A run whose table was changed by hand while it ran or stood stopped cannot go on: its cutover is refused with `cutover-schema-drift` or `cutover-fidelity-drift`, its resume with `resume-source-changed` (class `environmental`), and the `detail` names the shadow, the fence or the replication slot and publication, and the checkpoint row the run leaves, and the `--restart` and `discard` commands past them. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. A table refused with `copy-and-swap-pk-unsupported` because it has no primary key also carries `"guidance": "add-integer-primary-key"`, and its `detail` links the [steps to add one online](primary-keys.md#add-a-primary-key-online). |
 | `create-collision` | The greenfield create plan's table name or a claimed index, constraint-index, or sequence name is occupied. Nothing runs; re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal. Catalog absence checks handle existing occupants. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff. |
 
 Two codes that look like refusals are not: `create-name-mismatch` and
@@ -420,6 +421,29 @@ $ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(3
 
 ```text
 pg-sprite: error: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001)
+```
+
+### Refused: the table changed under a stopped copy-and-swap run (`resume-source-changed`) — exit 2
+
+A live copy-and-swap run of a retype on `orders` was stopped in `verifying`, and
+then someone added a column to `orders` by hand. The shadow was built before
+that column existed, so running the same command again cannot resume the run.
+It is refused with `copy-and-swap-refused`, cause `resume-source-changed`,
+class `environmental`, and nothing is written. The detail names what the
+stopped run leaves and the two commands past it: `--restart` builds a fresh
+shadow from the table as it is now, keeping the column added by hand, and
+`discard` drops what the run left without running the change. A run that was
+still in progress when the table changed stops at its cutover instead, with
+cause `cutover-schema-drift`, and its detail adds the same account. A consumer
+branches on the `cause` field, not on the detail's wording:
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN user_id TYPE bigint' --copy-and-swap --free-disk 10GiB
+refused (copy-and-swap-refused)
+  table:     public.orders
+  class:     environmental
+  statement: ALTER TABLE public.orders ALTER COLUMN user_id TYPE bigint
+  detail:    public.orders changed since this run built its shadow (for example a column or index added by hand); the stopped run cannot resume, and it leaves shadow table public._pgsprite_c74da4a21f58f903_new, replication slot pgsprite_a725d037, which retains WAL on the server until it is dropped, publication pgsprite_a725d037, and the checkpoint row in phase verifying; start over by running the same pg-sprite migrate command with --restart public.orders, or abandon the run without running the change with pg-sprite discard public.orders
 ```
 
 ### Refused: no online rewrite exists (`rewrite-required`) — exit 2

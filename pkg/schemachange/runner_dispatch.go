@@ -387,8 +387,13 @@ func rowProof(cp checkpoint.Checkpoint) (Proof, error) {
 // checkRowDescribes refuses a row that does not describe the shadow the
 // catalog holds: the names and fingerprints the row is keyed on must be
 // the shadow's, and the proof the row carries must equal the proof the
-// inspection re-derived, field for field. Both proofs are compared in
-// their JSON encoding after a decode, since the row's came back as the
+// inspection re-derived, field for field. A row whose shadow fingerprint
+// matches while its source fingerprint does not, or whose proof differs
+// from the re-derived one in the source's fidelity snapshot alone, still
+// describes its shadow: the source was changed under the stopped run,
+// which is the environment's doing, not the row's, and is refused as
+// resume-source-changed naming what the run leaves standing. Both proofs
+// are compared in their JSON encoding after a decode, since the row's came back as the
 // server renders JSON and the inspection's has not been through it. Two
 // proofs that differ only in their conversion fingerprint describe the same
 // shadow over a catalog that has changed under its conversions, and are
@@ -398,8 +403,13 @@ func checkRowDescribes(cp checkpoint.Checkpoint, rowProof Proof, built BuiltShad
 	if cp.ShadowTable != built.ShadowTable() {
 		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s names shadow %s, the shadow under the derived name is %s", cp.Schema, cp.Table, cp.ShadowTable, built.ShadowTable())
 	}
-	if cp.SourceFingerprint != built.SourceFingerprint() || cp.TargetFingerprint != built.TargetFingerprint() {
+	if cp.TargetFingerprint != built.TargetFingerprint() {
+		// INV: ST-2
 		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s carries fingerprints of another statement than the shadow embodies", cp.Schema, cp.Table)
+	}
+	if cp.SourceFingerprint != built.SourceFingerprint() {
+		// INV: ST-2 — the shadow is the row's; the source moved under it.
+		return refuse(CauseResumeSourceChanged, []error{standingRun(cp)}, "%s.%s changed since the run built its shadow %s: a column, constraint, index, storage parameter, or column-owned sequence was added, dropped, or changed by something other than the engine, so the stopped run cannot resume", cp.Schema, cp.Table, cp.ShadowTable)
 	}
 	same, err := sameProof(rowProof, built.Proof())
 	if err != nil {
@@ -416,7 +426,25 @@ func checkRowDescribes(cp checkpoint.Checkpoint, rowProof Proof, built BuiltShad
 		// INV: CO-9
 		return refuse(CauseCopyConversionDrift, nil, "the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", cp.Schema, cp.Table, built.ShadowTable(), built.Proof().ConversionFingerprint, rowProof.ConversionFingerprint)
 	}
+	sourceMoved, err := onlySourceMetadataDrifted(rowProof, built.Proof())
+	if err != nil {
+		return err
+	}
+	if sourceMoved {
+		// INV: ST-2 — the shadow is the row's; the source's metadata moved under it.
+		return refuse(CauseResumeSourceChanged, []error{standingRun(cp)}, "%s.%s changed since the run built its shadow %s: its owner, grants, policies, comment, replica identity, statistics targets, unvalidated checks, or identity sequence options were changed by something other than the engine, so the stopped run cannot resume", cp.Schema, cp.Table, cp.ShadowTable)
+	}
 	return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s carries a shadow proof other than the one the shadow under its name re-derives", cp.Schema, cp.Table)
+}
+
+// onlySourceMetadataDrifted reports whether the row's proof and the
+// re-derived one differ in the source's fidelity snapshot alone: the
+// shadow is the one the build made, and the source's owner, grants,
+// policies, comment, or other metadata the snapshot records was changed
+// under the stopped run since.
+func onlySourceMetadataDrifted(row, derived Proof) (bool, error) {
+	derived.Fidelity = row.Fidelity
+	return sameProof(row, derived)
 }
 
 // onlyConversionsDrifted reports whether the row's proof and the

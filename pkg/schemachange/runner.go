@@ -358,8 +358,10 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 //     records, never the one the caller changed its mind to.
 //   - A row before its cutover: the shadow under the row's name is
 //     inspected and its proof must equal the one the row carries, or the
-//     row is refused as resume-row-mismatch; the run continues from the
-//     row's phase and watermark. A row whose shadow no relation bears is
+//     row is refused as resume-row-mismatch — or as resume-source-changed
+//     when the shadow is the row's and the source alone changed since the
+//     build, which wraps a *StandingRunError naming what the run leaves;
+//     the run continues from the row's phase and watermark. A row whose shadow no relation bears is
 //     refused as resume-shadow-gone, the counterpart of shadow-unrecorded,
 //     and the row — with the slot a live row names — is left for the
 //     operator to drop and delete. A live run reads its slot too
@@ -412,7 +414,11 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // with DropWriteFence or drops the slot with decode.DropSlot, and deletes
 // the row, or runs the statement again with RunOptions.Restart, which
 // does those steps under the run's own lock; no Run without the restart
-// goes back to the copy. A run that stopped on a data fault (IsDataFault)
+// goes back to the copy. A run the cutover gate stops because the source
+// or the shadow changed under it (cutover-schema-drift,
+// cutover-fidelity-drift) cannot go on either, and returns the refusal
+// with a *StandingRunError beside it naming the shadow, the fence or the
+// slot, and the row it leaves for a restart or Runner.Discard. A run that stopped on a data fault (IsDataFault)
 // — the server rejecting the rows as the statement would shape them, in
 // the copy, the stream's apply, or the swap's drain — is the one stop the Runner does not leave to resume,
 // since every resume would meet the same rows: it is discarded whole
@@ -477,6 +483,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 		result.Verification = report
 		if err != nil {
 			err = driftRefusal(err, state.cp.Schema, state.cp.Table)
+			err = withStandingRun(err, state.cp)
 			return Result{}, r.abandonOnDataFault(ctx, pool, lock, target, &state, err)
 		}
 	}
