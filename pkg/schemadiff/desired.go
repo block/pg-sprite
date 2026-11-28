@@ -134,6 +134,9 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 			policyPath = true
 		}
 		if _, err := tx.Exec(ctx, st.SQL()); err != nil {
+			if rejected := desiredStatementRejection(st.SQL(), err); rejected != nil {
+				return Model{}, rejected
+			}
 			return Model{}, fmt.Errorf("execute desired statement on scratch schema: %w", err)
 		}
 	}
