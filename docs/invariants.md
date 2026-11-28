@@ -1214,7 +1214,16 @@ rename, the accepted blocking passthrough, and a reviewed plan's index drop;
 change; and `AdmitStoppedRun` and `AdmitPlanStoppedRun` in the dry runs, which end in the
 refusal the apply gives. `ALTER TYPE ... ADD VALUE` is exempt: it locks no table and changes
 nothing in a table's model; so is a reviewed plan's blocking drop of a partitioned table's
-index, since no copy-and-swap run can stop on a partitioned table. `pkg/schemachange` applies the
+index, since no copy-and-swap run can stop on a partitioned table; and so is a desired plan that
+creates its table, which runs only once the executing session finds the table absent.
+`TestEveryDoorChecksForAStoppedRunBeforeItExecutes` walks the package's source from every exported
+function and fails on a path to an executor call, a copy-and-swap `Runner`, or a desired plan
+reported converged that passes none of these checks and is not one of these exemptions. The walk
+proves a check is reached, not that its answer is obeyed: a door that reads the row and ignores a
+held table is caught only by that door's integration test, and an executor function passed as a
+value rather than called is not followed. It covers `pkg/migrate`'s doors alone; a host that calls
+`pkg/executor` itself owns the check, as [schemabot-integration.md](schemabot-integration.md)
+says. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
 `checkResumeRow` — the row must name this table and the derived slot (`resume-row-mismatch`),
 be non-terminal (`resume-row-terminal`), and not be a row whose cutover already began
@@ -1663,8 +1672,9 @@ and the referenced table's names still resolve to the tables it resolved and tha
 exactly one foreign key the parent's statement could adopt — validated, attached to nothing, and
 of the requested definition apart from any `ON DELETE` column list, the rule PostgreSQL 14 to 17
 adopt by — which is the one its leaf step recorded, refusing a leaf changed since its leaf step as
-`partitioned-foreign-key-leaf-changed`, which a rerun gets past; when the change is a column-list
-foreign key, the rerun refuses it as `partitioned-foreign-key-conflict` before any leaf step
+`partitioned-foreign-key-leaf-changed`, which a rerun gets past; when the change is a foreign key the
+parent could adopt whose `ON DELETE` column list is not the requested one, the rerun refuses it as
+`partitioned-foreign-key-conflict` before any leaf step
 (`TestAddPartitionedForeignKeyParentStepFailsClosed`); a rerun reports the parent's foreign key
 done only when every partition carries one it adopted
 (`TestRequireAdoptedFKEverywhereRefusesAPartitionTheParentsDidNotAdopt`).

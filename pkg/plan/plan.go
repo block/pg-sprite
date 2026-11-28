@@ -467,7 +467,7 @@ func RoutePartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
 // the build is one the run executes as the build. A foreign key a desired
 // file adds is planned with a qualified referenced table and an explicit
 // referenced column list, which the build needs; one with a clause the build
-// cannot carry, such as an ON DELETE column list, keeps the planner's NOT
+// cannot carry, such as an unnamed foreign key, keeps the planner's NOT
 // VALID then VALIDATE steps and meets RoutePartitionedParent's refusal.
 func RouteDesiredPartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
 	return routePartitionedForeignKeyBuilds(report, serverMajor, true)

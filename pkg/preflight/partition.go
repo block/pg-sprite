@@ -187,7 +187,7 @@ const partitionedNotValidForeignKeyMajor = 18
 // RefusesPartitionedParent, and runs the build with the statement itself.
 // From version 18 those steps run as they are, so it is false there. A
 // statement the build's own admission refuses, such as an unnamed foreign
-// key or one with an ON DELETE column list, still routes, so it is refused
+// key or one that references an unqualified table, still routes, so it is refused
 // with the build's reason. A submitted NOT VALID foreign key, and a
 // statement with any other subcommand beside the foreign key, are false and
 // meet RefusesPartitionedParent as before. A statement that does not parse is

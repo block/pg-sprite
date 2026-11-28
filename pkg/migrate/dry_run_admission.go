@@ -94,9 +94,10 @@ func AdmitPartitionedForeignKeyRequest(st statement.Statement, schema string, st
 // foreign key build's admission, for a statement
 // [AdmitPartitionedForeignKeyRequest] admitted, read from the live catalog
 // on pool: a referenced table the build does not take (partitioned, foreign,
-// a view, the table itself, or one of its partitions) and a sub-partitioned
-// partition are refused as the build refuses them under its table lock
-// before it gives any partition the foreign key. A partition tree holding a
+// a view, the table itself, or one of its partitions), a sub-partitioned
+// partition, and an ON DELETE column list on PostgreSQL 14 are refused as
+// the build refuses them under its table lock before it gives any partition
+// the foreign key. A partition tree holding a
 // foreign table or a partition whose detach has not finished is the build's
 // failed verdict, not a refusal, so it is returned as an error, where [Run]
 // returns one. The build's checks of the parent's constraints are not part

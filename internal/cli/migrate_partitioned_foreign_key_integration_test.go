@@ -253,20 +253,48 @@ func TestMigrateRefusesAnUnnamedForeignKeyOnAPartitionedTable(t *testing.T) {
 		"the foreign key has no name")
 }
 
-// ON DELETE SET NULL with a column list is a clause the parent's foreign key
-// does not compare when it adopts a partition's, so the build cannot prove
-// the partitions' foreign keys match; it refuses before anything runs, in
-// the dry run and the apply alike.
-func TestMigrateRefusesAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testing.T) {
+// ON DELETE SET NULL with a column list runs as the build on PostgreSQL 15
+// to 17: every partition's foreign key carries the same list, so the
+// parent's adopts them. PostgreSQL 14 has no column list; the dry run reads
+// the server's version and ends in the refusal the apply gives, before
+// anything runs.
+func TestMigrateAlterAddsAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testing.T) {
 	pool, url, schema, major := partitionedForeignKeyFixture(t)
 	requireBeforeNotValidOnPartitions(t, major)
-
-	assertForeignKeyRefusedLikeApply(t, url, pool, schema, fmt.Sprintf(`
+	alter := fmt.Sprintf(`
 		ALTER TABLE %[1]s.events
 		    ADD CONSTRAINT events_account_fk
 		    FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
-		    ON DELETE SET NULL (account_id)`, schema),
-		"an ON DELETE column list")
+		    ON DELETE SET NULL (account_id)`, schema)
+	if major < 15 {
+		assertForeignKeyRefusedLikeApply(t, url, pool, schema, alter, "has an ON DELETE column list, which PostgreSQL 14 does not have")
+		return
+	}
+
+	report := dryRunPlan(t, url, alter)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, report.Statements[0].Execution)
+
+	v, err := runForeignKey(t, url, alter)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	fk, found := readForeignKeyAdoption(t, pool, schema, "events_account_fk")
+	require.True(t, found, "the parent carries the foreign key")
+	assert.True(t, fk.validated)
+	assert.Equal(t, map[string]bool{
+		schema + ".events_2026_01": true,
+		schema + ".events_2026_02": true,
+	}, fk.adopted, "every partition's validated foreign key is attached to the parent's")
+	var withList int
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT count(*)
+		  FROM pg_constraint c
+		  JOIN pg_class t ON t.oid = c.conrelid
+		 WHERE t.relnamespace = $1::regnamespace
+		   AND c.contype = 'f'
+		   AND pg_get_constraintdef(c.oid) LIKE '%ON DELETE SET NULL (account_id)'`, schema).Scan(&withList))
+	assert.Equal(t, 3, withList, "the parent's foreign key and both partitions' carry the column list")
 }
 
 // The build takes only a plain table as the referenced table: a partitioned
