@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -1301,19 +1302,84 @@ func TestClassifyRefusesANotNullColumnNothingFillsOnATableWithRows(t *testing.T)
 // (Facts.ColumnLimitReached), ahead of every other way the add could run;
 // without the fact it classifies as usual.
 func TestClassifyRefusesAColumnAddPastTheColumnLimit(t *testing.T) {
+	numbers := preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: `"app"."events"`, Root: true}}}
 	full := planner.Facts{
 		ColumnLimitReached: map[string]bool{"kind": true},
+		ColumnNumbers:      numbers,
 		ColumnTypes:        map[string]string{"id": "bigint"},
 		AddColumnProofs:    map[string]statement.AddColumnProof{"kind": statement.AddColumnInPlace},
 	}
 	d := classifyWithFacts(t, "ALTER TABLE events ADD COLUMN kind text", full)
 	assert.Equal(t, planner.ReasonColumnLimit, d.Reason)
 	assert.Equal(t, planner.RouteRefuse, d.Route)
+	assert.Equal(t, &numbers, d.ColumnLimit, "the decision carries the read that names the tables at the limit")
 
 	roomy := full
 	roomy.ColumnLimitReached = nil
 	d = classifyWithFacts(t, "ALTER TABLE events ADD COLUMN kind text", roomy)
 	assert.Equal(t, planner.ReasonMetadataOnly, d.Reason)
+	assert.Nil(t, d.ColumnLimit)
+}
+
+// The column-limit refusal names the tables that have used every number,
+// the table itself or the partitions or inheritance children below it, and
+// gives the rebuild for each. It offers adding fewer columns only when the
+// table has numbers left, and says how many.
+func TestColumnLimitSubjectAndHelp(t *testing.T) {
+	const givesBack = "which gives back the numbers its dropped columns hold (VACUUM FULL does not)"
+	for name, tc := range map[string]struct {
+		numbers *preflight.ColumnNumbers
+		subject string
+		help    string
+	}{
+		"no read": {
+			subject: "a table that has used all 1600 of PostgreSQL's column numbers",
+			help:    "copy the table into a new one, " + givesBack,
+		},
+		"the table itself, none free": {
+			numbers: &preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: `"app"."events"`, Root: true}}},
+			subject: "a table that has used all 1600 of PostgreSQL's column numbers",
+			help:    "copy the table into a new one, " + givesBack + "; until then no column number is free",
+		},
+		"the table itself, one free": {
+			numbers: &preflight.ColumnNumbers{Left: 1, Fullest: []preflight.FullTable{{Name: `"app"."events"`, Root: true}}},
+			subject: "a table that has used all 1600 of PostgreSQL's column numbers",
+			help:    "copy the table into a new one, " + givesBack + ", or add at most 1 column",
+		},
+		"a partition, none free": {
+			numbers: &preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: `"app"."ledger_1"`, Partition: true}}},
+			subject: `a table whose partition "app"."ledger_1" has used all 1600 of PostgreSQL's column numbers`,
+			help: `copy partition "app"."ledger_1" into a new table, ` + givesBack +
+				", then detach the partition and attach the copy in its place; until then no column number is free",
+		},
+		"an inheritance child, three free": {
+			numbers: &preflight.ColumnNumbers{Left: 3, Fullest: []preflight.FullTable{{Name: `"app"."child"`}}},
+			subject: `a table whose inheritance child "app"."child" has used all 1600 of PostgreSQL's column numbers`,
+			help: `copy inheritance child "app"."child" into a new table, ` + givesBack +
+				", then make the copy inherit from the same parent in its place, or add at most 3 columns",
+		},
+		"two partitions": {
+			numbers: &preflight.ColumnNumbers{Fullest: []preflight.FullTable{
+				{Name: `"app"."ledger_1"`, Partition: true}, {Name: `"app"."ledger_2"`, Partition: true},
+			}},
+			subject: `a table whose partitions "app"."ledger_1", "app"."ledger_2" have used all 1600 of PostgreSQL's column numbers`,
+			help: `copy each of the partitions "app"."ledger_1", "app"."ledger_2" into a new table, ` + givesBack +
+				", then put each copy in its table's place: detach a partition and attach its copy, or make a child's copy inherit from the same parent" +
+				"; until then no column number is free",
+		},
+		"the table and a partition": {
+			numbers: &preflight.ColumnNumbers{Fullest: []preflight.FullTable{
+				{Name: `"app"."ledger"`, Root: true}, {Name: `"app"."ledger_1"`, Partition: true},
+			}},
+			subject: `a table that has used all 1600 of PostgreSQL's column numbers, as have its partition "app"."ledger_1"`,
+			help:    "copy the table into a new one, " + givesBack + `, and copy its partition "app"."ledger_1" the same way; until then no column number is free`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.subject, planner.ColumnLimitSubject(tc.numbers))
+			assert.Equal(t, tc.help, planner.ColumnLimitHelp(tc.numbers))
+		})
+	}
 }
 
 // Each new column takes one of the numbers left, in statement order, and the

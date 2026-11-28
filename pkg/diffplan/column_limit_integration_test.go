@@ -2,8 +2,10 @@ package diffplan_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 )
 
@@ -43,13 +46,22 @@ func TestPlanRefusesAColumnAddPastTheColumnLimit(t *testing.T) {
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 
 	reasons := map[string]planner.Reason{}
+	var refused planner.Decision
 	for _, st := range report.Statements {
 		for _, d := range st.Decisions {
 			reasons[d.Operation] = d.Reason
+			if d.Reason == planner.ReasonColumnLimit {
+				refused = d
+			}
 		}
 	}
 	assert.Equal(t, map[string]planner.Reason{
 		"ADD COLUMN kind": planner.ReasonMetadataOnly,
 		"ADD COLUMN note": planner.ReasonColumnLimit,
 	}, reasons)
+	assert.Equal(t, &preflight.ColumnNumbers{
+		Left:    1,
+		Fullest: []preflight.FullTable{{Name: pgx.Identifier{schema, "events"}.Sanitize(), Root: true}},
+	}, refused.ColumnLimit, "the refusal carries the numbers free before the plan, which the help offers")
+	assert.True(t, strings.HasSuffix(planner.ColumnLimitHelp(refused.ColumnLimit), ", or add at most 1 column"))
 }

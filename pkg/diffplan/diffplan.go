@@ -131,7 +131,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if facts.NullFilledColumns, err = nullFilledColumns(ctx, pool, req.Schema, ds.Table(), changes, facts.ColumnTypes); err != nil {
 			return plan.Report{}, err
 		}
-		if facts.ColumnLimitReached, err = columnLimitReached(ctx, pool, req.Schema, ds.Table(), changes, facts.ColumnTypes); err != nil {
+		if facts.ColumnLimitReached, facts.ColumnNumbers, err = columnLimitReached(ctx, pool, req.Schema, ds.Table(), changes, facts.ColumnTypes); err != nil {
 			return plan.Report{}, err
 		}
 		if retypesOrDropsColumn(changes) {
@@ -374,28 +374,30 @@ func nullFilledColumns(ctx context.Context, pool *pgxpool.Pool, schema, table st
 
 // columnLimitReached reads the columns the changes add once the table, or a
 // table that inherits from it, has no column number left
-// (planner.ColumnsPastLimit over preflight.ColumnNumbersLeft). The desired
+// (planner.ColumnsPastLimit over preflight.ReadColumnNumbers), and the read
+// itself, which names the tables at the limit. The desired
 // schema is built from scratch, where no dropped column holds a number, so
 // only the live table can be at the limit. columns are the table's live
 // columns; the catalog is read only when a change adds a column.
-func columnLimitReached(ctx context.Context, pool *pgxpool.Pool, schema, table string, changes []schemadiff.Change, columns map[string]string) (map[string]bool, error) {
+func columnLimitReached(ctx context.Context, pool *pgxpool.Pool, schema, table string, changes []schemadiff.Change, columns map[string]string) (map[string]bool, preflight.ColumnNumbers, error) {
 	opsByChange := make([][]statement.Op, len(changes))
 	adds := false
 	for i, ch := range changes {
 		ops, err := statement.ParseOps(ch.SQL)
 		if err != nil {
-			return nil, fmt.Errorf("read the operations of %q: %w", ch.SQL, err)
+			return nil, preflight.ColumnNumbers{}, fmt.Errorf("read the operations of %q: %w", ch.SQL, err)
 		}
 		opsByChange[i] = ops
 		adds = adds || slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn })
 	}
 	if !adds {
-		return nil, nil
+		return nil, preflight.ColumnNumbers{}, nil
 	}
-	left, err := preflight.ColumnNumbersLeft(ctx, pool, schema, table)
+	numbers, err := preflight.ReadColumnNumbers(ctx, pool, schema, table)
 	if err != nil {
-		return nil, err
+		return nil, preflight.ColumnNumbers{}, err
 	}
+	left := numbers.Left
 	present := maps.Clone(columns)
 	var reached map[string]bool
 	for _, ops := range opsByChange {
@@ -419,7 +421,7 @@ func columnLimitReached(ctx context.Context, pool *pgxpool.Pool, schema, table s
 			}
 		}
 	}
-	return reached, nil
+	return reached, numbers, nil
 }
 
 // retypesOrDropsColumn reports whether any change retypes or drops a

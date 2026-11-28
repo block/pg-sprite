@@ -232,8 +232,8 @@ func refusedDecisionDetail(d planner.Decision) (string, bool) {
 		return fmt.Sprintf("%s adds a NOT NULL column with no default to a table that holds rows, "+
 			"and PostgreSQL refuses it because every existing row would hold NULL; %s", d.Operation, planner.NotNullWithoutDefaultHelp), true
 	case planner.ReasonColumnLimit:
-		return fmt.Sprintf("%s adds a column to a table that has used all %d of PostgreSQL's column numbers, "+
-			"and a dropped column keeps its number until the table is rebuilt; %s", d.Operation, preflight.MaxColumnNumber, planner.ColumnLimitHelp), true
+		return fmt.Sprintf("%s adds a column to %s, and a dropped column keeps its number until the table is rebuilt; %s",
+			d.Operation, planner.ColumnLimitSubject(d.ColumnLimit), planner.ColumnLimitHelp(d.ColumnLimit)), true
 	case planner.ReasonCascadingDrop:
 		return fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views, row-level security policies, or other tables' foreign keys, "+
 			"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+

@@ -59,7 +59,7 @@ type Facts struct {
 // with no DEFAULT of its own whether it is NOT NULL, as spelled or through
 // its domain or an inline PRIMARY KEY, and the table holds a row it would
 // be NULL in (preflight.NullFilledColumns), and which columns it adds once
-// the table has no column number left (preflight.ColumnNumbersLeft). For one that adds an unnamed CHECK or
+// the table has no column number left (preflight.ReadColumnNumbers). For one that adds an unnamed CHECK or
 // FOREIGN KEY it also reads the constraint names the schema already uses,
 // so the safer sequence names the constraint as the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
@@ -132,15 +132,16 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 		return Facts{}, err
 	}
 	if adds {
-		left, err := preflight.ColumnNumbersLeft(ctx, pool, schema, st.Table())
+		numbers, err := preflight.ReadColumnNumbers(ctx, pool, schema, st.Table())
 		if err != nil {
 			return Facts{}, err
 		}
+		classifier.ColumnNumbers = numbers
 		ops, err := statement.ParseOps(st.SQL())
 		if err != nil {
 			return Facts{}, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 		}
-		classifier.ColumnLimitReached, _ = planner.ColumnsPastLimit(ops, classifier.ColumnTypes, left)
+		classifier.ColumnLimitReached, _ = planner.ColumnsPastLimit(ops, classifier.ColumnTypes, numbers.Left)
 	}
 	names, err := addsUnnamedValidatableConstraint(st)
 	if err != nil {

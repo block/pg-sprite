@@ -883,8 +883,12 @@ can have at most 1600 columns`, SQLSTATE `54011`) after taking the table's `ACCE
 EXCLUSIVE` lock. An add reaches every partition and inheritance child, each numbering its
 columns on its own, so the fullest of them decides. In a statement that adds several
 columns, each takes the next number left in statement order, and only the adds past the
-last one are refused. Copy the table into a new one, which gives the columns new numbers
-from one; `VACUUM FULL` rewrites the rows but keeps the numbers. The planner reads the
+last one are refused. Copy the table at the limit into a new one, which gives the columns
+new numbers from one; `VACUUM FULL` rewrites the rows but keeps the numbers. When the
+table at the limit is a partition, detach it and attach the copy in its place; when it is
+an inheritance child, make the copy inherit from the same parent. The plan names the
+tables at the limit and the numbers the table has free in `decisions[].column_limit`,
+and the help offers adding fewer columns only when some are free. The planner reads the
 highest number from the catalog; the linter has no live facts and never reports it.
 
 ### `cascading-drop`

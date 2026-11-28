@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -962,8 +963,10 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 }
 
 // A column add refused at the column limit says why in the refusal
-// sentence, and every such add of a statement shares one help line.
+// sentence, naming the partition that has used every number, and every such
+// add of a statement shares one help line with that partition's rebuild.
 func TestDryRunTextColumnLimitRefusal(t *testing.T) {
+	numbers := &preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: `"app"."events_1"`, Partition: true}}}
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema, report.Table, report.ServerVersion = "app", "events", "16.10"
 	report.Disposition = router.DispositionRefuse
@@ -974,17 +977,18 @@ func TestDryRunTextColumnLimitRefusal(t *testing.T) {
 		Reason:      verdict.ReasonUnsupportedStatement,
 		Class:       verdict.ClassCapabilityBoundary,
 		Decisions: []planner.Decision{
-			{Operation: "ADD COLUMN kind", Route: planner.RouteRefuse, Reason: planner.ReasonColumnLimit},
-			{Operation: "ADD COLUMN note", Route: planner.RouteRefuse, Reason: planner.ReasonColumnLimit},
+			{Operation: "ADD COLUMN kind", Route: planner.RouteRefuse, Reason: planner.ReasonColumnLimit, ColumnLimit: numbers},
+			{Operation: "ADD COLUMN note", Route: planner.RouteRefuse, Reason: planner.ReasonColumnLimit, ColumnLimit: numbers},
 		},
 	})
 
 	var out strings.Builder
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := strings.Join(strings.Fields(out.String()), " ")
-	assert.Contains(t, text, "error[unsupported-statement]: refused — ADD COLUMN kind adds a column to a table that has used all of PostgreSQL's column numbers, and a dropped column keeps its number until the table is rebuilt")
+	assert.Contains(t, text, `error[unsupported-statement]: refused — ADD COLUMN kind adds a column to a table whose partition "app"."events_1" has used all 1600 of PostgreSQL's column numbers, and a dropped column keeps its number until the table is rebuilt`)
 	assert.Contains(t, text, "note[column-limit]: ADD COLUMN note — adds a column to a table that has used all of PostgreSQL's column numbers")
-	assert.Equal(t, 1, strings.Count(text, "help: "+planner.ColumnLimitHelp))
+	assert.Equal(t, 1, strings.Count(text, "help: "+planner.ColumnLimitHelp(numbers)))
+	assert.Contains(t, text, `help: copy partition "app"."events_1" into a new table`)
 	assert.Contains(t, text, onlineDDLReferenceURL+"#column-limit")
 	assert.NotContains(t, text, "knows no safe path")
 }

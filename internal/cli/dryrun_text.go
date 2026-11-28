@@ -120,7 +120,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		}
 		if d.Reason == planner.ReasonColumnLimit && !columnLimitHelped {
 			columnLimitHelped = true
-			w.diag("help", "", planner.ColumnLimitHelp)
+			w.diag("help", "", planner.ColumnLimitHelp(d.ColumnLimit))
 		}
 	}
 	if ps.Destructive {
@@ -514,8 +514,8 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			"and PostgreSQL refuses it because every existing row would hold NULL"
 	}
 	if d.Reason == planner.ReasonColumnLimit {
-		return d.Operation + " adds a column to a table that has used all of PostgreSQL's column numbers, " +
-			"and a dropped column keeps its number until the table is rebuilt"
+		return d.Operation + " adds a column to " + planner.ColumnLimitSubject(d.ColumnLimit) +
+			", and a dropped column keeps its number until the table is rebuilt"
 	}
 	return "the planner knows no safe path for " + d.Operation
 }

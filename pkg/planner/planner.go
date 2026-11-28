@@ -414,6 +414,10 @@ type Decision struct {
 	// includes the column, each schema-qualified with every identifier
 	// quoted, present exactly for partition-key decisions.
 	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
+	// ColumnLimit is how many column numbers the table had left before the
+	// change, and which of it and its partitions or inheritance children
+	// have used the most, present exactly for column-limit decisions.
+	ColumnLimit *preflight.ColumnNumbers `json:"column_limit,omitempty"`
 	// DependentFix is the manual path for the views, policies, and
 	// triggers that block the change, which depends on what the change
 	// would do with those dependents out of the way. Like Kind, it is not part
@@ -780,6 +784,9 @@ type Facts struct {
 	// or a table that inherits from it, has no column number left
 	// (ColumnsPastLimit over preflight.ColumnNumbersLeft).
 	ColumnLimitReached map[string]bool
+	// ColumnNumbers is the read ColumnLimitReached was judged from, which
+	// names the tables at the limit for the refusal's help.
+	ColumnNumbers preflight.ColumnNumbers
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -931,10 +938,92 @@ func dependentFix(op statement.Op, facts Facts) DependentFix {
 const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
 	"or add it without NOT NULL, backfill it, then set NOT NULL"
 
+// ColumnLimitSubject names what is at the column limit for a column-limit
+// decision: the table itself, its partitions or inheritance children that have
+// used every number, or both.
+func ColumnLimitSubject(numbers *preflight.ColumnNumbers) string {
+	full := fmt.Sprintf("all %d of PostgreSQL's column numbers", preflight.MaxColumnNumber)
+	root, children := columnLimitTables(numbers)
+	switch {
+	case len(children) == 0:
+		return "a table that has used " + full
+	case root:
+		return fmt.Sprintf("a table that has used %s, as have its %s", full, childrenPhrase(children))
+	case len(children) == 1:
+		return fmt.Sprintf("a table whose %s has used %s", childrenPhrase(children), full)
+	default:
+		return fmt.Sprintf("a table whose %s have used %s", childrenPhrase(children), full)
+	}
+}
+
 // ColumnLimitHelp is the operator-facing manual path for a column-limit
-// decision.
-const ColumnLimitHelp = "copy the table into a new one, which gives back the numbers its dropped columns hold " +
-	"(VACUUM FULL does not), or add fewer columns"
+// decision: rebuild the tables at the limit, since copying a table gives back
+// the numbers its dropped columns hold, and add fewer columns only when the
+// table has a number left for some. Without the read it names the table alone.
+func ColumnLimitHelp(numbers *preflight.ColumnNumbers) string {
+	const givesBack = "which gives back the numbers its dropped columns hold (VACUUM FULL does not)"
+	root, children := columnLimitTables(numbers)
+	var rebuild string
+	switch {
+	case len(children) == 0:
+		rebuild = "copy the table into a new one, " + givesBack
+	case root:
+		rebuild = "copy the table into a new one, " + givesBack + ", and copy its " + childrenPhrase(children) + " the same way"
+	case len(children) == 1 && children[0].Partition:
+		rebuild = "copy partition " + children[0].Name + " into a new table, " + givesBack +
+			", then detach the partition and attach the copy in its place"
+	case len(children) == 1:
+		rebuild = "copy inheritance child " + children[0].Name + " into a new table, " + givesBack +
+			", then make the copy inherit from the same parent in its place"
+	default:
+		rebuild = "copy each of the " + childrenPhrase(children) + " into a new table, " + givesBack +
+			", then put each copy in its table's place: detach a partition and attach its copy, or make a child's copy inherit from the same parent"
+	}
+	switch {
+	case numbers == nil:
+		return rebuild
+	case numbers.Left == 0:
+		return rebuild + "; until then no column number is free"
+	case numbers.Left == 1:
+		return rebuild + ", or add at most 1 column"
+	default:
+		return fmt.Sprintf("%s, or add at most %d columns", rebuild, numbers.Left)
+	}
+}
+
+// columnLimitTables splits the tables at the column limit into whether the
+// table the statement alters is one of them and its partitions or inheritance
+// children that are.
+func columnLimitTables(numbers *preflight.ColumnNumbers) (root bool, children []preflight.FullTable) {
+	if numbers == nil {
+		return false, nil
+	}
+	for _, t := range numbers.Fullest {
+		if t.Root {
+			root = true
+			continue
+		}
+		children = append(children, t)
+	}
+	return root, children
+}
+
+// childrenPhrase names partitions or inheritance children with the noun that
+// fits them: "partition "s"."p1"", "partitions "s"."p1", "s"."p2"", or
+// "inheritance children ..." once any of them is not a partition.
+func childrenPhrase(children []preflight.FullTable) string {
+	names := make([]string, 0, len(children))
+	partitions := true
+	for _, t := range children {
+		names = append(names, t.Name)
+		partitions = partitions && t.Partition
+	}
+	noun := map[bool]string{true: "partition", false: "inheritance child"}[partitions]
+	if len(children) > 1 {
+		noun = map[bool]string{true: "partitions", false: "inheritance children"}[partitions]
+	}
+	return noun + " " + strings.Join(names, ", ")
+}
 
 // ColumnsPastLimit names the columns ops add once no column number is left,
 // given the numbers left before ops run, and returns how many are left after
@@ -1268,7 +1357,8 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case facts.ColumnLimitReached[op.Column]:
-			d.Route, d.Reason = RouteRefuse, ReasonColumnLimit
+			numbers := facts.ColumnNumbers
+			d.Route, d.Reason, d.ColumnLimit = RouteRefuse, ReasonColumnLimit, &numbers
 		case fillsNotNullWithNull(op, facts):
 			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
 		case op.GeneratedStored:
