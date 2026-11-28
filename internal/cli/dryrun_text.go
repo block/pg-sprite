@@ -102,6 +102,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 	// Every not-null-without-default column of a statement shares one
 	// manual path, printed once after the first of them.
 	notNullHelped := false
+	columnLimitHelped := false
 	for _, d := range ps.Decisions {
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
@@ -116,6 +117,10 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		if d.Reason == planner.ReasonNotNullWithoutDefault && !notNullHelped {
 			notNullHelped = true
 			w.diag("help", "", planner.NotNullWithoutDefaultHelp)
+		}
+		if d.Reason == planner.ReasonColumnLimit && !columnLimitHelped {
+			columnLimitHelped = true
+			w.diag("help", "", planner.ColumnLimitHelp)
 		}
 	}
 	if ps.Destructive {
@@ -405,6 +410,8 @@ func impactText(r planner.Reason) string {
 		return "changes a partition key column; PostgreSQL never retypes or drops one"
 	case planner.ReasonNotNullWithoutDefault:
 		return "adds a NOT NULL column with no default to a table that holds rows; PostgreSQL refuses this because every existing row would hold NULL"
+	case planner.ReasonColumnLimit:
+		return "adds a column to a table that has used all of PostgreSQL's column numbers; a dropped column keeps its number until the table is rebuilt"
 	case planner.ReasonCascadingDrop:
 		return "CASCADE also drops the views, row-level security policies, and other tables' foreign keys that depend on it; drop those explicitly and resubmit without CASCADE"
 	case planner.ReasonUnsupportedOperation:
@@ -505,6 +512,10 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 	if d.Reason == planner.ReasonNotNullWithoutDefault {
 		return d.Operation + " adds a NOT NULL column with no default to a table that holds rows, " +
 			"and PostgreSQL refuses it because every existing row would hold NULL"
+	}
+	if d.Reason == planner.ReasonColumnLimit {
+		return d.Operation + " adds a column to a table that has used all of PostgreSQL's column numbers, " +
+			"and a dropped column keeps its number until the table is rebuilt"
 	}
 	return "the planner knows no safe path for " + d.Operation
 }

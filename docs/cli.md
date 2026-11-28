@@ -842,7 +842,7 @@ and row, checksum, and catch-up counters directly; that snapshot is the
 $ pg-sprite migrate --dry-run --json --alter "ALTER TABLE orders ADD COLUMN ref text UNIQUE" > plan.json; echo $?
 2
 $ jq -c '{format_version, table, disposition}' plan.json
-{"format_version": 32,"table":"orders","disposition":"rewrite-required"}
+{"format_version": 33,"table":"orders","disposition":"rewrite-required"}
 ```
 
 The exit code answers the question a pipeline asks first, without parsing

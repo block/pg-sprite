@@ -93,6 +93,7 @@ func Reasons() []Reason {
 		ReasonDependentGeneratedColumn,
 		ReasonPartitionKey,
 		ReasonNotNullWithoutDefault,
+		ReasonColumnLimit,
 		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
@@ -223,6 +224,12 @@ const (
 	// only fail. A default, identity, or generated column fills the rows,
 	// and an empty table has none to fill, so neither is refused.
 	ReasonNotNullWithoutDefault Reason = "not-null-without-default"
+	// ReasonColumnLimit: the operation adds a column to a table that has
+	// used every column number PostgreSQL gives a table, or that a table
+	// inheriting from it has. A dropped column keeps its number until the
+	// table is rebuilt, so PostgreSQL refuses the statement (SQLSTATE
+	// 54011) however few live columns the table has; it could only fail.
+	ReasonColumnLimit Reason = "column-limit"
 	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
 	// depends on what it drops: a view or policy that reads a dropped
 	// column, or another table's foreign key on a dropped key. Those
@@ -769,6 +776,10 @@ type Facts struct {
 	// an offline lint; without it the server's own refusal at execution
 	// remains the backstop.
 	NullFilledColumns map[string]bool
+	// ColumnLimitReached are the columns the statement adds once the table,
+	// or a table that inherits from it, has no column number left
+	// (ColumnsPastLimit over preflight.ColumnNumbersLeft).
+	ColumnLimitReached map[string]bool
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -919,6 +930,43 @@ func dependentFix(op statement.Op, facts Facts) DependentFix {
 // not-null-without-default decision.
 const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
 	"or add it without NOT NULL, backfill it, then set NOT NULL"
+
+// ColumnLimitHelp is the operator-facing manual path for a column-limit
+// decision.
+const ColumnLimitHelp = "copy the table into a new one, which gives back the numbers its dropped columns hold " +
+	"(VACUUM FULL does not), or add fewer columns"
+
+// ColumnsPastLimit names the columns ops add once no column number is left,
+// given the numbers left before ops run, and returns how many are left after
+// them. columns are the table's live columns: adding one it already has
+// takes no number, unless an earlier operation of ops drops it. A dropped
+// column does not give its number back.
+func ColumnsPastLimit(ops []statement.Op, columns map[string]string, left int) (map[string]bool, int) {
+	dropped := map[string]bool{}
+	var past map[string]bool
+	for _, op := range ops {
+		switch op.Kind {
+		case statement.OpDropColumn:
+			dropped[op.Column] = true
+			continue
+		case statement.OpAddColumn:
+		default:
+			continue
+		}
+		if _, exists := columns[op.Column]; exists && !dropped[op.Column] {
+			continue
+		}
+		if left > 0 {
+			left--
+			continue
+		}
+		if past == nil {
+			past = map[string]bool{}
+		}
+		past[op.Column] = true
+	}
+	return past, left
+}
 
 // NullFillCandidates names the columns the operations of one ALTER TABLE
 // add with no DEFAULT of their own, the ones whose existing rows may be
@@ -1219,6 +1267,8 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		switch {
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
+		case facts.ColumnLimitReached[op.Column]:
+			d.Route, d.Reason = RouteRefuse, ReasonColumnLimit
 		case fillsNotNullWithNull(op, facts):
 			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
 		case op.GeneratedStored:

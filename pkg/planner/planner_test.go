@@ -1297,6 +1297,57 @@ func TestClassifyRefusesANotNullColumnNothingFillsOnATableWithRows(t *testing.T)
 	assert.Equal(t, planner.RouteNative, d.Route)
 }
 
+// Adding a column is refused when the table has no column number left
+// (Facts.ColumnLimitReached), ahead of every other way the add could run;
+// without the fact it classifies as usual.
+func TestClassifyRefusesAColumnAddPastTheColumnLimit(t *testing.T) {
+	full := planner.Facts{
+		ColumnLimitReached: map[string]bool{"kind": true},
+		ColumnTypes:        map[string]string{"id": "bigint"},
+		AddColumnProofs:    map[string]statement.AddColumnProof{"kind": statement.AddColumnInPlace},
+	}
+	d := classifyWithFacts(t, "ALTER TABLE events ADD COLUMN kind text", full)
+	assert.Equal(t, planner.ReasonColumnLimit, d.Reason)
+	assert.Equal(t, planner.RouteRefuse, d.Route)
+
+	roomy := full
+	roomy.ColumnLimitReached = nil
+	d = classifyWithFacts(t, "ALTER TABLE events ADD COLUMN kind text", roomy)
+	assert.Equal(t, planner.ReasonMetadataOnly, d.Reason)
+}
+
+// Each new column takes one of the numbers left, in statement order, and the
+// ones added after the last number is gone are past the limit. A column the
+// table already has takes none, a re-added dropped column takes a new one,
+// and a drop gives none back.
+func TestColumnsPastLimit(t *testing.T) {
+	ops := func(sql string) []statement.Op {
+		t.Helper()
+		parsed, err := statement.ParseOps(sql)
+		require.NoError(t, err)
+		return parsed
+	}
+	live := map[string]string{"id": "bigint", "email": "text"}
+
+	past, left := planner.ColumnsPastLimit(ops("ALTER TABLE events ADD COLUMN a int, ADD COLUMN b int, ADD COLUMN c int"), live, 2)
+	assert.Equal(t, map[string]bool{"c": true}, past)
+	assert.Zero(t, left)
+
+	past, left = planner.ColumnsPastLimit(ops("ALTER TABLE events ADD COLUMN a int"), live, 3)
+	assert.Nil(t, past)
+	assert.Equal(t, 2, left)
+
+	past, left = planner.ColumnsPastLimit(ops("ALTER TABLE events ADD COLUMN IF NOT EXISTS email text"), live, 0)
+	assert.Nil(t, past, "a column the table already has takes no number")
+	assert.Zero(t, left)
+
+	past, _ = planner.ColumnsPastLimit(ops("ALTER TABLE events DROP COLUMN email, ADD COLUMN email text"), live, 0)
+	assert.Equal(t, map[string]bool{"email": true}, past, "a re-added column takes a new number, and the drop gives none back")
+
+	past, _ = planner.ColumnsPastLimit(ops("ALTER TABLE events DROP COLUMN email"), live, 0)
+	assert.Nil(t, past)
+}
+
 // The columns whose rows may be left NULL are the ones added with no
 // DEFAULT of their own that the table does not already have, NOT NULL or
 // not, since a domain or an inline PRIMARY KEY can make a column NOT NULL
@@ -1648,6 +1699,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonDependentGeneratedColumn,
 		planner.ReasonPartitionKey,
 		planner.ReasonNotNullWithoutDefault,
+		planner.ReasonColumnLimit,
 		planner.ReasonCascadingDrop,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())

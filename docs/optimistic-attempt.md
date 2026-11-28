@@ -376,6 +376,7 @@ against `sizeGuardApplies`):
 | `dependent-generated-column` | n/a — refused at plan time |
 | `partition-key` | n/a — refused at plan time |
 | `not-null-without-default` | n/a — refused at plan time |
+| `column-limit` | n/a — refused at plan time |
 | `cascading-drop` | n/a — refused at plan time |
 | `unsupported-operation` | n/a — refused at plan time |
 

@@ -131,6 +131,9 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if facts.NullFilledColumns, err = nullFilledColumns(ctx, pool, req.Schema, ds.Table(), changes, facts.ColumnTypes); err != nil {
 			return plan.Report{}, err
 		}
+		if facts.ColumnLimitReached, err = columnLimitReached(ctx, pool, req.Schema, ds.Table(), changes, facts.ColumnTypes); err != nil {
+			return plan.Report{}, err
+		}
 		if retypesOrDropsColumn(changes) {
 			deps, err := preflight.ReadColumnDependents(ctx, pool, req.Schema, ds.Table())
 			if err != nil {
@@ -367,6 +370,56 @@ func nullFilledColumns(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		return nil, nil
 	}
 	return fills, nil
+}
+
+// columnLimitReached reads the columns the changes add once the table, or a
+// table that inherits from it, has no column number left
+// (planner.ColumnsPastLimit over preflight.ColumnNumbersLeft). The desired
+// schema is built from scratch, where no dropped column holds a number, so
+// only the live table can be at the limit. columns are the table's live
+// columns; the catalog is read only when a change adds a column.
+func columnLimitReached(ctx context.Context, pool *pgxpool.Pool, schema, table string, changes []schemadiff.Change, columns map[string]string) (map[string]bool, error) {
+	opsByChange := make([][]statement.Op, len(changes))
+	adds := false
+	for i, ch := range changes {
+		ops, err := statement.ParseOps(ch.SQL)
+		if err != nil {
+			return nil, fmt.Errorf("read the operations of %q: %w", ch.SQL, err)
+		}
+		opsByChange[i] = ops
+		adds = adds || slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn })
+	}
+	if !adds {
+		return nil, nil
+	}
+	left, err := preflight.ColumnNumbersLeft(ctx, pool, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	present := maps.Clone(columns)
+	var reached map[string]bool
+	for _, ops := range opsByChange {
+		var past map[string]bool
+		past, left = planner.ColumnsPastLimit(ops, present, left)
+		if len(past) > 0 {
+			if reached == nil {
+				reached = map[string]bool{}
+			}
+			maps.Copy(reached, past)
+		}
+		for _, op := range ops {
+			switch op.Kind {
+			case statement.OpDropColumn:
+				delete(present, op.Column)
+			case statement.OpAddColumn:
+				if present == nil {
+					present = map[string]string{}
+				}
+				present[op.Column] = ""
+			}
+		}
+	}
+	return reached, nil
 }
 
 // retypesOrDropsColumn reports whether any change retypes or drops a

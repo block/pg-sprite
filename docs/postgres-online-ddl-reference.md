@@ -59,7 +59,8 @@ drops a column a view reads, which PostgreSQL refuses, and `dependent-policy`,
 `dependent-trigger`, `dependent-publication`, `dependent-generated-column`, and
 `partition-key` are the same refusal for a column a row-level security policy, a trigger, a
 publication's column list or row filter, a generated column, or a partition key depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
-that nothing fills to a table with rows, which PostgreSQL refuses. `cascading-drop` is a
+that nothing fills to a table with rows, which PostgreSQL refuses. `column-limit` is a refusal:
+the operation adds a column to a table that has no column number left. `cascading-drop` is a
 refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
@@ -866,6 +867,25 @@ session's lock blocks fails the plan rather than guessing. The linter has no liv
 reports it. Rows a row-level security policy hides from the role do not count, and
 the server's own refusal remains the backstop for them and for rows inserted after
 planning.
+
+### `column-limit`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+
+The operation adds a column to a table that has used all 1,600 of PostgreSQL's column
+numbers. Every column a table has ever had holds a number, and a dropped column keeps its
+number until the table is rebuilt, so a table that has added and dropped columns over the
+years reaches the limit with far fewer live columns. PostgreSQL refuses the add (`tables
+can have at most 1600 columns`, SQLSTATE `54011`) after taking the table's `ACCESS
+EXCLUSIVE` lock. An add reaches every partition and inheritance child, each numbering its
+columns on its own, so the fullest of them decides. In a statement that adds several
+columns, each takes the next number left in statement order, and only the adds past the
+last one are refused. Copy the table into a new one, which gives the columns new numbers
+from one; `VACUUM FULL` rewrites the rows but keeps the numbers. The planner reads the
+highest number from the catalog; the linter has no live facts and never reports it.
 
 ### `cascading-drop`
 

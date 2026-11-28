@@ -81,7 +81,8 @@ import (
 // whose replacement a constraint takes over.
 // Version 32 added the dependent-publication planner reason and the
 // dependent_publications decision field.
-const FormatVersion = 32
+// Version 33 added the column-limit planner reason.
+const FormatVersion = 33
 
 // Source identifies which front door derived the plan.
 type Source string
