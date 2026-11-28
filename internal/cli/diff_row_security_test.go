@@ -37,7 +37,7 @@ func TestRowSecurityRefusalOutput(t *testing.T) {
 		t.Run(format, func(t *testing.T) {
 			cmd := &DiffCmd{JSON: format == "json", SQL: format == "sql"}
 			var out strings.Builder
-			err := cmd.writeRowSecurityRefusal(&out, errors.New("row security differs"))
+			err := cmd.writeRowSecurityRefusal(&out, errors.New("row security differs"), "CREATE TABLE documents (id bigint)")
 			require.ErrorIs(t, err, verdict.ErrRefused)
 			if format == "json" {
 				var v verdict.Verdict

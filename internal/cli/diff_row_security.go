@@ -53,7 +53,7 @@ func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, desired statement.DesiredW
 			return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, create)
 		}
 		if errors.Is(err, schemadiff.ErrUnsupportedChange) {
-			return c.writeRowSecurityRefusal(out, err)
+			return c.writeRowSecurityRefusal(out, err, create)
 		}
 		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, create)
 	}
@@ -62,13 +62,16 @@ func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, desired statement.DesiredW
 
 // A refused comparison has no executable plan. Emit the existing verdict shape
 // instead of an empty plan that could be mistaken for successful convergence.
-func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
+// The verdict names the file's CREATE TABLE, and for a row security change
+// its detail says how to apply the file instead.
+func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error, create string) error {
 	var review *diffplan.RowSecurityReviewRequired
 	errors.As(cause, &review)
-	v := verdict.Verdict{Detail: cause.Error()}.WithRefusal(plan.RowSecurityReviewRefusal())
+	v := verdict.Verdict{Statement: create, Detail: cause.Error()}.WithRefusal(plan.RowSecurityReviewRefusal())
 	if review == nil {
 		return c.writeVerdictRefusal(out, v, cause)
 	}
+	v.Detail = rowSecurityNextStep(review.Review)
 	switch {
 	case c.JSON:
 		report := struct {
@@ -90,7 +93,7 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(strings.TrimSuffix(text.String(), "\n"))); err != nil {
 			return fmt.Errorf("write RLS review: %w", err)
 		}
-		if _, err := fmt.Fprintln(out, sqlDiagnosticComment("refused: "+cause.Error())); err != nil {
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment("refused: "+v.Detail)); err != nil {
 			return fmt.Errorf("write RLS refusal: %w", err)
 		}
 	default:
@@ -102,6 +105,27 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 		}
 	}
 	return errors.Join(verdict.ErrRefused, cause)
+}
+
+// rowSecurityNextStep says how to apply a file whose row security differs
+// from the live table's. diff only previews such a file: migrate --desired
+// changes an existing table's row security in one transaction, and only when
+// the file's table definition matches the live one, so a file that also
+// changes the table is applied in two runs.
+func rowSecurityNextStep(review schemadiff.RowSecurityReview) string {
+	switch {
+	case review.TableChanged:
+		return "the file changes both the table and its row security, which are applied in separate runs: " +
+			"first run migrate --desired with the table definition as it is live and the new row security, " +
+			"then change the table definition in a second run"
+	case !review.TableComparisonComplete:
+		return "the table definition does not compare with the live table (see above), so apply the row security on its own: " +
+			"run migrate --desired with the table definition as it is live and the new row security, " +
+			"then plan the table change separately"
+	default:
+		return "diff does not plan row security; migrate --desired changes it in one transaction, " +
+			"checked against the review above"
+	}
 }
 
 // previewCreateWithRowSecurity shows what migrate --desired runs for a table
