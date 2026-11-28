@@ -534,7 +534,10 @@ refused (plan-fingerprint-mismatch)
   name, is a different plan and the run refuses with `plan-fingerprint-mismatch`.
 - An index drop never blocks the table. Immediately before each drop, the run
   reads the live object again and refuses, dropping nothing, if it no longer
-  matches the plan (`dropped-index-drift`, `dropped-object-drift`); see
+  matches the plan (`dropped-index-drift`, `dropped-object-drift`). The drop
+  of a changed index's old definition also reads the index built to replace
+  it and refuses if it is gone, invalid, or rebuilt with another definition
+  (`replacement-index-drift`); see
   [execution-model.md](execution-model.md) for these codes and for
   `dropped-index-replaced`.
 - A `--allow-destructive` table that is not the resolved table is a usage
@@ -738,7 +741,7 @@ and row, checksum, and catch-up counters directly; that snapshot is the
 $ pg-sprite migrate --dry-run --json --alter "ALTER TABLE orders ADD COLUMN ref text UNIQUE" > plan.json; echo $?
 2
 $ jq -c '{format_version, table, disposition}' plan.json
-{"format_version": 28,"table":"orders","disposition":"rewrite-required"}
+{"format_version": 30,"table":"orders","disposition":"rewrite-required"}
 ```
 
 The exit code answers the question a pipeline asks first, without parsing

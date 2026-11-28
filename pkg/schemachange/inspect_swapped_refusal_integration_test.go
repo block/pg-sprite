@@ -61,13 +61,7 @@ func TestInspectSwappedDoesNotReportNotSwappedWhileTheSwapIsCommitting(t *testin
 		_, _ = schemachange.Cutover(t.Context(), pool, s.lock, ready, drain, schemachange.CutoverOptions{})
 	}()
 	const commitStarts = 10 * time.Second
-	require.Eventually(t, func() bool {
-		var committing int
-		require.NoError(t, f.pool.QueryRow(t.Context(), `
-			SELECT count(*) FROM pg_stat_activity
-			WHERE state = 'active' AND query ILIKE 'commit%' AND pid <> pg_backend_pid()`).Scan(&committing))
-		return committing > 0
-	}, commitStarts, 20*time.Millisecond)
+	require.Eventually(t, func() bool { return f.committing(t) > 0 }, commitStarts, 20*time.Millisecond)
 
 	_, inspectErr := schemachange.InspectSwapped(t.Context(), f.pool, s.lock, s.built.Proof(), schemachange.Options{})
 

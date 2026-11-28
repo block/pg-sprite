@@ -263,7 +263,8 @@ func TestCopySwapRunVerdict(t *testing.T) {
 	// remedy names the setting to raise on both front doors. A stream that
 	// fell behind leaves its slot holding more unconfirmed WAL than the
 	// ceiling, which refuses a resume under the same ceiling before it
-	// starts, so its remedy names the ceiling and the restart.
+	// starts, so its remedy names the ceiling, the hand drop of
+	// the slot, and the restart.
 	t.Run("a slot over the ceiling on retained WAL names the ceiling to raise", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetained,
 			Retained: 2 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
@@ -291,8 +292,11 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
 		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 		assert.Contains(t, v.Detail, "resumes from the row")
-		assert.Contains(t, v.Detail, "above the unconfirmed WAL (--slot-lag-ceiling SIZE)")
+		assert.Contains(t, v.Detail, "raise the slot-lag ceiling (--slot-lag-ceiling SIZE) with margin above the slot's unconfirmed WAL as pg_replication_slots reads it then")
+		assert.Contains(t, v.Detail, "the resume counts that ceiling against --free-disk beside the shadow")
+		assert.Contains(t, v.Detail, "drop the slot by hand (pg_drop_replication_slot), which keeps the shadow and the checkpoint row")
 		assert.Contains(t, v.Detail, "(--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot")
+		assert.Contains(t, v.Detail, "checked against --free-disk as a fresh run")
 	})
 
 	// A resume refused for the slot's backlog is a refused verdict, not a
@@ -304,7 +308,8 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
 		assert.Equal(t, verdict.Cause(schemachange.CauseResumeSlotBacklog), v.Cause)
-		assert.Contains(t, v.Detail, "above the unconfirmed WAL (--slot-lag-ceiling SIZE)")
+		assert.Contains(t, v.Detail, "raise the slot-lag ceiling (--slot-lag-ceiling SIZE) with margin above the slot's unconfirmed WAL")
+		assert.Contains(t, v.Detail, "drop the slot by hand (pg_drop_replication_slot)")
 		assert.Contains(t, v.Detail, "(--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot")
 	})
 

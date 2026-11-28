@@ -479,9 +479,11 @@ func runAbandoned(err error) bool {
 // slot-lag ceiling stopped because its slot retained too much WAL also
 // names the ceiling to raise, since a resume under the same ceiling meets
 // the same write rate; one it stopped because the stream fell behind names
-// the ceiling to raise and the restart, since the slot keeps the
-// unconfirmed WAL over the ceiling and a resume under the same ceiling is
-// refused before it starts. In each case the detail
+// the ceiling to raise, the hand drop of the slot, and the restart, since
+// the slot keeps the unconfirmed WAL over the ceiling and a resume under
+// the same ceiling is refused before it starts; the error
+// text already gives that account, so this detail carries only the flags
+// and the slot to drop. In each case the detail
 // names the hold the run keeps or kept on the source, since that is what
 // the operator is paying for in the meantime: the write fence of a run that
 // blocked writes, or the replication slot of a live run, which pins WAL on
@@ -519,7 +521,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); " + raisedCeilingOnDisk
 	}
 	if ok && lag.Cause == decode.SlotLagStreamBehind {
-		return resume + "; the WAL the stream had not confirmed, more than the ceiling, stays in the slot, so a resume under the same ceiling is refused before it starts (resume-slot-backlog): " +
+		return resume + "; the WAL the stream had not confirmed, more than the ceiling, stays in the slot, so a resume under the same ceiling is refused before it starts (resume-slot-backlog); " +
 			slotBacklogRemedy
 	}
 	return resume
@@ -533,9 +535,11 @@ const raisedCeilingOnDisk = "the resume counts that ceiling against --free-disk 
 // WAL than its ceiling needs to go on: the stream-behind stop that leaves
 // such a slot and the resume-slot-backlog refusal that meets one both name
 // it.
-const slotBacklogRemedy = "once the write rate has dropped, resume with a slot-lag ceiling above the unconfirmed WAL (--slot-lag-ceiling SIZE); " +
-	raisedCeilingOnDisk + "; or start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " +
-	"drops the replication slot, deletes the checkpoint row, and runs the change from the start"
+const slotBacklogRemedy = "to resume, raise the slot-lag ceiling (--slot-lag-ceiling SIZE) with margin above the slot's unconfirmed WAL as pg_replication_slots reads it then, " +
+	"since the stopped slot keeps adding to it; " + raisedCeilingOnDisk +
+	"; or drop the slot by hand (pg_drop_replication_slot), which keeps the shadow and the checkpoint row, so the next run reconciles with a fresh slot instead of copying everything again" +
+	"; or start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot" +
+	", deletes the checkpoint row, and runs the change from the start, checked against --free-disk as a fresh run"
 
 // copySwapFailureCode names the executor outcome code for an error out of
 // the Runner. The Runner's errors are not the executor's, so the

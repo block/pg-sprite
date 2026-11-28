@@ -107,17 +107,33 @@ func (f shadowFixture) slowCommit(t *testing.T, hold time.Duration) schemachange
 	}
 }
 
-// waitForCommitToFinish waits until no backend is still running a COMMIT.
+// waitForCommitToFinish waits until no backend is still committing a
+// transaction on the fixture's tables.
 func (f shadowFixture) waitForCommitToFinish(t *testing.T) {
 	t.Helper()
 	const commitDeadline = 10 * time.Second
-	require.Eventually(t, func() bool {
-		var running int
-		require.NoError(t, f.pool.QueryRow(t.Context(), `
-			SELECT count(*) FROM pg_stat_activity
-			WHERE state = 'active' AND query ILIKE 'commit%' AND pid <> pg_backend_pid()`).Scan(&running))
-		return running == 0
-	}, commitDeadline, 50*time.Millisecond)
+	require.Eventually(t, func() bool { return f.committing(t) == 0 }, commitDeadline, 50*time.Millisecond)
+}
+
+// committing counts the backends running a COMMIT while they hold a lock on
+// a relation in the fixture's schema. COMMIT's text names no table, so the
+// locks it still holds are what tie it to this test: another test's COMMIT
+// on a shared server holds none here.
+func (f shadowFixture) committing(t *testing.T) int {
+	t.Helper()
+	var running int
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT count(*) FROM pg_catalog.pg_stat_activity a
+		WHERE a.state = 'active' AND a.query ILIKE 'commit%'
+		  AND a.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid()
+		  AND EXISTS (
+			SELECT 1 FROM pg_catalog.pg_locks l
+			JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) l.relation
+			JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+			WHERE l.pid OPERATOR(pg_catalog.=) a.pid AND l.granted
+			  AND l.database OPERATOR(pg_catalog.=) (SELECT oid FROM pg_catalog.pg_database WHERE datname OPERATOR(pg_catalog.=) pg_catalog.current_database())
+			  AND n.nspname OPERATOR(pg_catalog.=) $1)`, f.schema).Scan(&running))
+	return running
 }
 
 // The swap's answer must match what the server did with the COMMIT, even

@@ -220,7 +220,8 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 		"slot pgsprite_0123abcd has 1.2 GiB of WAL its stream has not confirmed, over the 1 GiB ceiling (1288490188 > 1073741824 bytes); "+
 			"the stream has fallen behind the source's writes, and the slot keeps that WAL unconfirmed after the stop, "+
 			"so a resume under the same SlotLagCeiling is refused before it starts: "+
-			"once the write rate has dropped, resume with a SlotLagCeiling above that much WAL and room on the volume for it, "+
+			"once the write rate has dropped, resume with a SlotLagCeiling with margin above the WAL the slot holds unconfirmed by then, "+
+			"which grows past this figure while the run is stopped, and room on the volume for it, "+
 			"or start the schema change over, which drops the slot and the WAL it holds",
 		behind.Error())
 
@@ -257,7 +258,7 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 	assert.Equal(t, `slot pgsprite_0123abcd is over the 1000 B ceiling (cause "future-cause"): retains 1.5 KiB, 512 B unconfirmed`+
 		"; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (6 in a row) and its batch was waiting out the backoff before the next retry, "+
 		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
-		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		"the rolled-back flushes left the shadow unchanged, and that churn must ease as well, beside the remedy for the measure, before a resume gets through",
 		backingOff.Error())
 
 	retrying := &decode.SlotLagExceededError{Slot: lagTestSlot, Cause: "future-cause",
@@ -266,7 +267,7 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 	assert.Equal(t, `slot pgsprite_0123abcd is over the 1000 B ceiling (cause "future-cause"): retains 1.5 KiB, 512 B unconfirmed`+
 		"; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (1 in a row), "+
 		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
-		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		"the rolled-back flushes left the shadow unchanged, and that churn must ease as well, beside the remedy for the measure, before a resume gets through",
 		retrying.Error())
 }
 
@@ -281,11 +282,12 @@ func TestStreamBehindStopNamesTheDeadlocksInProgress(t *testing.T) {
 	assert.Equal(t, "slot pgsprite_0123abcd has 1.2 KiB of WAL its stream has not confirmed, over the 1000 B ceiling (1200 > 1000 bytes); "+
 		"the stream has fallen behind the source's writes, and the slot keeps that WAL unconfirmed after the stop, "+
 		"so a resume under the same SlotLagCeiling is refused before it starts: "+
-		"once the write rate has dropped, resume with a SlotLagCeiling above that much WAL and room on the volume for it, "+
+		"once the write rate has dropped, resume with a SlotLagCeiling with margin above the WAL the slot holds unconfirmed by then, "+
+		"which grows past this figure while the run is stopped, and room on the volume for it, "+
 		"or start the schema change over, which drops the slot and the WAL it holds"+
 		"; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (6 in a row) and its batch was waiting out the backoff before the next retry, "+
 		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
-		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		"the rolled-back flushes left the shadow unchanged, and that churn must ease as well, beside the remedy for the measure, before a resume gets through",
 		behind.Error())
 }
 

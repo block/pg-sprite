@@ -182,7 +182,7 @@ func (d CatchupDeadlocks) text() string {
 	}
 	return fmt.Sprintf("; meanwhile the server had rolled the catch-up's flush back as a deadlock victim (%d in a row)%s, "+
 		"because the copy and the catch-up were writing the same unique values into the shadow at once: "+
-		"the rolled-back flushes left the shadow unchanged, and the run can resume once that churn eases",
+		"the rolled-back flushes left the shadow unchanged, and that churn must ease as well, beside the remedy for the measure, before a resume gets through",
 		d.Consecutive, waiting)
 }
 
@@ -197,7 +197,8 @@ func (e *SlotLagExceededError) ceilingText() string {
 		return fmt.Sprintf("slot %s has %s of WAL its stream has not confirmed, over the %s ceiling (%d > %d bytes); "+
 			"the stream has fallen behind the source's writes, and the slot keeps that WAL unconfirmed after the stop, "+
 			"so a resume under the same SlotLagCeiling is refused before it starts: "+
-			"once the write rate has dropped, resume with a SlotLagCeiling above that much WAL and room on the volume for it, "+
+			"once the write rate has dropped, resume with a SlotLagCeiling with margin above the WAL the slot holds unconfirmed by then, "+
+			"which grows past this figure while the run is stopped, and room on the volume for it, "+
 			"or start the schema change over, which drops the slot and the WAL it holds",
 			e.Slot, humanBytes(e.Unconfirmed), humanBytes(e.Ceiling), e.Unconfirmed, e.Ceiling)
 	case SlotLagWALRetained:

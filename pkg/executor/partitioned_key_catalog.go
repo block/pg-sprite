@@ -197,6 +197,43 @@ func readLeafKeyFacts(ctx context.Context, q querier, node partitionNode, spec p
 	return facts, err
 }
 
+// withoutTaken leaves out of the facts every index that taken, keyed by index
+// OID, gives to something other than the requested key, so the decision
+// neither adopts nor reports one: a reusable index is dropped, and so is a
+// constraint whose index is taken. A taken primary key still refuses a
+// requested primary key, since a table has one, and a taken index under the
+// derived name holds the name the build needs.
+func (facts leafKeyFacts) withoutTaken(spec partitionedKeySpec, node partitionNode, taken map[uint32]string) (leafKeyFacts, error) {
+	if len(taken) == 0 {
+		return facts, nil
+	}
+	if owner, ok := taken[facts.occupant.oid]; facts.occupied && ok {
+		return leafKeyFacts{}, fmt.Errorf("%w: %s on %s is the index %s takes",
+			ErrPartitionedKeyNameTaken, qualifiedName(facts.occupant.schema, facts.occupant.name), node.qualified(), owner)
+	}
+	var constraints []leafConstraint
+	for _, c := range facts.constraints {
+		owner, ok := taken[c.index.oid]
+		if !ok {
+			constraints = append(constraints, c)
+			continue
+		}
+		if spec.kind == partitionedPrimaryKey && c.contype == partitionedPrimaryKey.contype() {
+			return leafKeyFacts{}, fmt.Errorf("%w: primary key %s on %s backs the index %s takes, and a table has one primary key",
+				ErrPartitionedKeyConflict, c.name, node.qualified(), owner)
+		}
+	}
+	facts.constraints = constraints
+	var reusable []relationFacts
+	for _, r := range facts.reusable {
+		if _, ok := taken[r.oid]; !ok {
+			reusable = append(reusable, r)
+		}
+	}
+	facts.reusable = reusable
+	return facts, nil
+}
+
 // leafKeyState is where the resume decision found the leaf.
 type leafKeyState int
 

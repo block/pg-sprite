@@ -173,7 +173,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation, an added column whose type rewrites); a type rewrite of an existing column (`ALTER COLUMN TYPE`) executes through the route instead. |
 | `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; a desired-state plan that drops anything is refused whole until the run pins the reviewed plan with `--expect-fingerprint` and names its table with `--allow-destructive` ([Apply a reviewed drop](cli.md#apply-a-reviewed-drop), [execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
-| `declarative-foreign-key` | The desired-state plan drops a foreign key. Desired-state execution does not run foreign-key drops yet; the plan still shows the statement, and `migrate --alter` runs it. |
+| `declarative-foreign-key` | The desired-state plan drops a foreign key into another schema, which a desired file cannot declare. The plan still shows the statement, and `migrate --alter` runs it. |
 | `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the run did not open the route (the route is in preview; cause `copy-and-swap-not-enabled`, class `capability-boundary`, raised before the route's preflight runs or anything is written — pass `--copy-and-swap`), a copy-and-swap run stopped on the table keeps any other statement from running (cause `copy-and-swap-run-stopped`, class `environmental` — run the stopped statement again to finish it), the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the gate and the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. A table refused with `copy-and-swap-pk-unsupported` because it has no primary key also carries `"guidance": "add-integer-primary-key"`, and its `detail` links the [steps to add one online](primary-keys.md#add-a-primary-key-online). |
 | `create-collision` | The greenfield create plan's table name or a claimed index, constraint-index, or sequence name is occupied. Nothing runs; re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal. Catalog absence checks handle existing occupants. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff. |
 
@@ -200,7 +200,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -242,7 +242,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -435,7 +435,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -477,7 +477,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -572,7 +572,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -611,7 +611,7 @@ when it starts.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -707,7 +707,7 @@ cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx' --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -772,7 +772,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -817,7 +817,7 @@ object it removes, and the fingerprint covers it.
 ```console
 $ pg-sprite migrate --desired orders.sql --dry-run --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "diff",
   "schema": "public",
   "table": "orders",
@@ -995,7 +995,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 28,
+  "format_version": 30,
   "source": "diff",
   "schema": "public",
   "table": "users",

@@ -195,7 +195,8 @@ not more safely.
 
 The run stops with a failed verdict (exit 1) whose detail says which of three causes ended it;
 the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
-slot and the saved progress stay, so running the same command again resumes the run:
+slot and the saved progress stay for the next run to resume from, though a resume under the
+same ceiling can stop again, depending on the cause:
 
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
   pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
