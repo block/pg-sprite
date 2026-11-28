@@ -14,6 +14,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -62,6 +63,57 @@ CREATE TABLE orders (
 		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
 		assert.Empty(t, res.Verdicts)
 		assert.Equal(t, 1, liveForeignKeys(t, schema))
+	})
+
+	t.Run("refuses a changed foreign key as destructive and keeps the live one", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.users (
+				id bigint PRIMARY KEY
+			);
+			CREATE TABLE %[1]s.orders (
+				id bigint PRIMARY KEY,
+				user_id bigint NOT NULL REFERENCES %[1]s.users (id)
+			)`, schema))
+		require.NoError(t, err)
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, ordersCascade)}, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.Empty(t, res.Verdicts)
+		assert.Equal(t, 1, liveForeignKeys(t, schema))
+		var onDelete string
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT con.confdeltype::text
+			FROM pg_constraint con
+			JOIN pg_class rel ON rel.oid = con.conrelid
+			JOIN pg_namespace n ON n.oid = rel.relnamespace
+			WHERE con.contype = 'f' AND n.nspname = $1 AND rel.relname = 'orders'`, schema).Scan(&onDelete))
+		assert.Equal(t, "a", onDelete, "the live key keeps its NO ACTION delete rule")
+
+		// The reviewed plan, pinned and with the table acknowledged as
+		// destructive, still drops the live key, which the foreign-key policy
+		// refuses by kind.
+		report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t, ordersCascade)})
+		require.NoError(t, err)
+		res, err = migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema:              schema,
+			Desired:             parseDesired(t, ordersCascade),
+			ExpectedFingerprint: report.Fingerprint,
+			AllowDestructive:    schema + ".orders",
+		}, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonDeclarativeForeignKey, res.Reason, res.Detail)
+		assert.Equal(t, 1, liveForeignKeys(t, schema))
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT con.confdeltype::text
+			FROM pg_constraint con
+			JOIN pg_class rel ON rel.oid = con.conrelid
+			JOIN pg_namespace n ON n.oid = rel.relnamespace
+			WHERE con.contype = 'f' AND n.nspname = $1 AND rel.relname = 'orders'`, schema).Scan(&onDelete))
+		assert.Equal(t, "a", onDelete, "the acknowledged run leaves the live key's delete rule as it was")
 	})
 
 	t.Run("converges nothing when the declared foreign key matches", func(t *testing.T) {
@@ -310,3 +362,11 @@ CREATE TABLE employees (
 		WHERE conrelid = ($1 || '.employees')::regclass AND conname = 'employees_manager_id_fkey'`, schema).Scan(&validated))
 	assert.True(t, validated)
 }
+
+// ordersCascade declares orders with its user key changed to ON DELETE
+// CASCADE.
+const ordersCascade = `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE
+);`

@@ -317,7 +317,8 @@ refusal. The dry run plans it with the execution `partitioned-key-build` and
 reports the shape, partition key, and sub-partitioned tree refusals; the
 parent's checks are read only under the build's lock, so for those the dry run
 reports the build and the apply refuses. Desired-state plans (`diff`,
-`migrate --desired`) do not route it yet and refuse the statement. A plain
+`migrate --desired`) route the key a file adds too
+([below](#routing-from-a-desired-file)). A plain
 `ALTER TABLE parent ADD CONSTRAINT` builds every partition's index under
 `ACCESS EXCLUSIVE`, but it adopts a partition's unattached constraint of the
 same definition instead of building one. The flow relies on that:
@@ -379,6 +380,52 @@ same definition instead of building one. The flow relies on that:
 The report (`PartitionedKeyReport`) lists each leaf's constraint, index, and
 action (`found`, `constrained`, or `built`, and whether it recovered debris), the
 parent constraint's OID, the passes, and the duration.
+
+### Routing from a desired file
+
+A desired file that declares a primary key or unique constraint the live
+partitioned table lacks plans an `add-constraint` statement, schema-qualified
+and named: the diff fills in the server's default name
+(`<table>_<columns>_key`, `<table>_pkey`) for an unnamed constraint. The planner
+gives it a plain table's steps, a concurrent unique build and
+`ADD CONSTRAINT ... USING INDEX`, which cannot run on a partitioned parent.
+`diffplan.Plan` calls `plan.RouteDesiredPartitionedKeyBuilds` on a partitioned
+target before `plan.RoutePartitionedParent`, and it replaces those steps with
+the statement itself and the execution `partitioned-key-build`, the same
+contract `migrate --alter` plans. `RoutePartitionedParent` leaves the routed
+statement alone.
+
+A desired-state plan runs no admission of its own between `diff` and the run,
+so the router routes only a statement `executor.AdmitPartitionedKeyShape`
+accepts: a plan that shows the build is one the run executes as the build. A
+key with a clause the build cannot carry (`INCLUDE`, `NULLS NOT DISTINCT`,
+`DEFERRABLE`, `WITH (...)`, `USING INDEX TABLESPACE`) keeps the planner's steps
+and meets the partitioned-parent refusal. The imperative router routes every
+key, because its dry run then runs the build's admission and refuses with the
+build's own reason.
+
+`migrate --desired` (`migrate.RunDesired`) runs each statement through
+`migrate.Run`, which routes the key to the build on the statement, with the
+same verdicts as `migrate --alter`. Its plan admission checks
+`Options.Connection` before the first statement, as it does for the
+partitioned index build. `diff --sql` prints the statement commented out,
+since run as written it builds every partition's index under
+`ACCESS EXCLUSIVE`.
+
+The diff never plans `ADD CONSTRAINT ... USING INDEX` on a partitioned parent,
+which PostgreSQL refuses. A live index on the parent under the key's name is
+dropped and the key built fresh: the build refuses a parent that already holds
+a relation under the name, and the drop is the plain, blocking
+`blocking-index-drop`, which runs only under `--accept-blocking`. A partition's
+own valid unique index of the key's definition, attached to nothing, is outside
+the desired file, which models only the parent, and the build gives it the
+constraint instead of building another (`constrained`).
+
+A primary key over a column the live table allows to be `NULL` is planned after
+the `SET NOT NULL` the file's key implies, so it reaches the build with the
+column already `NOT NULL`. Duplicate rows fail a partition's unique build with
+`data-fault`; the error names the partition, and once the rows are fixed the
+next run resumes from the partitions already constrained.
 
 ## Out of scope
 

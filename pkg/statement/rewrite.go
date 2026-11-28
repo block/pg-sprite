@@ -24,6 +24,21 @@ var (
 	ErrNotValidNotApplicable = errors.New("statement cannot take NOT VALID")
 )
 
+// RenameIndex returns the CREATE INDEX statement sql with its index named
+// name. Nothing else about the statement changes.
+func RenameIndex(sql, name string) (string, error) {
+	node, err := parseSingle(sql)
+	if err != nil {
+		return "", err
+	}
+	ix := node.GetIndexStmt()
+	if ix == nil {
+		return "", fmt.Errorf("%w: %q", ErrNotCreateIndex, sql)
+	}
+	ix.Idxname = name
+	return deparseOne(node)
+}
+
 // Concurrently returns sql rewritten to its CONCURRENTLY form: CREATE
 // INDEX, DROP INDEX, REINDEX, or ALTER TABLE ... DETACH PARTITION. The
 // rewrite flips the grammar's concurrency flag and deparses — nothing else

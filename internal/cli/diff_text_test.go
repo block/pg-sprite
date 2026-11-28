@@ -264,6 +264,41 @@ func TestPlanTextCommentsOutAPartitionedIndexBuild(t *testing.T) {
 	}
 }
 
+// diff --sql never prints a partitioned key build as runnable SQL either.
+// Run by hand, the ADD PRIMARY KEY builds every partition's index under
+// ACCESS EXCLUSIVE on the whole tree; the engine gives each partition the
+// key online and then adds the parent's constraint, which adopts them.
+func TestPlanTextCommentsOutAPartitionedKeyBuild(t *testing.T) {
+	const sql = `ALTER TABLE app.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "app", "events", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	report.Statements = []plan.Statement{{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionPartitionedKeyBuild,
+		Decisions: []planner.Decision{{
+			Operation: "ADD CONSTRAINT events_pkey",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonSaferIdiom,
+		}},
+	}}
+
+	var out strings.Builder
+	require.NoError(t, writePlanText(&out, report))
+	text := out.String()
+	assert.Contains(t, text, "-- only the engine runs this build, one partition at a time: use pg-sprite migrate --desired or pg-sprite migrate --alter\n"+
+		"-- "+sql+";\n")
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		assert.True(t, line == "" || strings.HasPrefix(line, "--"), "no build is runnable as written: %q", line)
+	}
+}
+
 // diff --sql never prints a partitioned foreign key build as runnable SQL:
 // run by hand, the ADD CONSTRAINT validates every partition while it holds
 // SHARE ROW EXCLUSIVE on the whole tree. It is commented out and points the

@@ -131,7 +131,7 @@ matrix is [capabilities.md](docs/capabilities.md).
 - **Copy-and-swap is in preview** and carries only `ALTER COLUMN TYPE`; other rewrites refuse ([running it](docs/copy-and-swap.md)).
 - **No connection poolers** on pg-sprite's own connection, except Supabase's session endpoint ([poolers](docs/limitations.md#connections-and-poolers)).
 - **Foreign keys** a desired file adds run online (`NOT VALID`, then `VALIDATE`, or partition by partition on a partitioned table before PostgreSQL 18, except the shapes [the build refuses](docs/partitioned-foreign-key-design.md#routing-from-a-desired-file), which refuse the whole plan before anything runs); dropping one runs only through `migrate --alter`.
-- **Renames are refused** unless `--force` names the table, since they break running application instances.
+- **Renames are refused** unless `--force` names the table, since they break running application instances. An index a desired file declares under a new name is the exception: it is renamed in place and keeps serving.
 - **Destructive changes** need `--allow-destructive SCHEMA.TABLE`, and desired plans also need `--expect-fingerprint`.
 - **Index maintenance** (`DROP INDEX`, `REINDEX`) runs from `migrate --alter` only as an accepted blocking change ([passthrough](docs/lock-budgeted-passthrough.md)); a desired file drops an index concurrently under `--allow-destructive` and `--expect-fingerprint`, and a partitioned table's index only as an accepted blocking drop.
 - **Non-table objects** such as views, functions, and triggers are outside the declarative model, apart from adding enum labels.

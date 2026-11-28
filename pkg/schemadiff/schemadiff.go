@@ -212,6 +212,11 @@ type Constraint struct {
 	// privilege on them for a key the plan adds. Nil for every other
 	// constraint.
 	References *ForeignKeyReference `json:"-"`
+	// ReferencedBy are the foreign keys that reference a primary key or
+	// unique constraint's index, in a stable order. A key a foreign key
+	// depends on cannot be dropped, so a plan that replaces it is refused.
+	// A live fact, read only from a live table.
+	ReferencedBy []IncomingForeignKey `json:"-"`
 	// IndexInvalid reports a primary key, unique, or exclusion constraint
 	// whose index the server has not validated (pg_index.indisvalid is
 	// false). On a partitioned parent that is a key added with ALTER TABLE
@@ -253,6 +258,11 @@ type Index struct {
 	// prints as Def or one of those; see settleDesired. Only a desired
 	// model carries them.
 	DefReplays []string `json:"-"`
+	// ReferencedBy are the foreign keys whose referenced index this is,
+	// including one on the table itself. PostgreSQL records each key's
+	// dependency on the index, so the index cannot be dropped while one
+	// remains. Only a live model carries them.
+	ReferencedBy []IncomingForeignKey `json:"-"`
 }
 
 // ReplicaIdentityKeys is what the replica identity indexes of a table are

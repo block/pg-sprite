@@ -80,11 +80,11 @@ func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report
 // previewDesired is a desired-state dry run's admission and preview. A plan
 // the run's plan admission accepts, under the dry run's pin and
 // acknowledgement, next meets the copy-and-swap route's refusal of a table
-// in a partition or inheritance tree, which the run reads at admission
-// before anything executes, and then the partitioned foreign key build's
-// checks of the referenced table and the partition tree, which the run
-// reads there too; the dry run prints that refusal or stop as the run's
-// result. Every other plan is previewed by writeDesiredPreview, which
+// in a partition or inheritance tree, and then the partitioned key build's
+// catalog refusals and the partitioned foreign key build's checks of the
+// referenced table and the partition tree, which the run reads at admission
+// before anything executes; the dry run prints such a refusal or stop as the
+// run's result. Every other plan is previewed by writeDesiredPreview, which
 // reports plan admission's refusals as the run would.
 func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out io.Writer, report plan.Report) error {
 	if err := migrate.CheckDesiredAllowDestructiveTable(c.AllowDestructive, report); err != nil {
@@ -92,14 +92,19 @@ func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out
 	}
 	req := migrate.DesiredRequest{ExpectedFingerprint: c.ExpectFingerprint, AllowDestructive: c.AllowDestructive}
 	if _, admitted := migrate.AdmitPlan(req, report); admitted && len(report.Statements) > 0 {
-		refusal, admitted, err := migrate.AdmitPlanCopySwapPartitioning(ctx, pool, report)
-		if err != nil {
-			return err
+		for _, admit := range []func(context.Context, *pgxpool.Pool, plan.Report) (migrate.DesiredResult, bool, error){
+			migrate.AdmitPlanCopySwapPartitioning,
+			migrate.AdmitPlanPartitionedKeys,
+		} {
+			refusal, admitted, err := admit(ctx, pool, report)
+			if err != nil {
+				return err
+			}
+			if !admitted {
+				return c.finishDesired(out, refusal, nil)
+			}
 		}
-		if !admitted {
-			return c.finishDesired(out, refusal, nil)
-		}
-		refusal, admitted, err = migrate.AdmitPlanPartitionedForeignKeys(ctx, pool, report)
+		refusal, admitted, err := migrate.AdmitPlanPartitionedForeignKeys(ctx, pool, report)
 		if !admitted {
 			return c.finishDesired(out, refusal, err)
 		}

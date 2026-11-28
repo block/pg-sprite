@@ -182,11 +182,15 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 
 // routePartitionedTarget applies the partitioned-parent routing to a plan
 // whose target table is partitioned, on a server of major version
-// serverMajor. The order is the contract: a foreign key the file adds is
-// routed to the partitioned foreign key build first, because before
-// PostgreSQL 18 RoutePartitionedParent refuses the planner's NOT VALID step
-// on a partitioned table and leaves a routed statement alone.
+// serverMajor. The order is the contract: a primary key or unique constraint
+// the file adds is routed to the partitioned key build, and a foreign key to
+// the partitioned foreign key build, before RoutePartitionedParent runs. That
+// refuses the planner's USING INDEX steps, and before PostgreSQL 18 its
+// NOT VALID step, on a partitioned table, and leaves a routed statement alone.
 func routePartitionedTarget(report *plan.Report, serverMajor int) error {
+	if err := plan.RouteDesiredPartitionedKeyBuilds(report); err != nil {
+		return err
+	}
 	if err := plan.RouteDesiredPartitionedForeignKeyBuilds(report, serverMajor); err != nil {
 		return err
 	}
@@ -389,6 +393,9 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 			}
 		}
 		ps.Drops = ch.Drops
+		ps.ReplacedBy = ch.ReplacedBy
+		ps.Replacement = ch.Replacement
+		ps.Renames = ch.Renames
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil

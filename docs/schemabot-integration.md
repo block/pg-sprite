@@ -743,8 +743,8 @@ so "what persists" below is also what the rerun builds on. Route each outcome by
 its own key constraint (a concurrent unique index build, then `ADD CONSTRAINT ... USING INDEX`),
 then adds the parent's constraint, which adopts them, in one brief transaction. `migrate --alter`
 (`migrate.Run`) routes a lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table to
-it ([below](#outcomes-of-a-partitioned-key-build-1)); desired-state plans do not yet, and a
-library caller may call it directly. It stops at the first error and keeps every partition's
+it ([below](#outcomes-of-a-partitioned-key-build-1)), `migrate.RunDesired` runs a key a desired
+file adds the same way, and a library caller may call it directly. It stops at the first error and keeps every partition's
 finished key constraint, and **running the same statement again resumes from them**. The report
 it returns with an error says what the stop left: `leaves` lists the partitions that got their
 constraint, and `changed` is true once a partition's concurrent index build began, which can
@@ -816,8 +816,8 @@ step rolls back, every partition's foreign key stays, and the rerun adopts them.
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
 as this build; the plan statement carries `execution: partitioned-index-build`. The same wiring
-serves the key build, which `migrate.Run` alone routes a lone `ADD PRIMARY KEY` or `ADD UNIQUE`
-on a partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
+serves the key build, which both route a lone `ADD PRIMARY KEY` or `ADD UNIQUE` on a
+partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
 a foreign key on a partitioned table to before PostgreSQL 18 (`partitioned-foreign-key-build`).
 Each build takes
 the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
@@ -856,8 +856,23 @@ index is built concurrently and given the constraint, then the parent's `ADD CON
 them in one brief transaction. The `migrate --dry-run` plan statement carries
 `execution: partitioned-key-build` (plan `format_version` 27). It needs `migrate.Options.Connection`
 for its table lock session exactly as the partitioned index build does, with the same two wiring
-errors. `migrate.RunDesired` does not route it yet: a desired-state plan refuses the statement
-with `unsupported-partitioned-parent`, cause `parent-concurrent-index-build`. A forced run meets
+errors. A key a desired file adds plans the same way: the `diff` plan statement carries
+`execution: partitioned-key-build`, schema-qualified and named, under the same `format_version`
+27, and `migrate.RunDesired` runs it through `migrate.Run` with the verdicts below, checking
+`Options.Connection` for the whole plan before its first statement. A desired key whose shape
+the build refuses, such as a `DEFERRABLE` one, is not routed: its plan statement stays refused
+with `unsupported-partitioned-parent`. A primary key over a column the table allows to be `NULL`
+is planned after the `SET NOT NULL` the file implies, so `partitioned-key-nullable-column` is
+not reached from a desired file unless the column loses `NOT NULL` between the two statements.
+`migrate.RunDesired` also runs the build's catalog admission for every key the plan routes
+before its first statement (`migrate.AdmitPlanPartitionedKeys`, which `migrate --desired
+--dry-run` calls too): a key that lacks a partition key column, or a tree with a sub-partitioned
+partition, refuses the whole plan with the verdict the table below gives it, so a statement
+planned ahead of the key never commits first. A host that assembles its own report routes a
+desired plan's keys with `plan.RouteDesiredPartitionedKeyBuilds`, which routes only shapes the
+build admits; `plan.RoutePartitionedKeyBuilds` is the imperative dry run's router, which routes
+every key and relies on the build's admission afterward.
+A forced run meets
 cause `parent-blocking-index-build`, and `ADD CONSTRAINT ... USING INDEX` meets
 `parent-index-adoption`, as before.
 
@@ -1162,10 +1177,16 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `dropped-index-drift` when it changed after planning. An index drop whose name was taken by a
   different index between its check and the drop reports `dropped-index-replaced` (permanent):
   unlike the drift refusals, an unreviewed index was dropped, and the error names it so the
-  operator can check and recreate it. `ExecuteNativeWithProgress` carries no
+  operator can check and recreate it. The drop of a changed index's old definition carries
+  `Replacement`, the index the plan built under the temporary name and its definition; an adapter
+  passes it to `ExecuteReplacedIndexDropConcurrently`, which also refuses, dropping nothing, with
+  `replacement-index-drift` when that index is gone, invalid, or no longer has that definition.
+  A drop that carries `ReplacedBy` never runs without its `Replacement`: the migrate path refuses
+  one as an invariant violation, and an adapter that stores plans persists `Replacement` itself.
+  `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
-  rename under ST-7, since the statement names no table. `Adopts`, `Validates`, and
-  `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
+  `Replacement`, and `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
   fingerprint, so a stored plan carries it.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
