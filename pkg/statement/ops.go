@@ -221,6 +221,10 @@ type Op struct {
 	ForeignKey bool
 	// Default is the DEFAULT shape for OpAddColumn.
 	Default DefaultKind
+	// DeclaresNotNull is true for an OpAddColumn that spells NOT NULL on
+	// the column itself. A column can be NOT NULL without it, through an
+	// inline PRIMARY KEY or a domain type that declares NOT NULL.
+	DeclaresNotNull bool
 	// NewType is the target type for OpAlterColumnType and the column type
 	// for OpAddColumn, as the bare grammar type name (e.g. "varchar",
 	// "numeric") without the pg_catalog qualification.
@@ -557,8 +561,10 @@ func addColumnOp(def *pganalyze.ColumnDef) Op {
 			op.Default = DefaultExpression
 		case pganalyze.ConstrType_CONSTR_GENERATED:
 			op.GeneratedStored = true
+		case pganalyze.ConstrType_CONSTR_NOTNULL:
+			// No scan and no index build of its own.
+			op.DeclaresNotNull = true
 		case pganalyze.ConstrType_CONSTR_NULL,
-			pganalyze.ConstrType_CONSTR_NOTNULL,
 			pganalyze.ConstrType_CONSTR_ATTR_DEFERRABLE,
 			pganalyze.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE,
 			pganalyze.ConstrType_CONSTR_ATTR_DEFERRED,
