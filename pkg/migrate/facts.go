@@ -103,6 +103,7 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 		classifier.DependentViews, classifier.DropDependentViews, classifier.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
 		classifier.DependentPolicies, classifier.DropDependentPolicies, classifier.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 		classifier.DependentTriggers = planner.ColumnDependents(deps.Triggers)
+		classifier.DependentPublications = planner.ColumnDependents(deps.Publications)
 		classifier.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
 		classifier.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
 		classifier.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)

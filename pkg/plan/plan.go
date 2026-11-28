@@ -74,8 +74,9 @@ import (
 // Version 30 runs the drop-foreign-key kind instead of refusing it, and
 // narrows the declarative-foreign-key reason to the drop of a key a desired
 // file cannot declare, or changes under the same name where it cannot be
-// replaced in one statement.
-const FormatVersion = 30
+// replaced in one statement. Version 31 added the dependent-publication
+// planner reason and the dependent_publications decision field.
+const FormatVersion = 31
 
 // Source identifies which front door derived the plan.
 type Source string

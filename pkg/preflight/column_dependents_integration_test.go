@@ -592,3 +592,77 @@ func TestReadColumnDependentsNamesAClonedTriggerOnce(t *testing.T) {
 	_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN status TYPE varchar(64)", schema))
 	require.NoError(t, err, "with the named triggers gone the type change runs")
 }
+
+// ReadColumnDependents maps each column to the publications whose column
+// list or row filter for the table names it, each named once however many
+// tables of the tree it lists. A publication that publishes the table
+// whole records no dependency on a column and is not named. The server is
+// the oracle: it refuses to drop a named column, and drops it once the
+// publication stops naming it. Column lists and row filters exist from
+// PostgreSQL 15; before that no publication can name a column, and only
+// the whole-table publication is created.
+func TestReadColumnDependentsPublications(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	listed, filtered, whole := schema+"_listed", schema+"_filtered", schema+"_whole"
+	t.Cleanup(func() {
+		for _, name := range []string{listed, filtered, whole} {
+			if _, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP PUBLICATION IF EXISTS "+name); err != nil {
+				t.Logf("drop publication %s: %v", name, err)
+			}
+		}
+	})
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, email text, amt int, note text);
+		CREATE PUBLICATION %[2]s FOR TABLE %[1]s.orders`, schema, whole))
+	require.NoError(t, err)
+
+	var version int
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version))
+	const publicationFiltersSince = 150000
+	if version < publicationFiltersSince {
+		deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+		require.NoError(t, err)
+		assert.Empty(t, deps.Publications.Tree, "a whole-table publication names no column")
+		return
+	}
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.refunds (id bigint PRIMARY KEY, amt int);
+		CREATE PUBLICATION %[2]s FOR TABLE %[1]s.orders (id, email, amt), %[1]s.refunds (id, amt);
+		CREATE PUBLICATION %[3]s FOR TABLE %[1]s.orders WHERE (amt > 0)`, schema, listed, filtered))
+	require.NoError(t, err)
+
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	quoted := func(name string) string { return `"` + name + `"` }
+	named := map[string][]string{
+		"id":    {quoted(listed)},
+		"email": {quoted(listed)},
+		"amt":   {quoted(filtered), quoted(listed)},
+	}
+	assert.Equal(t, named, deps.Publications.Tree)
+	assert.Equal(t, named, deps.Publications.Drop)
+	assert.Equal(t, named, deps.Publications.Own)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN note", schema))
+	require.NoError(t, err, "a column no publication names drops")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN amt", schema))
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "a named column does not drop")
+	assert.Equal(t, "2BP01", pgErr.Code)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		ALTER PUBLICATION %[2]s SET TABLE %[1]s.orders (id, email), %[1]s.refunds (id, amt);
+		ALTER PUBLICATION %[3]s SET TABLE %[1]s.orders`, schema, listed, filtered))
+	require.NoError(t, err)
+	deps, err = preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	assert.NotContains(t, deps.Publications.Tree, "amt")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN amt", schema))
+	require.NoError(t, err, "with no publication naming it the column drops")
+}

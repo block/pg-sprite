@@ -372,6 +372,7 @@ against `sizeGuardApplies`):
 | `dependent-view` | n/a — refused at plan time |
 | `dependent-policy` | n/a — refused at plan time |
 | `dependent-trigger` | n/a — refused at plan time |
+| `dependent-publication` | n/a — refused at plan time |
 | `dependent-generated-column` | n/a — refused at plan time |
 | `partition-key` | n/a — refused at plan time |
 | `not-null-without-default` | n/a — refused at plan time |

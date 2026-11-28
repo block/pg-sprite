@@ -12,8 +12,8 @@ import (
 
 // ColumnDependents names, per column, the objects whose definitions read
 // it and that PostgreSQL will not let a type change or a drop of the
-// column outlive: views, row-level security policies, triggers, generated
-// columns, and partition keys.
+// column outlive: views, row-level security policies, triggers,
+// publications, generated columns, and partition keys.
 type ColumnDependents struct {
 	// Views are the views and materialized views that read the column,
 	// each rendered "schema"."view".
@@ -29,6 +29,12 @@ type ColumnDependents struct {
 	// form DROP TRIGGER takes. A trigger whose function reads the column
 	// records no dependency on it and does not block the change.
 	Triggers DependentObjects
+	// Publications are the publications whose column list or row filter
+	// for the table names the column, each rendered "publication", the
+	// form ALTER PUBLICATION takes. A publication that publishes the
+	// table without a column list or row filter records no dependency on
+	// the column and does not block the change.
+	Publications DependentObjects
 	// GeneratedColumns are the generated columns whose expression reads
 	// the column, each rendered "schema"."table"."column".
 	GeneratedColumns DependentObjects
@@ -60,7 +66,7 @@ type DependentObjects struct {
 }
 
 // ReadColumnDependents reads which views, materialized views, policies,
-// triggers, generated columns, and partition keys read each column of
+// triggers, publications, generated columns, and partition keys read each column of
 // schema.table, and the same-named column of every table below it. A
 // column only a table below has is left out: no change to the table
 // reaches it.
@@ -77,7 +83,7 @@ type DependentObjects struct {
 // from the dropped table loses it. Partitions never declare a column of
 // their own, so a drop reaches every partition. The dependency is the one
 // pg_depend records to the column: from the view's rewrite rule, the
-// policy, the trigger, or the generated column (from its expression on
+// policy, the trigger, the publication's entry for the table, or the generated column (from its expression on
 // PostgreSQL 15 and later, from the generated column itself before that),
 // and from the column to its own table for a partition key column. A
 // trigger a partition clones from a parent's trigger in the tree is named
@@ -95,6 +101,7 @@ func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table
 		Views:                 newDependentObjects(),
 		Policies:              newDependentObjects(),
 		Triggers:              newDependentObjects(),
+		Publications:          newDependentObjects(),
 		GeneratedColumns:      newDependentObjects(),
 		PartitionKeys:         newDependentObjects(),
 		GeneratedColumnCopies: newDependentObjects(),
@@ -115,6 +122,7 @@ func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table
 		dependentView:         deps.Views,
 		dependentPolicy:       deps.Policies,
 		dependentTrigger:      deps.Triggers,
+		dependentPublication:  deps.Publications,
 		dependentGenerated:    deps.GeneratedColumns,
 		dependentPartitionKey: deps.PartitionKeys,
 	}
@@ -195,7 +203,8 @@ type dependentColumn struct {
 
 // dependentName names one dependent of a kind: a view or a partitioned
 // table by relation alone, a policy or a trigger by member and the table
-// it is defined on, and a generated column by member and its table.
+// it is defined on, a publication by member alone, and a generated column
+// by member and its table.
 type dependentName struct{ kind, schema, relation, member string }
 
 // The kinds of dependent readDependentTree reports.
@@ -203,6 +212,7 @@ const (
 	dependentView         = "view"
 	dependentPolicy       = "policy"
 	dependentTrigger      = "trigger"
+	dependentPublication  = "publication"
 	dependentGenerated    = "generated"
 	dependentPartitionKey = "partition-key"
 )
@@ -277,6 +287,15 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 				JOIN tree parent ON parent.oid OPERATOR(pg_catalog.=) pt.tgrelid
 				WHERE pt.oid OPERATOR(pg_catalog.=) tg.tgparentid
 			  )
+			UNION
+			SELECT 'publication'::pg_catalog.text, '', '', pub.pubname
+			FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_publication_rel pr ON pr.oid OPERATOR(pg_catalog.=) d.objid
+			JOIN pg_catalog.pg_publication pub ON pub.oid OPERATOR(pg_catalog.=) pr.prpubid
+			WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
+			  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refobjid OPERATOR(pg_catalog.=) tree.oid
+			  AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
 			UNION
 			SELECT 'generated'::pg_catalog.text, n.nspname, c.relname, g.attname
 			FROM pg_catalog.pg_depend d
@@ -359,6 +378,10 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		case dependentView, dependentPartitionKey:
 		case dependentPolicy, dependentTrigger, dependentGenerated:
 			d.member = *member
+		case dependentPublication:
+			// A publication is a database object, not a table's: one that
+			// lists the column on two tables of the tree is named once.
+			d = dependentName{kind: *kind, member: *member}
 		default:
 			return nil, 0, fmt.Errorf("column %s of table %d has a dependent of unknown kind %q", column, oid, *kind)
 		}
@@ -423,7 +446,8 @@ func setDependents(into map[string][]string, column string, deps []dependentName
 // render quotes every identifier of the name: "schema"."view" for a view
 // and "schema"."table" for a partitioned table, "policy" ON
 // "schema"."table" for a policy and "trigger" ON "schema"."table" for a
-// trigger, the forms their DROP statements take, and
+// trigger, the forms their DROP statements take, "publication" for a
+// publication, the form ALTER PUBLICATION takes, and
 // "schema"."table"."column" for a generated column.
 func (d dependentName) render() string {
 	switch d.kind {
@@ -431,6 +455,8 @@ func (d dependentName) render() string {
 		return pgx.Identifier{d.member}.Sanitize() + " ON " + pgx.Identifier{d.schema, d.relation}.Sanitize()
 	case dependentGenerated:
 		return pgx.Identifier{d.schema, d.relation, d.member}.Sanitize()
+	case dependentPublication:
+		return pgx.Identifier{d.member}.Sanitize()
 	default:
 		return pgx.Identifier{d.schema, d.relation}.Sanitize()
 	}
