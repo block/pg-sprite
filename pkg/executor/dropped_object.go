@@ -142,11 +142,6 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 		return fmt.Errorf("%w: dropping %s %s of %s would also remove %s, which the plan did not review; re-plan",
 			ErrDroppedObjectDrift, d.Kind, d.Name, target, strings.Join(extra, "; "))
 	}
-	if d.Kind == schemadiff.DroppedColumn {
-		if err := refusePublishedColumnDrift(ctx, tx, st, d, target); err != nil {
-			return err
-		}
-	}
 	if d.Replacement != nil {
 		if err := refuseReplacementIndexDrift(ctx, tx, st.Schema(), st.Table(), *d.Replacement); err != nil {
 			return err
@@ -155,19 +150,76 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 	return refuseDropBelow(ctx, tx, st, d, target)
 }
 
-// refusePublishedColumnDrift refuses a column drop while a publication's
-// column list or row filter names the column, on the table or on a
+// PublishedColumnError is the dropped-object drift of a column drop that a
+// publication's column list or row filter names, on the table or on a
 // partition below it, read under the table's lock. The planner refuses
 // such a drop first, so a publication found here was created or changed
 // after planning. The server would refuse the drop too, with an untyped
-// error; this names the publication so the operator knows what to change.
+// error; this names the publications so the operator knows what to change.
 // A publication does not go with the column, so it is not one of the
-// dependents the plan lists.
-func refusePublishedColumnDrift(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
+// dependents a planned drop lists.
+type PublishedColumnError struct {
+	// Table is the quoted name of the table the drop runs on.
+	Table string
+	// Column is the dropped column.
+	Column string
+	// Publications are the publications that name the column, unquoted.
+	Publications []string
+}
+
+func (e *PublishedColumnError) Error() string {
+	return fmt.Sprintf("%v: %s", ErrDroppedObjectDrift, e.Reason())
+}
+
+// Unwrap makes the error an ErrDroppedObjectDrift, so its outcome code is
+// dropped-object-drift.
+func (e *PublishedColumnError) Unwrap() error { return ErrDroppedObjectDrift }
+
+// Reason says which publications name the column and what clears them.
+func (e *PublishedColumnError) Reason() string {
+	quoted := make([]string, 0, len(e.Publications))
+	for _, name := range e.Publications {
+		quoted = append(quoted, pgx.Identifier{name}.Sanitize())
+	}
+	noun := "publication"
+	if len(quoted) > 1 {
+		noun = "publications"
+	}
+	return fmt.Sprintf("%s %s now names column %s of %s in its column list or row filter, which the plan did not review, "+
+		"and the server refuses the drop while it does; take the column out of the publication, then re-plan",
+		noun, strings.Join(quoted, ", "), e.Column, e.Table)
+}
+
+// refusePublishedColumnDrops locks st's table in ACCESS EXCLUSIVE, the
+// lock a column drop takes anyway, and refuses with a
+// *PublishedColumnError while a publication names one of columns. It runs
+// for every native column drop, planned or submitted with --alter, since
+// a publication can start naming the column in the window between the
+// plan's read and the drop.
+func refusePublishedColumnDrops(ctx context.Context, tx pgx.Tx, st statement.Statement, columns []string) error {
+	target, err := lockForCheck(ctx, tx, st, "check the publications that name the columns it drops")
+	if err != nil {
+		return err
+	}
+	for _, column := range columns {
+		names, err := publicationsNamingColumn(ctx, tx, target, column)
+		if err != nil {
+			return fmt.Errorf("read the publications that name column %s of %s before dropping it: %w", column, target, err)
+		}
+		if len(names) > 0 {
+			return &PublishedColumnError{Table: target, Column: column, Publications: names}
+		}
+	}
+	return nil
+}
+
+// publicationsNamingColumn reads the publications whose column list or row
+// filter names column of table (a quoted name) or of a partition below it.
+func publicationsNamingColumn(ctx context.Context, tx pgx.Tx, table, column string) ([]string, error) {
 	// INV: CO-9 — every catalog name is pg_catalog-qualified and the table
-	// is resolved by its quoted, schema-qualified name. pg_partition_tree
-	// lists nothing for a table that is not partitioned, so the table itself
-	// is matched on its own.
+	// is resolved by its quoted name. pg_partition_tree lists nothing for a
+	// table that is not partitioned, so the table itself is matched on its
+	// own.
 	const q = `
 		SELECT DISTINCT p.pubname::pg_catalog.text
 		FROM pg_catalog.pg_depend d
@@ -183,24 +235,11 @@ func refusePublishedColumnDrift(ctx context.Context, tx pgx.Tx, st statement.Sta
 		          SELECT t.relid FROM pg_catalog.pg_partition_tree($1::pg_catalog.regclass) t))
 		  AND a.attname OPERATOR(pg_catalog.=) $2
 		ORDER BY 1`
-	rows, err := tx.Query(ctx, q, pgx.Identifier{st.Schema(), st.Table()}.Sanitize(), d.Name)
+	rows, err := tx.Query(ctx, q, table, column)
 	if err != nil {
-		return fmt.Errorf("read the publications that name column %s of %s before dropping it: %w", d.Name, target, err)
+		return nil, err
 	}
-	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return fmt.Errorf("read the publications that name column %s of %s before dropping it: %w", d.Name, target, err)
-	}
-	if len(names) == 0 {
-		return nil
-	}
-	quoted := make([]string, 0, len(names))
-	for _, name := range names {
-		quoted = append(quoted, pgx.Identifier{name}.Sanitize())
-	}
-	return fmt.Errorf("%w: publication %s now names column %s of %s in its column list or row filter, which the plan did not review, "+
-		"and the server refuses the drop while it does; take the column out of the publication, then re-plan",
-		ErrDroppedObjectDrift, strings.Join(quoted, ", "), d.Name, target)
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // refuseDropBelow refuses a drop on a table with tables below it, read

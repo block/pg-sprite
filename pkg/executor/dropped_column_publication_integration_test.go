@@ -18,7 +18,8 @@ import (
 // filter after the plan reviewed the column's drop stops the drop with a
 // typed dropped-object-drift naming the publication, read under the
 // table's lock, and the column survives. A publication of the whole table
-// names no column and does not stop it. Column lists and row filters exist
+// names no column and does not stop it. A drop submitted without a plan
+// meets the same refusal. Column lists and row filters exist
 // from PostgreSQL 15; before that only the whole-table case runs.
 func TestRunDroppingRefusesAColumnAPublicationNowNames(t *testing.T) {
 	pool, _ := newPool(t)
@@ -76,6 +77,24 @@ func TestRunDroppingRefusesAColumnAPublicationNowNames(t *testing.T) {
 			assert.Equal(t, executor.CodeDroppedObjectDrift, executor.OutcomeCode(err))
 			assert.Contains(t, err.Error(), fmt.Sprintf("publication %q now names column note", name))
 			assert.Contains(t, err.Error(), "which the plan did not review")
+			assert.True(t, columnExists(t, pool, schema, "t", "note"), "the column must survive a refused drop")
+			var published *executor.PublishedColumnError
+			require.ErrorAs(t, err, &published)
+			assert.Equal(t, []string{name}, published.Publications)
+			assert.Equal(t, "note", published.Column)
+		})
+		// A drop submitted on its own carries no planned object, and meets
+		// the same refusal: the publication can appear between the
+		// planner's read and the drop.
+		t.Run(tc.name+", submitted drop", func(t *testing.T) {
+			schema := table(t)
+			name := schema + "_" + tc.suffix
+			publication(t, name, fmt.Sprintf(tc.pub, schema))
+			st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN note", schema))
+			err := executor.ExecuteNative(t.Context(), pool, mustPreflight(t, pool, schema, "t"), st, runBudget.Brief, executor.DefaultRetryPolicy())
+			require.ErrorIs(t, err, executor.ErrDroppedObjectDrift)
+			assert.Equal(t, executor.CodeDroppedObjectDrift, executor.OutcomeCode(err))
+			assert.Contains(t, err.Error(), fmt.Sprintf("publication %q now names column note", name))
 			assert.True(t, columnExists(t, pool, schema, "t", "note"), "the column must survive a refused drop")
 		})
 	}

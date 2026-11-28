@@ -297,7 +297,8 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	// under the session default), so the statement's unqualified secondary
 	// names — a column's type, an expression's function — resolve in the
 	// target schema whether the run creates the table or alters it.
-	// A native drop is checked against the replica identity, an index
+	// A native drop is checked against the replica identity, a column drop
+	// against the publications that name the column, an index
 	// adoption against the planned index definition, and a validation
 	// against the planned constraint definition, again inside the
 	// attempt's own transaction, under the lock it runs with: the plan's
@@ -310,6 +311,11 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	if len(drops) > 0 {
 		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
 			return refuseReplicaIdentityLoss(ctx, tx, st, drops)
+		})
+	}
+	if columns := droppedColumns(drops); len(columns) > 0 {
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refusePublishedColumnDrops(ctx, tx, st, columns)
 		})
 	}
 	if adopts != nil {

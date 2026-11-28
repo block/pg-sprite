@@ -372,6 +372,7 @@ func failureVerdict(st statement.Statement, err error,
 	}
 	unknown := errors.As(err, new(*executor.CommitOutcomeUnknownError))
 	leftover, buildFault := indexBuildDataFaultDetail(err)
+	published, _ := errors.AsType[*executor.PublishedColumnError](err)
 	var stepErr *executor.SequenceStepError
 	if !errors.As(err, &stepErr) {
 		switch {
@@ -381,6 +382,8 @@ func failureVerdict(st statement.Statement, err error,
 				v.Table)
 		case buildFault:
 			v.Detail = leftover
+		case published != nil:
+			v.Detail = published.Reason() + "; nothing was dropped"
 		}
 		return v
 	}
@@ -413,6 +416,9 @@ func failureVerdict(st statement.Statement, err error,
 	}
 	if buildFault {
 		v.Detail += "; " + leftover
+	}
+	if published != nil {
+		v.Detail += "; " + published.Reason()
 	}
 	if errors.Is(err, executor.ErrDetachInterrupted) {
 		// The step's own first transaction committed, which the generic
