@@ -1,8 +1,8 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
 // status (the optimistic front door), pull, diff, and fmt (the declarative
 // front door), lint and suggest (the offline checker and advisor),
-// capabilities (the embedded support matrix), and reap (the orphan-slot
-// reaper).
+// capabilities (the embedded support matrix), reap (the orphan-slot
+// reaper), and discard (abandon a stopped copy-and-swap run).
 package cli
 
 import (
@@ -34,6 +34,7 @@ type CLI struct {
 	Capabilities CapabilitiesCmd `cmd:"" help:"Print the embedded support matrix."`
 	Status       StatusCmd       `cmd:"" help:"Report the status of a running schema change."`
 	Reap         ReapCmd         `cmd:"" help:"Drop the orphan replication slots and publications that stopped copy-and-swap runs left in the connected database."`
+	Discard      DiscardCmd      `cmd:"" help:"Abandon a stopped copy-and-swap run on one table without running its change: drop its shadow table, its write fence or replication slot and publication, and its checkpoint row."`
 }
 
 // New returns a command tree for kong.Parse. The version is the same
@@ -137,7 +138,7 @@ type MigrateCmd struct {
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
 	CopyAndSwap       bool          `help:"Preview: open the copy-and-swap route for this run. A statement the planner routes to copy-and-swap (a column retype and the other changes PostgreSQL can only apply by rewriting the table) is otherwise refused before anything runs (exit 2, reason copy-and-swap-refused, cause copy-and-swap-not-enabled); every native route is unaffected. The route is still preflighted, size-guarded, and governed by --free-disk, --slot-lag-ceiling, --keep-old, --block-writes, and --restart. Cannot be combined with --dry-run." name:"copy-and-swap"`
 	FreeDisk          byteSize      `help:"Free space on the volume the table lives on, for a statement the planner routes to copy-and-swap; the preflight refuses the run when the shadow table and its indexes would not fit, and a live run also when they and the --slot-lag-ceiling (1GiB unless set) would not fit together; a resumed run is asked only for what is left to grow, less the shadow and slot WAL the stopped run already holds (binary units: B, KiB, MiB, GiB, TiB). Unset means no space and refuses." name:"free-disk" placeholder:"SIZE"`
-	SlotLagCeiling    byteSize      `help:"WAL a live copy-and-swap's replication slot may hold before the run stops: a stop threshold checked each catch-up cycle, not a limit the server enforces. The slot and the saved progress stay for the next run to resume from, and the stopped slot keeps retaining WAL while the source takes writes, so resume promptly or drop it deliberately. A positive whole number of bytes, optionally with a binary unit (B, KiB, MiB, GiB, TiB; KB, MB, GB, TB are binary too). Unset is 1GiB. A live run needs more than about 15 seconds and a catch-up cycle of the cluster's WAL (the copy's own writes included), with margin, or it stops with cause wal-retained even while it keeps up. Raise it when a run stopped with cause wal-retained or wal-retained-hard-limit and no open or prepared write transaction holds the WAL back, with free space on the volume for the WAL the slot may hold: the preflight counts the ceiling once against --free-disk beside the shadow table, while the slot may reach about three times it, plus a catch-up cycle of the cluster's WAL, before the run stops. Cannot be combined with --dry-run, or with --block-writes, whose run holds no slot." name:"slot-lag-ceiling" placeholder:"SIZE"`
+	SlotLagCeiling    byteSize      `help:"WAL a live copy-and-swap's replication slot may hold before the run stops: a stop threshold checked each catch-up cycle, not a limit the server enforces. A resume checks it once more before it starts, against the WAL the slot already holds unconfirmed, and is refused (resume-slot-backlog) over it. The slot and the saved progress stay for the next run to resume from, and the stopped slot keeps retaining WAL while the source takes writes, so resume promptly or drop it deliberately. A positive whole number of bytes, optionally with a binary unit (B, KiB, MiB, GiB, TiB; KB, MB, GB, TB are binary too). Unset is 1GiB. A live run needs more than about 15 seconds and a catch-up cycle of the cluster's WAL (the copy's own writes included), with margin, or it stops with cause wal-retained even while it keeps up. Raise it when a run stopped with cause wal-retained or wal-retained-hard-limit and no open or prepared write transaction holds the WAL back, or with cause stream-behind, whose slot keeps more unconfirmed WAL than the ceiling after the stop (raise it with margin above what the slot holds unconfirmed at the resume), with free space on the volume for the WAL the slot may hold: the preflight counts the ceiling once against --free-disk beside the shadow table, while the slot may reach about three times it, plus a catch-up cycle of the cluster's WAL, before the run stops. Cannot be combined with --dry-run, or with --block-writes, whose run holds no slot." name:"slot-lag-ceiling" placeholder:"SIZE"`
 	KeepOld           bool          `help:"After a copy-and-swap, keep the retained source table under its _old name for a rollback window you end by hand, instead of dropping it before the run reports done." name:"keep-old"`
 	BlockWrites       string        `help:"Offline mode: block the table's writes for the length of a copy-and-swap: the run fences writes instead of streaming them through a replication slot, and needs no logical decoding from the server, but every write that reaches the fence fails with SQLSTATE 55006 until the swap. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. Cannot be combined with --desired." name:"block-writes" placeholder:"SCHEMA.TABLE"`
 	Restart           string        `help:"Start a copy-and-swap over instead of resuming the leftover of an earlier run: the leftover shadow table, checkpoint row, and write fence or replication slot are discarded under the run's lock, then the statement runs from the beginning. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. A leftover whose swap already committed is not discarded; run the statement without this flag to finish it. Cannot be combined with --force, --accept-blocking, --dry-run, or --desired." placeholder:"SCHEMA.TABLE"`
@@ -346,3 +347,18 @@ type ReapCmd struct {
 
 // Run implements the reap subcommand.
 func (c *ReapCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
+
+// DiscardCmd abandons the stopped copy-and-swap run on one table: whatever
+// the run left — its shadow table, its write fence (offline) or replication
+// slot and publication (live), and its checkpoint row — is dropped, and the
+// change is not run. A run in progress, a run whose swap committed, and a
+// change that completed are refused and nothing is dropped.
+type DiscardCmd struct {
+	DBFlags `embed:""`
+
+	Table string `arg:"" name:"table" placeholder:"SCHEMA.TABLE" help:"The table whose stopped run to discard, named exactly as --restart names it: the schema-qualified name, an unquoted name in lower case."`
+	JSON  bool   `help:"Emit the report as JSON."`
+}
+
+// Run implements the discard subcommand.
+func (c *DiscardCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }

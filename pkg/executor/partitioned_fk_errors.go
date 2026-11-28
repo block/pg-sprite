@@ -12,11 +12,14 @@ var (
 	// that is not the requested foreign key.
 	ErrPartitionedForeignKeyNameTaken = errors.New("the name the foreign key needs on a partition is held by a constraint that is not the requested foreign key")
 	// ErrPartitionedForeignKeyConflict is returned when the leaf already
-	// carries foreign keys of the requested definition that the parent's
-	// foreign key could not adopt as the one the step proved: two or more of
-	// them, so which one the parent adopts would be left to the server, or
-	// one already attached to a parent table's foreign key.
-	ErrPartitionedForeignKeyConflict = errors.New("the partition already has a foreign key of the requested definition that the parent's could not adopt as the only one")
+	// carries a foreign key that keeps the parent's foreign key from
+	// adopting the one the step proved: two or more of the requested
+	// definition, so which one the parent adopts would be left to the
+	// server; one of the requested definition already attached to a parent
+	// table's foreign key; or one the parent's statement could adopt whose
+	// ON DELETE column list is not the requested one, which the server does
+	// not compare when it chooses what to adopt.
+	ErrPartitionedForeignKeyConflict = errors.New("the partition already has a foreign key that keeps the parent's from adopting the requested one as the only one")
 	// ErrPartitionedForeignKeyReferencedTable is returned when the foreign
 	// key references a table the build does not take: anything but a plain
 	// table, such as a partitioned table, a foreign table, or a view, or a

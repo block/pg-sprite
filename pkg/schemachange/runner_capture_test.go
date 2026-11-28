@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,6 +49,33 @@ func TestCaptureOutcomeKeepsTheFillsErrorWhenTheRunsContextEnded(t *testing.T) {
 		c := &capture{err: fmt.Errorf("catch up: %w", errCaptureEnded)}
 		err := captureOutcome(t.Context(), c, nil, nil)
 		require.NoError(t, err, "a capture its owner stopped reports nothing")
+	})
+}
+
+// A capture's end bounds its own wait for the slot. When that bound runs
+// out, the error it returns names the expiry and does not match
+// context.DeadlineExceeded, since the caller's context did not end: a
+// slot lag stop joined with it keeps its own code rather than reading as
+// the caller's cancellation. An error returned while the bound is still
+// live comes back unchanged.
+func TestCaptureEndWaitExpiryIsNotAContextError(t *testing.T) {
+	waiting := fmt.Errorf("await slot pgsprite_x idle, held by backend 4242: %w", context.DeadlineExceeded)
+
+	t.Run("the end's own bound expired", func(t *testing.T) {
+		endCtx, cancel := context.WithTimeoutCause(context.WithoutCancel(t.Context()), 0, errCaptureEndWaitExpired)
+		defer cancel()
+		<-endCtx.Done()
+		err := endWaitError(endCtx, waiting)
+		require.ErrorIs(t, err, errCaptureEndWaitExpired)
+		assert.NotErrorIs(t, err, context.DeadlineExceeded)
+		assert.NotErrorIs(t, err, context.Canceled)
+	})
+
+	t.Run("the bound is still live", func(t *testing.T) {
+		endCtx, cancel := context.WithTimeoutCause(context.WithoutCancel(t.Context()), time.Hour, errCaptureEndWaitExpired)
+		defer cancel()
+		err := endWaitError(endCtx, waiting)
+		assert.Same(t, waiting, err)
 	})
 }
 

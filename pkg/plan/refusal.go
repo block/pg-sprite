@@ -84,12 +84,21 @@ func RouteRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
 }
 
-// ForeignKeyChangeRefusal classifies a desired-state foreign-key drop:
-// dropping a foreign key from a desired file is a planned capability. The
+// ChangedForeignKeyRefusal classifies the desired-state drop of a foreign key
+// changed under the same name where the add cannot share its statement. The
 // plan keeps the statement, so the diff stays visible while execution
 // refuses it.
-func ForeignKeyChangeRefusal() verdict.Refusal {
-	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey)
+func ChangedForeignKeyRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey).
+		WithCause(verdict.CauseChangedForeignKey)
+}
+
+// UndeclarableForeignKeyRefusal classifies the desired-state drop of a
+// foreign key a desired file cannot declare. The plan keeps the statement,
+// so the diff stays visible while execution refuses it.
+func UndeclarableForeignKeyRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey).
+		WithCause(verdict.CauseUndeclarableForeignKey)
 }
 
 // DestructiveChangeRefusal classifies a change that would discard live data

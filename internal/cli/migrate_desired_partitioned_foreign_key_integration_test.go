@@ -179,6 +179,49 @@ func TestMigrateDesiredFailsAPartitionedForeignKeyOnAnOrphanRow(t *testing.T) {
 		"the first partition's foreign key is reused, and the second's, added NOT VALID before the row stopped it, is validated")
 }
 
+// A foreign key from a partitioned table to itself references a partitioned
+// table, which the build does not take. The desired file adds a note column
+// and that foreign key; the plan routes the foreign key to the build from
+// its text, and the run reads the build's catalog checks before the plan's
+// first statement, so it refuses the whole plan and the column is not
+// added. The dry run reads the same checks and prints the same refusal.
+func TestMigrateDesiredRefusesASelfReferencingPartitionedForeignKeyWholeLikeTheDryRun(t *testing.T) {
+	pool, url, schema, major := partitionedForeignKeyFixture(t)
+	requireBeforeNotValidOnPartitions(t, major)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		ALTER TABLE %s.events ADD CONSTRAINT events_pkey PRIMARY KEY (id, created_at)`, schema))
+	require.NoError(t, err)
+	const desired = `
+CREATE TABLE events (
+    id         bigint NOT NULL,
+    created_at date NOT NULL,
+    account_id bigint,
+    note       text,
+    CONSTRAINT events_pkey PRIMARY KEY (id, created_at),
+    CONSTRAINT events_parent_fk FOREIGN KEY (account_id, created_at) REFERENCES events (id, created_at)
+) PARTITION BY RANGE (created_at);`
+
+	dryRun, err := runDesired(t, url, schema, desired, "--dry-run")
+	require.ErrorIs(t, err, verdict.ErrRefused, "the dry run exits with the refusal code")
+	applied, err := runDesired(t, url, schema, desired)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	assert.Equal(t, verdict.OutcomeRefused, applied.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, applied.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, applied.Class)
+	assert.Contains(t, applied.Detail, schema+".events is a partitioned table, not a plain table")
+	assert.Contains(t, applied.Detail, "nothing was executed")
+	assert.Empty(t, applied.Verdicts, "no statement was attempted")
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the run reports")
+	var hasNote bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 'events' AND column_name = 'note')`, schema).Scan(&hasNote))
+	assert.False(t, hasNote, "the ADD COLUMN planned ahead of the foreign key did not run")
+	_, found := readForeignKeyAdoption(t, pool, schema, "events_parent_fk")
+	assert.False(t, found)
+}
+
 // PostgreSQL 18 accepts NOT VALID on a partitioned table, so a foreign key a
 // desired file adds takes the ordinary online route there: ADD ... NOT
 // VALID, then VALIDATE CONSTRAINT, not the partitioned build.

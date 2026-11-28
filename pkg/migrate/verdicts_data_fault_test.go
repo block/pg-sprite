@@ -54,3 +54,27 @@ func TestFailureVerdictNamesTheLeftoverOfADataFaultBuild(t *testing.T) {
 		assert.Contains(t, v.Detail, "inspect it before any removal")
 	})
 }
+
+// A column drop refused because a publication now names the column fails
+// dropped-object-drift, and the verdict's detail names the publication and
+// what clears it, so a reader of the JSON need not parse stderr.
+func TestFailureVerdictNamesThePublicationThatRefusedADrop(t *testing.T) {
+	st, err := statement.ParseOne("ALTER TABLE s.t DROP COLUMN b")
+	require.NoError(t, err)
+	published := &executor.PublishedColumnError{Table: `"s"."t"`, Column: "b", Publications: []string{"p524r"}}
+	const named = `publication "p524r" now names column b of "s"."t"`
+
+	t.Run("no step", func(t *testing.T) {
+		v := failureVerdict(st, published, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeDroppedObjectDrift), v.Code)
+		assert.Contains(t, v.Detail, named)
+		assert.Contains(t, v.Detail, "take the column out of the publication, then re-plan; nothing was dropped")
+	})
+	t.Run("sequence step", func(t *testing.T) {
+		step := &executor.SequenceStepError{Step: 2, Total: 2, SQL: "x", Err: published}
+		v := failureVerdict(st, step, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeDroppedObjectDrift), v.Code)
+		assert.Contains(t, v.Detail, "sequence step 2 of 2 failed; no earlier steps had committed; "+named)
+		assert.NotContains(t, v.Detail, "Code names the outcome")
+	})
+}

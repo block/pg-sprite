@@ -359,7 +359,8 @@ func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 		var running bool
 		err := pool.QueryRow(t.Context(),
 			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			  WHERE query LIKE 'REINDEX INDEX %' AND state = 'active')`).Scan(&running)
+			  WHERE query LIKE 'REINDEX INDEX %' AND state = 'active'
+			    AND strpos(query, $1) > 0)`, schema).Scan(&running)
 		return err == nil && running
 	}, 30*time.Second, 25*time.Millisecond, "the accepted REINDEX must be running")
 	cancel()

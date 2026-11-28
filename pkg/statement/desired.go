@@ -217,8 +217,9 @@ func (ds DesiredSchema) WithExtensionSchemas(schemas ...string) (DesiredSchema, 
 // declarative front door can execute on a scratch schema: one unqualified
 // CREATE TABLE and unqualified, non-concurrent CREATE INDEX statements on
 // it. Foreign keys are admitted for planning when the table they reference
-// is unqualified; desired-state execution refuses every foreign-key change
-// (see docs/limitations.md). Anything else is refused with a typed error.
+// is unqualified, or is the table itself; desired-state execution adds,
+// drops, and changes them (see docs/limitations.md). Anything else is
+// refused with a typed error.
 func ParseDesired(sql string) (DesiredSchema, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {

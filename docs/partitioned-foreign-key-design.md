@@ -32,16 +32,21 @@ one is validated, and nothing is added twice.
 | No matching foreign key, derived name held by another constraint | refused, `partitioned-foreign-key-name-taken` |
 | Two or more matching foreign keys | refused, `partitioned-foreign-key-conflict` |
 | A matching foreign key already attached to a parent's | refused, `partitioned-foreign-key-conflict` |
-| A foreign key that would match but for its `ON DELETE` column list | refused, `partitioned-foreign-key-conflict` |
+| A validated foreign key, attached to nothing, that matches but for its `ON DELETE` column list | refused, `partitioned-foreign-key-conflict` |
 
 "Matching" is the comparison the server makes before it adopts: the same referenced table, the
 same referencing and referenced columns in order, the same `MATCH`, `ON UPDATE`, `ON DELETE`,
 enforcement, and deferrability, plus the same `ON DELETE SET NULL` or `SET DEFAULT` column list
-(PostgreSQL 15 and later), compared as the set of columns it names. The server does not compare
-that list, and among the foreign keys it would adopt it takes the first by name, so one that
-differs only in its list is refused rather than left for the server to pick over the step's.
-PostgreSQL 14 has no column list, and the build refuses one there under its table lock
-(`partitioned-foreign-key-unsupported-shape`). Foreign keys of another definition are left alone.
+(PostgreSQL 15 and later), compared as the set of columns it names. On PostgreSQL 14 to 17 the
+server adopts a validated foreign key attached to nothing without comparing that list, and takes
+the first such key by name, so one that differs only in its list could be adopted in place of the
+step's, and with it a delete rule the parent does not have. That key is refused: recreate it with
+the requested list, or drop it, and rerun. A foreign key of another list that is `NOT VALID` or
+already attached to a parent's is not one the server adopts, and is left alone, as are foreign
+keys of another definition. PostgreSQL 14 has no column list, and the build refuses one there
+under its table lock (`partitioned-foreign-key-unsupported-shape`). The build decides every
+partition before its first leaf step, so a refusal on a late partition leaves the earlier ones as
+they were.
 
 ## Verified against PostgreSQL
 
@@ -66,6 +71,10 @@ by the integration tests in `pkg/executor`:
   read-back catches each case: the adopted foreign key's OID is not the recorded one.
 - With two matching leaf foreign keys, the parent adopts one and leaves the other, so the leaf
   step refuses that state before the parent's statement can choose.
+- On 15 to 17, a validated leaf foreign key attached to nothing that differs from the parent's
+  only in its `ON DELETE SET NULL` or `SET DEFAULT` column list is one the parent can adopt, so
+  the build refuses it before any leaf step, and the parent's step refuses one that appears after
+  the leaf steps. A `NOT VALID` one, or one already attached to a parent's, is not adopted.
 - PostgreSQL 18 accepts `ADD FOREIGN KEY ... NOT VALID` on the parent (the same locks as the plain
   form, and no scan), and `VALIDATE CONSTRAINT` on the parent holds `ShareUpdateExclusiveLock`.
   The ordinary online route, `NOT VALID` then `VALIDATE`, therefore works there, and
@@ -96,15 +105,19 @@ column twice, keeps the `NOT VALID` plan and is refused as `unsupported-partitio
 `environmental`, before anything runs. On 18 nothing is routed.
 
 The plan's routing reads the statement, not the catalog, so the refusals the build makes from the
-catalog are not in the plan. A foreign key to a partitioned, foreign, or view table, including
-one that references the partitioned table itself or one of its partitions, and a tree with a
-sub-partitioned partition plan as the build and are refused (`capability-boundary`) when the run
-reaches the statement; a tree with a foreign-table partition or a detach pending fails there with
-`foreign-table-partition` or `partition-detach-pending`. The build stops before it touches a
-partition, but the statements planned ahead of it have committed by then, so
-a desired file that also adds a column keeps the column, and the next plan is the foreign key
-alone, refused the same way. Leave such a foreign key out of the desired file until the build
-carries it.
+catalog are read at admission instead. Before any statement runs, `migrate --desired`
+(`migrate.RunDesired`, through `migrate.AdmitPlanPartitionedForeignKeys`) runs the build's own
+catalog checks for every statement routed to it with `executor.AdmitPartitionedForeignKey`, which
+resolves the referenced table and lists the tree as the build does (`resolveFKReference`,
+`refuseFKTree`) in one bounded read, without the table lock. A foreign key to a partitioned,
+foreign, or view table, including one that references the partitioned table itself or one of its
+partitions, and a tree with a sub-partitioned partition refuse the whole plan
+(`unsupported-statement`, `capability-boundary`); a tree with a foreign-table partition or a
+detach pending stops it as a failed result with no verdict, whose error wraps the build's
+`ErrForeignTablePartition` or `ErrPartitionDetachPending`. Either way nothing has executed, so a desired file that
+also adds a column does not keep the column. `migrate --desired --dry-run` runs the same checks
+and prints the same result. The build makes the checks again under its lock when it runs, and
+that reading decides; a tree that changes between admission and the build still stops there.
 
 ## Routing from `migrate --alter`
 
@@ -114,8 +127,11 @@ statement (`preflight.RoutesToPartitionedForeignKeyBuild`), before the planner's
 `NOT VALID` then `VALIDATE` steps meet the partitioned-parent refusal. On 18 those steps run as
 they are. A forced run and a submitted `NOT VALID` are not routed. The dry run plans the
 statement with the execution `partitioned-foreign-key-build` and reports the build's shape
-refusals (`not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape`); the checks under
-the build's lock (the parent's constraints, the referenced table, the tree) are reported by the
-apply only. Those are refusals when the build stopped before any partition got the foreign key,
+refusals (`not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape`) and, through
+`migrate.AdmitPartitionedForeignKeyCatalog` and `executor.AdmitPartitionedForeignKey`, the
+build's refusals of the referenced table and the sub-partitioned tree, with the verdict the apply
+gives; a foreign-table partition or a pending detach ends the dry run in the build's error, as
+the apply ends in a failed verdict. The parent's constraints are checked by the apply only, under
+the build's lock. The build's catalog refusals are refusals when the build stopped before any partition got the foreign key,
 and failed verdicts after; every other stop is a failed verdict with the executor's code
 ([schemabot-integration](schemabot-integration.md#outcomes-of-a-partitioned-foreign-key-build)).

@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -509,10 +510,76 @@ func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := strings.Join(strings.Fields(out.String()), " ")
-	assert.Contains(t, text, `error[unsupported-statement]: refused — DROP COLUMN email changes a column read by "app"."active_users", "reports"."mail", and PostgreSQL refuses to retype or drop a column while a view reads it`)
+	assert.Contains(t, text, `error[unsupported-statement]: refused — DROP COLUMN email changes a column read by views "app"."active_users", "reports"."mail", and PostgreSQL refuses to retype or drop a column while a view reads it`)
 	assert.Contains(t, text, "help: drop or redefine those views first, then re-plan")
 	assert.Contains(t, text, onlineDDLReferenceURL+"#dependent-view")
 	assert.NotContains(t, text, "knows no safe path")
+}
+
+// A refusal because views read the changed column calls a materialized
+// view by its kind, and the help gives the manual path the change takes
+// with the views out of the way: for an in-place type change, recreating
+// them around it in one transaction, where a materialized view also runs
+// its query to fill itself again.
+func TestDryRunTextDependentViewRefusalNamesMaterializedViews(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fix        planner.DependentFix
+		readers    []string
+		views      []string
+		refusal    string
+		help       string
+		notContain string
+	}{
+		"a materialized view on an in-place type change": {
+			fix:     planner.DependentFixRecreateAroundChange,
+			views:   []string{`"app"."mail"`},
+			readers: []string{`"app"."mail_top"`, `"app"."mail"`},
+			refusal: `ALTER COLUMN email TYPE varchar(100) changes a column read by materialized view "app"."mail", and PostgreSQL refuses`,
+			help: "help: this type change runs in place, without rewriting the table, so in one transaction drop those materialized views, run the change, and recreate them; " +
+				"recreating a materialized view runs its query to fill it again while the transaction blocks the table; " +
+				`drop the views in this order: view "app"."mail_top", then materialized view "app"."mail", and recreate them in reverse; ` +
+				"a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults, and a materialized view its indexes too, so recreate those with each view",
+		},
+		"a view and a materialized view on a type change that rewrites the table": {
+			fix:        planner.DependentFixExpandContract,
+			views:      []string{`"app"."active_users"`, `"app"."mail"`},
+			refusal:    `ALTER COLUMN email TYPE varchar(100) changes a column read by view "app"."active_users" and materialized view "app"."mail", and PostgreSQL refuses`,
+			help:       "point those views and materialized views at it and switch reads to it, then drop the old column once nothing uses it",
+			notContain: "fill it again",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := plan.NewReport(plan.SourceAlter)
+			report.Schema, report.Table, report.ServerVersion = "app", "users", "16.10"
+			report.Disposition = router.DispositionRefuse
+			report.Statements = append(report.Statements, plan.Statement{
+				SQL:         "ALTER TABLE app.users ALTER COLUMN email TYPE varchar(100)",
+				Route:       planner.RouteRefuse,
+				Disposition: router.DispositionRefuse,
+				Reason:      verdict.ReasonUnsupportedStatement,
+				Class:       verdict.ClassCapabilityBoundary,
+				Decisions: []planner.Decision{{
+					Operation:                  "ALTER COLUMN email TYPE varchar(100)",
+					Route:                      planner.RouteRefuse,
+					Reason:                     planner.ReasonDependentView,
+					DependentViews:             tc.views,
+					DependentMaterializedViews: []string{`"app"."mail"`},
+					DependentViewDropOrder:     tc.readers,
+					DependentFix:               tc.fix,
+				}},
+			})
+
+			var out strings.Builder
+			require.NoError(t, writeDryRunText(&out, palette{}, report))
+			text := strings.Join(strings.Fields(out.String()), " ")
+			assert.Contains(t, text, "error[unsupported-statement]: refused — "+tc.refusal)
+			assert.Contains(t, text, tc.help)
+			assert.NotContains(t, text, "drop or redefine those")
+			if tc.notContain != "" {
+				assert.NotContains(t, text, tc.notContain)
+			}
+		})
+	}
 }
 
 // A refusal because row-level security policies read the changed column
@@ -584,6 +651,18 @@ func TestDryRunTextHiddenDependentRefusalsNameTheObjects(t *testing.T) {
 			refusal: `ALTER COLUMN status TYPE varchar(64) changes a column named by trigger "audit_status" ON "app"."orders", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it`,
 			help:    `help: the change is also blocked by generated column "app"."orders"."status_upper": ` + planner.GeneratedColumnHelp,
 			anchor:  "#dependent-trigger",
+		},
+		{
+			name: "publication",
+			decision: planner.Decision{
+				Kind:                  statement.OpDropColumn,
+				Operation:             "DROP COLUMN amount",
+				Reason:                planner.ReasonDependentPublication,
+				DependentPublications: []string{`"orders_pub"`},
+			},
+			refusal: `DROP COLUMN amount changes a column named by publication "orders_pub", and PostgreSQL refuses to retype or drop a column while a publication's column list or row filter names it`,
+			help:    "help: " + planner.PublicationHelp(statement.OpDropColumn),
+			anchor:  "#dependent-publication",
 		},
 		{
 			name: "generated column",
@@ -837,26 +916,47 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	assert.NotContains(t, out.String(), "Debian")
 }
 
-// A foreign-key drop in a desired-state plan says in words that it is not
-// applied declaratively, so the reader of the diff knows the change is shown
-// for review only.
+// A refused foreign-key drop says in words why it is not applied
+// declaratively and names the one remedy its cause calls for, so the reader
+// of the diff knows what to change. A report with no cause, such as one
+// decoded from JSON, names both.
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
-	report := plan.NewReport(plan.SourceDiff)
-	report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
-	report.Disposition = router.DispositionRefuse
-	report.Statements = append(report.Statements, plan.Statement{
-		SQL:         "ALTER TABLE public.orders DROP CONSTRAINT orders_user_id_fkey",
-		Kind:        schemadiff.ChangeDropForeignKey,
-		Route:       planner.RouteNative,
-		Disposition: router.DispositionRefuse,
-		Reason:      verdict.ReasonDeclarativeForeignKey,
-		Class:       verdict.ClassCapabilityBoundary,
-	})
+	const (
+		changed      = "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
+		undeclarable = "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"
+	)
+	for _, tt := range []struct {
+		name  string
+		cause verdict.Cause
+		want  string
+	}{
+		{"a key changed under the same name", verdict.CauseChangedForeignKey, changed},
+		{"a key a desired file cannot declare", verdict.CauseUndeclarableForeignKey, undeclarable},
+		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
+			"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			report := plan.NewReport(plan.SourceDiff)
+			report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
+			report.Disposition = router.DispositionRefuse
+			report.Statements = append(report.Statements, plan.Statement{
+				SQL:          "ALTER TABLE public.orders DROP CONSTRAINT orders_user_id_fkey",
+				Kind:         schemadiff.ChangeDropForeignKey,
+				Route:        planner.RouteNative,
+				Disposition:  router.DispositionRefuse,
+				Reason:       verdict.ReasonDeclarativeForeignKey,
+				Class:        verdict.ClassCapabilityBoundary,
+				RefusalCause: tt.cause,
+			})
 
-	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, palette{}, report))
-	// The renderer wraps prose; compare with whitespace collapsed.
-	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — dropping a foreign key is not supported for desired-state apply yet; "+
-		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
+			var out strings.Builder
+			require.NoError(t, writeDryRunText(&out, palette{}, report))
+			// The renderer wraps prose; compare with whitespace collapsed.
+			flat := strings.Join(strings.Fields(out.String()), " ")
+			assert.Contains(t, flat, "error[declarative-foreign-key]: refused — "+tt.want)
+			if tt.cause != "" {
+				assert.NotContains(t, flat, "either the file", "only the remedy the cause calls for is named")
+			}
+		})
+	}
 }

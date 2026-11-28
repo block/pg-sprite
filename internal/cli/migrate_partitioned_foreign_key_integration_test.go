@@ -255,9 +255,9 @@ func TestMigrateRefusesAnUnnamedForeignKeyOnAPartitionedTable(t *testing.T) {
 
 // ON DELETE SET NULL with a column list runs as the build on PostgreSQL 15
 // to 17: every partition's foreign key carries the same list, so the
-// parent's adopts them. PostgreSQL 14 has no column list; the dry run
-// checks only the statement's shape and plans the build, and the build
-// refuses under its table lock before it adds anything.
+// parent's adopts them. PostgreSQL 14 has no column list; the dry run reads
+// the server's version and ends in the refusal the apply gives, before
+// anything runs.
 func TestMigrateAlterAddsAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testing.T) {
 	pool, url, schema, major := partitionedForeignKeyFixture(t)
 	requireBeforeNotValidOnPartitions(t, major)
@@ -266,6 +266,10 @@ func TestMigrateAlterAddsAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testi
 		    ADD CONSTRAINT events_account_fk
 		    FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
 		    ON DELETE SET NULL (account_id)`, schema)
+	if major < 15 {
+		assertForeignKeyRefusedLikeApply(t, url, pool, schema, alter, "has an ON DELETE column list, which PostgreSQL 14 does not have")
+		return
+	}
 
 	report := dryRunPlan(t, url, alter)
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
@@ -273,17 +277,6 @@ func TestMigrateAlterAddsAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testi
 	assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, report.Statements[0].Execution)
 
 	v, err := runForeignKey(t, url, alter)
-	if major < 15 {
-		require.Error(t, err)
-		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
-		assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
-		assert.Contains(t, v.Detail, "ON DELETE column list")
-		_, found := readForeignKeyAdoption(t, pool, schema, "events_account_fk")
-		assert.False(t, found, "the parent has no foreign key")
-		assert.Zero(t, partitionForeignKeysAttached(t, pool, schema))
-		return
-	}
 	require.NoError(t, err)
 	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
 	fk, found := readForeignKeyAdoption(t, pool, schema, "events_account_fk")
@@ -302,6 +295,29 @@ func TestMigrateAlterAddsAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testi
 		   AND c.contype = 'f'
 		   AND pg_get_constraintdef(c.oid) LIKE '%ON DELETE SET NULL (account_id)'`, schema).Scan(&withList))
 	assert.Equal(t, 3, withList, "the parent's foreign key and both partitions' carry the column list")
+}
+
+// The build takes only a plain table as the referenced table: a partitioned
+// one makes the parent's statement clone the foreign key onto every
+// referenced partition, which the build neither proves nor reads back. Only
+// the catalog says ledgers is partitioned, so the dry run reads it as the
+// build does and ends in the refusal the apply gives, before anything runs.
+func TestMigrateRefusesAPartitionedForeignKeyToAPartitionedTableLikeApply(t *testing.T) {
+	pool, url, schema, major := partitionedForeignKeyFixture(t)
+	requireBeforeNotValidOnPartitions(t, major)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.ledgers (
+		    id bigint PRIMARY KEY
+		) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.ledgers_low PARTITION OF %[1]s.ledgers
+		    FOR VALUES FROM (1) TO (1000)`, schema))
+	require.NoError(t, err)
+
+	assertForeignKeyRefusedLikeApply(t, url, pool, schema, fmt.Sprintf(`
+		ALTER TABLE %[1]s.events
+		    ADD CONSTRAINT events_ledger_fk
+		    FOREIGN KEY (account_id) REFERENCES %[1]s.ledgers (id)`, schema),
+		schema+".ledgers is a partitioned table, not a plain table")
 }
 
 // --force runs the submitted form as written: the plain ADD FOREIGN KEY,
