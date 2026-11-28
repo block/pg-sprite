@@ -152,6 +152,16 @@ type Change struct {
 	// for Validates, so a validation that runs apart from its add never
 	// validates a constraint someone put under the same name in between.
 	AddsNotValid *ConstraintValidation `json:"-"`
+	// AddsKey is set on an ADD CONSTRAINT of a new primary key or unique
+	// constraint the diff adds with its own index: the index the constraint
+	// owns, under the constraint's name, and the definition introspection
+	// reads for it. A key that takes over a live index, or replaces one in
+	// place, carries Adopts instead. A plan that runs
+	// the add as a concurrent build and then ADD CONSTRAINT ... USING INDEX
+	// checks that definition before the attach, as it does for Adopts, so an
+	// attach that runs apart from its build never takes over an index
+	// someone put under the same name in between.
+	AddsKey *IndexAdoption `json:"-"`
 	// References is set on an ADD CONSTRAINT of a FOREIGN KEY: the table
 	// and columns the key references, on which the role that runs the plan
 	// needs REFERENCES.
@@ -677,7 +687,17 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), References: con.References})
 				continue
 			}
-			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})
+			if isKey(con) {
+				// The definition leaves out the storage parameters of the
+				// key's index, which the build must carry for the index to
+				// match the one the attach checks.
+				withOptions, err := statement.WithKeyIndexOptions(sql, con.IndexDef)
+				if err != nil {
+					return nil, fmt.Errorf("carry the index options of key %s: %w", con.Name, err)
+				}
+				sql = withOptions
+			}
+			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), AddsKey: addedKey(con)})
 		}
 	}
 
@@ -1069,6 +1089,15 @@ func addedNotValid(con Constraint) *ConstraintValidation {
 		return nil
 	}
 	return &ConstraintValidation{Constraint: con.Name, Def: con.Def + notValidSuffix}
+}
+
+// addedKey is the index a new primary key or unique constraint owns, under
+// the constraint's name, and nil for any other constraint.
+func addedKey(con Constraint) *IndexAdoption {
+	if !isKey(con) {
+		return nil
+	}
+	return &IndexAdoption{Index: con.Name, Def: con.IndexDef}
 }
 
 // validatesInPlace reports whether live is the desired constraint left NOT

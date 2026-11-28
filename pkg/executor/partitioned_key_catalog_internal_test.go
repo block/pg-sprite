@@ -116,3 +116,70 @@ func TestDecideLeafKey(t *testing.T) {
 		assert.Equal(t, leafKeyPlan{state: leafKeyBuildNeeded}, plan)
 	})
 }
+
+// An index another parent index takes at the attach is neither adopted nor
+// reported for the key, for the same leaf and key as TestDecideLeafKey.
+func TestLeafKeyFactsWithoutTaken(t *testing.T) {
+	leaf := standaloneTable(100, "app", "events_2026_01")
+	columns := []leafKeyColumn{
+		{name: "id", attnum: 1, notNull: true, quoted: "id"},
+		{name: "created_at", attnum: 2, notNull: true, quoted: "created_at"},
+	}
+	const derived = "events_id_key_p100"
+	keyIndex := func(oid uint32, name string) relationFacts {
+		return relationFacts{
+			oid: oid, schema: "app", name: name, relkind: "i",
+			tableOID: 100, tableName: "events_2026_01", tableRelkind: "r",
+			valid: true, unique: true,
+			def:        "CREATE UNIQUE INDEX " + name + " ON app.events_2026_01 USING btree (id, created_at)",
+			quotedName: name, quotedSchema: "app", quotedTable: "events_2026_01",
+		}
+	}
+	taken := map[uint32]string{200: "events_id_idx"}
+
+	t.Run("a taken unattached unique index is not adopted", func(t *testing.T) {
+		facts := leafKeyFacts{columns: columns, reusable: []relationFacts{keyIndex(200, "events_2026_01_id_idx")}}
+
+		facts, err := facts.withoutTaken(eventsUniqueKey, leaf, taken)
+		require.NoError(t, err)
+		plan, err := decideLeafKey(eventsUniqueKey, leaf, derived, facts)
+
+		require.NoError(t, err)
+		assert.Equal(t, leafKeyPlan{state: leafKeyBuildNeeded}, plan)
+	})
+
+	t.Run("a taken unique constraint is not the key and does not stand in its way", func(t *testing.T) {
+		idx := keyIndex(200, "events_2026_01_key")
+		idx.backsConstraint = true
+		facts := leafKeyFacts{columns: columns, constraints: []leafConstraint{
+			{oid: 300, name: "events_2026_01_key", contype: "u", key: []int16{1, 2}, index: idx},
+		}}
+
+		facts, err := facts.withoutTaken(eventsUniqueKey, leaf, taken)
+		require.NoError(t, err)
+		plan, err := decideLeafKey(eventsUniqueKey, leaf, derived, facts)
+
+		require.NoError(t, err)
+		assert.Equal(t, leafKeyPlan{state: leafKeyBuildNeeded}, plan)
+	})
+
+	t.Run("a taken primary key refuses a requested primary key", func(t *testing.T) {
+		idx := keyIndex(200, "events_2026_01_pkey")
+		idx.backsConstraint = true
+		facts := leafKeyFacts{columns: columns, constraints: []leafConstraint{
+			{oid: 300, name: "events_2026_01_pkey", contype: "p", key: []int16{1, 2}, index: idx},
+		}}
+
+		_, err := facts.withoutTaken(eventsPrimaryKey, leaf, taken)
+
+		require.ErrorIs(t, err, ErrPartitionedKeyConflict)
+	})
+
+	t.Run("a taken index under the derived name holds the name", func(t *testing.T) {
+		facts := leafKeyFacts{columns: columns, occupant: keyIndex(200, derived), occupied: true}
+
+		_, err := facts.withoutTaken(eventsUniqueKey, leaf, taken)
+
+		require.ErrorIs(t, err, ErrPartitionedKeyNameTaken)
+	})
+}
