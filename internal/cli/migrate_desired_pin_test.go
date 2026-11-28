@@ -43,6 +43,18 @@ func TestDiffTextPrintsTheFingerprint(t *testing.T) {
 	assert.Contains(t, out.String(), "plan:\n  app.orders — 2 statements, 0 steps to run, 0 refused\n\nfingerprint:\n  "+report.Fingerprint+"\n\ndiff:\n")
 }
 
+// A dry run's refused preview of a destructive plan prints the fingerprint a
+// run pins, not the refused preview's own, which no run executes.
+func TestDiffTextPrintsThePinnableFingerprintOfARefusedPreview(t *testing.T) {
+	report := desiredReport(true)
+	preview, pinnable := (&MigrateCmd{}).previewDesiredPlan(report)
+	require.Equal(t, report.Fingerprint, pinnable)
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, preview))
+	assert.Contains(t, out.String(), "fingerprint:\n  "+report.Fingerprint+"\n")
+	assert.NotContains(t, out.String(), preview.Fingerprint)
+}
+
 // A dry run previews a destructive plan as refused unless it carries both
 // the pin of the plan the diff printed and the table in the destructive
 // acknowledgement. A refused preview hands back the fingerprint to pin,
@@ -91,6 +103,7 @@ func TestWriteDesiredPreviewNamesTheWayThrough(t *testing.T) {
 	var text strings.Builder
 	require.ErrorIs(t, (&MigrateCmd{}).writeDesiredPreview(&text, report), verdict.ErrRefused)
 	assert.Contains(t, text.String(), "to run this plan, add to the command:\n  --expect-fingerprint "+report.Fingerprint+" --allow-destructive app.orders\n")
+	assert.Contains(t, text.String(), "fingerprint:\n  "+report.Fingerprint+"\n", "the fingerprint the text prints is the one to pin")
 
 	var js strings.Builder
 	require.ErrorIs(t, (&MigrateCmd{JSON: true}).writeDesiredPreview(&js, report), verdict.ErrRefused)
@@ -203,6 +216,17 @@ func TestWriteDesiredPreviewChecksThePinAndTheTable(t *testing.T) {
 			assert.Contains(t, js.String(), `"reason": "`+string(verdict.ReasonPlanFingerprintMismatch)+`"`)
 		})
 	}
+
+	t.Run("a pin of the refused preview", func(t *testing.T) {
+		report := reports["a destructive plan"]
+		preview, _ := (&MigrateCmd{}).previewDesiredPlan(report)
+		var text strings.Builder
+		c := &MigrateCmd{AllowDestructive: "app.orders", ExpectFingerprint: preview.Fingerprint}
+		require.ErrorIs(t, c.writeDesiredPreview(&text, report), verdict.ErrRefused)
+		flat := strings.Join(strings.Fields(text.String()), " ")
+		assert.Contains(t, flat, "identifies a dry run's refused preview of this plan, which no run executes; pin the plan's own fingerprint, "+report.Fingerprint)
+		assert.NotContains(t, flat, "changed since the plan was reviewed")
+	})
 
 	var out strings.Builder
 	additive := reports["a plan that drops nothing"]
