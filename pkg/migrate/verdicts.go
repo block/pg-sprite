@@ -400,7 +400,7 @@ func failureVerdict(st statement.Statement, err error,
 		Detail:    "execution failed; nothing committed — a started bounded attempt rolls back",
 	}
 	unknown := errors.As(err, new(*executor.CommitOutcomeUnknownError))
-	leftover, buildFault := indexBuildDataFaultDetail(err)
+	leftover, indexFault := indexBuildFaultDetail(err)
 	published, _ := errors.AsType[*executor.PublishedColumnError](err)
 	var stepErr *executor.SequenceStepError
 	if !errors.As(err, &stepErr) {
@@ -409,7 +409,7 @@ func failureVerdict(st statement.Statement, err error,
 			v.Detail = fmt.Sprintf("outcome unknown: the COMMIT did not return success, "+
 				"so whether the change committed cannot be established from the client — inspect the catalog for %s before retrying",
 				v.Table)
-		case buildFault:
+		case indexFault:
 			v.Detail = leftover
 		case published != nil:
 			v.Detail = published.Reason() + "; nothing was dropped"
@@ -436,14 +436,14 @@ func failureVerdict(st statement.Statement, err error,
 	case len(v.ExecutedSQL) > 0:
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; the %d committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
 			stepErr.Step, stepErr.Total, len(v.ExecutedSQL))
-	case buildFault, published != nil:
+	case indexFault, published != nil:
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; no earlier steps had committed",
 			stepErr.Step, stepErr.Total)
 	default:
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; no earlier steps had committed — Code names the outcome and any state the failed step itself left",
 			stepErr.Step, stepErr.Total)
 	}
-	if buildFault {
+	if indexFault {
 		v.Detail += "; " + leftover
 	}
 	if published != nil {
@@ -458,24 +458,48 @@ func failureVerdict(st statement.Statement, err error,
 	return v
 }
 
-// indexBuildDataFaultDetail says what a concurrent index build that failed
-// on the table's rows left, for the failed verdict's detail: its code is
-// data-fault, which names the rows rather than the invalid index the
-// build left under the requested name, so the detail names that index and
-// how it is removed once the rows are corrected. It reports false for
-// every other failure.
-func indexBuildDataFaultDetail(err error) (string, bool) {
+// indexBuildFaultDetail says what a concurrent index build that failed on
+// a permanent cause left, for the failed verdict's detail: its code is
+// data-fault (the table's rows) or resource-exhausted (the server's
+// resources or limits), which name the cause rather than the invalid index
+// the build left under the requested name, so the detail names that index
+// and how it is removed once the cause is fixed. It reports false for every
+// other failure.
+func indexBuildFaultDetail(err error) (string, bool) {
 	invalidErr, ok := errors.AsType[*executor.InvalidIndexError](err)
-	if !ok || invalidErr.Code() != executor.CodeDataFault {
+	if !ok {
 		return "", false
 	}
 	index := pgx.Identifier{invalidErr.Schema, invalidErr.Index}.Sanitize()
-	fault := rowsViolateIndex("the table's rows", index)
-	if !errors.Is(invalidErr.Cleanup, executor.ErrBuildLeftInvalidIndex) {
-		return fault + "; " + unprovenInvalidIndexLeftover, true
+	switch invalidErr.Code() {
+	case executor.CodeDataFault:
+		return leftoverDetail(invalidErr, rowsViolateIndex("the table's rows", index), "correct the rows", index), true
+	case executor.CodeResourceExhausted:
+		return leftoverDetail(invalidErr, resourceExhaustedIndex(index), "free the resource or raise the limit", index), true
+	default:
+		return "", false
 	}
-	return fmt.Sprintf("%s; the failed build left the index behind invalid, which blocks a rerun under that name — correct the rows, then DROP INDEX CONCURRENTLY %s and run the change again",
-		fault, index), true
+}
+
+// leftoverDetail appends to a fault clause what the failed build left under
+// the index's name: its proven own leftover blocks a rerun until the fix and
+// the drop, and an entry the run could not prove its own is only to be
+// inspected.
+func leftoverDetail(invalidErr *executor.InvalidIndexError, fault, fix, index string) string {
+	if !errors.Is(invalidErr.Cleanup, executor.ErrBuildLeftInvalidIndex) {
+		return fault + "; " + unprovenInvalidIndexLeftover
+	}
+	return fmt.Sprintf("%s; the failed build left the index behind invalid, which blocks a rerun under that name — %s, then DROP INDEX CONCURRENTLY %s and run the change again",
+		fault, fix, index)
+}
+
+// resourceExhaustedIndex is the clause a resource-exhausted detail of an
+// index build leads with: which index's build ran out of a server resource
+// or hit a configured limit, and that every rerun fails the same way until
+// an operator frees the resource or raises the limit. The server error says
+// which resource.
+func resourceExhaustedIndex(index string) string {
+	return fmt.Sprintf("the server ran out of a resource or hit a configured limit during the concurrent build of index %s, so every rerun fails the same way until the resource is freed or the limit raised", index)
 }
 
 // rowsViolateIndex is the clause a data-fault detail of an index build leads
@@ -485,7 +509,7 @@ func rowsViolateIndex(rows, index string) string {
 	return fmt.Sprintf("%s violate index %s, so its concurrent build failed and every rerun meets the same rows until they are corrected", rows, index)
 }
 
-// unprovenInvalidIndexLeftover is what a data-fault detail says of an invalid
+// unprovenInvalidIndexLeftover is what a failed build's detail says of an invalid
 // index under the build's name that the run could not prove its own.
 const unprovenInvalidIndexLeftover = "an invalid index remains under that name which the run could not prove its own — inspect it before any removal, see docs/invalid-index-recovery.md"
 

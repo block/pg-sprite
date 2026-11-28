@@ -78,3 +78,41 @@ func TestFailureVerdictNamesThePublicationThatRefusedADrop(t *testing.T) {
 		assert.NotContains(t, v.Detail, "Code names the outcome")
 	})
 }
+
+// A failed verdict for an index build that ran out of a server resource is
+// resource-exhausted, and its detail does not claim nothing committed: the
+// build left an invalid index under the requested name that blocks a rerun.
+// The DROP the operator runs once the resource is freed is offered only for
+// a leftover proven this build's own, the same as for a data fault.
+func TestFailureVerdictNamesTheLeftoverOfAResourceExhaustedBuild(t *testing.T) {
+	st, err := statement.ParseOne("ALTER TABLE s.accounts ADD CONSTRAINT k UNIQUE (email)")
+	require.NoError(t, err)
+	build := &pgconn.PgError{Code: "53400", Message: "temporary file size exceeds temp_file_limit (64kB)"}
+	own := &executor.InvalidIndexError{Schema: "s", Index: "k", Table: "accounts", Build: build, Cleanup: executor.ErrBuildLeftInvalidIndex}
+	unproven := &executor.InvalidIndexError{Schema: "s", Index: "k", Table: "accounts", Build: build, Cleanup: executor.ErrAbandonmentUnproven}
+	const drop = `DROP INDEX CONCURRENTLY "s"."k"`
+
+	t.Run("own leftover, no step", func(t *testing.T) {
+		v := failureVerdict(st, own, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeResourceExhausted), v.Code)
+		assert.Contains(t, v.Detail, `during the concurrent build of index "s"."k"`)
+		assert.Contains(t, v.Detail, "free the resource or raise the limit")
+		assert.Contains(t, v.Detail, drop)
+		assert.NotContains(t, v.Detail, "nothing committed")
+	})
+	t.Run("own leftover, first step", func(t *testing.T) {
+		step := &executor.SequenceStepError{Step: 1, Total: 2, Kind: executor.StepConcurrentIndexBuild, SQL: "x", Err: own}
+		v := failureVerdict(st, step, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeResourceExhausted), v.Code)
+		assert.Contains(t, v.Detail, "no earlier steps had committed")
+		assert.Contains(t, v.Detail, drop)
+		assert.NotContains(t, v.Detail, "Code names the outcome")
+	})
+	t.Run("a leftover not proven this run's own offers no drop", func(t *testing.T) {
+		v := failureVerdict(st, unproven, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeResourceExhausted), v.Code)
+		assert.NotContains(t, v.Detail, "DROP INDEX CONCURRENTLY")
+		assert.Contains(t, v.Detail, "inspect it before any removal")
+		assert.NotContains(t, v.Detail, "nothing committed")
+	})
+}
