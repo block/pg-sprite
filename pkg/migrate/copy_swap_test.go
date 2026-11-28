@@ -340,11 +340,27 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)
 	})
 
+	// The verdict's cause is the decode error's token, so the CLI's --json
+	// and a library caller reading the error's Cause route on one string.
+	t.Run("a slot lag verdict's cause is the error's own token", func(t *testing.T) {
+		for _, cause := range []decode.SlotLagCause{
+			decode.SlotLagStreamBehind, decode.SlotLagWALRetained, decode.SlotLagWALRetainedHardLimit,
+		} {
+			t.Run(string(cause), func(t *testing.T) {
+				lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: cause,
+					Retained: 4 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
+				v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
+				assert.Equal(t, string(cause), string(v.Cause))
+			})
+		}
+	})
+
 	// The Runner joins a capture's stop with the fill's, and the catch-up
 	// carries a cycle's failure beside the caller's cancellation, so a slot
 	// lag stop can travel with an outcome that outranks it; the verdict
-	// then carries that outcome's code and no slot lag cause.
-	t.Run("a cancellation, a breach, or a data fault outranks a slot lag stop", func(t *testing.T) {
+	// then carries that outcome's code and no slot lag cause. A divergence
+	// needs a restart, not the resume a slot lag code invites.
+	t.Run("a cancellation, a breach, a data fault, or a divergence outranks a slot lag stop", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagStreamBehind,
 			Retained: 2 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
 		for _, tc := range []struct {
@@ -355,6 +371,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 			{"cancellation", fmt.Errorf("catch up: %w", context.Canceled), executor.CodeCancelledByCaller},
 			{"breach", fmt.Errorf("gate: %w", schemachange.ErrInvariantViolation), executor.CodeInvariantViolation},
 			{"data fault", fmt.Errorf("copy chunk: %w", &pgconn.PgError{Code: "22001"}), executor.CodeDataFault},
+			{"divergence", &checksum.DivergenceError{Report: checksum.Report{Chunks: 3, Mismatches: []checksum.Mismatch{{}}}}, executor.CodeExecutionFailed},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				v, _ := copySwapRunVerdict(st, holdSlot, errors.Join(lag, tc.with))

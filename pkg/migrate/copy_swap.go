@@ -467,6 +467,13 @@ func runAbandoned(err error) bool {
 	return errors.As(err, &abandoned)
 }
 
+// isDivergence reports whether the run stopped because the shadow did not
+// match the source (*checksum.DivergenceError).
+func isDivergence(err error) bool {
+	_, ok := errors.AsType[*checksum.DivergenceError](err)
+	return ok
+}
+
 // copySwapStoppedRemedy says what the operator does with a stopped run.
 // A data fault from the server — a value the new type will not hold, a
 // constraint the rows break — is one the Runner has already acted on: the
@@ -514,7 +521,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		return "the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, " + released + ", and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
 	}
 	startOver := "correct the data or the statement, then start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release + ", deletes the checkpoint row, and runs the change from the start"
-	if _, ok := errors.AsType[*checksum.DivergenceError](err); ok {
+	if isDivergence(err) {
 		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + startOver
 	}
 	if schemachange.IsDataFault(err) {
@@ -566,7 +573,9 @@ func slotBacklogRefusalDetail(backlog *schemachange.SlotBacklogError) string {
 // is the precedence when the Runner joins a capture's stop with the fill's
 // (a slot lag stop beside a data fault or a breach in the copy) or the
 // catch-up carries one beside the caller's cancellation: the cancellation,
-// the breach, and the fault each outrank the slot lag stop.
+// the breach, the fault, and a divergence each outrank the slot lag stop. A
+// divergence is an execution failure whose remedy is a restart, so a slot
+// lag code beside it would invite a resume that verifies the same copy.
 func copySwapFailureCode(err error) executor.Code {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -575,6 +584,8 @@ func copySwapFailureCode(err error) executor.Code {
 		return executor.CodeInvariantViolation
 	case schemachange.IsDataFault(err):
 		return executor.CodeDataFault
+	case isDivergence(err):
+		return executor.CodeExecutionFailed
 	case errors.Is(err, decode.ErrSlotLagCeiling):
 		return executor.CodeSlotLagExceeded
 	default:
