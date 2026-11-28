@@ -85,7 +85,8 @@ import (
 // fields.
 // Version 34 added the column-limit planner reason and the column_limit
 // decision field.
-const FormatVersion = 34
+// Version 35 added the statement-level uniqueness_kept_by field.
+const FormatVersion = 35
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -170,6 +171,16 @@ type Statement struct {
 	// Adopts, and out of the fingerprint, which covers the statement that
 	// builds the replacement.
 	Replacement *schemadiff.IndexReplacement `json:"-"`
+	// UniquenessKeptBy is set on a diff-derived DROP INDEX of a unique index
+	// or DROP CONSTRAINT of a unique constraint when another unique index or
+	// key of the desired table rejects every duplicate the dropped one
+	// rejects and is in place before the drop runs (see
+	// schemadiff.Change.UniquenessKeptBy). It names that index or
+	// constraint, so a reviewer reads that the drop lets no duplicate in.
+	// The drop still removes an object, so it stays destructive.
+	// Explanatory: the fingerprint covers the statements that build the
+	// object it names, not this field.
+	UniquenessKeptBy string `json:"uniqueness_kept_by,omitempty"`
 	// Renames is the index a diff-derived ALTER INDEX ... RENAME TO
 	// renames and the definition it must still have when the rename runs
 	// (see schemadiff.Change.Renames). Out of the JSON report for the same

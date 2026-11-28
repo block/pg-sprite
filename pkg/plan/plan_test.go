@@ -892,7 +892,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 34 against this test.
+// omissions. A consumer pins format_version 35 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -948,7 +948,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 34,
+		"format_version": 35,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -1006,7 +1006,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 34,
+		"format_version": 35,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1031,7 +1031,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 34,
+		"format_version": 35,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -1103,8 +1103,10 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 	explained.Guidance = suggest.GuidanceSplitStatement
 	explained.Reason = verdict.ReasonUnsupportedStatement
 	explained.Cause = executor.CreateShapePartitionOf
+	explained.ReplacedBy = "t_c_idx_new"
+	explained.UniquenessKeptBy = "t_c_key"
 	assert.Equal(t, base, plan.Fingerprint([]plan.Statement{explained, b}),
-		"decisions, kind, destructive, guidance, reason, and cause are explanatory: identity unchanged")
+		"decisions, kind, destructive, guidance, reason, cause, replaced_by, and uniqueness_kept_by are explanatory: identity unchanged")
 
 	assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{b, a}),
 		"statement order is part of identity")
@@ -1262,7 +1264,7 @@ func TestFingerprintCoversExtensionSchemas(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 34.
+// pinned to format_version 35.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }
