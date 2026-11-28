@@ -151,6 +151,26 @@ func TestMeasureResumeHeldOverTheRowStates(t *testing.T) {
 				return preflight.CopySwapHeld{SwapCommitted: true}
 			},
 		},
+		{
+			// The same committed swap for a live run whose row names the
+			// route's slot, with that slot retaining WAL: nothing is
+			// measured, so the slot's retained WAL is not reported either.
+			name:       "a committed swap of a live run measures no slot, with the row naming the route's slot",
+			decodesWAL: true,
+			leave: func(t *testing.T, f runnerFixture) preflight.CopySwapHeld {
+				f.committedCutoverRow(t)
+				slot := f.copySwapShape(t).DecodingName()
+				lock := f.lock(t, "orders")
+				row, err := f.store.Inspect(t.Context(), f.schema, "orders")
+				require.NoError(t, err)
+				row.SlotName = slot
+				row.PublicationName = slot
+				require.NoError(t, f.store.Save(t.Context(), lock, row))
+				require.NoError(t, lock.Release(t.Context()))
+				f.plantSlotRetainingWAL(t, slot)
+				return preflight.CopySwapHeld{SwapCommitted: true}
+			},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

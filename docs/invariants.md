@@ -567,7 +567,8 @@ operator, the `pg_total_relation_size(oid)` call included — a planted
 `pg_total_relation_size(oid)` and a lookalike `name = name` on a shadowing
 `<schema>, pg_catalog` path do not change the size it reads,
 `TestMeasureResumeHeldReadsTheRealShadowSizeUnderAPlantedSizeFunction` and
-`TestMeasureResumeHeldSizesTheShadowAloneUnderALookalikeNameEquals`), `pkg/migrate`
+`TestMeasureResumeHeldSizesTheShadowAloneUnderALookalikeNameEquals`, and every name in the
+query is checked qualified by `TestShadowBytesSQLQualifiesEveryName`), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
@@ -1522,7 +1523,9 @@ more under its lock refuses it as `finish-admission-stale` before it writes, pin
 `TestRunRefusesAFinishOnlyTargetOnARowWhoseSwapDidNotCommit`; the figure for each
 row state — no row, a `done` or incompatible row, a missing shadow, a materialized view under
 the shadow's name, a quiesced run or a row naming no slot beside the route's slot, and a
-committed swap — is pinned by `TestMeasureResumeHeldOverTheRowStates`, another database's
+committed swap, with or without the row naming the route's slot — is pinned by
+`TestMeasureResumeHeldOverTheRowStates`, a zero shape refused before any read by
+`TestMeasureResumeHeldRefusesAZeroShapeWithoutReadingAnything`, another database's
 relation by `TestMeasureResumeHeldCountsNoTableOfAnotherDatabase`, a failed shadow read
 returned rather than counted as nothing by `TestMeasureResumeHeldReturnsAShadowReadThatFails`,
 and desired-state admission's discount by
