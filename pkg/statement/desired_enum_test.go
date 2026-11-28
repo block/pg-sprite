@@ -58,24 +58,34 @@ func TestParseDesiredFileRefusesAnEnumTypeFileThatHoldsMore(t *testing.T) {
 		object DeclaredObject
 	}{
 		{
-			name: "a second type",
-			sql:  "CREATE TYPE a AS ENUM ('x'); CREATE TYPE b AS ENUM ('y')",
-			err:  ErrEnumTypeAlone,
-			stmt: "CREATE TYPE b AS ENUM ('y')",
+			name:   "a second type",
+			sql:    "CREATE TYPE a AS ENUM ('x'); CREATE TYPE b AS ENUM ('y')",
+			err:    ErrEnumTypeAlone,
+			stmt:   "CREATE TYPE b AS ENUM ('y')",
+			object: DeclaredEnumType,
 		},
 		{
-			name: "row security",
-			sql:  "CREATE TYPE status AS ENUM ('a'); ALTER TABLE t ENABLE ROW LEVEL SECURITY",
-			err:  ErrEnumTypeAlone,
-			stmt: "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+			name:   "row security",
+			sql:    "CREATE TYPE status AS ENUM ('a'); ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+			err:    ErrEnumTypeAlone,
+			stmt:   "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+			object: DeclaredRowSecurity,
+		},
+		{
+			name:   "a label rename",
+			sql:    "CREATE TYPE mood AS ENUM ('a'); ALTER TYPE mood RENAME VALUE 'a' TO 'c'",
+			err:    ErrDisallowedStatement,
+			stmt:   "ALTER TYPE mood RENAME VALUE 'a' TO 'c'",
+			object: DeclaredEnumLabel,
 		},
 		{
 			// The parse tree spells the empty old label as no label, so
 			// the canonical text would name an ADD VALUE.
-			name: "a rename from the empty label",
-			sql:  "CREATE TYPE mood AS ENUM ('a');\nALTER TYPE mood RENAME VALUE '' TO 'blue';\n",
-			err:  ErrDisallowedStatement,
-			stmt: "ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+			name:   "a rename from the empty label",
+			sql:    "CREATE TYPE mood AS ENUM ('a');\nALTER TYPE mood RENAME VALUE '' TO 'blue';\n",
+			err:    ErrDisallowedStatement,
+			stmt:   "ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+			object: DeclaredEnumLabel,
 		},
 		{
 			name:   "a comment on the type",
@@ -115,6 +125,7 @@ func TestParseDesiredFileRefusesAnEnumTypeFileThatHoldsMore(t *testing.T) {
 			extra, ok := errors.AsType[*EnumTypeFileError](err)
 			require.True(t, ok, err.Error())
 			assert.Equal(t, tc.stmt, extra.SQL)
+			assert.Equal(t, tc.object, extra.Object)
 		})
 	}
 }

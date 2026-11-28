@@ -31,6 +31,9 @@ type EnumTypeFileError struct {
 	// names it: the canonical form, or the source text when the canonical
 	// form would classify as a different kind.
 	SQL string
+	// Object is the object the statement declares, which belongs in a
+	// desired file of its own.
+	Object DeclaredObject
 }
 
 func (e *EnumTypeFileError) Error() string {
@@ -179,7 +182,7 @@ func enumTypeAloneRefusal(source *desiredSource, raw *pganalyze.RawStmt) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrEnumTypeAlone, err)
 	}
-	return &EnumTypeFileError{SQL: sql}
+	return &EnumTypeFileError{SQL: sql, Object: declaredObject(raw.GetStmt())}
 }
 
 // enumTypeName returns the unqualified type name a CREATE TYPE ... AS ENUM

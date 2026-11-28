@@ -125,6 +125,7 @@ func TestParseDesiredFileNamesTheObjectARefusedStatementDeclares(t *testing.T) {
 		{"schema", table + "CREATE SCHEMA audit", DeclaredSchema},
 		{"rule", table + "CREATE RULE r AS ON INSERT TO t DO INSTEAD NOTHING", DeclaredRule},
 		{"data change", table + "DELETE FROM t", DeclaredOther},
+		{"enum label", table + "ALTER TYPE mood ADD VALUE 'blue'", DeclaredEnumLabel},
 		{"comment beside row security",
 			table + "CREATE POLICY p ON t USING (true); COMMENT ON TABLE t IS 'people'", DeclaredComment},
 	}

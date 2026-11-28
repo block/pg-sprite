@@ -128,7 +128,9 @@ CREATE TYPE order_status_old AS ENUM ('placed');
 	comment, ok := errors.AsType[*DisallowedStatementError](refused.Refusals[0])
 	require.True(t, ok, "%v", refused.Refusals[0])
 	assert.Equal(t, DeclaredComment, comment.Object)
-	assert.ErrorIs(t, refused.Refusals[1], ErrEnumTypeAlone)
+	second, ok := errors.AsType[*EnumTypeFileError](refused.Refusals[1])
+	require.True(t, ok, "%v", refused.Refusals[1])
+	assert.Equal(t, DeclaredEnumType, second.Object)
 }
 
 // A row-security file's table and indexes are admitted apart from its row

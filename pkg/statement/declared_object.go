@@ -45,6 +45,19 @@ const (
 	// DeclaredEnumType is CREATE TYPE ... AS ENUM. A desired file may hold
 	// one, but only alone, so beside a table it belongs in a file of its own.
 	DeclaredEnumType
+	// DeclaredEnumLabel is ALTER TYPE ... ADD VALUE or RENAME VALUE: a
+	// change to an enum type's labels, which a desired enum type file
+	// declares in its CREATE TYPE instead.
+	DeclaredEnumLabel
+	// DeclaredTable is CREATE TABLE, other than CREATE TABLE ... AS.
+	DeclaredTable
+	// DeclaredIndex is CREATE INDEX.
+	DeclaredIndex
+	// DeclaredPolicy is CREATE POLICY.
+	DeclaredPolicy
+	// DeclaredRowSecurity is an ALTER TABLE that only enables, disables,
+	// forces, or stops forcing row security.
+	DeclaredRowSecurity
 )
 
 // DeclaredObjects returns the closed set of declared objects,
@@ -67,6 +80,11 @@ func DeclaredObjects() []DeclaredObject {
 		DeclaredSchema,
 		DeclaredRule,
 		DeclaredEnumType,
+		DeclaredEnumLabel,
+		DeclaredTable,
+		DeclaredIndex,
+		DeclaredPolicy,
+		DeclaredRowSecurity,
 	}
 }
 
@@ -101,6 +119,16 @@ func (o DeclaredObject) String() string {
 		return "rule"
 	case DeclaredEnumType:
 		return "enum type"
+	case DeclaredEnumLabel:
+		return "enum label change"
+	case DeclaredTable:
+		return "table"
+	case DeclaredIndex:
+		return "index"
+	case DeclaredPolicy:
+		return "policy"
+	case DeclaredRowSecurity:
+		return "row security change"
 	default:
 		return "statement"
 	}
@@ -138,6 +166,16 @@ func declaredObject(node *pganalyze.Node) DeclaredObject {
 		return DeclaredRule
 	case node.GetCreateEnumStmt() != nil:
 		return DeclaredEnumType
+	case node.GetAlterEnumStmt() != nil:
+		return DeclaredEnumLabel
+	case node.GetCreateStmt() != nil:
+		return DeclaredTable
+	case node.GetIndexStmt() != nil:
+		return DeclaredIndex
+	case node.GetCreatePolicyStmt() != nil:
+		return DeclaredPolicy
+	case node.GetAlterTableStmt() != nil && changesOnlyRowSecurity(node.GetAlterTableStmt()):
+		return DeclaredRowSecurity
 	default:
 		return DeclaredOther
 	}
