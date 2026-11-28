@@ -125,18 +125,25 @@ func inheritanceChildren(below []tableBelow) []string {
 	return names
 }
 
-// dropSaysOnly reports whether st's one operation says ONLY. dropsObject
-// has already proven st an ALTER TABLE whose sole operation is the drop.
-func dropSaysOnly(st statement.Statement) (bool, error) {
+// dropSaysOnly reports whether st says ONLY. dropsObject has already
+// proven st an ALTER TABLE whose sole operation is the drop of d, or one
+// that replaces constraint d in place (replacesConstraint), whose add then
+// reaches the partitions exactly as far as its drop.
+func dropSaysOnly(st statement.Statement, d *schemadiff.DroppedObject) (bool, error) {
 	ops, err := statement.ParseOps(st.SQL())
 	if err != nil {
 		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
-	if len(ops) != 1 {
-		return false, fmt.Errorf("%w: %q has %d operations, and only a step whose sole operation is the drop is checked",
+	if len(ops) != 1 && !replacesConstraint(ops, d) {
+		return false, fmt.Errorf("%w: %q has %d operations, and only a step whose sole operation is the drop, or one that replaces it in place, is checked",
 			ErrInvariantViolation, st.SQL(), len(ops))
 	}
-	return ops[0].Only, nil
+	for _, op := range ops {
+		if op.Only {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // refusePartitionedColumnDrop checks a reviewed column drop on a

@@ -17,6 +17,7 @@ import (
 func TestDropsObjectShapes(t *testing.T) {
 	email := &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: "t_email_key", Definition: "UNIQUE (email)"}
 	check := &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: "t_qty_check", Definition: "CHECK ((qty > 0))"}
+	pkey := &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: "t_pkey", Definition: "PRIMARY KEY (id)"}
 	cases := []struct {
 		name    string
 		sql     string
@@ -28,6 +29,12 @@ func TestDropsObjectShapes(t *testing.T) {
 		{name: "a key replaced by its new index",
 			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_email_key, ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key_new`,
 			dropped: email, drops: true},
+		{name: "a primary key swapped in under another name",
+			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_pkey, ADD CONSTRAINT t_id_pk PRIMARY KEY USING INDEX t_id_pk_new`,
+			dropped: pkey, drops: true},
+		{name: "a unique key added under another name",
+			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_email_key, ADD CONSTRAINT t_email_uniq UNIQUE USING INDEX t_email_uniq_new`,
+			dropped: email, refused: true},
 		{name: "a rule replaced NOT VALID",
 			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_qty_check, ADD CONSTRAINT t_qty_check CHECK (qty > 5) NOT VALID`,
 			dropped: check, drops: true},
@@ -57,4 +64,31 @@ func TestDropsObjectShapes(t *testing.T) {
 			assert.Equal(t, tc.drops, drops)
 		})
 	}
+}
+
+// A drop on a partitioned table reaches its partitions unless it says ONLY.
+// A rule replaced in place says ONLY or not for the whole statement, so its
+// add reaches the partitions exactly as far as its drop.
+func TestDropSaysOnly(t *testing.T) {
+	check := &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: "t_qty_check", Definition: "CHECK ((qty > 0))"}
+	for name, tc := range map[string]struct {
+		sql  string
+		only bool
+	}{
+		"the drop alone":            {sql: `ALTER TABLE s.t DROP CONSTRAINT t_qty_check`},
+		"the drop alone with ONLY":  {sql: `ALTER TABLE ONLY s.t DROP CONSTRAINT t_qty_check`, only: true},
+		"a rule replaced in place":  {sql: `ALTER TABLE s.t DROP CONSTRAINT t_qty_check, ADD CONSTRAINT t_qty_check CHECK (qty > 5) NOT VALID`},
+		"a rule replaced with ONLY": {sql: `ALTER TABLE ONLY s.t DROP CONSTRAINT t_qty_check, ADD CONSTRAINT t_qty_check CHECK (qty > 5) NOT VALID`, only: true},
+	} {
+		st, err := statement.ParseOne(tc.sql)
+		require.NoError(t, err, name)
+		only, err := dropSaysOnly(st, check)
+		require.NoError(t, err, name)
+		assert.Equal(t, tc.only, only, name)
+	}
+
+	st, err := statement.ParseOne(`ALTER TABLE s.t DROP CONSTRAINT t_qty_check, ADD COLUMN note text`)
+	require.NoError(t, err)
+	_, err = dropSaysOnly(st, check)
+	require.ErrorIs(t, err, ErrInvariantViolation, "a drop beside an unrelated operation is not checked")
 }

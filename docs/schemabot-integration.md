@@ -811,6 +811,52 @@ the tree's locks before the referenced table's, the server's own order, so it me
 against a transaction that read the referenced table and then writes the partitioned table; the
 step rolls back, every partition's foreign key stays, and the rerun adopts them.
 
+### Outcomes of an online `ATTACH PARTITION`
+
+`executor.AttachPartitionOnline` (and `AttachPartitionOnlineAsStep`) runs a reviewed
+`ALTER TABLE schema.parent ATTACH PARTITION table FOR VALUES ...` online, under the parent's
+advisory lock. A plain `ATTACH PARTITION` scans the new table and the parent's `DEFAULT`
+partition, builds the parent's missing indexes, and validates its foreign keys, all under
+`ACCESS EXCLUSIVE`. The flow does each of those first while writes go on: a validated `CHECK` on
+the new table that implies the bound, the parent's `CHECK`s and `NOT NULL`s, its indexes built
+concurrently, its foreign keys added `NOT VALID` and validated, and last a validated `CHECK` on
+the `DEFAULT` partition that excludes the bound. The `ATTACH` then changes only the catalog and
+drops both proof `CHECK`s in its own transaction; an `ATTACH` that would still scan or build is
+refused rather than run. It is a library entry only: `migrate` does not route an
+`ATTACH PARTITION` to it, and still refuses one without `--force` (`not-native-safe-rewrite-required`).
+
+The `DEFAULT` partition's proof refuses the writes the parent routes there inside the new bound
+from when it is added until the attach commits, so the flow refuses a parent with a `DEFAULT`
+partition unless `AttachPartitionOptions.AcceptDefaultWriteWindow` is set, and adds that proof
+last. **A run that stops without attaching drops that proof again**, whatever stopped it: a
+failed step, the `ATTACH`'s lock budget, a cancelled context, or a lost table lock. The drop runs
+under a context of its own, bounded by `HolderWait` plus a short cleanup budget, and appears in
+the report as a step of kind `default-proof` with action `dropped`; the report is returned with
+the error. If that drop itself fails, the error names the `CHECK` and the `ALTER TABLE ... DROP
+CONSTRAINT` that removes it, and an operator runs it unless the table turns out to be attached.
+
+Everything else a stop leaves stays on the new table, and **running the same statement again
+resumes from it**: the bound proof (a `CHECK` named `pgsprite_attach_bound_...`, enforced for new
+rows, refusing only rows the attach would refuse), the parent's `CHECK`s and `NOT NULL`s, the
+built indexes and key constraints, and the validated foreign keys. A rerun that finds the table
+already attached drops any proof still there and reports each as a `dropped` step.
+
+| Outcome | Persists | Retry | Orchestrator action |
+| --- | --- | --- | --- |
+| `attach-partition-unsupported-shape` | nothing | no, permanent | The statement is not one `ATTACH PARTITION ... FOR VALUES` on a schema-qualified parent (another statement, an unqualified parent, a `DEFAULT` bound). Fix the statement |
+| `attach-partition-table` | nothing added; a proof an earlier run left on the `DEFAULT` partition is dropped | no, permanent | The new table is missing, not a plain table, already a partition or inheritance child, or its columns differ from the parent's by name, type, or collation; or the `DEFAULT` partition is not a plain table. An operator fixes the table, then the same statement runs |
+| `attach-partition-default-window` | nothing added; a proof an earlier run left on the `DEFAULT` partition is dropped | no, permanent | The parent has a `DEFAULT` partition and the caller did not accept its write window. Set `AcceptDefaultWriteWindow`, or detach the `DEFAULT` partition first |
+| `pool-too-small` | nothing | no, permanent | The pool holds fewer connections than a concurrent index build needs; refused before the lock is taken. Resize the pool |
+| `execution-failed` with SQLSTATE `23514` (`check_violation`) in the chain | the new table's work so far, its bound proof `NOT VALID`; never the `DEFAULT` partition's proof | not until the rows move | Rows of the new table fall outside the bound, or rows of the `DEFAULT` partition fall inside it; the error names the table and the `CHECK`. Move those rows, then rerun |
+| `budget-lock-exceeded`, `budget-statement-exceeded`, `cancelled-by-caller`, `commit-outcome-unknown` | the new table's work so far; the `DEFAULT` partition's proof dropped unless the table is attached | yes | Rerun the same statement; it resumes. After `commit-outcome-unknown` the rerun finds the table attached or attaches it |
+| `invariant-violation`, `table-lock-unconfirmed`, `*dbconn.TableLockHeldError`, and the index and foreign key steps' own codes | as for the row above | as in [the partitioned index build table](#outcomes-of-a-partitioned-index-build) | Route as there |
+
+The index step's `ADD CONSTRAINT ... USING INDEX` and the foreign key step's `ADD ... NOT VALID`
+request their locks without waiting outside the lock queue, so `HolderWait` does not cover them;
+the pool's `lock_timeout` bounds each. A host that drives the flow as a step of its own run
+through `AttachPartitionOnlineAsStep` sees each statement on the tracker, but not live progress
+of the concurrent index builds. The codes are in [execution-model](execution-model.md#outcome-codes).
+
 ### Wiring the build through `migrate.Run` and `migrate.RunDesired`
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
@@ -1184,9 +1230,12 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
   rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
-  `Replacement`, and `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  `Replacement`, `DropsHelper`, and `RefusalCause` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
-  fingerprint, so a stored plan carries it.
+  fingerprint, so a stored plan carries it. `RefusalCause` also reaches the `RunDesired`
+  verdict: a `declarative-foreign-key` refusal carries `cause` `changed-foreign-key` (declare
+  the changed key under a new name) or `undeclarable-foreign-key` (drop it with
+  `migrate --alter`). Route on `DesiredResult.Cause`, not on the detail.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
   all direct-routed statements run first, then all engine-driven ones, regardless of their
   relative order in the plan — and a statement in one partition that depends on one in the

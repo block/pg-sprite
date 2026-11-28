@@ -282,12 +282,13 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 		// INV: LK-2 — a new table is locked by no one else, but a foreign
 		// key it declares or adds takes SHARE ROW EXCLUSIVE on the table it
 		// references, so the step waits out that table's long-lived
-		// writers first, up to HolderWait.
+		// writers first, and ends without requesting the lock when one is
+		// still there after HolderWait.
 		referenced, err := withReferencedTables(step, at.Schema(), nil)
 		if err != nil {
 			return rep, err
 		}
-		if _, err := waitOutsideLockQueue(ctx, pool, referenced, retry.HolderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
+		if err := awaitLockQueue(ctx, pool, referenced, retry.HolderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
 			return rep, &SequenceStepError{Step: i + 1, Total: len(steps), Kind: StepBrief, SQL: step.SQL(), Err: err}
 		}
 		err = executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
