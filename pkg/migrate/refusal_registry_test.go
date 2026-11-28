@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -458,8 +460,9 @@ func TestRowSecurityRefusalRegistry(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// A desired file that declares one index constraint twice is a mistake in
-// the file, so it is refused by design; a CREATE TABLE that names a live
+// A desired file that declares one index constraint twice, or holds a
+// statement the server rejects as written, is a mistake in the file, so it
+// is refused by design; a CREATE TABLE that names a live
 // parent, or a TABLESPACE the partitioned index build would not honor, is
 // a capability boundary. Both front doors that build a desired
 // file, RunDesired and the row-security executor, classify them the same
@@ -467,6 +470,10 @@ func TestRowSecurityRefusalRegistry(t *testing.T) {
 func TestDesiredShapeRefusalClasses(t *testing.T) {
 	merged := fmt.Errorf("inspect desired row security for public.t: %w",
 		fmt.Errorf("%w: table %q, constraint %q", schemadiff.ErrDesiredConstraintMerged, "t", "c2"))
+	rejected := fmt.Errorf("plan desired schema: %w", &schemadiff.DesiredStatementError{
+		Statement: "CREATE INDEX t_legacy_idx ON t (legacy)",
+		Err:       &pgconn.PgError{Code: "42703", Message: `column "legacy" does not exist`},
+	})
 	// The planner reads a desired TABLESPACE only after the server has
 	// loaded the file into the scratch schema, and the server rejects the
 	// built-in tablespaces on a partitioned table, so only a tablespace the
@@ -481,6 +488,7 @@ func TestDesiredShapeRefusalClasses(t *testing.T) {
 		want verdict.Refusal
 	}{
 		{"a constraint declared twice", merged, verdict.ByDesign(verdict.ReasonUnsupportedStatement)},
+		{"a statement the server rejects", rejected, verdict.ByDesign(verdict.ReasonUnsupportedStatement)},
 		{"a partition of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredPartitionOf), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
 		{"an inheritance child of a live parent", fmt.Errorf("wrapped: %w", schemadiff.ErrDesiredInherits), verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},
 		{"a TABLESPACE on a partitioned table's index", tablespace, verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)},

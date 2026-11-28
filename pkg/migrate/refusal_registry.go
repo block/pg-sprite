@@ -306,28 +306,30 @@ func partitionedKeyRefusal(err error) (verdict.Refusal, bool) {
 // schema: a CREATE TABLE that names a live parent, refused before the
 // build runs; one that declares a constraint twice, which the build shows
 // the server kept only once; an expression whose printed text never
-// settles; and a TABLESPACE on an index the partitioned index build would
-// create, which that build does not honor. RunDesired maps them to a
-// refusal, since nothing was planned or executed.
+// settles; a TABLESPACE on an index the partitioned index build would
+// create, which that build does not honor; and a statement of the file the
+// server rejects as written. RunDesired maps them to a refusal, since
+// nothing was planned or executed.
 func desiredShapeSentinels() []error {
 	return []error{
 		schemadiff.ErrDesiredPartitionOf,
 		schemadiff.ErrDesiredInherits,
 		schemadiff.ErrDesiredConstraintMerged,
 		schemadiff.ErrExpressionUnsettled,
+		schemadiff.ErrDesiredStatementRejected,
 		executor.ErrPartitionedIndexTablespace,
 	}
 }
 
 // desiredShapeRefusal classifies a desired-file shape refusal. A constraint
-// declared twice is a mistake in the file, so it is by design; a live
-// parent is a capability boundary. ok is false for an error outside
-// desiredShapeSentinels().
+// declared twice and a statement the server rejects are mistakes in the
+// file, so they are by design; a live parent is a capability boundary. ok
+// is false for an error outside desiredShapeSentinels().
 func desiredShapeRefusal(err error) (verdict.Refusal, bool) {
 	if !isInSentinelSet(err, desiredShapeSentinels()) {
 		return verdict.Refusal{}, false
 	}
-	if errors.Is(err, schemadiff.ErrDesiredConstraintMerged) {
+	if errors.Is(err, schemadiff.ErrDesiredConstraintMerged) || errors.Is(err, schemadiff.ErrDesiredStatementRejected) {
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
