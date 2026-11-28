@@ -240,6 +240,27 @@ no printing to process stdout) are enforced by `.golangci.yml`, not prose.
 
 - Do not create PRs automatically — pushing a branch is fine; opening the PR is the author's
   decision. When asked, create PRs as drafts (`gh pr create --draft`); the author marks ready.
+- PR titles carry a prefix: either a conventional commit, `<type>(<scope>): <sentence>`,
+  or the Go style, `<package>: <sentence>`. The type is `feat`, `fix`, `docs`, `refactor`,
+  `perf`, `test`, `ci`, `build`, `chore`, or `deps`; the scope or package names the area the
+  change is about (`planner`, `executor`, `migrate`, `cli`). A change with no package, such
+  as a docs, CI, or test-only change, may use a bare type in the Go style (`docs: …`,
+  `ci: …`), which the history already does. The sentence says what the
+  change does in words a reviewer understands without the diff, starts lowercase, and has
+  no trailing period: `feat(planner): refuse to retype or drop a column that a publication
+  includes`, `migrate: walk every front door for its stopped-run check`. A plain sentence
+  with no prefix is a malformed title. PRs merge as squash commits, so the title becomes
+  the commit subject on `main`, where it can no longer be fixed. Pass `--title` explicitly,
+  never `--fill` or a commit subject. After creating the PR and after every retitle, run
+  this check: it prints the title so you can read it against the change, and exits
+  nonzero when the form is wrong or `gh` fails:
+
+  ```bash
+  title=$(gh pr view <n> --json title --jq .title) &&
+    printf '%s\n' "$title" &&
+    { printf '%s\n' "$title" | grep -Eq '^((feat|fix|docs|refactor|perf|test|ci|build|chore|deps)\([a-z0-9-]+\)!?|[a-z0-9-]+): [a-z0-9-].*[^.]$' ||
+      { echo "PR title is not in the required form" >&2; false; }; }
+  ```
 - Never squash or rewrite history after a human has reviewed (comments or approval) — add
   commits so reviewers can see increments. Squash freely before review.
 - Agent disclosure lines (agent name + model) go at the *bottom* of PR bodies and issue
