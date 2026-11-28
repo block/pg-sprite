@@ -754,7 +754,14 @@ name in lower case. The table keeps its shape and its rows; an offline run's
 table takes writes again. `discard` drops in the order a restart does (the
 shadow, then the fence or the slot, then the row), so a discard that fails
 partway leaves a row that still records what stands; it prints what it
-dropped, exits 1, and a second `discard` finishes the job. Dropping a live
+dropped, exits 1, and a second `discard` finishes the job. One stop names a
+leftover it could not drop: when no replication slot of the run's name
+remains but the publication of that name was not dropped, the report names
+it under `publication_left`. A second `discard` drops it if the first
+failed for a passing reason; one that leaves it again has met a publication
+that is not of the engine's shape (it publishes other tables, say), which
+`discard` never drops: check that nothing uses it, drop it by hand with
+`DROP PUBLICATION`, and run `discard` again. Dropping a live
 run's slot waits for a server process still holding it, such as the stream
 of a run whose host died, which the server ends after `wal_sender_timeout`;
 the whole discard gives up after five minutes.
@@ -769,8 +776,19 @@ It is refused, with exit 2 and nothing dropped, when:
 - the checkpoint row names a slot other than the table's own
   (`resume-row-mismatch`);
 - the role lacks the copy-and-swap grants (`insufficient-privileges`),
-  including replication access when the run holds a slot, or the table no
-  longer has a shape copy-and-swap takes (the preflight's own cause).
+  including replication access when the run holds a slot: the `detail`
+  names the grant that gives it, so grant it, or connect as the role that
+  ran the change, and run `discard` again;
+- the table no longer has a shape copy-and-swap takes (the preflight's own
+  cause), such as a user trigger, a foreign key, or a dependent view added
+  since the run stopped: `discard` proves the table's shape as a run does,
+  so it cannot discard this run. Remove the run by hand instead, as the
+  [integration guide](schemabot-integration.md#stopping-resuming-and-starting-over)
+  describes under "Discarding without running the change": delete the
+  table's checkpoint row, drop the shadow and any write fence, and then
+  `reap` drops the slot no row names, or drop it by hand as
+  [replication-slots.md](replication-slots.md#free-the-wal-resume-drop-the-slot-or-start-over)
+  shows.
 
 With no checkpoint row, `discard` still drops a shadow table, a write fence,
 and a slot and publication under the table's derived names, the slot only as
@@ -797,13 +815,14 @@ removed, or changes meaning.
 | `format_version` | The report's shape, 1 |
 | `table` | The table as given |
 | `outcome` | `discarded`, `nothing-to-discard`, `refused` (exit 2, nothing dropped), or `stopped` (exit 1, the fields below name what was dropped before the failure) |
-| `cause` | The refusal cause of a `refused` or `stopped` discard, such as `table-lock-held` or `restart-swap-committed`; `""` otherwise, and for a stop that was not a refusal |
+| `cause` | The refusal cause of a `refused` or `stopped` discard; `""` otherwise, and for a stop that was not a refusal. It is one of the causes the command names, `table-lock-held`, `slot-active`, and `insufficient-privileges`; a copy-and-swap shape cause from the preflight ([`CopySwapRefusalCause`](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause)); or a shadow operation cause from the engine ([`RefusalCause`](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause)), of which a discard meets `restart-swap-committed`, `resume-row-terminal`, `resume-row-mismatch`, and `resume-slot-foreign` as above; `shadow-foreign-relation` and `shadow-owner-mismatch` when a relation under the shadow's name, or the table itself, is not the one the engine's run made or proved; and `shadow-lock-lost`, `shadow-lock-held-elsewhere`, and `shadow-lock-unconfirmed` when the table's lock is lost or cannot be confirmed mid-discard. A script that meets a cause it does not know treats it as a refusal to read by hand |
 | `detail` | The error behind a `refused` or `stopped` discard, `""` otherwise |
 | `row_phase` | The phase of the checkpoint row deleted, `""` when none was |
 | `shadow` | The shadow table dropped, in the table's schema, `""` when none was |
 | `slot` | The replication slot dropped, `""` when none was |
 | `publication` | The publication dropped, `""` when none was |
 | `write_fence` | True when the write fence was taken off the table |
+| `publication_left` | On a `stopped` discard, the publication left in place after no replication slot of its name remained (the slot is gone, whether this discard dropped it or it was gone already); `""` otherwise |
 
 stdout is empty, with exit 1, when the command failed before it dropped
 anything and was not refused, such as a connection failure or a table name

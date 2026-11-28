@@ -354,7 +354,7 @@ that tests the sentinel first would send an operator-dropped shadow or a held sl
 | `shadow-statement-target` (from `Runner`, on resume) | The statement `Run` was given names another table than the proven target, caught before the row's statement is compared with it | Configuration: the statement and the target disagree; retrying cannot succeed |
 | `resume-row-decoding` (from `Runner`) | The row was written by the other kind of run: a target proven without logical decoding was handed a row that names a slot or publication, or is in `catching_up` or `reconciling`, and has no slot to continue it with; a target proven for decoding was handed a row that names no slot, whose source was fenced, not captured | Run the row under the kind of `CopySwapTarget` proof that made it; the proof, not the caller, chooses the route |
 | `shadow-unrecorded` (from `Runner`) | A relation bears the target's derived shadow name and no row records a run for the target | `DropShadow` the leftover and run again, or run again with `RunOptions.Restart`, which drops it under the run's lock first; a relation the engine did not make is an operator's to rename |
-| `resume-shadow-gone` (from `Runner`) | The row's swap has not committed (any phase from `copying` to a `cutover` whose swap rolled back) and it records a shadow under which no relation stands; `ErrShadowNotFound` is reachable through the refusal, and nothing was written | Run the statement again with a restart (`--restart`, `RunOptions.Restart`), which discards the row, its slot or fence, and starts over. By hand, a row of a run that blocked writes: `Store.Delete` the row and run again; the next run builds a fresh shadow, and the source stays fenced until `DropWriteFence` or that run's swap. Live row (it names a slot): `decode.DropSlot` the row's slot, then `Store.Delete` the row, and run again; the slot retains WAL until it is dropped, and a run started while it stands fails creating its own. A live source has no fence |
+| `resume-shadow-gone` (from `Runner`) | The row's swap has not committed (any phase from `copying` to a `cutover` whose swap rolled back) and it records a shadow under which no relation stands; `ErrShadowNotFound` is reachable through the refusal, and nothing was written | Run the statement again with a restart (`--restart`, `RunOptions.Restart`), which discards the row, its slot or fence, and starts over; or, to end the change without running it, `pg-sprite discard SCHEMA.TABLE` (`Runner.Discard`, [below](#discarding-without-running-the-change)), which drops the same. By hand, a row of a run that blocked writes: `Store.Delete` the row and run again; the next run builds a fresh shadow, and the source stays fenced until `DropWriteFence` or that run's swap. Live row (it names a slot): `decode.DropSlot` the row's slot, then `Store.Delete` the row, and run again; the slot retains WAL until it is dropped, and a run started while it stands fails creating its own. A live source has no fence |
 | `resume-slot-foreign` | The slot of the derived name is physical or another database's; the engine may neither decode from it nor drop it | Operator action on the slot; retrying cannot succeed while it is there |
 | `resume-slot-held` | The engine's own slot is held by another backend — a previous run still draining, or a tool reading it | Wait and inspect again; a holder that never lets go is an operator action |
 | `cutover-relation-replaced` (from `Reconcile`) | The source or the shadow is no longer the relation the build recorded, read before the reconcile wrote anything | Stop; the table under the names is not the one this run proved — operator action |
@@ -1211,7 +1211,8 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
 
 A copy-and-swap run is one process holding one table lock session, and its whole lifecycle
 is driven by running the same statement again. The same four operator verbs apply at the
-CLI and through `migrate.Run`, plus one the Runner performs on its own; an orchestrator's
+CLI and through `migrate.Run`, a fifth, discarding a stopped change, applies at the CLI and
+through `Runner.Discard`, and the Runner performs one more on its own; an orchestrator's
 `Stop`/`Cancel` map onto them without any cross-process control channel.
 
 | Operator need | What to do | What pg-sprite does |
@@ -1220,6 +1221,7 @@ CLI and through `migrate.Run`, plus one the Runner performs on its own; an orche
 | **Stop** a running change | Send `SIGINT` (Ctrl-C) or `SIGTERM` once; a library caller cancels the context it handed `migrate.Run`, best with a cause of its own (`context.WithCancelCause`), which the returned error carries beside `context.Canceled` | The run's context is cancelled and the run unwinds through its own stop path: a copy in flight saves the watermark its committed chunks reached, the table lock session is released, the row stays at its last save with the run's hold on the source — the write fence of a run that blocked writes, or the replication slot of a live run, which retains WAL until the run is finished or discarded — and the verdict is `failed` with `code: cancelled-by-caller` (exit 1). A second `SIGINT`/`SIGTERM` ends the process at once with exit 130, before the stop path completes; the row then records whatever the last save landed, and the lock session is released by the server when its connection drops |
 | **Resume** a stopped change | Run the same statement again — with `--copy-and-swap` (`CopySwap.Enabled`), since the resume is a copy-and-swap run too — and the same `--block-writes SCHEMA.TABLE` if the stopped run blocked writes. A library caller makes the same `migrate.Run` call once the stopped call's slot is let go, since a resume that meets it held is refused as `resume-slot-held`; a shorter `CopySwap.CheckpointInterval` puts the copy's last save closer to where it stopped. The [library load proof](testing.md#the-library-load-proof) is a worked example of a host that stops and resumes a live run this way | The checkpoint row says where to continue: a stopped copy continues from its watermark, a run past its copy verifies again, a `cutover` row is answered by the catalog (a committed swap finishes from the old-table drop; a rolled-back swap goes back through verify and gate). Unless the slot was lost, nothing is copied twice. A live run whose slot is gone or the server reports lost, or whose row is still in `reconciling` from a reconcile that stopped partway, is reconciled first, with no flag: a new slot, a comparison of every chunk below the watermark against the source, and a recopy of those that differ ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)); the run then continues as above, and `Result.Reconciled` reports it ([What `Runner.Run` returns](#what-runnerrun-returns)). The same statement resumes through copy-and-swap whatever it would route to against the table's shape by then — a run stopped after its swap committed has already put the statement's shape live, where a drop of the column it dropped would otherwise run natively and fail — and it still needs `--allow-destructive` if it drops something. A different statement on the same table is refused before it runs, whatever it routes to (`copy-and-swap-refused`, cause `copy-and-swap-run-stopped`; the `Runner` called directly refuses it as `resume-row-mismatch`), unless `--restart` names the table ([below](#a-stopped-run-holds-its-table)). A stopped run that blocked writes resumes only with the acknowledgement, and a stopped live run only without it; a run of the other kind is refused (`resume-row-decoding`) and leaves the stopped run's hold as it is |
 | **Start over** — discard a stopped change and run it from the beginning | Run the same statement, with `--copy-and-swap` (`CopySwap.Enabled`) and `--restart SCHEMA.TABLE`, where the value names the resolved target exactly | Under the run's own table lock session, discards what the stopped run left in the order a later restart could meet idempotently — the shadow, then the hold on the source (`DropWriteFence` for a blocked-writes row, `decode.DropSlot` for a live row), then the checkpoint row — and runs the change fresh. A leftover shadow that no row records is discarded the same way. The decision is written to the audit log before anything is discarded |
+| **Discard** a stopped change without running it | `pg-sprite discard SCHEMA.TABLE`, naming the table as `--restart` does; a library caller calls `schemachange.Runner.Discard` ([below](#discarding-without-running-the-change)) | Under the table's lock, refused at once while a run holds it, drops what the stopped run left in the restart's order — the shadow, the hold on the source, then the checkpoint row — and runs nothing. A run whose swap committed is refused, since the change is live. The decision is written to the audit log before anything is dropped |
 | **Abandon** a change the data refuses | Nothing — the Runner does it | A run whose fill or swap stops on a data fault (a `*pgconn.PgError` in SQLSTATE class `22` or `23`: a value the new type will not hold, a constraint the copied rows break) would stop the same way on every resume, so the Runner discards it the way `--restart` would — shadow, hold on the source, checkpoint row — under the lock session it still holds, and returns `*schemachange.AbandonedError` wrapping the server's error. The verdict is `failed` with `code: data-fault` and `abandoned: true`, and nothing is left on the source. Correct the data or the statement, then run it again; the run starts from the beginning |
 
 **When to start over rather than resume.** Most stops resume: a cancellation, a lost lock
@@ -1268,8 +1270,9 @@ nothing executes; the `detail` names the stopped statement and its phase. A host
 stopped run by running its statement again, then runs the new one. Before the swap, a new
 statement that itself routes to copy-and-swap can start over instead under `--restart
 SCHEMA.TABLE`, which discards the stopped run; a statement that routes anywhere else cannot
-take `--restart`, so the stopped run has to be finished, or discarded by hand as for
-`resume-shadow-gone`. `migrate.RunDesired` refuses the same way, with the same cause, when the
+take `--restart`, so the stopped run has to be finished, or discarded first with
+`pg-sprite discard SCHEMA.TABLE` (`Runner.Discard`,
+[below](#discarding-without-running-the-change)). `migrate.RunDesired` refuses the same way, with the same cause, when the
 plan for the table is empty while such a row stands — the table matches the desired schema
 only because the stopped run swapped it in, and the retained source and the row would
 otherwise stay with nothing to finish them; a non-empty plan meets the row statement by
@@ -1303,16 +1306,28 @@ resumes a stopped copy-and-swap on its own, and a run that must start over is th
 statement run through `Run` — `migrate --alter … --restart SCHEMA.TABLE` on the CLI — before
 the plan is run again.
 
-**Discarding without running the change.** An orchestrator's `Cancel` — end the change and
+<a id="discarding-without-running-the-change"></a>**Discarding without running the change.** An orchestrator's `Cancel` — end the change and
 leave nothing behind, without running it — is `schemachange.Runner.Discard(ctx, pool, shape)`.
 It takes a `preflight.CopySwapShape` (`preflight.CheckPrivileges` with
 `TierCopyAndSwap`, and `LogicalDecoding` set when the stopped run may be a live one, then
 `preflight.CheckCopySwapShape`), not a target: a discard grows nothing, so it is not asked for
-the disk or the slot headroom the stopped run itself holds. It has no CLI flag or verb.
+the disk or the slot headroom the stopped run itself holds. On the CLI it is
+`pg-sprite discard SCHEMA.TABLE` ([cli.md](cli.md#abandon-a-stopped-copy-and-swap-run)), which
+prints the [discard report](cli.md#discard-report) and exits 2 for a refusal before anything was
+dropped, 1 for a discard that stopped partway, and 0 otherwise.
+
+A host that does not know whether the stopped run is live or offline proves the shape the way
+the command does: `CheckPrivileges` with `LogicalDecoding` first, and when that returns a
+`*preflight.PrivilegeError`, again without it, then `CheckCopySwapShape` with the role either
+call proved. A role without replication access can then still discard an offline run, which
+holds no slot; a live run's slot is refused under that proof, before anything is dropped, with
+`preflight.ErrCopySwapProofMismatch`, and the first call's `PrivilegeError` names the grant
+that gives the access.
 
 The shape check reads the table as it stands now, so a table that has changed shape since the
 run stopped — a user trigger, a foreign key, or a dependent view added — has no
-`CopySwapShape` to hand to `Discard`. The operator then removes the run by hand, with no run
+`CopySwapShape` to hand to `Discard`, and `pg-sprite discard` refuses it with the
+preflight's cause and exit 2. The operator then removes the run by hand, with no run
 in flight: delete the table's row from `pgsprite.pgsprite_checkpoint`, drop the shadow
 (`_pgsprite_…_new` in the table's schema), and for a blocked-writes run drop the
 `pgsprite_write_fence` trigger from the table; `pg-sprite reap` (`Store.ReapOrphanSlots`) then

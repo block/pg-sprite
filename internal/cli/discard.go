@@ -60,6 +60,10 @@ const (
 	discardCauseSlotActive = "slot-active"
 )
 
+// errDiscardTableAmbiguous reports a SCHEMA.TABLE name that names a table
+// at more than one of its dots.
+var errDiscardTableAmbiguous = errors.New("the name names more than one table, splitting at different dots")
+
 // discardReport is the discard command's output. Every name field is empty,
 // and write_fence false, for a leftover the discard did not drop.
 type discardReport struct {
@@ -78,6 +82,11 @@ type discardReport struct {
 	Slot        string `json:"slot"`
 	Publication string `json:"publication"`
 	WriteFence  bool   `json:"write_fence"`
+	// PublicationLeft names the publication a stopped discard left after
+	// no replication slot of its name remained: the slot is gone, whether
+	// this discard dropped it or it was gone already, and the publication
+	// was not dropped.
+	PublicationLeft string `json:"publication_left"`
 
 	// schema is the table's schema, for the text's shadow name.
 	schema string
@@ -160,18 +169,43 @@ func (c *DiscardCmd) run(ctx context.Context, out io.Writer) error {
 		// which grant gives it.
 		err = fmt.Errorf("%w: %w", err, replicationErr)
 	}
-	cause, refused := discardRefusal(err)
-	if refused && discarded.Nothing() {
-		report := newDiscardReport(c.Table, discardOutcomeRefused, discarded)
+	outcome, cause := discardFailure(err, discarded)
+	switch outcome {
+	case discardOutcomeRefused:
+		report := newDiscardReport(c.Table, outcome, discarded)
 		report.Cause, report.Detail = cause, err.Error()
 		return c.finish(out, report, verdict.ErrRefused)
-	}
-	if discarded.Nothing() {
+	case discardOutcomeStopped:
+		report := newDiscardReport(c.Table, outcome, discarded)
+		report.Cause, report.Detail = cause, err.Error()
+		if errors.Is(err, decode.ErrSlotDroppedPublicationLeft) {
+			report.PublicationLeft = shape.DecodingName()
+		}
+		return c.finish(out, report, fmt.Errorf("discard %s: %w", c.Table, err))
+	default:
 		return fmt.Errorf("discard %s: %w", c.Table, err)
 	}
-	report := newDiscardReport(c.Table, discardOutcomeStopped, discarded)
-	report.Cause, report.Detail = cause, err.Error()
-	return c.finish(out, report, fmt.Errorf("discard %s: %w", c.Table, err))
+}
+
+// discardFailure sorts a discard that returned err after dropping
+// discarded into the outcome its report states, with the refusal cause
+// err carries: refused when a refusal came before anything was dropped,
+// stopped when something is gone, and no outcome, which prints no report,
+// for a failure before anything was dropped that is not a refusal. A
+// publication left after its slot is a stop even when the call names
+// nothing it dropped, since the slot of its name is gone.
+func discardFailure(err error, discarded schemachange.Discarded) (discardOutcome, string) {
+	cause, refused := discardRefusal(err)
+	if errors.Is(err, decode.ErrSlotDroppedPublicationLeft) {
+		return discardOutcomeStopped, cause
+	}
+	if !discarded.Nothing() {
+		return discardOutcomeStopped, cause
+	}
+	if refused {
+		return discardOutcomeRefused, cause
+	}
+	return "", ""
 }
 
 // finish prints the report and returns result, or the write's error
@@ -224,7 +258,7 @@ func resolveDiscardTable(ctx context.Context, pool *pgxpool.Pool, flat string) (
 	case 1:
 		return found[0][0], found[0][1], nil
 	default:
-		return "", "", fmt.Errorf("%s names more than one table, splitting at different dots; nothing was discarded", flat)
+		return "", "", fmt.Errorf("%s: %w; nothing was discarded", flat, errDiscardTableAmbiguous)
 	}
 }
 
@@ -324,6 +358,9 @@ func renderDiscard(report discardReport) string {
 	if report.Outcome == discardOutcomeStopped {
 		fmt.Fprintf(&b, "run discard %s again to drop what is left\n", report.Table)
 	}
+	if report.PublicationLeft != "" {
+		fmt.Fprintf(&b, "a publication %s that discard leaves again is not of the engine's shape: drop it by hand once nothing uses it\n", report.PublicationLeft)
+	}
 	return b.String()
 }
 
@@ -343,5 +380,8 @@ func writeDiscarded(b *strings.Builder, report discardReport) {
 	}
 	if report.RowPhase != "" {
 		fmt.Fprintf(b, "  deleted the checkpoint row (phase %s)\n", report.RowPhase)
+	}
+	if report.PublicationLeft != "" {
+		fmt.Fprintf(b, "  no replication slot %s remains; its publication was left in place\n", report.PublicationLeft)
 	}
 }
