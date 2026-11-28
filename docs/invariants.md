@@ -873,7 +873,8 @@ statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
 same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
-The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported)
+The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported,
+also reached through the attach index step in `pkg/executor/attach_index.go` for a table to attach)
 takes `ACCESS EXCLUSIVE` on one leaf only for `ADD CONSTRAINT ... USING INDEX` on an index already
 built concurrently, in a brief transaction under both bounds. A primary key over a column the leaf
 allows to be NULL, or whose not-null constraint is `NOT VALID` on PostgreSQL 18, would make that
@@ -1143,7 +1144,7 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 | RS-2 | Policy changes and convergence verification commit together or roll back | `ExecuteRowSecurity`; real DDL fault injection restores original policies |
 | RS-3 | Bound lock waits, statements, and the whole attempt | `ExecuteRowSecurity`; lock contention and deadline cancellation |
 | RS-4 | Run only admitted, qualified RLS DDL; keep scratch disposable | `RenderRowSecurity` from the scratch catalog and executor readback; qualified-helper, quoted-name, and scratch-cleanup tests |
-| RS-5 | Reviewed RLS execution compares the full ordered generated SQL under the target lock before target DDL; a mismatch refuses without target changes | `ExecuteReviewedRowSecurity`; `TestReviewedRowSecurityRechecksAfterLockWait`, `TestReviewedRowSecurityRefusesDifferentSequences` |
+| RS-5 | Reviewed RLS execution compares the full ordered generated SQL before target DDL, under the target lock for an existing table; a mismatch refuses without target changes | `ExecuteReviewedRowSecurity`, `ExecuteReviewedCreateWithRowSecurity`; `TestReviewedRowSecurityRechecksAfterLockWait`, `TestReviewedRowSecurityRefusesDifferentSequences`, `TestExecuteReviewedCreateWithRowSecurityRefusesADifferentSequence`, `TestExecuteReviewedCreateWithRowSecurityRefusesATableThatNowExists` |
 | RS-6 | A table created with row security commits together with its RLS or not at all | `ExecuteCreateWithRowSecurity`; `TestExecuteCreateWithRowSecurityNeverExposesTheTableWithoutItsPolicies`, `TestExecuteCreateWithRowSecurityRollsBackTheTableWhenAPolicyFails`, `TestExecuteCreateWithRowSecurityRollsBackANameTakenAfterTheProbe` |
 
 ## State, checkpoint, and resume (ST)
@@ -1191,7 +1192,15 @@ front door, where a native route reads no row: before routing any statement on a
 `findStoppedRun` reads the table's row, and a statement other than the stopped run's own,
 compared as parsed, is refused (`copy-and-swap-run-stopped`); a row it cannot judge — another
 format or phase, a store an older engine created, a store the role may not read — holds the
-table while the catalog shows the run's shadow or retained source. `pkg/schemachange` applies the
+table while the catalog shows the run's shadow or retained source. Every other door that acts
+on the table reads the row the same way before it does: `refuseOverStoppedRun` for an index
+rename, the accepted blocking passthrough, and a reviewed plan's index drop;
+`refuseEmptyPlanOverStoppedRun` for an empty plan in `RunDesired` and
+`RunDesiredWithRowSecurity`; `AdmitRowSecurityStoppedRun` before a row security file's atomic
+change; and `AdmitStoppedRun` and `AdmitPlanStoppedRun` in the dry runs, which end in the
+refusal the apply gives. `ALTER TYPE ... ADD VALUE` is exempt: it locks no table and changes
+nothing in a table's model; so is a reviewed plan's blocking drop of a partitioned table's
+index, since no copy-and-swap run can stop on a partitioned table. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
 `checkResumeRow` — the row must name this table and the derived slot (`resume-row-mismatch`),
 be non-terminal (`resume-row-terminal`), and not be a row whose cutover already began
@@ -1315,7 +1324,10 @@ before its row; a first save whose row does not land drops the slot and the shad
 a slot of the derived name the run did not make is reported as the `*decode.SlotExistsError`
 it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
-row's position — a ceiling abort included, so the backlog is drained by resuming — or the
+row's position — a ceiling abort included, whose backlog a resume drains, though after a
+`stream-behind` abort a resume under the same ceiling stops again unless the stream reads
+through that backlog within the first catch-up cycle, which judges the slot, so it needs a
+ceiling above the slot's unconfirmed WAL — or the
 operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`, or has a
 restart (`RunOptions.Restart`) do the same sequence under the run's own lock, or a discard
 (`Runner.Discard`) do it under a lock of its own without running the change — a data fault
@@ -1594,7 +1606,11 @@ and its attach); the leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE
 detach pending, before it builds, and in the constraint's transaction locks the leaf
 `SHARE UPDATE EXCLUSIVE`, which excludes a detach, before it proves the leaf and the index by
 identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-pending cases,
-`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`). `AddPartitionedKey` admits only a named
+`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`); the attach index step
+(`pkg/executor/attach_index.go`, unexported) proves, before its builds and again after, that the
+parent is still a partitioned table and the table to attach still that plain table, a partition or
+inheritance child of nothing (`standaloneNodeSQL` through `proveNodeIn`;
+`TestEnsureAttachIndexesRefusesATableOrParentItDoesNotTake`). `AddPartitionedKey` admits only a named
 `ADD PRIMARY KEY` or `ADD UNIQUE` on the preflighted partitioned table and renders the parent's
 statement from the admitted kind, name, and columns alone; it refuses a tree holding a partition
 with its detach pending before any leaf step, since a key given to a partition leaving the tree

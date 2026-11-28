@@ -287,23 +287,23 @@ func (o Options) retry() executor.RetryPolicy {
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (v verdict.Verdict, err error) {
 	opts.startProgress(1)
 	defer func() { opts.finishProgress(v.Outcome, err) }()
-	return run(ctx, pool, st, opts, 1, nil, nil, nil)
+	return run(ctx, pool, st, opts, 1, nil, nil, nil, nil)
 }
 
 // run is Run for a statement that may be a diff-planned index adoption,
 // constraint validation, or drop: when adopts is set, st takes over that
 // index, when validates is set, st validates that constraint, and when
-// dropped is set, st drops that column, constraint, or NOT NULL. In every
-// case execution checks the planned definition again under the table's lock
-// before acting on it.
-func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject) (verdict.Verdict, error) {
-	v, err := runStatement(ctx, pool, st, opts, step, adopts, validates, dropped)
+// dropped is set, st drops that column, constraint, or NOT NULL, and when
+// renames is set, st renames that index. In every case execution checks the
+// planned definition again under the table's lock before acting on it.
+func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject, renames *schemadiff.IndexRename) (verdict.Verdict, error) {
+	v, err := runStatement(ctx, pool, st, opts, step, adopts, validates, dropped, renames)
 	return WithServerError(v, err), err
 }
 
 // runStatement is run before a failed verdict records the server error
 // that failed it.
-func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject) (verdict.Verdict, error) {
+func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, dropped *schemadiff.DroppedObject, renames *schemadiff.IndexRename) (verdict.Verdict, error) {
 	if err := opts.validate(); err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -326,7 +326,14 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		return gated, nil
 	}
 	if st.Kind() == statement.KindRenameIndex {
-		return renameIndex(ctx, pool, st, opts, step, logger)
+		if adopts != nil || validates != nil || dropped != nil {
+			return verdict.Verdict{}, fmt.Errorf("%w: an index rename carries no adoption, validation, or drop check", executor.ErrInvariantViolation)
+		}
+		return renameIndex(ctx, pool, st, opts, step, renames, logger)
+	}
+	if renames != nil {
+		return verdict.Verdict{}, fmt.Errorf("%w: planned statement %q carries the rename of index %s but is not an index rename",
+			executor.ErrInvariantViolation, st.SQL(), renames.Index)
 	}
 	if st.Kind() == statement.KindAddEnumValue {
 		return addEnumValue(ctx, pool, st, opts, step, logger)
@@ -382,7 +389,7 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		return verdict.Verdict{}, err
 	}
 	if stopped.blocks(st, opts) {
-		return copySwapRunStoppedVerdict(st, qualified(st), stopped), nil
+		return copySwapRunStoppedVerdict(st, qualified(st), stopped, true), nil
 	}
 	resumes := stopped.resumedBy(st)
 	if err := checkDropRoute(rs, dropped); err != nil {
@@ -605,9 +612,15 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the adoption of index %s and the validation of constraint %s",
 			executor.ErrInvariantViolation, adopts.Index, validates.Constraint)
 	}
-	if dropped != nil && (adopts != nil || validates != nil) {
-		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the drop of %s %s and an adoption or a validation",
-			executor.ErrInvariantViolation, dropped.Kind, dropped.Name)
+	if dropped != nil && validates != nil {
+		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the drop of %s %s and the validation of constraint %s",
+			executor.ErrInvariantViolation, dropped.Kind, dropped.Name, validates.Constraint)
+	}
+	if dropped != nil && adopts != nil && dropped.Kind != schemadiff.DroppedConstraint {
+		// Only a constraint replaced in place drops and adopts at once:
+		// its new index takes the place of the old constraint's.
+		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the drop of %s %s and the adoption of index %s",
+			executor.ErrInvariantViolation, dropped.Kind, dropped.Name, adopts.Index)
 	}
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, substituted) {

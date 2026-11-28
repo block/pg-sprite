@@ -13,26 +13,30 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// A foreign key the desired file adds or validates keeps its route, so it
-// runs online; a foreign key it drops stays in the plan so the diff is
-// reviewable, but is refused for execution.
-func TestRefuseForeignKeyDropsKeepsAddsAndValidationsRouted(t *testing.T) {
-	executable := func(sql string, kind schemadiff.ChangeKind) plan.Statement {
-		return plan.Statement{
+// A foreign-key drop keeps its route and runs, as an add or a validation
+// does. Only the drop of a key a desired file cannot declare stays in the
+// plan for review and is refused for execution.
+func TestRefuseUndeclarableForeignKeyDropsRefusesOnlyUndeclarableKeys(t *testing.T) {
+	executable := func(sql string, kind schemadiff.ChangeKind, drops string) plan.Statement {
+		st := plan.Statement{
 			SQL: sql, Kind: kind, Route: planner.RouteNative, Backend: router.BackendNative,
 			Disposition: router.DispositionExecute, ExecSQL: []string{sql},
 		}
+		if drops != "" {
+			st.Drops = &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: drops}
+		}
+		return st
 	}
 	report := plan.NewReport(plan.SourceDiff)
 	report.Disposition = router.DispositionExecute
 	report.Statements = []plan.Statement{
-		executable("ALTER TABLE orders ADD COLUMN note text", schemadiff.ChangeAddColumn),
-		executable("ALTER TABLE orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)", schemadiff.ChangeAddForeignKey),
-		executable("ALTER TABLE orders VALIDATE CONSTRAINT orders_account_id_fkey", schemadiff.ChangeValidateForeignKey),
-		executable("ALTER TABLE orders DROP CONSTRAINT orders_coupon_id_fkey", schemadiff.ChangeDropForeignKey),
+		executable("ALTER TABLE orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)", schemadiff.ChangeAddForeignKey, ""),
+		executable("ALTER TABLE orders VALIDATE CONSTRAINT orders_account_id_fkey", schemadiff.ChangeValidateForeignKey, ""),
+		executable("ALTER TABLE orders DROP CONSTRAINT orders_coupon_id_fkey", schemadiff.ChangeDropForeignKey, "orders_coupon_id_fkey"),
+		executable("ALTER TABLE orders DROP CONSTRAINT orders_region_id_fkey", schemadiff.ChangeDropForeignKey, "orders_region_id_fkey"),
 	}
 
-	plan.RefuseForeignKeyDrops(&report)
+	plan.RefuseUndeclarableForeignKeyDrops(&report, map[string]bool{"orders_region_id_fkey": true})
 
 	require.Len(t, report.Statements, 4)
 	for _, st := range report.Statements[:3] {
@@ -41,7 +45,7 @@ func TestRefuseForeignKeyDropsKeepsAddsAndValidationsRouted(t *testing.T) {
 	}
 
 	drop := report.Statements[3]
-	assert.Equal(t, "ALTER TABLE orders DROP CONSTRAINT orders_coupon_id_fkey", drop.SQL)
+	assert.Equal(t, "ALTER TABLE orders DROP CONSTRAINT orders_region_id_fkey", drop.SQL)
 	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
 	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
 	assert.Equal(t, verdict.ClassCapabilityBoundary, drop.Class)
