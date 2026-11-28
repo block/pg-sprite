@@ -1593,6 +1593,9 @@ table in a partition or inheritance tree through `preflight.CheckCopySwapPartiti
 `migrate.AdmitCopySwapPartitioning` and `migrate.AdmitPlanCopySwapPartitioning` call: the
 same catalog facts and the same `CheckCopySwapShape` decision, minting no proof, so it too is a
 read-only surface rather than a second enforcement.
+The partitioned foreign key build's catalog refusals are read before the first write through
+`executor.AdmitPartitionedForeignKey` (for a desired plan, `migrate.AdmitPlanPartitionedForeignKeys`);
+the build repeats them under its lock, and that reading decides.
 Both front doors run the copy-and-swap checks through `schemachange.CheckCopySwap`, which runs
 `preflight.CheckCopySwap`'s checks with the resume measure, before the route writes anything.
 *Planned enforcement:* all other execution paths in preflight. *Source:*
@@ -1862,8 +1865,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `ADD FOREIGN KEY` on a partitioned parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
   build (each partition's foreign key added `NOT VALID` and validated, then the parent's
   `ADD CONSTRAINT` adopts them); a foreign key a desired file adds runs as the same build when
-  the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`), and one it does
-  not keeps the `NOT VALID` plan and is refused. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
+  the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`) and is refused whole
+  at desired-state admission when the build's catalog checks refuse it
+  (`migrate.AdmitPlanPartitionedForeignKeys`, see [ST-6](#st-6--preflight-before-the-first-write)), and one whose shape it does
+  not admit keeps the `NOT VALID` plan and is refused. `migrate --alter` reads the kind of the index a single-index `DROP INDEX` names and
   refuses a partitioned index's drop, plain or concurrent, with the same cause, never naming the
   concurrent idiom PostgreSQL rejects for it. The plan keeps a desired-state drop of a
   partitioned index refused; a desired-state run lifts only that refusal, running the plain

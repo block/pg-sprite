@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -33,9 +34,9 @@ func (r *Runner) copy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 type appliedSource func() decode.LSN
 
 // runCopy runs c to the end of the key space, saving the landed watermark
-// every checkpoint interval while the copy is in progress and once more
-// when it ends, and leaves the row in phase next with the complete
-// watermark.
+// once the copy first lands past where it began, every checkpoint
+// interval after that while the copy is in progress, and once more when
+// it ends, and leaves the row in phase next with the complete watermark.
 //
 // The periodic save runs beside the copier and stops it when a save
 // fails: a run whose row cannot be written has nothing to resume from
@@ -96,15 +97,30 @@ type watermarkSaver struct {
 	err     error
 }
 
-// loop saves the watermark every checkpoint interval until ctx ends. The
-// context ending is how the copy's end is signalled, so it is not an
+// firstSavePoll is how often the saving loop reads the copier's landed
+// watermark, a read from memory, until the copy has landed past where
+// the run began.
+const firstSavePoll = 100 * time.Millisecond
+
+// loop saves the watermark until ctx ends: once as soon as the copy has
+// landed past the watermark the run began from, then every checkpoint
+// interval. The first save comes early so a run stopped at any point
+// after its first chunk landed resumes past that chunk, however much
+// shorter than the interval the copy was; it adds one save per run, so
+// the row is written no more often than one save per interval after it.
+// The context ending is how the copy's end is signalled, so it is not an
 // error, whether it ends the sleep or a save in flight: the save after
 // the copier returns records what that save did not.
 func (s *watermarkSaver) loop(ctx context.Context, c *copier.Copier) error {
 	interval := s.runner.opts.checkpointInterval()
 	sleep := s.runner.opts.sleep()
+	began := s.state.cp.Watermark
 	for {
-		if err := sleep(ctx, interval); err != nil {
+		wait := interval
+		if s.state.cp.Watermark == began {
+			wait = min(interval, firstSavePoll)
+		}
+		if err := sleep(ctx, wait); err != nil {
 			return s.unlessEnded(ctx, err)
 		}
 		if err := s.saveIfMoved(ctx, c); err != nil {

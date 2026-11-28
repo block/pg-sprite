@@ -198,7 +198,9 @@ the same binary through a real project's schema-change history and is not
 a CI gate; so is the [load proof](#the-load-proof) (`make load-proof`), which
 drives it through a copy-and-swap under a concurrent write load, and its
 [library variant](#the-library-load-proof) (`make load-proof-library`), which
-drives the same change through `migrate.Run`. *Binds:*
+drives the same change through `migrate.Run`, and its
+[kill variant](#the-kill-load-proof) (`make load-proof-kill`), which kills
+the binary with SIGKILL and runs it again. *Binds:*
 Phase 2 (first executing command). *Source:* pgroll `make examples` CI job; pg_repack driving its CLI through `pg_regress`.
 
 ### TM-9 — The operation must outlive the observer
@@ -239,6 +241,7 @@ capability no peer suite has.
 | `make replay` / `make replay-refresh` / `make replay-down` | Corpus replay ([replay/README.md](../replay/README.md)): drive the built binary through a pinned real-project schema-change history, asserting each statement's typed outcome. Operator-run, not a CI gate. |
 | `make load-proof LOAD_PROOF_FREE_DISK=…` | The [load proof](#the-load-proof): the built binary carries a copy-and-swap over a large table while a concurrent workload writes it, and writes `results.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF=1`, which the target sets. |
 | `make load-proof-library LOAD_PROOF_FREE_DISK=…` | The [library load proof](#the-library-load-proof): the same change under the same load, driven in-process through `migrate.Run`, cancelled through its context mid-copy and mid-verify and resumed each time, and writes `results-library.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF_LIBRARY=1`, which the target sets. |
+| `make load-proof-kill LOAD_PROOF_FREE_DISK=…` | The [kill load proof](#the-kill-load-proof): the same change under the same load, run through the built binary, killed with SIGKILL mid-copy and mid-verify and run again each time, and writes `results-kill.json`. Operator-run, not a CI gate; skipped unless `LOAD_PROOF_KILL=1`, which the target sets. |
 | `make slot-release-proof` | The slot release proof: a catch-up on a busy source runs on the real clock through two of PostgreSQL's own slot releases (about 15 seconds apart) with the slot's retained WAL crossing the lag ceiling before each, and logs the slot's positions at every reading. `PG_VERSION` selects the major. A minute or more of wall-clock time per run, so not a merge gate; skipped unless `SLOT_RELEASE_PROOF=1`, which the target sets. CI runs it as the `Slot Release Proof` workflow weekly on `main` (and on demand), once per major 14 → 18 with each major a separate job, and on any pull request that changes the workflow or the proof's test file; the workflow is not part of `all-green`. Each scheduled run also re-enables the workflow through the API, so GitHub's 60-day inactivity rule does not switch the schedule off. A red job is the first place to look when a major's release cadence may have changed, but on a shared runner it can also be contention or an image pull, so read the logged positions before changing the sizing rule. GitHub itself opens no issue for a failed scheduled run (it emails only whoever last edited the schedule), so the workflow's `report` job does: after every scheduled run, a run that did not pass on every major opens one issue labelled `slot-release-proof`, or comments on the open one, with the run's link, the date, and the majors that did not pass; the next scheduled run that passes comments with its link and closes the issue. The job adopts only an issue it opened (the label and its own title), so a hand-written issue that shares the label is never commented on or closed, and it creates the label only when it opens an issue. A cancelled or skipped proof counts as not passing, since it proved nothing that week, and never closes the issue; on-demand and pull-request runs never touch it, and neither does a re-run of an older scheduled run once a newer one exists. The issue reports scheduled runs that happened and whose proof finished: a schedule GitHub or an admin disabled files nothing, and a failed `keepalive` turns the run red without filing, so the badge and the Actions tab remain the check for those. The job runs `scripts/slot-release-proof-issue.sh`, which `make test-slot-release-proof-issue` drives through each outcome against a stand-in `gh` in CI's unit job. The badge at the top of the README shows the latest scheduled run on `main`. Unit tests in `internal/testutil` pin the target to a test that exists, the matrix to the majors `make test-supported-postgres` runs, and the `report` job to every matrix job, the schedule alone, and the only `issues: write` token. The unit tests in `pkg/applier` pin the same release model on every pull request. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
@@ -429,6 +432,95 @@ encoded as the binary prints it, with the same `verification` object.
 The library proof has been shown to pass at 20,000 and 50,000 rows on a laptop with
 `fsync=off` under the default load, and not yet at the default table size, which needs the
 same host as the load proof's default run.
+
+### The kill load proof
+
+`make load-proof-kill LOAD_PROOF_FREE_DISK=<free space>` builds `bin/pg-sprite` and runs
+`TestLoadProofKill` in [integration/loadproof](../integration/loadproof/kill_test.go): the
+load proof's change, table, and load, run through the binary with the load proof's flags,
+and killed with SIGKILL, the way a crash, an out-of-memory kill, or a node loss ends it: no
+cleanup runs, nothing more is saved, and the server drops the binary's connections. The
+operator then runs the same command again. It takes the load proof's variables and database,
+and writes its record to `results-kill.json` (`LOAD_PROOF_RESULTS` moves it). It is
+operator-run, not a CI gate; it is skipped unless `LOAD_PROOF_KILL=1`, which the target sets.
+A run takes up to three runs' worth of copying (less when each rerun resumes from a save),
+plus up to a few minutes of waits for the server to let go of the dead binary's backends and
+slot, which scale with the server's `wal_sender_timeout`; run as `go test` directly, it
+needs a `-timeout` above the two-hour run budget plus the cleanup, as the target's
+`-timeout 3h` is.
+
+The harness polls the checkpoint row, the same read a status command makes, every 50
+milliseconds, and kills the binary from that poll; nothing is timed:
+
+1. The first run is killed in `copying` at the first poll that sees the row carry a saved
+   watermark short of the key space, so the rerun has a save to resume from and the rows
+   landed above it to clear. The binary saves the copy's watermark as soon as its first
+   chunk lands and every ten seconds after, so even at a smoke size, where the copy lasts
+   about a second, the kill lands after a save. Only while the row carries no watermark
+   does the poll fall back to the heap sizes, killing once the shadow's heap is at least
+   half the source's.
+2. The second run resumes from that row and is killed at the first poll that sees the row
+   in `verifying`. The poll also notes the first watermark it sees this run save in
+   `copying`.
+3. The third run resumes from the `verifying` row and runs to its verdict, under the same
+   poll, which sends nothing.
+
+After each kill the harness waits, for at most the server's `wal_sender_timeout` plus 30
+seconds (and never less than the binary's default `statement_timeout` plus 30 seconds),
+for every backend carrying the binary's `application_name` to leave the server, and only
+then reads the row the dead run left: a backend still in a statement when its process died
+runs on until the statement ends, and a save it was making can still commit.
+
+Before each rerun the harness waits, for at most the server's `wal_sender_timeout` plus 30
+seconds, for the server to let go of the slot the dead binary held, since a rerun that meets
+it held is refused as `resume-slot-held`; it never drops or takes over the slot. It also waits
+for the load to commit a few writes per worker, so the interval in which no binary runs holds
+writes only the kept slot can carry into the new table. A kill in `catching_up` is not made:
+at a smoke size that phase lasts less than a poll or two, so a kill aimed at it would land
+only some of the time. Nor is the kill in `verifying` held until the pass has compared a
+chunk, as the library proof's cancel is: the row records nothing of the pass's progress, and
+the binary reports it nowhere a harness outside the process can read.
+
+A pass proves, beyond what the load proof's oracles prove of the result:
+
+- each kill landed inside its phase: the binary died of the SIGKILL the harness sent, not
+  of its own accord or of a SIGKILL from elsewhere (the run budget's deadline, the
+  out-of-memory killer), and the row it left stands in the phase the poll saw, a killed
+  copy's watermark still short of the key space;
+- the killed copy's rerun resumed from its save: the first watermark the poll saw the rerun
+  save is at or above the one the killed run left, where a copy started over would save one
+  below it first, and the run's `resumed_from_save` is `true`. At a size where the kill
+  lands before the copy's first save, the row carries no watermark (`watermark_at_kill` is
+  absent), the rerun copies again from the first key into the same shadow, and the proof
+  asserts only what the next bullets do; `resumed_from_save` is then `false` on every run,
+  so such a pass is not read as a proof of resuming from a save;
+- the run resumed from the `verifying` row did not copy again: the first row the poll saw
+  while it ran stood in `verifying` or a later phase, and no poll saw the row in `copying`
+  after it had seen it in `verifying`;
+- each rerun resumed the killed run rather than starting over: the shadow every killed run
+  leaves, and in the end the swapped-in table, is the relation the first run built (by OID);
+- the last run exits 0 with `executed-via-copy-and-swap` and the swap's WAL position, the row
+  is `done`, and no replication slot is left under the name the engine derives for the table
+  or the one the row named;
+- the retained `_old` table and the live table agree row for row, the live table's catalog
+  equals a natively changed table's, every load failure is one the swap causes, and the load
+  inserts after the swap — the load proof's own oracles, with its exclusions, judged against
+  the last run's swap and exit.
+
+The record has the load proof's shape plus `runs`: per run, when it started and how long it
+ran, how long the harness waited for the slot before it, the phase it was killed in with the
+two heap sizes the poll read then, the signal that ended it and its exit code, how long the
+dead binary's backends took to leave (`backends_exit_wait_ms`), the row's phase and
+watermark after it (`watermark_at_kill`), for the killed copy's rerun the first watermark
+the poll saw it save (`first_saved_watermark`) and whether that was held to the killed
+run's save (`resumed_from_save`), the shadow's OID, the writes the load committed before
+the next run, and, for the last run, the verdict's outcome and code.
+The phase list the checkpoint poll records spans all three runs, `phase_sequence` lists the
+phases in the order the poll saw them, and `verdict` is the last run's stdout.
+
+The kill proof has been shown to pass at 20,000 and 50,000 rows on a laptop with `fsync=off`
+under the default load, and not yet at the default table size, which needs the same host as
+the load proof's default run.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
 

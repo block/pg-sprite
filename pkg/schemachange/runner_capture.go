@@ -19,6 +19,12 @@ import (
 // owner stops it: the one end of a catch-up that is not a failure.
 var errCaptureEnded = errors.New("capture ended by the run")
 
+// errCaptureEndWaitExpired is what a capture's end returns when its own
+// bound on closing the stream and waiting for the slot ran out. It is not
+// a context error: the caller's context did not end, so the stop the
+// capture ended beside keeps its own code.
+var errCaptureEndWaitExpired = errors.New("capture end wait expired")
+
 // slotIdlePoll is how often a run that has stopped its stream reads the
 // slot while it waits for the stream's backend to let the slot go.
 const slotIdlePoll = 50 * time.Millisecond
@@ -70,12 +76,23 @@ func (r *Runner) startCapture(ctx context.Context, pool *pgxpool.Pool, target pr
 func (c *capture) end(ctx context.Context, pool *pgxpool.Pool, sleep func(context.Context, time.Duration) error) error {
 	c.cancel(errCaptureEnded)
 	c.wg.Wait()
-	endCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)
+	endCtx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout, errCaptureEndWaitExpired)
 	defer cancel()
 	if err := closeStream(endCtx, c.stream); err != nil {
+		return endWaitError(endCtx, err)
+	}
+	return endWaitError(endCtx, awaitSlotIdle(endCtx, pool, c.stream.Slot(), sleep))
+}
+
+// endWaitError reports an error out of a capture's end. When the end's own
+// bound expired, the error is errCaptureEndWaitExpired with the text of
+// what was waiting, and no longer matches context.DeadlineExceeded, so a
+// run's verdict does not read the expiry as the caller's cancellation.
+func endWaitError(endCtx context.Context, err error) error {
+	if err == nil || !errors.Is(context.Cause(endCtx), errCaptureEndWaitExpired) {
 		return err
 	}
-	return awaitSlotIdle(endCtx, pool, c.stream.Slot(), sleep)
+	return fmt.Errorf("%w after %s: %s", errCaptureEndWaitExpired, dbconn.DefaultConnectTimeout, err.Error())
 }
 
 // failure is the catch-up's error when it is the catch-up's own: anything

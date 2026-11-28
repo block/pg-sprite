@@ -14,7 +14,10 @@
 // TestLoadProofLibrary drives the same change in-process through
 // migrate.Run, cancelling and resuming it as an importer does; it is
 // skipped unless LOAD_PROOF_LIBRARY=1, which `make load-proof-library`
-// sets.
+// sets. TestLoadProofKill runs the binary as TestLoadProof does, kills it
+// with SIGKILL mid-copy and mid-verify, and runs it again each time, as an
+// operator does after a crash; it is skipped unless LOAD_PROOF_KILL=1,
+// which `make load-proof-kill` sets.
 package loadproof_test
 
 import (
@@ -246,29 +249,13 @@ func TestLoadProof(t *testing.T) {
 	t.Logf("seeding %d rows into %s", c.Rows, table.Qualified())
 	require.NoError(t, table.SeedRows(ctx, c.Rows))
 
-	load := testutil.StartLoad(t, pool, table, testutil.LoadSpec{
-		Seed:                 1,
-		Workers:              c.Workers,
-		RatePerSecond:        c.RatePerSecond,
-		Mix:                  loadMix,
-		HotRowFraction:       c.HotRowFraction,
-		ToastRewriteFraction: 0.5,
-		RecordFailures:       true,
-	})
-	waitForLoad(t, load, func(p testutil.Progress) bool { return p.Committed() > 0 },
-		firstCommitDeadline, "the load's first commit before the run starts")
+	load := startProofLoad(t, pool, table, c)
 
-	alter := fmt.Sprintf(alterTemplate, table.Qualified())
 	watch := startWatch(t, pool, table, load)
 	atStart := load.Progress()
 	started := time.Now()
 	res.StartedAt = started
-	output, diagnostic, code := runBinary(t, ctx, c, "migrate",
-		"--copy-and-swap",
-		"--keep-old",
-		"--free-disk", c.FreeDisk,
-		"--json",
-		"--alter", alter)
+	output, diagnostic, code := runBinary(t, ctx, c, migrateArgs(c, table)...)
 	exited := time.Now()
 	atExit := load.Progress()
 	res.RunMillis = exited.Sub(started).Milliseconds()
@@ -304,6 +291,37 @@ func TestLoadProof(t *testing.T) {
 		assert.True(t, failureAllowed(f, window), "load failure the swap is not allowed to cause, at %s (mark %s, exit %s): SQLSTATE %q: %v",
 			f.At.Format(time.RFC3339Nano), w.MarkAt.Format(time.RFC3339Nano), exited.Format(time.RFC3339Nano), f.Code, f.Err)
 	}
+}
+
+// startProofLoad starts the proof's load on table, sized by c, and waits
+// for its first commit, so a run begins over a table that is being
+// written.
+func startProofLoad(t *testing.T, pool *pgxpool.Pool, table testutil.WorkloadTable, c config) *testutil.LoadGenerator {
+	t.Helper()
+	load := testutil.StartLoad(t, pool, table, testutil.LoadSpec{
+		Seed:                 1,
+		Workers:              c.Workers,
+		RatePerSecond:        c.RatePerSecond,
+		Mix:                  loadMix,
+		HotRowFraction:       c.HotRowFraction,
+		ToastRewriteFraction: 0.5,
+		RecordFailures:       true,
+	})
+	waitForLoad(t, load, func(p testutil.Progress) bool { return p.Committed() > 0 },
+		firstCommitDeadline, "the load's first commit before the run starts")
+	return load
+}
+
+// migrateArgs is the command line the binary runs the change under proof
+// with: the copy-and-swap route, keeping the source as _old for the row
+// oracle, with the operator's free-space figure and a JSON verdict.
+func migrateArgs(c config, table testutil.WorkloadTable) []string {
+	return []string{"migrate",
+		"--copy-and-swap",
+		"--keep-old",
+		"--free-disk", c.FreeDisk,
+		"--json",
+		"--alter", fmt.Sprintf(alterTemplate, table.Qualified())}
 }
 
 // requireMarkSpansTheStream holds the mark to what the row oracle needs to

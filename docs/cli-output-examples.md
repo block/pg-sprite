@@ -423,6 +423,13 @@ $ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(3
 pg-sprite: error: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001)
 ```
 
+A live copy-and-swap run that its replication slot's lag ceiling stopped fails
+the same way, with `"code": "slot-lag-exceeded"` and a `cause` naming the
+measure that crossed the ceiling: `stream-behind`, `wal-retained`, or
+`wal-retained-hard-limit`. The checkpoint row and the slot stay; the detail
+says how to resume, and a consumer branches on `code` and `cause`, not on the
+detail's wording ([replication slots](replication-slots.md#the-slot-lag-ceiling)).
+
 ### Refused: the table changed under a stopped copy-and-swap run (`resume-source-changed`) — exit 2
 
 A live copy-and-swap run of a retype on `orders` was stopped in `verifying`, and
