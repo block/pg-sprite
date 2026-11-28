@@ -79,9 +79,8 @@ func AdmitPartitionedUniqueIndex(ctx context.Context, pool *pgxpool.Pool, st sta
 // FOREIGN KEY itself: it runs the build's own static admission, so an
 // unnamed foreign key, or one with a clause the build cannot carry to every
 // partition, is refused in the dry run as it is in the run. The build's
-// checks under its table lock (the parent's constraints, the referenced
-// table, the shape of the tree) are not part of it, so a dry run does not
-// claim them.
+// checks of the referenced table and the shape of the tree are
+// [AdmitPartitionedForeignKeyCatalog]'s.
 func AdmitPartitionedForeignKeyRequest(st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
 	return admitRouted(st, schema, steps, func(steps []string) error {
 		if len(steps) != 1 {
@@ -89,6 +88,39 @@ func AdmitPartitionedForeignKeyRequest(st statement.Statement, schema string, st
 		}
 		return executor.AdmitPartitionedForeignKeyShape(steps[0])
 	})
+}
+
+// AdmitPartitionedForeignKeyCatalog is the catalog half of the partitioned
+// foreign key build's admission, for a statement
+// [AdmitPartitionedForeignKeyRequest] admitted, read from the live catalog
+// on pool: a referenced table the build does not take (partitioned, foreign,
+// a view, the table itself, or one of its partitions) and a sub-partitioned
+// partition are refused as the build refuses them under its table lock
+// before it gives any partition the foreign key. A partition tree holding a
+// foreign table or a partition whose detach has not finished is the build's
+// failed verdict, not a refusal, so it is returned as an error, where [Run]
+// returns one. The build's checks of the parent's constraints are not part
+// of it, so a dry run does not claim them. The verdict, the boolean, and the
+// error mean what they mean for [AdmitRoutedSteps].
+func AdmitPartitionedForeignKeyCatalog(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema string, steps []string) (verdict.Verdict, bool, error) {
+	return admitRoutedAs(st, schema, steps, func(steps []string) error {
+		if len(steps) != 1 {
+			return fmt.Errorf("%w: the partitioned foreign key build runs one statement, got %d", executor.ErrInvariantViolation, len(steps))
+		}
+		return executor.AdmitPartitionedForeignKey(ctx, pool, steps[0])
+	}, partitionedForeignKeyCatalogRefusal)
+}
+
+// partitionedForeignKeyCatalogRefusal classifies a refusal of the
+// partitioned foreign key build's catalog admission as the build's refusal
+// verdict classifies it: a shape refusal is an admission refusal, and the
+// referenced table and the sub-partitioned tree are the build's own catalog
+// refusals.
+func partitionedForeignKeyCatalogRefusal(err error) (verdict.Refusal, bool) {
+	if r, ok := admissionRefusal(err); ok {
+		return r, true
+	}
+	return partitionedForeignKeyRefusal(err)
 }
 
 // AdmitCopySwapPartitioning is the dry run's reading of the copy-and-swap

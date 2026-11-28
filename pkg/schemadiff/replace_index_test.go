@@ -157,9 +157,9 @@ func TestDiffChangedIndexRefusesATakenReplacementName(t *testing.T) {
 	}
 }
 
-// A table whose diff drops or retypes a column, and a partitioned parent,
-// keep the drop and rebuild: the column change takes or rebuilds the index
-// anyway, and a partitioned index is never built concurrently.
+// A table whose diff retypes a column, and a partitioned parent, keep the
+// drop and rebuild: the retype rebuilds the index anyway, and a partitioned
+// index is never built concurrently.
 func TestDiffChangedIndexKeepsTheDropAndRebuild(t *testing.T) {
 	t.Run("a retyped column", func(t *testing.T) {
 		desired := desiredUniqueName()
@@ -253,4 +253,36 @@ func TestDiffRefusesDroppingAnIndexAForeignKeyReferences(t *testing.T) {
 			assert.Contains(t, err.Error(), `drop or change "tickets_event_name_fkey" first, or `+tc.keep)
 		})
 	}
+}
+
+// An index only a foreign key on the same table references is dropped once
+// the plan has dropped that key, which goes first, so the plan drops both
+// rather than refusing. A key on another table still refuses it.
+func TestDiffDropsAnIndexOnceTheSelfReferencingKeyOnItIsDropped(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns, Column{Name: "parent_name", Type: "character varying(50)"})
+	live.Constraints = append(live.Constraints, Constraint{
+		Name: "events_parent_fkey", Def: "FOREIGN KEY (parent_name) REFERENCES events(name)", ForeignKey: true,
+	})
+	live.Indexes = []Index{{Name: "events_name_idx", Def: wantNameIndex, ReferencedBy: []IncomingForeignKey{
+		{Schema: "public", Table: "events", Constraint: "events_parent_fkey"},
+	}}}
+	desired := base()
+	desired.Columns = append(desired.Columns, Column{Name: "parent_name", Type: "character varying(50)"})
+	desired.Indexes = nil
+
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_parent_fkey"`,
+		`DROP INDEX "public"."events_name_idx"`,
+	}, sqls(changes))
+
+	live.Indexes[0].ReferencedBy = append(live.Indexes[0].ReferencedBy,
+		IncomingForeignKey{Schema: "public", Table: "tickets", Constraint: "tickets_event_name_fkey"})
+	_, err = Diff("public", live, desired)
+	var unsupportedErr *UnsupportedChangeError
+	require.ErrorAs(t, err, &unsupportedErr)
+	assert.Equal(t, CauseReferencedIndex, unsupportedErr.Cause)
+	assert.Contains(t, err.Error(), `referenced by foreign key "tickets_event_name_fkey"`)
 }

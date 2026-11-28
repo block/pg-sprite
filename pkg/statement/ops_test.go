@@ -164,12 +164,12 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "alter type with a collation",
 			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE "C"`,
-			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "C"},
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "C", NewTypeCollationName: statement.QualifiedName{Name: "C"}},
 		},
 		{
 			name: "alter type with a schema-qualified collation",
 			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE pg_catalog."C"`,
-			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "pg_catalog.C"},
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "pg_catalog.C", NewTypeCollationName: statement.QualifiedName{Schema: "pg_catalog", Name: "C"}},
 		},
 		{
 			name: "set default",
@@ -634,4 +634,22 @@ func TestParseOpsRecordsOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ops, 1)
 	assert.False(t, ops[0].Only)
+}
+
+// A live collation as schemadiff renders it, schema-qualified and
+// quote_ident-quoted, reads back into the name and schema a COLLATE clause
+// gives, so the two compare without splitting either on its dots.
+func TestParseCollationName(t *testing.T) {
+	for in, want := range map[string]statement.QualifiedName{
+		`pg_catalog."C"`:     {Schema: "pg_catalog", Name: "C"},
+		`app."names.v1"`:     {Schema: "app", Name: "names.v1"},
+		`"C"`:                {Name: "C"},
+		`pg_catalog.default`: {Schema: "pg_catalog", Name: "default"},
+	} {
+		got, err := statement.ParseCollationName(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	_, err := statement.ParseCollationName(`"C" COLLATE "POSIX"`)
+	require.Error(t, err)
 }

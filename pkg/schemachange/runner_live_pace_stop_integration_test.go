@@ -49,14 +49,31 @@ func fillWAL(ctx context.Context, pool *pgxpool.Pool, rows int) error {
 
 // A live run the lag ceiling stops as stream-behind says on the error how
 // far its copy was held back before the stop, since Run returns no Result
-// with an error. The copy reads the stream's lag over its pace mark at
-// every reading, so it waits before its first chunk however the run is
-// timed. The capture is held from confirming past one change the source
-// never makes visible, written at the run's first save, so every later
-// byte of WAL counts as the stream's lag. Once that hold is in place, the
-// copy's first wait writes about 26 MiB, which the next catch-up cycle
-// reads over the 16 MiB ceiling.
+// with an error.
 func TestRunnerStoppedStreamBehindReportsHowFarItsCopyWasHeldBack(t *testing.T) {
+	f, err := stopStreamBehindInCopy(t)
+
+	var exceeded *decode.SlotLagExceededError
+	require.ErrorAs(t, err, &exceeded)
+	assert.Equal(t, decode.SlotLagStreamBehind, exceeded.Cause, "the held confirmation is the stream's own lag")
+	assert.Positive(t, exceeded.CopyPaced.Waits, "the copy was held back before the ceiling stopped the run")
+
+	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseCopying, row.Phase, "the run stopped in its copy")
+}
+
+// stopStreamBehindInCopy runs a live table under paceStopCeiling until the
+// catch-up stops it stream-behind in its copy, and returns the fixture and
+// Run's error, with the hidden commit released. The copy reads the
+// stream's lag over its pace mark at every reading, so it waits before its
+// first chunk however the run is timed. The capture is held from
+// confirming past one change the source never makes visible, written at
+// the run's first save, so every later byte of WAL counts as the stream's
+// lag. Once that hold is in place, the copy's first wait writes about
+// 26 MiB, which the next catch-up cycle reads over the 16 MiB ceiling.
+func stopStreamBehindInCopy(t *testing.T) (reconcileFixture, error) {
+	t.Helper()
 	const seeded = 2500
 	f := newDecodingFixtureOn(t, seeded, synchronousStandbyThatNeverConnects)
 	hidden := newHiddenCommit(t, f)
@@ -93,15 +110,6 @@ func TestRunnerStoppedStreamBehindReportsHowFarItsCopyWasHeldBack(t *testing.T) 
 	require.NoError(t, err)
 	schemachange.PaceOverMark(r, math.MaxInt64, nil)
 	_, err = r.Run(t.Context(), f.pool, f.target, f.liveStatement(t))
-
-	var exceeded *decode.SlotLagExceededError
-	require.ErrorAs(t, err, &exceeded)
-	assert.Equal(t, decode.SlotLagStreamBehind, exceeded.Cause, "the held confirmation is the stream's own lag")
-	assert.Positive(t, exceeded.CopyPaced.Waits, "the copy was held back before the ceiling stopped the run")
-
-	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
-	require.NoError(t, err)
-	assert.Equal(t, checkpoint.PhaseCopying, row.Phase, "the run stopped in its copy")
-
 	hidden.release(t)
+	return f, err
 }

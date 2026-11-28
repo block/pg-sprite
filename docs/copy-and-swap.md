@@ -194,11 +194,17 @@ while pg-sprite keeps up (see below); a ceiling well below the default stops a b
 not more safely.
 
 The run stops with a failed verdict (exit 1) whose detail says which of three causes ended it;
-the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
-slot and the saved progress stay, so running the same command again resumes the run:
+with `--json` the verdict's `code` is `slot-lag-exceeded` and its `cause` is that cause's token,
+and the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
+slot and the saved progress stay for the next run to resume from, though a resume under the
+same ceiling can stop again, depending on the cause:
 
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
-  pg-sprite fell behind the source's writes.
+  pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
+  stop, so running the same command again under the same ceiling is refused
+  (`resume-slot-backlog`) before it opens the stream or restarts the copy: no shadow row is
+  cleared or copied and the slot confirms nothing. The check reads the slot as it stands at
+  the resume, so a resume admitted just under the ceiling can still stop `stream-behind`.
 - **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
   for longer than it takes to release WAL pg-sprite has confirmed: an open or prepared
   transaction holds it back, or the cluster writes more WAL per release interval and cycle than
@@ -279,6 +285,7 @@ name for a rollback window; you drop it yourself when the window ends.
 | Stop a running change | Press Ctrl-C, or send `SIGTERM`, once. The run saves where its copy reached and exits. The table keeps its fence (offline) or its replication slot (live) until you resume or start over. |
 | Resume it | Run the same command again — `--copy-and-swap` included, since the resume is a copy-and-swap run too — with `--block-writes SCHEMA.TABLE` if the run blocked writes. It continues from where it stopped; unless the slot was lost, nothing is copied twice. If a live run's replication slot is gone or the server reports it lost (after a failover, or when the server drops a slot that retained too much WAL), or a reconcile stopped partway, the resume reconciles first, with no flag needed: it creates a new slot, compares every landed chunk against the source, recopies only those that differ, and then continues. The comparison takes time in proportion to the rows already copied ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)). |
 | Start over | Run the same command (again with `--copy-and-swap`) plus `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. `--restart` applies to `migrate --alter` only: `migrate --desired` rejects it, because there the derived plan, not you, decides which run the flag would discard. A stopped `--desired` copy resumes when you run the plan again; to start it over, run the stopped statement with `migrate --alter --copy-and-swap --restart SCHEMA.TABLE` first. The failed run's detail numbers the statement that stopped ("planned statement N of M"), and `pg-sprite diff --desired FILE --sql` prints the plan's statements. |
+| Abandon it | Run `pg-sprite discard SCHEMA.TABLE`, naming the table exactly as `--restart` does. pg-sprite drops the shadow, the fence or slot and publication, and the saved progress, and does not run the change: the table keeps its shape and rows, and takes writes again if the run blocked them. It is refused while a run is in progress and once the run's swap has committed, when the change is already live and the same command finishes it. See [Abandon a stopped copy-and-swap run](cli.md#abandon-a-stopped-copy-and-swap-run). |
 | Recover from bad data | When the server rejects a row under the new type or a constraint, the run reports `code: data-fault` and tries to abandon itself. Follow the verdict's detail: if it says the run was abandoned, nothing is left behind, so fix the data or the statement and run it again. If it says the run could not be abandoned, the shadow and the fence or slot remain, so fix the data or the statement and run it with `--restart SCHEMA.TABLE`. |
 
 ```sh
@@ -286,5 +293,5 @@ pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 
-A stopped live run keeps its replication slot, and the slot keeps WAL on the server. Resume it
-or start it over promptly rather than leaving it.
+A stopped live run keeps its replication slot, and the slot keeps WAL on the server. Resume it,
+start it over, or discard it promptly rather than leaving it.

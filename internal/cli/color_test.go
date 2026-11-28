@@ -181,6 +181,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		DependentViews:            []string{`"public"."v"`},
 		DependentPolicies:         []string{`"p" ON "public"."t"`},
 		DependentTriggers:         []string{`"tr" ON "public"."t"`},
+		DependentPublications:     []string{`"pub"`},
 		DependentGeneratedColumns: []string{`"public"."t"."g"`},
 		PartitionKeyTables:        []string{`"public"."t"`},
 		ExecutedSQL:               []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
