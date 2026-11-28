@@ -466,6 +466,9 @@ Three related jobs stay with humans on purpose:
   that is always rolled back, so a listing scoped to the owner's schema never sees them.
   `schemadiff.ScratchSchemaPrefix` exports the name's prefix, so a DDL guard on the target,
   such as an event trigger, can exempt the scratch build's `CREATE SCHEMA` and the DDL inside it.
+  The prefix names the scratch build's objects but does not authenticate them: any role that
+  can create a schema can pick such a name. Scope the exemption to the role pg-sprite
+  connects as, for example by checking `session_user`.
 
   Once a reviewer has accepted a drop, the owner runs it with `executor.ExecuteDropTable`.
   At plan time, record the table's definition with `schemadiff.DroppedTableDefinition` on
