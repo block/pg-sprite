@@ -160,11 +160,18 @@ type accessFacts struct {
 	// ownerPrivileged reports an owner whose membership would hand the
 	// engine role more than the owner's objects: see ownerPrivilegedSQL.
 	ownerPrivileged bool
+	// ownerSet reports that the role can already SET ROLE to the owner
+	// (pg_has_role mode SET, PostgreSQL 16+; false below 16, where SET is
+	// not a membership option). A refusal that re-grants the membership
+	// keeps SET TRUE when it is, since a re-grant updates the options of
+	// the membership it names and would otherwise clear it.
+	ownerSet bool
 }
 
 // ownerPrivilegedSQL reports whether the role whose OID is $owner, or any
 // role it is a member of, is a superuser, holds CREATEROLE, REPLICATION, or
-// BYPASSRLS, or is a predefined role other than pg_database_owner. A
+// BYPASSRLS, is a predefined role other than pg_database_owner, or is
+// rds_replication, which grants replication without the attribute. A
 // membership in such an owner hands the engine role those powers, through
 // SET ROLE where the membership allows it and through inheritance where a
 // predefined role's privileges are concerned, so the refusal never advises
@@ -174,8 +181,16 @@ const ownerPrivilegedSQL = `EXISTS (
 		SELECT 1 FROM pg_catalog.pg_roles a
 		WHERE (a.rolsuper OR a.rolcreaterole OR a.rolreplication OR a.rolbypassrls
 		       OR (pg_catalog.starts_with(a.rolname::pg_catalog.text, 'pg_')
-		           AND a.rolname OPERATOR(pg_catalog.<>) 'pg_database_owner'))
+		           AND a.rolname OPERATOR(pg_catalog.<>) 'pg_database_owner')
+		       OR a.rolname OPERATOR(pg_catalog.=) 'rds_replication')
 		  AND pg_catalog.pg_has_role($owner, a.oid, 'MEMBER'))`
+
+// ownerSetSQL reports whether the connected role can SET ROLE to the role
+// whose OID is $owner. SET is a membership option only from PostgreSQL 16,
+// and pg_has_role rejects the mode below it, so the probe answers false
+// there without calling it.
+const ownerSetSQL = `CASE WHEN pg_catalog.current_setting('server_version_num')::int OPERATOR(pg_catalog.>=) 160000
+		     THEN pg_catalog.pg_has_role(current_user, $owner, 'SET') ELSE false END`
 
 // CheckPrivileges verifies the connected role holds the access the
 // requirement needs against schema.table (search_path resolution when
@@ -234,7 +249,8 @@ func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table st
 		       pg_catalog.has_schema_privilege(current_user, n.nspname, 'CREATE'),
 		       pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE'),
 		       (SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) current_user),
-		       ` + ownerPrivilegedFor("c.relowner") + `
+		       ` + ownerPrivilegedFor("c.relowner") + `,
+		       ` + ownerSetFor("c.relowner") + `
 		FROM pg_catalog.pg_class c
 		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) c.relowner
@@ -244,7 +260,7 @@ func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table st
 	var f accessFacts
 	err := pool.QueryRow(ctx, q, schema, table).Scan(
 		&f.role, &f.versionNum, &f.database, &f.schema, &f.relkind, &f.owner,
-		&f.canConnect, &f.schemaUsage, &f.schemaCreate, &f.ownerUsage, &f.roleInherit, &f.ownerPrivileged)
+		&f.canConnect, &f.schemaUsage, &f.schemaCreate, &f.ownerUsage, &f.roleInherit, &f.ownerPrivileged, &f.ownerSet)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return accessFacts{}, unresolvedTargetCause(ctx, pool, schema, table)
 	}
@@ -368,13 +384,18 @@ func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tie
 	if tier < TierCopyAndSwap {
 		return nil
 	}
-	return checkSetRoleAccess(ctx, pool, f)
+	return checkSetRoleAccess(ctx, pool, f, transferTableRemedy)
 }
 
 // ownerPrivilegedFor is ownerPrivilegedSQL for the owner OID that column
 // holds.
 func ownerPrivilegedFor(column string) string {
 	return strings.ReplaceAll(ownerPrivilegedSQL, "$owner", column)
+}
+
+// ownerSetFor is ownerSetSQL for the owner OID that column holds.
+func ownerSetFor(column string) string {
+	return strings.ReplaceAll(ownerSetSQL, "$owner", column)
 }
 
 // ownerMembershipRefusal is the Tier-1 refusal, with the remediation that
@@ -384,7 +405,9 @@ func ownerPrivilegedFor(column string) string {
 // membership. On 16+ inheritance is a membership option, and GRANT ...
 // WITH INHERIT TRUE both creates a missing membership and updates an
 // existing non-inheriting one; it grants SET only when tier, the rung the
-// run needs, is copy-and-swap, the one rung that runs SET ROLE. object
+// run needs, is copy-and-swap, the one rung that runs SET ROLE, or when the
+// role can already SET ROLE to the owner, since the re-grant would
+// otherwise clear that option on the membership it updates. object
 // names what the role would alter, a table or a type, for the ownership
 // transfer the hint offers instead.
 //
@@ -410,7 +433,7 @@ func ownerMembershipRefusal(f accessFacts, object string, tier Tier) *PrivilegeE
 	transfer := fmt.Sprintf("if the owner is an administrative role, transfer the %s instead: %s", object, transferSQL)
 	if f.versionNum >= pg16 {
 		set := "FALSE"
-		if tier >= TierCopyAndSwap {
+		if tier >= TierCopyAndSwap || f.ownerSet {
 			set = "TRUE"
 		}
 		return &PrivilegeError{
@@ -444,19 +467,28 @@ func ownerMembershipRefusal(f accessFacts, object string, tier Tier) *PrivilegeE
 // has already proved before reaching this rung — the ownership ladder
 // through an inheriting USAGE chain (a membership chain), the create path
 // through MEMBER directly — so there is nothing further to check below 16.
-func checkSetRoleAccess(ctx context.Context, pool *pgxpool.Pool, f accessFacts) error {
+//
+// A missing SET option on an owner that holds administrative power is never
+// remedied with the grant: SET ROLE is how the engine role would reach a
+// superuser's or a CREATEROLE role's power, which inheritance does not pass
+// on. remedy names what to do instead, for the caller's kind of owner.
+func checkSetRoleAccess(ctx context.Context, pool *pgxpool.Pool, f accessFacts, remedy privilegedOwnerRemedy) error {
 	const pg16 = 160000
 	if f.versionNum < pg16 {
 		return nil
 	}
 	// INV: CO-9 — pg_catalog-qualified like every privilege probe.
-	const q = `
-		SELECT pg_catalog.pg_has_role(current_user, r.oid, 'SET')
+	q := `
+		SELECT pg_catalog.pg_has_role(current_user, r.oid, 'SET'),
+		       ` + ownerPrivilegedFor("r.oid") + `
 		FROM pg_catalog.pg_roles r
 		WHERE r.rolname OPERATOR(pg_catalog.=) $1`
-	var canSet bool
-	if err := pool.QueryRow(ctx, q, f.owner).Scan(&canSet); err != nil {
+	var canSet, privileged bool
+	if err := pool.QueryRow(ctx, q, f.owner).Scan(&canSet, &privileged); err != nil {
 		return fmt.Errorf("check SET ROLE access to %s: %w", f.owner, err)
+	}
+	if !canSet && privileged {
+		return remedy(f)
 	}
 	if !canSet {
 		return &PrivilegeError{
@@ -467,6 +499,24 @@ func checkSetRoleAccess(ctx context.Context, pool *pgxpool.Pool, f accessFacts) 
 		}
 	}
 	return nil
+}
+
+// privilegedOwnerRemedy builds the refusal for a missing SET option on an
+// owner that holds administrative power, naming what to do instead of the
+// grant.
+type privilegedOwnerRemedy func(accessFacts) *PrivilegeError
+
+// transferTableRemedy is the copy-and-swap rung's remedy: the table moves to
+// an ordinary role, which the engine role is then made a member of.
+func transferTableRemedy(f accessFacts) *PrivilegeError {
+	return &PrivilegeError{
+		Tier:  TierCopyAndSwap,
+		Check: fmt.Sprintf("pg_has_role(%s, %s, 'SET')", f.role, f.owner),
+		Grant: fmt.Sprintf("ALTER TABLE %s.%s OWNER TO <role>",
+			pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.table}.Sanitize()),
+		Hint: fmt.Sprintf("the table's owner %s is a superuser or holds administrative power, and SET ROLE to it would hand the engine role that power; transfer the table to an ordinary role, then grant the engine role membership in that role WITH INHERIT TRUE, SET TRUE",
+			f.owner),
+	}
 }
 
 // checkReplicationAccess verifies the role can open a logical replication

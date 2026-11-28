@@ -117,6 +117,29 @@ func TestCheckCreatePrivilegesAsRefusals(t *testing.T) {
 	assert.True(t, proof.SetsRole())
 }
 
+// A create owner that holds administrative power is never offered as a
+// membership: SET ROLE to it would hand the engine role that power. The
+// refusal asks for an ordinary role as the create owner instead.
+func TestCheckCreatePrivilegesAsNeverAdvisesMembershipInAPrivilegedOwner(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	const password = "create-as-privileged-password"
+	owner := testutil.NewRole(t, admin, "NOLOGIN CREATEROLE")
+	engineRole := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	engine := connectAs(t, serverURL, engineRole, password)
+
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	var privilegeErr *preflight.PrivilegeError
+	require.ErrorAs(t, err, &privilegeErr)
+	assert.Equal(t, preflight.TierCreateTable, privilegeErr.Tier)
+	assert.Equal(t, fmt.Sprintf("pg_has_role(%s, %s, 'MEMBER')", engineRole, owner), privilegeErr.Check)
+	assert.NotContains(t, privilegeErr.Grant, pgx.Identifier{owner}.Sanitize())
+	assert.Contains(t, err.Error(), fmt.Sprintf("the create owner %s is a superuser or holds administrative power", owner))
+}
+
 // A NOINHERIT engine role that is a member of the owner can SET ROLE to it
 // — SET ROLE consults membership, not inheritance — so the check admits it,
 // and the refusal it gets before the grant is cleared by the exact GRANT

@@ -88,7 +88,7 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 	// INV: CO-9 — every function, operator, relation, and type is
 	// pg_catalog-qualified, so a planted overload on the session's
 	// search_path cannot answer a privilege probe true.
-	const q = `
+	q := `
 		SELECT s.nspname,
 		       n.nspname IS NOT NULL,
 		       current_user::pg_catalog.text,
@@ -99,16 +99,18 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 		            ELSE COALESCE(pg_catalog.pg_has_role(current_user, (SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2), 'MEMBER'), false) END,
 		       pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CONNECT'),
 		       COALESCE(pg_catalog.has_schema_privilege(CASE WHEN $2 OPERATOR(pg_catalog.=) '' THEN current_user::pg_catalog.regrole::pg_catalog.oid ELSE (SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2) END, n.oid, 'USAGE'), false),
-		       COALESCE(pg_catalog.has_schema_privilege(CASE WHEN $2 OPERATOR(pg_catalog.=) '' THEN current_user::pg_catalog.regrole::pg_catalog.oid ELSE (SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2) END, n.oid, 'CREATE'), false)
+		       COALESCE(pg_catalog.has_schema_privilege(CASE WHEN $2 OPERATOR(pg_catalog.=) '' THEN current_user::pg_catalog.regrole::pg_catalog.oid ELSE (SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2) END, n.oid, 'CREATE'), false),
+		       CASE WHEN $2 OPERATOR(pg_catalog.=) '' OR $2 OPERATOR(pg_catalog.=) current_user THEN false
+		            ELSE COALESCE(` + ownerPrivilegedFor("(SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2)") + `, false) END
 		FROM (SELECT CASE WHEN $1 OPERATOR(pg_catalog.=) '' THEN pg_catalog.current_schema() ELSE $1 END AS nspname) s
 		LEFT JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) s.nspname`
 	var targetSchema *string
-	var schemaExists, ownerExists, ownerMember, canConnect, schemaUsage, schemaCreate bool
+	var schemaExists, ownerExists, ownerMember, canConnect, schemaUsage, schemaCreate, ownerPrivileged bool
 	var versionNum int
 	var role, database string
 	if err := pool.QueryRow(ctx, q, schema, owner).Scan(
 		&targetSchema, &schemaExists, &role, &database,
-		&versionNum, &ownerExists, &ownerMember, &canConnect, &schemaUsage, &schemaCreate); err != nil {
+		&versionNum, &ownerExists, &ownerMember, &canConnect, &schemaUsage, &schemaCreate, &ownerPrivileged); err != nil {
 		return CreationRole{}, fmt.Errorf("gather create access facts for schema %q: %w", schema, err)
 	}
 	if targetSchema == nil {
@@ -134,6 +136,12 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 		createRole = owner
 	}
 	setsRole := createRole != role
+	facts := accessFacts{role: role, owner: owner, versionNum: versionNum}
+	if !ownerMember && ownerPrivileged {
+		refusal := privilegedCreateOwnerRemedy(facts)
+		refusal.Check = fmt.Sprintf("pg_has_role(%s, %s, 'MEMBER')", role, owner)
+		return CreationRole{}, refusal
+	}
 	if !ownerMember {
 		grant := fmt.Sprintf("GRANT %s TO %s", pgx.Identifier{owner}.Sanitize(), pgx.Identifier{role}.Sanitize())
 		if versionNum >= 160000 {
@@ -154,7 +162,7 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 		}
 	}
 	if setsRole {
-		if err := checkSetRoleAccess(ctx, pool, accessFacts{role: role, owner: owner, versionNum: versionNum}); err != nil {
+		if err := checkSetRoleAccess(ctx, pool, facts, privilegedCreateOwnerRemedy); err != nil {
 			if privilegeErr, ok := errors.AsType[*PrivilegeError](err); ok {
 				privilegeErr.Tier = TierCreateTable
 			}
@@ -162,4 +170,21 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 		}
 	}
 	return CreationRole{role: role, owner: createRole, schema: *targetSchema}, nil
+}
+
+// privilegedCreateOwnerRemedy is the create path's refusal for a create owner
+// that holds administrative power: membership with SET in it would hand the
+// engine role that power, so the remedy is an ordinary role as the owner.
+func privilegedCreateOwnerRemedy(f accessFacts) *PrivilegeError {
+	grant := fmt.Sprintf("GRANT <role> TO %s", pgx.Identifier{f.role}.Sanitize())
+	if f.versionNum >= 160000 {
+		grant += " WITH SET TRUE"
+	}
+	return &PrivilegeError{
+		Tier:  TierCreateTable,
+		Check: fmt.Sprintf("pg_has_role(%s, %s, 'SET')", f.role, f.owner),
+		Grant: grant,
+		Hint: fmt.Sprintf("the create owner %s is a superuser or holds administrative power, and SET ROLE to it would hand the engine role that power; name an ordinary role as the create owner instead",
+			f.owner),
+	}
 }

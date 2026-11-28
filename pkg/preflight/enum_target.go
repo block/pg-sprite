@@ -101,7 +101,8 @@ func resolveEnumType(ctx context.Context, pool *pgxpool.Pool, ref statement.Type
 		       r.rolname::pg_catalog.text,
 		       pg_catalog.pg_has_role(current_user, t.typowner, 'USAGE'),
 		       (SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) current_user),
-		       ` + ownerPrivilegedFor("t.typowner") + `
+		       ` + ownerPrivilegedFor("t.typowner") + `,
+		       ` + ownerSetFor("t.typowner") + `
 		FROM pg_catalog.pg_type t
 		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) t.typnamespace
 		JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) t.typowner
@@ -112,7 +113,7 @@ func resolveEnumType(ctx context.Context, pool *pgxpool.Pool, ref statement.Type
 	var f accessFacts
 	var isEnum bool
 	err := pool.QueryRow(ctx, q, name.Sanitize()).Scan(&e.oid, &isEnum,
-		&f.role, &f.versionNum, &f.schema, &f.table, &f.owner, &f.ownerUsage, &f.roleInherit, &f.ownerPrivileged)
+		&f.role, &f.versionNum, &f.schema, &f.table, &f.owner, &f.ownerUsage, &f.roleInherit, &f.ownerPrivileged, &f.ownerSet)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return EnumTarget{}, accessFacts{}, fmt.Errorf("%w: no type %s; nothing was executed", ErrEnumTypeNotFound, name.Sanitize())
 	}

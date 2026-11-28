@@ -218,14 +218,25 @@ that `GRANT` cannot change.
 
 A refusal for a missing membership asks for no more than the run needs. On 16+ it grants
 `WITH INHERIT TRUE, SET FALSE`, since only copy-and-swap runs `SET ROLE`. A run that
-needs copy-and-swap is told `WITH INHERIT TRUE, SET TRUE` instead.
+needs copy-and-swap is told `WITH INHERIT TRUE, SET TRUE` instead. So is a role that can
+already `SET ROLE` to the owner: re-granting a membership updates the options it names, and
+`SET FALSE` would take away a `SET` the role already had.
 
-A refusal never advises membership in an owner that holds power beyond its objects. That
-covers an owner that is a superuser or has `CREATEROLE`, `REPLICATION`, or `BYPASSRLS`. It
-also covers an owner that is a member, at any depth, of a role that has them, or of a
-predefined `pg_*` role other than `pg_database_owner`. Such a grant would hand the engine
-role that power, so the refusal names only the ownership transfer
-(`ALTER TABLE ... OWNER TO <role>`, to an ordinary role the engine is then made a member of).
+A refusal never advises membership in an owner that holds power beyond its objects, and
+never advises `SET` on one. That covers an owner that is a superuser or has `CREATEROLE`,
+`REPLICATION`, or `BYPASSRLS`. It also covers an owner that is a member, at any depth, of
+a role that has them, of `rds_replication`, or of a predefined `pg_*` role other than
+`pg_database_owner`. Such a grant would hand the engine role that power, so the refusal
+names only the ownership transfer (`ALTER TABLE ... OWNER TO <role>`, to an ordinary role
+the engine is then made a member of). A create owner with that power gets the same answer:
+name an ordinary role as the create owner instead.
+
+The check reads role attributes and memberships only. An owner that also owns the database
+is not flagged, though membership in it carries the database owner's rights, `DROP
+DATABASE` among them. In the common layout the application role owns both the database and
+its tables, and flagging it would send every such operator to transfer every table. If the
+engine role must not hold the database owner's rights, transfer the tables to a role that
+does not own the database before granting membership.
 
 ## What the engine role must not have
 
