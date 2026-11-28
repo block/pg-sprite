@@ -8,7 +8,10 @@ import (
 	"github.com/block/pg-sprite/pkg/progress"
 )
 
-// progressFieldSeparator separates the fields of one progress line.
+// progressFieldSeparator separates the fields of one progress line. The
+// kill load proof (integration/loadproof) reads the verify pass's percent
+// off a plain line by this separator and the "checksum" operation label,
+// so a change to either changes what that proof parses.
 const progressFieldSeparator = "  "
 
 // renderProgress renders one running snapshot as a single progress line:

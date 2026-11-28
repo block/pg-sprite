@@ -171,12 +171,30 @@ func manualPath(g suggest.Guidance) string {
 // backendUnavailableVerdict is the refusal for a change whose backend has no
 // carrying path for it in this build.
 func backendUnavailableVerdict(st statement.Statement, rs router.Statement) verdict.Verdict {
+	detail := fmt.Sprintf("the change requires the %s strategy, which does not carry this operation yet: "+
+		"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend)
+	constrained := firstConstrainedType(rs.Decisions)
+	if constrained != "" {
+		detail = detail + "; " + planner.ConstrainedTypeHelp(constrained)
+	}
 	return verdict.Verdict{
-		Statement: st.SQL(),
-		Table:     qualified(st),
-		Detail: fmt.Sprintf("the change requires the %s strategy, which does not carry this operation yet: "+
-			"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend),
+		Statement:       st.SQL(),
+		Table:           qualified(st),
+		Detail:          detail,
+		ConstrainedType: constrained,
 	}.WithRefusal(backendUnavailableRefusal())
+}
+
+// firstConstrainedType is the domain of the first decision that adds a
+// column of a domain with constraints, which is what forces the rewrite,
+// and "" when no decision does.
+func firstConstrainedType(decisions []planner.Decision) string {
+	for _, d := range decisions {
+		if d.ConstrainedType != "" {
+			return d.ConstrainedType
+		}
+	}
+	return ""
 }
 
 // routeRefusalVerdict is the refusal for a statement the planner refused:
@@ -198,6 +216,10 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 	v.DependentTriggers = d.DependentTriggers
 	v.DependentPublications = d.DependentPublications
 	v.DependentGeneratedColumns = d.DependentGeneratedColumns
+	v.NotNullFromType = d.NotNullFromType
+	if d.Reason == planner.ReasonColumnLimit {
+		v.ColumnLimit = d.ColumnLimit
+	}
 	if d.Reason == planner.ReasonPartitionKey {
 		v.PartitionKeyTables = d.PartitionKeyTables
 	}
@@ -229,8 +251,15 @@ func refusedDecisionDetail(d planner.Decision) (string, bool) {
 		return fmt.Sprintf("%s changes a column in the partition key of %s, and PostgreSQL never retypes or drops a partition key column; %s",
 			d.Operation, strings.Join(d.PartitionKeyTables, ", "), planner.PartitionKeyHelp), true
 	case planner.ReasonNotNullWithoutDefault:
+		help := planner.NotNullWithoutDefaultHelp
+		if d.NotNullFromType != "" {
+			help = planner.NotNullFromTypeHelp(d.NotNullFromType)
+		}
 		return fmt.Sprintf("%s adds a NOT NULL column with no default to a table that holds rows, "+
-			"and PostgreSQL refuses it because every existing row would hold NULL; %s", d.Operation, planner.NotNullWithoutDefaultHelp), true
+			"and PostgreSQL refuses it because every existing row would hold NULL; %s", d.Operation, help), true
+	case planner.ReasonColumnLimit:
+		return fmt.Sprintf("%s adds a column to %s, and a dropped column keeps its number until the table is rebuilt; %s",
+			d.Operation, planner.ColumnLimitSubject(d.ColumnLimit), planner.ColumnLimitHelp(d.ColumnLimit)), true
 	case planner.ReasonCascadingDrop:
 		return fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views, row-level security policies, or other tables' foreign keys, "+
 			"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+

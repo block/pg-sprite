@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -747,6 +748,65 @@ func TestDryRunTextNotNullWithoutDefaultRefusalGivesTheManualPath(t *testing.T) 
 	assert.NotContains(t, text, "knows no safe path")
 }
 
+// A NOT NULL column that takes its NOT NULL from its domain gets help that
+// names the domain and says to use its base type, since neither manual
+// path of a spelled NOT NULL exists for it; a spelled NOT NULL beside it
+// still gets the shared help.
+func TestDryRunTextNotNullFromItsDomainNamesTheDomain(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "customers", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.customers ADD COLUMN qty app.positive_qty, ADD COLUMN plan text NOT NULL",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{{
+			Operation:       "ADD COLUMN qty",
+			Route:           planner.RouteRefuse,
+			Reason:          planner.ReasonNotNullWithoutDefault,
+			NotNullFromType: "app.positive_qty",
+		}, {
+			Operation: "ADD COLUMN plan",
+			Route:     planner.RouteRefuse,
+			Reason:    planner.ReasonNotNullWithoutDefault,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Equal(t, 1, strings.Count(text, "help: "+planner.NotNullFromTypeHelp("app.positive_qty")))
+	assert.Equal(t, 1, strings.Count(text, "help: "+planner.NotNullWithoutDefaultHelp))
+}
+
+// An added column of a domain with constraints needs a backend this build
+// does not carry; the dry run says which domain forces the rewrite and the
+// base-type path that avoids it.
+func TestDryRunTextConstrainedDomainNamesTheBaseTypePath(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "customers", "16.10"
+	report.Disposition = router.DispositionUnavailable
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.customers ADD COLUMN qty app.positive_qty DEFAULT 1",
+		Route:       planner.RouteCopyAndSwap,
+		Disposition: router.DispositionUnavailable,
+		Backend:     router.BackendCopyAndSwap,
+		Decisions: []planner.Decision{{
+			Operation:       "ADD COLUMN qty",
+			Route:           planner.RouteCopyAndSwap,
+			Reason:          planner.ReasonTypeRewrite,
+			ConstrainedType: "app.positive_qty",
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Equal(t, 1, strings.Count(text, "help: "+planner.ConstrainedTypeHelp("app.positive_qty")))
+}
+
 // The refusal sentence explains the first refused operation, the same one
 // the run's verdict explains, even when a later operation is refused
 // because views read its column; that operation's views still appear in
@@ -959,4 +1019,36 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 			}
 		})
 	}
+}
+
+// A column add refused at the column limit says why in the refusal
+// sentence and in each add's own line, naming the partition that has used
+// every number, and every such add of a statement shares one help line with
+// that partition's rebuild.
+func TestDryRunTextColumnLimitRefusal(t *testing.T) {
+	numbers := &preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: `"app"."events_1"`, Partition: true}}}
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "events", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.events ADD COLUMN kind text, ADD COLUMN note text",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{
+			{Operation: "ADD COLUMN kind", Route: planner.RouteRefuse, Reason: planner.ReasonColumnLimit, ColumnLimit: numbers},
+			{Operation: "ADD COLUMN note", Route: planner.RouteRefuse, Reason: planner.ReasonColumnLimit, ColumnLimit: numbers},
+		},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, `error[unsupported-statement]: refused — ADD COLUMN kind adds a column to a table whose partition "app"."events_1" has used all 1600 of PostgreSQL's column numbers, and a dropped column keeps its number until the table is rebuilt`)
+	assert.Contains(t, text, `note[column-limit]: ADD COLUMN note — adds a column to a table whose partition "app"."events_1" has used all 1600 of PostgreSQL's column numbers; a dropped column keeps its number until the table is rebuilt`)
+	assert.Equal(t, 1, strings.Count(text, "help: "+planner.ColumnLimitHelp(numbers)))
+	assert.Contains(t, text, `help: copy partition "app"."events_1" into a new table`)
+	assert.Contains(t, text, onlineDDLReferenceURL+"#column-limit")
+	assert.NotContains(t, text, "knows no safe path")
 }

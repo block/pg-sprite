@@ -93,6 +93,7 @@ func Reasons() []Reason {
 		ReasonDependentGeneratedColumn,
 		ReasonPartitionKey,
 		ReasonNotNullWithoutDefault,
+		ReasonColumnLimit,
 		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
@@ -223,6 +224,12 @@ const (
 	// only fail. A default, identity, or generated column fills the rows,
 	// and an empty table has none to fill, so neither is refused.
 	ReasonNotNullWithoutDefault Reason = "not-null-without-default"
+	// ReasonColumnLimit: the operation adds a column to a table that has
+	// used every column number PostgreSQL gives a table, or that a table
+	// inheriting from it has. A dropped column keeps its number until the
+	// table is rebuilt, so PostgreSQL refuses the statement (SQLSTATE
+	// 54011) however few live columns the table has; it could only fail.
+	ReasonColumnLimit Reason = "column-limit"
 	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
 	// depends on what it drops: a view or policy that reads a dropped
 	// column, or another table's foreign key on a dropped key. Those
@@ -407,6 +414,24 @@ type Decision struct {
 	// includes the column, each schema-qualified with every identifier
 	// quoted, present exactly for partition-key decisions.
 	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
+	// ColumnLimit is how many column numbers the table had left before the
+	// change, and which of it and its partitions or inheritance children
+	// have used the most, present exactly for column-limit decisions.
+	ColumnLimit *preflight.ColumnNumbers `json:"column_limit,omitempty"`
+	// NotNullFromType is the added column's type, as the statement spells
+	// it with every identifier quoted, when that type is what makes the column NOT NULL: a domain that
+	// declares NOT NULL, on a column that spells neither NOT NULL nor
+	// PRIMARY KEY. Present only for not-null-without-default decisions.
+	// Adding a nullable column of that type is impossible, so the manual
+	// path is the type's base type instead (see NotNullFromTypeHelp).
+	NotNullFromType string `json:"not_null_from_type,omitempty"`
+	// ConstrainedType is the added column's type, as the statement spells
+	// it with every identifier quoted, when that type is a domain with constraints, which PostgreSQL
+	// checks against every row by rewriting the table whatever default the
+	// column is given. Present only for type-rewrite decisions. The manual
+	// path is the domain's base type with its constraints on the column
+	// instead (see ConstrainedTypeHelp).
+	ConstrainedType string `json:"constrained_type,omitempty"`
 	// DependentFix is the manual path for the views, policies, and
 	// triggers that block the change, which depends on what the change
 	// would do with those dependents out of the way. Like Kind, it is not part
@@ -769,6 +794,13 @@ type Facts struct {
 	// an offline lint; without it the server's own refusal at execution
 	// remains the backstop.
 	NullFilledColumns map[string]bool
+	// ColumnLimitReached are the columns the statement adds once the table,
+	// or a table that inherits from it, has no column number left
+	// (ColumnsPastLimit over preflight.ColumnNumbersLeft).
+	ColumnLimitReached map[string]bool
+	// ColumnNumbers is the read ColumnLimitReached was judged from, which
+	// names the tables at the limit for the refusal's help.
+	ColumnNumbers preflight.ColumnNumbers
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -919,6 +951,183 @@ func dependentFix(op statement.Op, facts Facts) DependentFix {
 // not-null-without-default decision.
 const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which PostgreSQL stores without rewriting the table, " +
 	"or add it without NOT NULL, backfill it, then set NOT NULL"
+
+// ColumnLimitSubject names what is at the column limit for a column-limit
+// decision: the table itself, its partitions or inheritance children that have
+// used the most numbers, or both. When numbers are left it says how many, so
+// a refusal of the adds past them agrees with the help's offer to add fewer.
+func ColumnLimitSubject(numbers *preflight.ColumnNumbers) string {
+	full := fmt.Sprintf("all %d of PostgreSQL's column numbers", preflight.MaxColumnNumber)
+	if numbers != nil && numbers.Left > 0 {
+		full = fmt.Sprintf("all but %d of PostgreSQL's %d column numbers", numbers.Left, preflight.MaxColumnNumber)
+	}
+	root, children := columnLimitTables(numbers)
+	switch {
+	case len(children) == 0:
+		return "a table that has used " + full
+	case root:
+		return fmt.Sprintf("a table that has used %s, as have its %s", full, childrenPhrase(children))
+	case len(children) == 1:
+		return fmt.Sprintf("a table whose %s has used %s", childrenPhrase(children), full)
+	default:
+		return fmt.Sprintf("a table whose %s have used %s", childrenPhrase(children), full)
+	}
+}
+
+// ColumnLimitHelp is the operator-facing manual path for a column-limit
+// decision: rebuild the tables at the limit, since copying a table gives back
+// the numbers its dropped columns hold, and add fewer columns only when the
+// table has a number left for some. Without the read it names the table alone.
+func ColumnLimitHelp(numbers *preflight.ColumnNumbers) string {
+	const givesBack = "which gives back the numbers its dropped columns hold (VACUUM FULL does not)"
+	root, children := columnLimitTables(numbers)
+	var rebuild string
+	switch {
+	case len(children) == 0:
+		rebuild = "copy the table into a new one, " + givesBack
+	case root:
+		rebuild = "copy the table into a new one, " + givesBack + ", and copy its " + childrenPhrase(children) + " the same way"
+	case len(children) == 1 && children[0].Partition:
+		rebuild = "copy partition " + children[0].Name + " into a new table, " + givesBack +
+			", then detach the partition and attach the copy in its place"
+	case len(children) == 1:
+		rebuild = "copy inheritance child " + children[0].Name + " into a new table, " + givesBack +
+			", then make the copy inherit from the same parent in its place"
+	default:
+		rebuild = "copy each of the " + childrenPhrase(children) + " into a new table, " + givesBack +
+			", then put each copy in its table's place: detach a partition and attach its copy, or make a child's copy inherit from the same parent"
+	}
+	switch {
+	case numbers == nil:
+		return rebuild
+	case numbers.Left == 0:
+		return rebuild + "; until then no column number is free"
+	case numbers.Left == 1:
+		return rebuild + ", or add at most 1 column"
+	default:
+		return fmt.Sprintf("%s, or add at most %d columns", rebuild, numbers.Left)
+	}
+}
+
+// columnLimitTables splits the tables at the column limit into whether the
+// table the statement alters is one of them and its partitions or inheritance
+// children that are.
+func columnLimitTables(numbers *preflight.ColumnNumbers) (root bool, children []preflight.FullTable) {
+	if numbers == nil {
+		return false, nil
+	}
+	for _, t := range numbers.Fullest {
+		if t.Root {
+			root = true
+			continue
+		}
+		children = append(children, t)
+	}
+	return root, children
+}
+
+// childrenPhrase names partitions or inheritance children with the noun that
+// fits them: "partition "s"."p1"", "partitions "s"."p1", "s"."p2"", or
+// "inheritance children ..." once any of them is not a partition.
+func childrenPhrase(children []preflight.FullTable) string {
+	names := make([]string, 0, len(children))
+	partitions := true
+	for _, t := range children {
+		names = append(names, t.Name)
+		partitions = partitions && t.Partition
+	}
+	noun := map[bool]string{true: "partition", false: "inheritance child"}[partitions]
+	if len(children) > 1 {
+		noun = map[bool]string{true: "partitions", false: "inheritance children"}[partitions]
+	}
+	return noun + " " + strings.Join(names, ", ")
+}
+
+// ColumnsPastLimit names the columns ops add once no column number is left,
+// given the numbers left before ops run, and returns how many are left after
+// them. columns are the table's live columns: adding one it already has
+// takes no number, unless an earlier operation of ops drops it. A dropped
+// column does not give its number back.
+func ColumnsPastLimit(ops []statement.Op, columns map[string]string, left int) (map[string]bool, int) {
+	dropped := map[string]bool{}
+	var past map[string]bool
+	for _, op := range ops {
+		switch op.Kind {
+		case statement.OpDropColumn:
+			dropped[op.Column] = true
+			continue
+		case statement.OpAddColumn:
+		default:
+			continue
+		}
+		if _, exists := columns[op.Column]; exists && !dropped[op.Column] {
+			continue
+		}
+		if left > 0 {
+			left--
+			continue
+		}
+		if past == nil {
+			past = map[string]bool{}
+		}
+		past[op.Column] = true
+	}
+	return past, left
+}
+
+// NotNullFromTypeHelp is the operator-facing manual path for a
+// not-null-without-default decision whose NOT NULL comes from the column's
+// type, typeName, a domain. Neither manual path of NotNullWithoutDefaultHelp
+// exists for it: the column cannot be added without NOT NULL, and
+// PostgreSQL rewrites the table to check every row against a domain with
+// constraints, whatever default the column is given. The NOT NULL may be
+// declared by a domain the named one is defined over rather than by the
+// named one itself.
+func NotNullFromTypeHelp(typeName string) string {
+	return "the column's type, " + typeName + ", is a domain that makes it NOT NULL, so the column needs a default, " +
+		"and with one PostgreSQL rewrites the table to check every row against the domain; " + domainBaseTypePath
+}
+
+// ConstrainedTypeHelp is the operator-facing manual path for adding a
+// column whose type, typeName, is a domain with constraints: PostgreSQL
+// rewrites the table to check every row against them, whatever default the
+// column is given.
+func ConstrainedTypeHelp(typeName string) string {
+	return "the column's type, " + typeName + ", is a domain with constraints, and PostgreSQL rewrites the table " +
+		"to check every row against them whatever default the column is given; " + domainBaseTypePath
+}
+
+// domainBaseTypePath is the manual path for adding a column of a domain
+// with constraints: the column takes the type the domain chain ends in and
+// carries the chain's constraints itself, in forms PostgreSQL adds without
+// a rewrite. A domain can be defined over another domain, whose
+// constraints it inherits, so the type to use is the first one in the
+// chain that is not a domain, and the constraints are those of every
+// domain in it.
+const domainBaseTypePath = "add the column with the type the domain is defined over instead " +
+	"(for a domain over another domain, the first type in the chain that is not a domain), " +
+	"with NOT NULL and a constant DEFAULT if a domain in the chain declares NOT NULL, " +
+	"and add each CHECK the chain declares as NOT VALID, then VALIDATE CONSTRAINT"
+
+// notNullFromType returns the type op spells for its column when that type
+// is what makes the added column NOT NULL: the column spells neither NOT
+// NULL nor PRIMARY KEY, so only its type can. It returns "" otherwise.
+func notNullFromType(op statement.Op) string {
+	if op.DeclaresNotNull || slices.Contains(op.InlineConstraints, statement.ConstraintPrimaryKey) {
+		return ""
+	}
+	return spelledType(op)
+}
+
+// spelledType is the added column's type as op spells it, schema-qualified
+// when the statement qualifies it, with every identifier quoted so a name
+// holding a dot or capitals reads unambiguously.
+func spelledType(op statement.Op) string {
+	if op.NewTypeSchema != "" {
+		return pgx.Identifier{op.NewTypeSchema, op.NewType}.Sanitize()
+	}
+	return pgx.Identifier{op.NewType}.Sanitize()
+}
 
 // NullFillCandidates names the columns the operations of one ALTER TABLE
 // add with no DEFAULT of their own, the ones whose existing rows may be
@@ -1219,14 +1428,22 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		switch {
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
+		case facts.ColumnLimitReached[op.Column]:
+			// Checked ahead of the adds that route to copy-and-swap only
+			// because no backend carries an added column yet. The shadow is
+			// a LIKE clone with fresh column numbers, so once a backend does,
+			// the copy is the rebuild this refusal's help recommends, and
+			// those adds belong ahead of this case.
+			numbers := facts.ColumnNumbers
+			d.Route, d.Reason, d.ColumnLimit = RouteRefuse, ReasonColumnLimit, &numbers
 		case fillsNotNullWithNull(op, facts):
-			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
+			d.Route, d.Reason, d.NotNullFromType = RouteRefuse, ReasonNotNullWithoutDefault, notNullFromType(op)
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
 		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
 		case addColumnProof(op, facts) == statement.AddColumnTypeRewrites:
-			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
+			d.Route, d.Reason, d.ConstrainedType = RouteCopyAndSwap, ReasonTypeRewrite, spelledType(op)
 		case addColumnProof(op, facts) == statement.AddColumnUnproven:
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
 		case op.Default == statement.DefaultExpression && !addsInPlace(addColumnProof(op, facts)):

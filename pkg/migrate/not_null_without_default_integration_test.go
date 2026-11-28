@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -99,16 +100,17 @@ func TestRunJudgesANotNullColumnByWhatTheServerFillsItWith(t *testing.T) {
 		"SELECT pg_catalog.array_agg(DISTINCT tier::text) FROM %s.customers", schema)).Scan(&tiers))
 	assert.Equal(t, []string{"free"}, tiers)
 
-	for column, add := range map[string]string{
-		"plan":   "ADD COLUMN plan %[1]s.tier_required",
-		"seq_id": "ADD COLUMN seq_id bigint PRIMARY KEY",
+	for column, refused := range map[string]struct{ add, fromType string }{
+		"plan":   {"ADD COLUMN plan %[1]s.tier_required", pgx.Identifier{schema, "tier_required"}.Sanitize()},
+		"seq_id": {"ADD COLUMN seq_id bigint PRIMARY KEY", ""},
 	} {
 		v, err = migrate.Run(t.Context(), pool,
-			parseOne(t, fmt.Sprintf("ALTER TABLE %[1]s.customers "+add, schema)), runOptions())
-		require.NoError(t, err, add)
+			parseOne(t, fmt.Sprintf("ALTER TABLE %[1]s.customers "+refused.add, schema)), runOptions())
+		require.NoError(t, err, refused.add)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome, v.Detail)
-		assert.Contains(t, v.Detail, "ADD COLUMN "+column+" adds a NOT NULL column with no default to a table that holds rows")
-		assert.Empty(t, v.ExecutedSQL, add)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason, refused.add)
+		assert.Equal(t, refused.fromType, v.NotNullFromType, column)
+		assert.Empty(t, v.ExecutedSQL, refused.add)
 	}
 	v, err = migrate.Run(t.Context(), pool,
 		parseOne(t, fmt.Sprintf("ALTER TABLE %s.customers ADD COLUMN note text", schema)), runOptions())

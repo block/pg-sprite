@@ -81,7 +81,11 @@ import (
 // whose replacement a constraint takes over.
 // Version 32 added the dependent-publication planner reason and the
 // dependent_publications decision field.
-const FormatVersion = 32
+// Version 33 added the not_null_from_type and constrained_type decision
+// fields.
+// Version 34 added the column-limit planner reason and the column_limit
+// decision field.
+const FormatVersion = 34
 
 // Source identifies which front door derived the plan.
 type Source string

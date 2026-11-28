@@ -59,7 +59,8 @@ drops a column a view reads, which PostgreSQL refuses, and `dependent-policy`,
 `dependent-trigger`, `dependent-publication`, `dependent-generated-column`, and
 `partition-key` are the same refusal for a column a row-level security policy, a trigger, a
 publication's column list or row filter, a generated column, or a partition key depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
-that nothing fills to a table with rows, which PostgreSQL refuses. `cascading-drop` is a
+that nothing fills to a table with rows, which PostgreSQL refuses. `column-limit` is a refusal:
+the operation adds a column to a table that has no column number left. `cascading-drop` is a
 refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
@@ -855,7 +856,15 @@ refuses the statement (`column "…" of relation "…" contains null values`, SQ
 lock and checked the rows. The statement could only fail. Give the column a constant
 default instead, which PostgreSQL stores in the catalog without rewriting the table
 (`fast-default`), or add the column without `NOT NULL`, backfill it, and set `NOT
-NULL` afterwards, which the planner runs as its safer sequence (`safer-idiom`). An
+NULL` afterwards, which the planner runs as its safer sequence (`safer-idiom`). When
+the `NOT NULL` comes from the column's domain, neither path exists: a domain with a
+constraint rewrites the table whatever the default, and the column cannot shed the
+domain's `NOT NULL`. The decision's `not_null_from_type` names the domain, and the
+help says to add the column with the type the domain chain ends in, carrying the
+chain's constraints on the column instead. The same column given a default is a
+`type-rewrite`, not a refusal for `NULL`s, and its decision's `constrained_type`
+names the domain for the same path. A `migrate` refusal's verdict carries both
+fields too. An
 empty table has no rows to fill, so the same statement is `metadata-only` there, and
 a column the table already has is not refused, since `ADD COLUMN IF NOT EXISTS`
 skips it, unless the same statement drops the column first. The planner asks the
@@ -866,6 +875,29 @@ session's lock blocks fails the plan rather than guessing. The linter has no liv
 reports it. Rows a row-level security policy hides from the role do not count, and
 the server's own refusal remains the backstop for them and for rows inserted after
 planning.
+
+### `column-limit`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+
+The operation adds a column to a table that has used all 1,600 of PostgreSQL's column
+numbers. Every column a table has ever had holds a number, and a dropped column keeps its
+number until the table is rebuilt, so a table that has added and dropped columns over the
+years reaches the limit with far fewer live columns. PostgreSQL refuses the add (`tables
+can have at most 1600 columns`, SQLSTATE `54011`) after taking the table's `ACCESS
+EXCLUSIVE` lock. An add reaches every partition and inheritance child, each numbering its
+columns on its own, so the fullest of them decides. In a statement that adds several
+columns, each takes the next number left in statement order, and only the adds past the
+last one are refused. Copy the table at the limit into a new one, which gives the columns
+new numbers from one; `VACUUM FULL` rewrites the rows but keeps the numbers. When the
+table at the limit is a partition, detach it and attach the copy in its place; when it is
+an inheritance child, make the copy inherit from the same parent. The plan names the
+tables at the limit and the numbers the table has free in `decisions[].column_limit`,
+and the help offers adding fewer columns only when some are free. The planner reads the
+highest number from the catalog; the linter has no live facts and never reports it.
 
 ### `cascading-drop`
 
