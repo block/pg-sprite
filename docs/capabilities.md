@@ -464,6 +464,8 @@ Three related jobs stay with humans on purpose:
   tables, and sequences are outside the model and are not undeclared tables. The planner's scratch
   objects live in a schema of their own (`pgsprite_scratch_<random>`) inside a transaction
   that is always rolled back, so a listing scoped to the owner's schema never sees them.
+  `schemadiff.ScratchSchemaPrefix` exports the name's prefix, so a DDL guard on the target,
+  such as an event trigger, can exempt the scratch build's `CREATE SCHEMA` and the DDL inside it.
 
   Once a reviewer has accepted a drop, the owner runs it with `executor.ExecuteDropTable`.
   At plan time, record the table's definition with `schemadiff.DroppedTableDefinition` on
