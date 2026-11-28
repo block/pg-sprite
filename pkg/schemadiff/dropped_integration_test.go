@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -130,4 +131,46 @@ func TestDroppedColumnListsEveryDependent(t *testing.T) {
 			assert.Equal(t, want, drop.Dependents)
 		})
 	}
+}
+
+// A publication whose column list names a column does not go with the
+// column, since the server refuses the drop while the publication names it,
+// so a dropped column does not list it. PostgreSQL 14 has no column lists,
+// and a publication of the whole table records no column dependency there.
+func TestDroppedColumnDoesNotListAPublication(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, note text, code text)`, schema))
+	require.NoError(t, err)
+
+	var version int
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT pg_catalog.current_setting('server_version_num')::int`).Scan(&version))
+	pub := pgx.Identifier{schema + "_pub"}.Sanitize()
+	table := pgx.Identifier{schema, "t"}.Sanitize()
+	publish := fmt.Sprintf(`CREATE PUBLICATION %s FOR TABLE %s (id, note)`, pub, table)
+	if version < 150000 {
+		publish = fmt.Sprintf(`CREATE PUBLICATION %s FOR TABLE %s`, pub, table)
+	}
+	_, err = pool.Exec(t.Context(), publish)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := pool.Exec(t.Context(), `DROP PUBLICATION IF EXISTS `+pub)
+		assert.NoError(t, err)
+	})
+
+	var edges int
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT count(*) FROM pg_catalog.pg_depend d
+		WHERE d.classid = 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
+		  AND d.refobjid = $1::pg_catalog.regclass AND d.refobjsubid > 0`, table).Scan(&edges))
+	if version >= 150000 {
+		assert.Positive(t, edges, "the column list records a dependency on its columns")
+	} else {
+		assert.Zero(t, edges)
+	}
+
+	drop := modeltest.PlannedDrop(t, pool, schema, "t", schemadiff.DroppedColumn, "note")
+	assert.Empty(t, drop.Dependents)
 }
