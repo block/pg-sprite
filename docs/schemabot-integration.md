@@ -1364,12 +1364,13 @@ alike (`migrate.AdmitStoppedRun`, `migrate.AdmitPlanStoppedRun`, and
 `migrate.AdmitRowSecurityStoppedRun` are the checks it makes), and ends in the refusal the
 apply would give, at the point the apply gives it; the dry run of the stopped statement itself
 is not refused and shows the route against the table's current shape, while the apply resumes
-it through copy-and-swap. Two paths make no check, deliberately: `ALTER TYPE ... ADD VALUE`
+it through copy-and-swap. Three paths make no check, deliberately: `ALTER TYPE ... ADD VALUE`
 names a type and locks no table, and an enum label is not part of a table's shape, so it
 cannot change what a stopped run holds — the label is added and the stopped run still resumes
-and finishes; and a reviewed plan's blocking drop of a partitioned table's index (under
+and finishes; a reviewed plan's blocking drop of a partitioned table's index (under
 `--accept-blocking`) can never meet a stopped run, since copy-and-swap refuses a partitioned
-table before it builds anything.
+table before it builds anything; and a plan that creates its table runs only once the table
+is confirmed absent, so no run can be stopped on it.
 
 **What `--restart` excludes.** It is a copy-and-swap acknowledgement, so it is an error —
 before any verdict, with nothing executed or discarded — on a statement the router sends
