@@ -230,7 +230,8 @@ type DroppedObject struct {
 	// an entry the table has lost since is no reason to refuse.
 	Dependents []string `json:"dependents,omitempty"`
 	// DependentObjects are Dependents as typed values, in the same order,
-	// set where a plan lists a column drop. A host matches one by kind and
+	// set wherever a column drop is rendered: by Diff for a plan and by
+	// ReadDroppedObject for the live object. A host matches one by kind and
 	// name against the other drops of its plan, and quotes its name, without
 	// splitting a rendered entry, whose name can hold the separator.
 	// In-process only: the JSON plan carries Dependents, and execution
