@@ -45,6 +45,10 @@ type FullTable struct {
 // table that inherits from it has used. An ADD COLUMN reaches every such
 // table, and each numbers its columns on its own, so the fullest one decides.
 // A dropped column keeps its number, so the read counts dropped columns too.
+// An inheritance child that already has a column of the added name merges
+// the two without a new number, but the read still counts it as taking one,
+// so it can refuse an add PostgreSQL would accept; it never admits one
+// PostgreSQL refuses.
 const columnNumbersSQL = `WITH RECURSIVE root(oid) AS (
 	SELECT c.oid
 	  FROM pg_catalog.pg_class c

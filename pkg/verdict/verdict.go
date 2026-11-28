@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/refusal"
 	"github.com/block/pg-sprite/pkg/suggest"
 )
@@ -747,6 +748,11 @@ type Verdict struct {
 	// value the plan report's type-rewrite decision carries. Empty for
 	// every other verdict.
 	ConstrainedType string `json:"constrained_type,omitempty"`
+	// ColumnLimit is how many column numbers the table had free before a
+	// column-limit refusal's change, and the tables that have used the
+	// most numbers: the ones to rebuild. The same value the plan report's
+	// column-limit decision carries. Nil for every other verdict.
+	ColumnLimit *preflight.ColumnNumbers `json:"column_limit,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what

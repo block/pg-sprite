@@ -1429,6 +1429,11 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		case hasUnrecognizedConstraint(op.InlineConstraints):
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case facts.ColumnLimitReached[op.Column]:
+			// Checked ahead of the adds that route to copy-and-swap only
+			// because no backend carries an added column yet. The shadow is
+			// a LIKE clone with fresh column numbers, so once a backend does,
+			// the copy is the rebuild this refusal's help recommends, and
+			// those adds belong ahead of this case.
 			numbers := facts.ColumnNumbers
 			d.Route, d.Reason, d.ColumnLimit = RouteRefuse, ReasonColumnLimit, &numbers
 		case fillsNotNullWithNull(op, facts):

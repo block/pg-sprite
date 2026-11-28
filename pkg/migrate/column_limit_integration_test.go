@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -45,6 +46,9 @@ func TestRunRefusesAColumnAddPastTheColumnLimit(t *testing.T) {
 	assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
 	assert.Contains(t, v.Detail, "ADD COLUMN kind adds a column to a table that has used all 1600 of PostgreSQL's column numbers")
 	assert.True(t, strings.HasSuffix(v.Detail, "; copy the table into a new one, which gives back the numbers its dropped columns hold (VACUUM FULL does not); until then no column number is free"), v.Detail)
+	assert.Equal(t, &preflight.ColumnNumbers{
+		Fullest: []preflight.FullTable{{Name: pgx.Identifier{schema, "events"}.Sanitize(), Root: true}},
+	}, v.ColumnLimit, "the verdict names the table to rebuild")
 	assert.Empty(t, v.ExecutedSQL)
 	var exists bool
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT FROM pg_catalog.pg_attribute
@@ -89,6 +93,8 @@ func TestRunNamesThePartitionAtTheColumnLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome, v.Detail)
 	partition := pgx.Identifier{schema, "ledger_1"}.Sanitize()
+	assert.Equal(t, &preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: partition, Partition: true}}}, v.ColumnLimit,
+		"the verdict names the partition to rebuild")
 	assert.Contains(t, v.Detail, "ADD COLUMN kind adds a column to a table whose partition "+partition+" has used all 1600 of PostgreSQL's column numbers")
 	assert.Contains(t, v.Detail, "copy partition "+partition+" into a new table")
 	assert.Contains(t, v.Detail, "then detach the partition and attach the copy in its place; until then no column number is free")

@@ -217,6 +217,9 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 	v.DependentPublications = d.DependentPublications
 	v.DependentGeneratedColumns = d.DependentGeneratedColumns
 	v.NotNullFromType = d.NotNullFromType
+	if d.Reason == planner.ReasonColumnLimit {
+		v.ColumnLimit = d.ColumnLimit
+	}
 	if d.Reason == planner.ReasonPartitionKey {
 		v.PartitionKeyTables = d.PartitionKeyTables
 	}

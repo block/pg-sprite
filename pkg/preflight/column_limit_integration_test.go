@@ -68,13 +68,31 @@ func TestReadColumnNumbersCountsDroppedColumnsAndChildren(t *testing.T) {
 		Fullest: []preflight.FullTable{{Name: quoted("ledger_1"), Partition: true}},
 	}, numbers, "the attached partition's dropped column holds number 2")
 
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.ledger_3 PARTITION OF %[1]s.ledger FOR VALUES FROM (200) TO (300) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.ledger_3a (id int, g1 int, g2 int);
+		ALTER TABLE %[1]s.ledger_3a DROP COLUMN g1, DROP COLUMN g2;
+		ALTER TABLE %[1]s.ledger_3 ATTACH PARTITION %[1]s.ledger_3a FOR VALUES FROM (200) TO (300)`, schema))
+	require.NoError(t, err)
+	numbers, err = preflight.ReadColumnNumbers(t.Context(), pool, schema, "ledger")
+	require.NoError(t, err)
+	assert.Equal(t, preflight.ColumnNumbers{
+		Left:    preflight.MaxColumnNumber - 3,
+		Fullest: []preflight.FullTable{{Name: quoted("ledger_3a"), Partition: true}},
+	}, numbers, "a sub-partition two levels down decides for the root")
+
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`DO $$ BEGIN
-		FOR i IN 1..1598 LOOP
+		FOR i IN 1..1597 LOOP
 			EXECUTE pg_catalog.format('ALTER TABLE %[1]s.events ADD COLUMN c%%s int', i);
 			EXECUTE pg_catalog.format('ALTER TABLE %[1]s.events DROP COLUMN c%%s', i);
 		END LOOP;
 	END $$`, schema))
 	require.NoError(t, err)
+	numbers, err = preflight.ReadColumnNumbers(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	assert.Equal(t, 1, numbers.Left)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %s.events ADD COLUMN last int`, schema))
+	require.NoError(t, err, "one left means PostgreSQL accepts one more add")
 	numbers, err = preflight.ReadColumnNumbers(t.Context(), pool, schema, "events")
 	require.NoError(t, err)
 	assert.Zero(t, numbers.Left)
