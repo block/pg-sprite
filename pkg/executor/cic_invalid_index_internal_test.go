@@ -84,7 +84,15 @@ func TestInvalidIndexErrorNamesTheBuildFailure(t *testing.T) {
 		})
 	}
 	other := &pgconn.PgError{Severity: "ERROR", Message: "could not open file", Code: "58P01"}
-	for _, cleanup := range []error{ErrBuildLeftInvalidIndex, ErrAbandonmentUnproven} {
+	for _, cleanup := range []error{
+		ErrBuildLeftInvalidIndex,
+		ErrInvalidIndexBuildInFlight,
+		ErrAbandonedInvalidIndex,
+		ErrInvalidIndexOnOtherTable,
+		ErrInvalidIndexNotDroppable,
+		ErrInvalidIndexBuilderUnobservable,
+		ErrAbandonmentUnproven,
+	} {
 		t.Run("outside the fault classes: "+cleanup.Error(), func(t *testing.T) {
 			e := &InvalidIndexError{Schema: "s", Index: "i", Table: "t", Build: other, Cleanup: cleanup}
 			assert.Contains(t, e.Error(), "(the build failed: ERROR: could not open file (SQLSTATE 58P01))")

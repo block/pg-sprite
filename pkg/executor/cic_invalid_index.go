@@ -94,20 +94,20 @@ func (e *InvalidIndexError) Error() string {
 		return fmt.Sprintf("index %s is this build's own invalid leftover%s; recover with RebuildAbandonedIndex or DROP INDEX CONCURRENTLY %s, see docs/invalid-index-recovery.md: %v",
 			name, e.buildClause(), pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuildInFlight):
-		return fmt.Sprintf("index %s is invalid because backend %d is still building it; wait for that build to finish or fail, see docs/invalid-index-recovery.md: %v",
-			name, e.BuilderPID, e.Cleanup)
+		return fmt.Sprintf("index %s is invalid because backend %d is still building it%s; wait for that build to finish or fail, see docs/invalid-index-recovery.md: %v",
+			name, e.BuilderPID, e.buildClause(), e.Cleanup)
 	case errors.Is(e.Cleanup, ErrAbandonedInvalidIndex):
-		return fmt.Sprintf("index %s is abandoned invalid debris on table %s with no backend building it; recover with RebuildAbandonedIndex, see docs/invalid-index-recovery.md: %v",
-			name, e.Table, e.Cleanup)
+		return fmt.Sprintf("index %s is abandoned invalid debris on table %s with no backend building it%s; recover with RebuildAbandonedIndex, see docs/invalid-index-recovery.md: %v",
+			name, e.Table, e.buildClause(), e.Cleanup)
 	case errors.Is(e.Cleanup, ErrInvalidIndexOnOtherTable):
-		return fmt.Sprintf("index %s is invalid debris on a different table (%s), which this change will not remove; recover it from that table's own change or inspect it yourself, see docs/invalid-index-recovery.md: %v",
-			name, e.Table, e.Cleanup)
+		return fmt.Sprintf("index %s is invalid debris on a different table (%s)%s, which this change will not remove; recover it from that table's own change or inspect it yourself, see docs/invalid-index-recovery.md: %v",
+			name, e.Table, e.buildClause(), e.Cleanup)
 	case errors.Is(e.Cleanup, ErrInvalidIndexNotDroppable):
-		return fmt.Sprintf("index %s is invalid on table %s but is not debris the server will remove concurrently (a partitioned table's index, an index partition, or a constraint's index); this change leaves it in place — inspect pg_class.relkind, pg_class.relispartition, and pg_constraint.conindid yourself, see docs/invalid-index-recovery.md: %v",
-			name, e.Table, e.Cleanup)
+		return fmt.Sprintf("index %s is invalid on table %s but is not debris the server will remove concurrently (a partitioned table's index, an index partition, or a constraint's index)%s; this change leaves it in place — inspect pg_class.relkind, pg_class.relispartition, and pg_constraint.conindid yourself, see docs/invalid-index-recovery.md: %v",
+			name, e.Table, e.buildClause(), e.Cleanup)
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuilderUnobservable):
-		return fmt.Sprintf("index %s is invalid on table %s and this role cannot see whether another backend is still building it; recover with RebuildAbandonedIndex, which proves the state under the table lock, or inspect pg_stat_progress_create_index as a role with pg_read_all_stats, see docs/invalid-index-recovery.md: %v",
-			name, e.Table, e.Cleanup)
+		return fmt.Sprintf("index %s is invalid on table %s and this role cannot see whether another backend is still building it%s; recover with RebuildAbandonedIndex, which proves the state under the table lock, or inspect pg_stat_progress_create_index as a role with pg_read_all_stats, see docs/invalid-index-recovery.md: %v",
+			name, e.Table, e.buildClause(), e.Cleanup)
 	default:
 		return fmt.Sprintf("index %s may be invalid but the catalog state could not be proven%s; inspect pg_index.indisvalid and pg_stat_progress_create_index yourself before any recovery, see docs/invalid-index-recovery.md: %v",
 			name, e.buildClause(), e.Cleanup)
