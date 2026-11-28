@@ -21,7 +21,7 @@ import (
 // cancelled while it waits for a reader's transaction.
 func leaveDetachPending(t *testing.T, pool *pgxpool.Pool, schema, table string) {
 	t.Helper()
-	endReader := openReader(t, pool, schema)
+	endReader, _ := openReader(t, pool, schema)
 	conn, err := pool.Acquire(t.Context())
 	require.NoError(t, err)
 	defer conn.Release()
@@ -80,7 +80,7 @@ func TestRunReportsADetachCancelledWhileItWaitsAsInterrupted(t *testing.T) {
 	opts := detachOptions(schema)
 	opts.Budget.Brief.LockTimeout = 30 * time.Second
 	opts.Budget.Brief.StatementTimeout = time.Minute
-	endReader := openReader(t, pool, schema)
+	endReader, reader := openReader(t, pool, schema)
 
 	type result struct {
 		v   verdict.Verdict
@@ -94,7 +94,7 @@ func TestRunReportsADetachCancelledWhileItWaitsAsInterrupted(t *testing.T) {
 		v, err := migrate.Run(ctx, pool, st, opts)
 		done <- result{v, err}
 	}()
-	waitForDetachToWait(t, pool, schema)
+	waitForDetachToWait(t, pool, reader)
 	cancel()
 	res := <-done
 	require.ErrorIs(t, res.err, executor.ErrDetachInterrupted)
@@ -133,7 +133,7 @@ func TestRunEndsADetachAtItsStatementBudget(t *testing.T) {
 	opts := detachOptions(schema)
 	opts.Budget.Brief.LockTimeout = 30 * time.Second
 	opts.Budget.Brief.StatementTimeout = 500 * time.Millisecond
-	endReader := openReader(t, pool, schema)
+	endReader, _ := openReader(t, pool, schema)
 
 	start := time.Now()
 	v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(

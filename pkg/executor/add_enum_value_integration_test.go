@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -222,7 +223,7 @@ func TestExecuteEnumValueAddWhileTheNameMovesDuringItsWait(t *testing.T) {
 			go func() {
 				done <- executor.ExecuteEnumValueAdd(t.Context(), pool, et, st, waitBudget, oneAttempt)
 			}()
-			waitForEnumValueLockWait(t, pool, schema)
+			waitForEnumValueLockWait(t, pool, mover.Conn().PgConn().PID())
 			_, err = mover.Exec(t.Context(), fmt.Sprintf(`
 				ALTER TYPE %[1]s.mood RENAME TO mood_old;
 				ALTER TYPE %[1]s.weather RENAME TO mood`, schema))
@@ -246,16 +247,13 @@ func TestExecuteEnumValueAddWhileTheNameMovesDuringItsWait(t *testing.T) {
 	}
 }
 
-// waitForEnumValueLockWait waits until a session running an ALTER TYPE ...
-// ADD VALUE on a type in schema is waiting on a lock.
-func waitForEnumValueLockWait(t *testing.T, pool *pgxpool.Pool, schema string) {
+// waitForEnumValueLockWait waits until a session is waiting on the type
+// lock the session with backend process ID holder took with its own
+// ADD VALUE.
+func waitForEnumValueLockWait(t *testing.T, pool *pgxpool.Pool, holder uint32) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		var waiting bool
-		err := pool.QueryRow(t.Context(),
-			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			  WHERE query LIKE 'ALTER TYPE % ADD VALUE %' AND wait_event_type = 'Lock'
-			    AND strpos(query, $1) > 0)`, schema).Scan(&waiting)
+		waiting, err := testutil.BlockedBy(t.Context(), pool, holder)
 		return err == nil && waiting
 	}, 30*time.Second, 25*time.Millisecond, "the ADD VALUE must be waiting on the type's lock")
 }
