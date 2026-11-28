@@ -42,6 +42,11 @@ import (
 // still grow what is measured; that run keeps this one from starting, and
 // growth only adds held space. The shadow's size read does lock the
 // shadow, so it waits out a concurrent DDL on it.
+//
+// pool and store must be on the shape's database. A pool on another
+// database finds no relation under the shadow's name and no slot of its
+// own, so it counts nothing rather than failing, and the disk check asks
+// for a fresh run's whole requirement.
 func MeasureResumeHeld(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, shape preflight.CopySwapShape, decodesWAL bool) (preflight.CopySwapHeld, error) {
 	if shape.Table() == "" {
 		return preflight.CopySwapHeld{}, fmt.Errorf("%w: zero copy-and-swap shape", preflight.ErrCopySwapProofMismatch)

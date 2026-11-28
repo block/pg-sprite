@@ -25,7 +25,9 @@ func dropAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachProof,
 	}
 	// INV: LK-2 — the DROP takes ACCESS EXCLUSIVE, so it requests its lock
 	// once no long-lived reader or writer holds the table, or once
-	// holderWait runs out.
+	// holderWait runs out. As for the ADD, a holder that outlasts the wait
+	// does not end the step: the DROP still requests its lock under its
+	// lock budget, so the outcome is not read.
 	if _, err := waitOutsideLockQueue(ctx, pool, proof.lockedTables(), holderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
 		return err
 	}

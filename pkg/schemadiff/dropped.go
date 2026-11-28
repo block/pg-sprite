@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -74,7 +75,7 @@ func ReadDroppedObject(ctx context.Context, q Querier, schema, table string, kin
 			if kind == DroppedColumn {
 				return DroppedObject{
 					Kind: kind, Name: name, Definition: col.DroppedDefinition(),
-					Dependents: DependentLines(col.Dependents),
+					Dependents: DependentLines(col.Dependents), DependentObjects: slices.Clone(col.Dependents),
 				}, true, nil
 			}
 			if !col.NotNull {

@@ -175,11 +175,10 @@ func (c *fakeHolderWaitClock) clock() holderWaitClock {
 	}
 }
 
-// A holder that never leaves ends the wait exactly at its limit. No sleep
-// runs past the deadline, so the last one is cut short, and the sample after
-// it, with none of the wait left, ends the wait. While the holder lingers,
-// each sample reports it with the time waited, and the report clears when the
-// wait ends.
+// A holder that never leaves ends the wait at its limit. The last sleep is
+// cut short, keeping back time for one more read, and that read still sees
+// the holder, so the wait ends. While the holder lingers, each sample reports
+// it with the time waited, and the report clears when the wait ends.
 func TestWaitOutsideLockQueueStopsAtItsDeadline(t *testing.T) {
 	f := newHolderWaitFixture(t)
 	f.exec(t, "CREATE TABLE %s.t (id int PRIMARY KEY)")
@@ -195,14 +194,60 @@ func TestWaitOutsideLockQueueStopsAtItsDeadline(t *testing.T) {
 	})
 	require.NoError(t, err)
 	requireOutlasted(t, outcome, readerPID)
-	assert.Equal(t, limit, outcome.waited)
-	assert.Equal(t, []time.Duration{lockHolderSampleGap, lockHolderSampleGap, limit - 2*lockHolderSampleGap}, fake.sleeps)
+	lastSleep := limit - 2*lockHolderSampleGap - lockHolderReadReserve
+	assert.Equal(t, limit-lockHolderReadReserve, outcome.waited)
+	assert.Equal(t, []time.Duration{lockHolderSampleGap, lockHolderSampleGap, lastSleep}, fake.sleeps)
 	table := qualifiedName(f.schema, "t")
 	assert.Equal(t, []*progress.LockHolderWait{
 		{PID: uint32(readerPID), Table: table, Waited: lockHolderSampleGap, Limit: limit},
 		{PID: uint32(readerPID), Table: table, Waited: 2 * lockHolderSampleGap, Limit: limit},
+		{PID: uint32(readerPID), Table: table, Waited: limit - lockHolderReadReserve, Limit: limit},
 		nil,
 	}, reports)
+}
+
+// A holder that commits during the wait's last, shortened sleep is seen gone
+// by the read that follows it, so the wait ends with nothing in the way
+// rather than reporting a holder that already finished.
+func TestWaitOutsideLockQueueReadsAfterItsLastSleep(t *testing.T) {
+	f := newHolderWaitFixture(t)
+	f.exec(t, "CREATE TABLE %s.t (id int PRIMARY KEY)")
+	tx, err := f.admin.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = tx.Exec(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.t", f.schema))
+	require.NoError(t, err)
+
+	const limit = 500 * time.Millisecond
+	fake := &fakeHolderWaitClock{at: time.Unix(0, 0)}
+	clock := fake.clock()
+	sleep := clock.sleep
+	clock.sleep = func(ctx context.Context, d time.Duration) error {
+		if d < lockHolderSampleGap {
+			require.NoError(t, tx.Rollback(ctx), "the holder finishes during the last sleep")
+		}
+		return sleep(ctx, d)
+	}
+	outcome := f.waitFor(t, f.admin, "ALTER TABLE %s.t ADD COLUMN note text", "t", limit, clock)
+	assert.False(t, outcome.exhausted, "the read after the last sleep sees the holder gone")
+	assert.Equal(t, limit-lockHolderReadReserve, outcome.waited)
+}
+
+// A holder whose session cannot be described still ends the step with the
+// typed error and the lock budget's code, and the message says why its state
+// is missing.
+func TestDescribeHolderFailureKeepsTheTypedError(t *testing.T) {
+	f := newHolderWaitFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	lingering := &LingeringHolderError{PID: 4242, Table: "billing.invoices", Watched: 30 * time.Second}
+	describeHolder(ctx, f.admin, lingering)
+	assert.Empty(t, lingering.State)
+	assert.Zero(t, lingering.TransactionAge)
+	assert.Equal(t, CodeBudgetLockExceeded, OutcomeCode(lingering))
+	assert.Equal(t, "backend 4242 held a lock on billing.invoices for the whole 30s the step waited, "+
+		"so the step did not request its lock and no reader or writer queued behind it "+
+		"(its session could not be described: context canceled)", lingering.Error())
 }
 
 // The wait's deadline also bounds its catalog reads: a read that starts with
@@ -268,4 +313,17 @@ func TestNativeLockedTables(t *testing.T) {
 			assert.Equal(t, tt.want, tables)
 		})
 	}
+}
+
+// A lingering holder is named with what the role could see of it: its state
+// and transaction age when pg_stat_activity shows the session, and only its
+// backend when it does not.
+func TestLingeringHolderErrorNamesWhatTheRoleCouldSee(t *testing.T) {
+	seen := &LingeringHolderError{PID: 4242, Table: "billing.invoices", Watched: 30 * time.Second, State: "active", TransactionAge: 2*time.Hour + 400*time.Millisecond}
+	assert.Equal(t, "backend 4242 (active, transaction open for 2h0m0s) held a lock on billing.invoices for the whole 30s the step waited, "+
+		"so the step did not request its lock and no reader or writer queued behind it", seen.Error())
+
+	hidden := &LingeringHolderError{PID: 4242, Table: "billing.invoices", Watched: 30 * time.Second}
+	assert.Equal(t, "backend 4242 held a lock on billing.invoices for the whole 30s the step waited, "+
+		"so the step did not request its lock and no reader or writer queued behind it", hidden.Error())
 }

@@ -469,6 +469,13 @@ func introspectColumns(ctx context.Context, tx Querier, oid uint32) ([]Column, e
 		       ), ''),
 		       a.attidentity::pg_catalog.text,
 		       a.attgenerated::pg_catalog.text,
+		       EXISTS (
+		           SELECT 1
+		           FROM pg_catalog.pg_type bt
+		           WHERE bt.oid OPERATOR(pg_catalog.=) a.atttypid
+		             AND bt.typnamespace OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.regnamespace
+		             AND bt.typtype OPERATOR(pg_catalog.<>) 'd'
+		       ),
 		       seq.seqtype, seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache, seq.seqcycle
 		FROM pg_catalog.pg_attribute a
 		LEFT JOIN pg_catalog.pg_attrdef d
@@ -509,7 +516,7 @@ func introspectColumns(ctx context.Context, tx Querier, oid uint32) ([]Column, e
 		var seqStart, seqIncrement, seqMin, seqMax, seqCache *int64
 		var seqCycle *bool
 		if err := rows.Scan(&c.Name, &c.AttNum, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated,
-			&seqType, &seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle); err != nil {
+			&c.BuiltInType, &seqType, &seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle); err != nil {
 			return nil, fmt.Errorf("scan column: %w", err)
 		}
 		c.Identity = Identity(identity)
@@ -601,6 +608,11 @@ func introspectTableDependents(ctx context.Context, tx Querier, oid uint32) ([]D
 // column's definition carries them, and PostgreSQL 18 catalogs a NOT NULL as
 // a constraint where earlier versions do not. Rows are in a stable order.
 func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (map[int16][]Dependent, error) {
+	// A publication whose column list or row filter names a column does not
+	// go with it: the server refuses the drop while the publication names
+	// the column, and the planner refuses that drop first, so the
+	// publication's edge is not listed.
+	//
 	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT d.refobjsubid::pg_catalog.int2, 'index'::pg_catalog.text, c.relname::pg_catalog.text,
@@ -645,6 +657,7 @@ func introspectColumnDependents(ctx context.Context, tx Querier, oid uint32) (ma
 		WHERE d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
 		  AND d.refobjid OPERATOR(pg_catalog.=) $1 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
 		  AND d.classid OPERATOR(pg_catalog.<>) 'pg_catalog.pg_constraint'::pg_catalog.regclass
+		  AND d.classid OPERATOR(pg_catalog.<>) 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
 		  AND NOT (d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass AND EXISTS (
 		      SELECT 1 FROM pg_catalog.pg_class c
 		      WHERE c.oid OPERATOR(pg_catalog.=) d.objid

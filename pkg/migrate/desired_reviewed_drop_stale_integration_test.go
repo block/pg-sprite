@@ -122,3 +122,49 @@ func TestExecutePlanRefusesADropWhoseObjectChangedAfterTheRead(t *testing.T) {
 		})
 	}
 }
+
+// A reviewed plan drops a foreign key, and before it runs another session
+// replaces the key with one of the same name on a different column. The drop
+// re-reads the key under the table's lock, refuses with the permanent drift
+// code, and the replacement stays.
+func TestExecutePlanRefusesAForeignKeyDropWhoseKeyChangedAfterTheRead(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (id int PRIMARY KEY);
+		CREATE TABLE %[1]s.orders (
+			id int PRIMARY KEY,
+			user_id int CONSTRAINT orders_user_fkey REFERENCES %[1]s.users (id),
+			buyer_id int
+		)`, schema))
+	require.NoError(t, err)
+
+	ds, err := statement.ParseDesired(`CREATE TABLE orders (id int PRIMARY KEY, user_id int, buyer_id int);`)
+	require.NoError(t, err)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	require.NotNil(t, report.Statements[0].Drops, "the drop carries the key it read")
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		ALTER TABLE %[1]s.orders DROP CONSTRAINT orders_user_fkey;
+		ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_fkey FOREIGN KEY (buyer_id) REFERENCES %[1]s.users (id)`, schema))
+	require.NoError(t, err)
+
+	replan := func(ctx context.Context) (plan.Report, error) {
+		return diffplan.Plan(ctx, pool, diffplan.Request{Schema: schema, Desired: ds})
+	}
+	res, err := executePlan(t.Context(), pool, report, DefaultOptions(), schema+".orders", "", replan)
+	require.ErrorIs(t, err, executor.ErrDroppedObjectDrift)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	require.NotEmpty(t, res.Verdicts)
+	assert.Equal(t, string(executor.CodeDroppedObjectDrift), res.Verdicts[len(res.Verdicts)-1].Code)
+
+	var def string
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT pg_get_constraintdef(oid) FROM pg_catalog.pg_constraint
+		WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_user_fkey'`, schema).Scan(&def))
+	assert.Equal(t, fmt.Sprintf("FOREIGN KEY (buyer_id) REFERENCES %s.users(id)", schema), def, "the replacement key stays")
+}

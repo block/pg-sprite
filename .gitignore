@@ -5,3 +5,4 @@ coverage.out
 .vscode/
 integration/loadproof/results.json
 integration/loadproof/results-library.json
+integration/loadproof/results-kill.json
