@@ -249,7 +249,10 @@ func (c *capture) wait(t *testing.T) error {
 
 // killWalsender terminates the backend holding the slot, the way a failover
 // or an operator ends a walsender: the stream's receive fails with the
-// server's admin-shutdown error and the catch-up returns it.
+// server's admin-shutdown error and the catch-up returns it. It returns once
+// the slot is released: the walsender sends that error before it exits and
+// lets go of the slot, so a caller that drops or inspects the slot sooner
+// would still find it held.
 func (f reconcileFixture) killWalsender(t *testing.T, cap *capture, slotName string) {
 	t.Helper()
 	var terminated bool
@@ -261,6 +264,23 @@ func (f reconcileFixture) killWalsender(t *testing.T, cap *capture, slotName str
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "57P01", pgErr.Code, "the walsender was terminated by an administrator")
+	f.awaitSlotReleased(t, slotName)
+}
+
+// awaitSlotReleased polls until the catalog shows nothing holding the slot,
+// which is after the holder's walsender has exited. A timeout names the
+// backend still holding it, which tells a walsender stuck past its release
+// from a new holder that took the slot.
+func (f reconcileFixture) awaitSlotReleased(t *testing.T, name string) {
+	t.Helper()
+	const slotReleased = 10 * time.Second
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		status, found, err := decode.InspectSlot(t.Context(), f.pool, name)
+		if !assert.NoError(collect, err) || !assert.True(collect, found) {
+			return
+		}
+		assert.False(collect, status.Active, "slot %s is still held by backend %d", name, status.ActivePID)
+	}, slotReleased, 50*time.Millisecond)
 }
 
 // copyAll runs the copier to completion while a capture consumes the
