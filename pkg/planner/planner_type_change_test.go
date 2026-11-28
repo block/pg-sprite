@@ -147,3 +147,47 @@ func TestClassifyTypeChangeAcceptsPgCatalogQualifiedTarget(t *testing.T) {
 		assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason, sql)
 	}
 }
+
+// The temporal precision, varbit, and cidr rules read the live type as
+// format_type renders it, with the modifiers inside a multi-word name, and
+// match the target as the grammar spells it. Each relabel keeps every
+// stored value; each rewrite rounds, truncates, or masks one.
+func TestClassifyTypeChangeRelabelsTemporalPrecisionVarbitAndCidr(t *testing.T) {
+	for name, tc := range map[string]struct {
+		liveType, target string
+		relabel          bool
+	}{
+		"raise timestamp precision":          {"timestamp(3) without time zone", "timestamp(6)", true},
+		"drop timestamp precision":           {"timestamp(3) without time zone", "timestamp", true},
+		"timestamp to the maximum precision": {"timestamp without time zone", "timestamp(6)", true},
+		"timestamp above the maximum":        {"timestamp(3) without time zone", "timestamp(7)", true},
+		"lower timestamp precision":          {"timestamp(6) without time zone", "timestamp(3)", false},
+		"give timestamp a lower precision":   {"timestamp without time zone", "timestamp(3)", false},
+		"raise timestamptz precision":        {"timestamp(3) with time zone", "timestamptz(6)", true},
+		"timestamp to timestamptz":           {"timestamp(3) without time zone", "timestamptz(3)", false},
+		"raise time precision":               {"time(2) without time zone", "time(5)", true},
+		"drop timetz precision":              {"time(2) with time zone", "timetz", true},
+		"lower timetz precision":             {"time(5) with time zone", "timetz(2)", false},
+		"raise a timestamp array precision":  {"timestamp(3) without time zone[]", "timestamp(6)[]", false},
+		"widen varbit":                       {"bit varying(8)", "varbit(16)", true},
+		"widen bit varying":                  {"bit varying(8)", "bit varying(16)", true},
+		"drop varbit length":                 {"bit varying(8)", "varbit", true},
+		"narrow varbit":                      {"bit varying(16)", "varbit(8)", false},
+		"widen fixed bit":                    {"bit(8)", "bit(16)", false},
+		"cidr to inet":                       {"cidr", "inet", true},
+		"inet to cidr":                       {"inet", "cidr", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE "+tc.target, planner.Facts{ColumnTypes: map[string]string{"c": tc.liveType}})
+			require.NoError(t, err)
+			require.Len(t, plan.Decisions, 1)
+			if tc.relabel {
+				assert.Equal(t, planner.RouteNative, plan.Decisions[0].Route)
+				assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason)
+				return
+			}
+			assert.Equal(t, planner.RouteCopyAndSwap, plan.Decisions[0].Route)
+			assert.Equal(t, planner.ReasonTypeRewrite, plan.Decisions[0].Reason)
+		})
+	}
+}

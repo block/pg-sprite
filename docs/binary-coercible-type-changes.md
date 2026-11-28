@@ -460,7 +460,15 @@ PostgreSQL can prove. It accepts exactly:
 
 - the same type and modifier (a no-op relabel);
 - `varchar(n) → varchar(m)` with `m ≥ n`, `varchar(n) → varchar`, and `varchar → text`;
-- `numeric(p,s) → numeric(p',s)` with `p' ≥ p`, and `numeric(p,s) → numeric`.
+- `numeric(p,s) → numeric(p',s)` with `p' ≥ p`, and `numeric(p,s) → numeric`;
+- for `timestamp`, `timestamptz`, `time`, and `timetz`, a precision that is higher, removed,
+  or the maximum of 6, such as `timestamp(3) → timestamp(6)` or `timestamptz(6) → timestamptz`;
+- `varbit(n) → varbit(m)` with `m ≥ n`, and `varbit(n) → varbit`;
+- `cidr → inet`.
+
+Each rule leaves every stored value as it is, and the column's indexes are reused, not
+rebuilt. A lower temporal precision rounds every value, a shorter `varbit` truncates, and
+`inet → cidr` masks host bits, so each of those rewrites.
 
 The widening rules apply to scalar columns only. An array column is a relabel only when
 its element type and modifier are unchanged (declared dimensions do not count); any other
@@ -487,9 +495,9 @@ reuses the column's indexes, like the same widen without a collation. An unquali
 keeps only a `pg_catalog` collation, because the engine's sessions search `pg_catalog`
 first. A collation in another schema is kept only by a clause qualified with that schema.
 
-Everything else — including changes PostgreSQL would relabel, such as `varbit` or temporal
-precision widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔
-timestamptz` case — is treated as `type-rewrite` and routed to the copy-and-swap path, which
+Everything else — including changes PostgreSQL would relabel, such as `interval` precision
+widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔ timestamptz`
+case — is treated as `type-rewrite` and routed to the copy-and-swap path, which
 runs it only when the run opens that route with `--copy-and-swap`
 ([copy-and-swap.md](copy-and-swap.md)). The bias is intentional: a false "free" verdict
 would run a blocking rewrite on a hot table; a false "rewrite" verdict costs a slower but
