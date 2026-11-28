@@ -88,7 +88,9 @@ var stoppedRunExempt = map[string]string{
 // gate what follows the if, and one later in a function does not gate a
 // call before it. That is a structural approximation of control flow, not
 // a proof of it: it does not see a branch that returns before the
-// check's result is used, and it resolves a method call by name alone.
+// check's result is used, it resolves a method call by name alone, and
+// an executing package's function used as a value rather than called is
+// not followed.
 func TestEveryDoorChecksForAStoppedRunBeforeItExecutes(t *testing.T) {
 	w := newDoorWalk(t)
 	for _, fn := range w.entries {
@@ -96,7 +98,8 @@ func TestEveryDoorChecksForAStoppedRunBeforeItExecutes(t *testing.T) {
 	}
 	assert.Empty(t, w.violations,
 		"each path reaches work on a table with no stopped-run check before it: call one of %v on the way, "+
-			"or name the function in stoppedRunExempt with why no stopped run can be under what it changes",
+			"name the function in stoppedRunExempt with why no stopped run can be under what it changes, "+
+			"or, when the flagged call runs nothing, list it among its package's reads in executingPackages",
 		stoppedRunChecks)
 	for name := range stoppedRunExempt {
 		assert.True(t, w.exemptUsed[name],
