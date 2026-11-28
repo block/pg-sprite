@@ -40,6 +40,17 @@ func replicaIdentityDrops(st statement.Statement) ([]statement.Op, error) {
 	return drops, nil
 }
 
+// droppedColumns names the columns among drops.
+func droppedColumns(drops []statement.Op) []string {
+	var columns []string
+	for _, op := range drops {
+		if op.Kind == statement.OpDropColumn {
+			columns = append(columns, op.Column)
+		}
+	}
+	return columns
+}
+
 // refuseReplicaIdentityLoss locks what drops lock anyway, in ACCESS
 // EXCLUSIVE, the lock ALTER TABLE ... REPLICA IDENTITY needs: st's table,
 // and the tables below it when a drop reaches them. It then reads what

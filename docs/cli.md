@@ -56,10 +56,12 @@ behind the copy. A `pool_max_conns` in the URL is kept as given, and a
 copy-and-swap run refuses a pool below six before it creates anything
 (`code: pool-too-small`).
 
-Only `migrate` without `--dry-run` ever commits a schema change. The one other
-command that writes to the database is `reap` without `--dry-run`, which drops
-only the engine's orphan replication slots and their publications, never table
-data.
+Only `migrate` without `--dry-run` ever commits a schema change. Two other
+commands write to the database, and neither touches table data: `reap` without
+`--dry-run` drops only the engine's orphan replication slots and their
+publications, and `discard` drops what a stopped copy-and-swap run left on one
+table (its shadow table, write fence or replication slot and publication, and
+checkpoint row).
 
 `lint`, `suggest`, `fmt`, and `capabilities` take no connection flags at all,
 so they cannot reach a database by accident.
@@ -327,7 +329,9 @@ Without `--copy-and-swap` the same command is refused with
 `copy-and-swap-refused` and nothing runs. A live run needs `wal_level=logical`;
 `--block-writes SCHEMA.TABLE` runs without it by blocking the table's writes
 until the swap. A stopped run resumes when you run the same command again,
-and `--restart SCHEMA.TABLE` starts it over. Choosing between live and
+`--restart SCHEMA.TABLE` starts it over, and
+[`discard SCHEMA.TABLE`](#abandon-a-stopped-copy-and-swap-run) abandons it
+without running the change. Choosing between live and
 offline, what a run needs, and how to stop one are in
 [copy-and-swap.md](copy-and-swap.md).
 
@@ -727,21 +731,118 @@ Every list is always an array, never `null`. stdout is empty, with exit 1,
 only when the pass failed before it reached any slot, such as a connection
 or catalog read failure.
 
+### Abandon a stopped copy-and-swap run
+
+A stopped copy-and-swap run keeps its shadow table, its hold on the table (the
+write fence of an offline run, or the replication slot and publication of a
+live one, which keeps WAL), and its checkpoint row until you resume it or
+start it over. When you decide not to make the change at all, or the volume
+is filling and you cannot run it now, `discard` drops all of it without
+running the change:
+
+```console
+$ pg-sprite discard public.orders
+discarded the stopped copy-and-swap run on public.orders; its change was not run
+  dropped shadow table public._pgsprite_c74da4a21f58f903_new
+  dropped replication slot pgsprite_a725d037
+  dropped publication pgsprite_a725d037
+  deleted the checkpoint row (phase catching_up)
+```
+
+Name the table exactly as `--restart` does: schema-qualified, an unquoted
+name in lower case. The table keeps its shape and its rows; an offline run's
+table takes writes again. `discard` drops in the order a restart does (the
+shadow, then the fence or the slot, then the row), so a discard that fails
+partway leaves a row that still records what stands; it prints what it
+dropped, exits 1, and a second `discard` finishes the job. One stop names a
+leftover it could not drop: when no replication slot of the run's name
+remains but the publication of that name was not dropped, the report names
+it under `publication_left`. A second `discard` drops it if the first
+failed for a passing reason; one that leaves it again has met a publication
+that is not of the engine's shape (it publishes other tables, say), which
+`discard` never drops: check that nothing uses it, drop it by hand with
+`DROP PUBLICATION`, and run `discard` again. Dropping a live
+run's slot waits for a server process still holding it, such as the stream
+of a run whose host died, which the server ends after `wal_sender_timeout`;
+the whole discard gives up after five minutes.
+
+It is refused, with exit 2 and nothing dropped, when:
+
+- a run on the table is in progress (`table-lock-held`): stop it with Ctrl-C
+  or `SIGTERM` first;
+- the run's swap already committed (`restart-swap-committed`): the change is
+  live, so run the same `migrate` command again to finish it;
+- the change completed (`resume-row-terminal`);
+- the checkpoint row names a slot other than the table's own
+  (`resume-row-mismatch`);
+- the role lacks the copy-and-swap grants (`insufficient-privileges`),
+  including replication access when the run holds a slot: the `detail`
+  names the grant that gives it, so grant it, or connect as the role that
+  ran the change, and run `discard` again;
+- the table no longer has a shape copy-and-swap takes (the preflight's own
+  cause), such as a user trigger, a foreign key, or a dependent view added
+  since the run stopped: `discard` proves the table's shape as a run does,
+  so it cannot discard this run. Remove the run by hand instead, as the
+  [integration guide](schemabot-integration.md#stopping-resuming-and-starting-over)
+  describes under "Discarding without running the change": delete the
+  table's checkpoint row, drop the shadow and any write fence, and then
+  `reap` drops the slot no row names, or drop it by hand as
+  [replication-slots.md](replication-slots.md#free-the-wal-resume-drop-the-slot-or-start-over)
+  shows.
+
+With no checkpoint row, `discard` still drops a shadow table, a write fence,
+and a slot and publication under the table's derived names, the slot only as
+`reap` would drop it: a slot another table's run owns (`resume-slot-foreign`)
+and a slot a process holds (`slot-active`) are left. The shadow and the fence
+go first, so when either was dropped the outcome is `stopped` with that cause
+and exit 1; otherwise it is `refused` with exit 2.
+
+A table with no stopped run and nothing under its run's names reports
+`nothing to discard` and exits 0. `discard` creates the checkpoint table if
+the database lacks it, as a copy-and-swap run does. It has no `--dry-run`:
+what it would drop depends on reads it makes under the table's lock, and the
+report names everything it dropped. `--json` prints the
+[discard report](#discard-report).
+
+#### Discard report
+
+`discard --json` prints one object, `format_version` 1. A consumer must reject
+a version it does not know; the version is bumped whenever a field is added,
+removed, or changes meaning.
+
+| Field | Meaning |
+|---|---|
+| `format_version` | The report's shape, 1 |
+| `table` | The table as given |
+| `outcome` | `discarded`, `nothing-to-discard`, `refused` (exit 2, nothing dropped), or `stopped` (exit 1, the fields below name what was dropped before the failure) |
+| `cause` | The refusal cause of a `refused` or `stopped` discard; `""` otherwise, and for a stop that was not a refusal. It is one of the causes the command names, `table-lock-held`, `slot-active`, and `insufficient-privileges`; a copy-and-swap shape cause from the preflight ([`CopySwapRefusalCause`](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause)); or a shadow operation cause from the engine ([`RefusalCause`](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause)), of which a discard meets `restart-swap-committed`, `resume-row-terminal`, `resume-row-mismatch`, and `resume-slot-foreign` as above; `shadow-foreign-relation` and `shadow-owner-mismatch` when a relation under the shadow's name, or the table itself, is not the one the engine's run made or proved; and `shadow-lock-lost`, `shadow-lock-held-elsewhere`, and `shadow-lock-unconfirmed` when the table's lock is lost or cannot be confirmed mid-discard. A script that meets a cause it does not know treats it as a refusal to read by hand |
+| `detail` | The error behind a `refused` or `stopped` discard, `""` otherwise |
+| `row_phase` | The phase of the checkpoint row deleted, `""` when none was |
+| `shadow` | The shadow table dropped, in the table's schema, `""` when none was |
+| `slot` | The replication slot dropped, `""` when none was |
+| `publication` | The publication dropped, `""` when none was |
+| `write_fence` | True when the write fence was taken off the table |
+| `publication_left` | On a `stopped` discard, the publication left in place after no replication slot of its name remained (the slot is gone, whether this discard dropped it or it was gone already); `""` otherwise |
+
+stdout is empty, with exit 1, when the command failed before it dropped
+anything and was not refused, such as a connection failure or a table name
+no table bears.
+
 A program that embeds pg-sprite as a Go library can poll a run's phase, step,
 and row, checksum, and catch-up counters directly; that snapshot is the
 [progress report contract](progress-report.md).
 
 ## Use the CLI from scripts and agents
 
-`migrate`, `diff`, `status`, `reap`, `lint`, `suggest`, and `capabilities` take
-`--json`. stdout carries only the report; diagnostics go to stderr, and
+`migrate`, `diff`, `status`, `reap`, `discard`, `lint`, `suggest`, and
+`capabilities` take `--json`. stdout carries only the report; diagnostics go to stderr, and
 `--debug` adds statement-level tracing there.
 
 ```console
 $ pg-sprite migrate --dry-run --json --alter "ALTER TABLE orders ADD COLUMN ref text UNIQUE" > plan.json; echo $?
 2
 $ jq -c '{format_version, table, disposition}' plan.json
-{"format_version": 31,"table":"orders","disposition":"rewrite-required"}
+{"format_version": 32,"table":"orders","disposition":"rewrite-required"}
 ```
 
 The exit code answers the question a pipeline asks first, without parsing
@@ -763,6 +864,7 @@ Each JSON shape is versioned:
 - [lint-report.md](lint-report.md) and [suggest-report.md](suggest-report.md)
 - [capabilities-contract.md](capabilities-contract.md) for `capabilities`
 - [Reap report](#reap-report) above for `reap`
+- [Discard report](#discard-report) above for `discard`
 
 [cli-output-examples.md](cli-output-examples.md) has one captured example of
 every output, and an orchestrator that embeds the engine as a Go library should

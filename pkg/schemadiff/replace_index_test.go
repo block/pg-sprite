@@ -157,9 +157,9 @@ func TestDiffChangedIndexRefusesATakenReplacementName(t *testing.T) {
 	}
 }
 
-// A table whose diff drops or retypes a column, and a partitioned parent,
-// keep the drop and rebuild: the column change takes or rebuilds the index
-// anyway, and a partitioned index is never built concurrently.
+// A table whose diff retypes a column, and a partitioned parent, keep the
+// drop and rebuild: the retype rebuilds the index anyway, and a partitioned
+// index is never built concurrently.
 func TestDiffChangedIndexKeepsTheDropAndRebuild(t *testing.T) {
 	t.Run("a retyped column", func(t *testing.T) {
 		desired := desiredUniqueName()

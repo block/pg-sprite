@@ -229,6 +229,14 @@ type DroppedObject struct {
 	// refuses a drop that would take along anything the plan did not list;
 	// an entry the table has lost since is no reason to refuse.
 	Dependents []string `json:"dependents,omitempty"`
+	// DependentObjects are Dependents as typed values, in the same order,
+	// set wherever a column drop is rendered: by Diff for a plan and by
+	// ReadDroppedObject for the live object. A host matches one by kind and
+	// name against the other drops of its plan, and quotes its name, without
+	// splitting a rendered entry, whose name can hold the separator.
+	// In-process only: the JSON plan carries Dependents, and execution
+	// checks only those.
+	DependentObjects []Dependent `json:"-"`
 	// Replacement, for a constraint, is the index that replaces it, which
 	// the run attaches from the plan's [Change.Replacement]. The constraint
 	// is dropped only while that index is still in place.
@@ -360,11 +368,13 @@ type ConstraintValidation struct {
 
 // Diff derives the ordered statement list that converges live onto desired.
 // Order is dependency-correct: drops first (indexes, then constraints, then
-// columns, then NOT NULLs), then column adds and alters, then constraint
-// adds, then index creates, then foreign key adds — so an added column
-// exists before an index or constraint that references it. Four kinds of
+// NOT NULLs), then column adds and alters, then constraint adds, then index
+// creates, then foreign key adds — so an added column exists before an
+// index or constraint that references it. A plan that drops a column drops
+// it last, unless it changes its columns first (see changesColumnsFirst),
+// in which case the column drops follow the constraint drops. Five kinds of
 // change keep the old object in place until its replacement is, unless the
-// plan also drops or retypes a column:
+// plan changes its columns first:
 //
 //   - A changed index is replaced in the create bucket, built under a
 //     temporary name before the old index is dropped (see replacedIndexes).
@@ -375,7 +385,10 @@ type ConstraintValidation struct {
 //     a unique index or constraint, and a constraint the file declares
 //     again under another name, are dropped after the index creates (see
 //     heldDrops).
-//   - Such a foreign key is dropped after the foreign key adds.
+//   - A CHECK the plan drops, when the plan adds a CHECK, is dropped after
+//     the constraint adds.
+//   - A foreign key the plan drops, when the plan adds or validates one, is
+//     dropped after the foreign key adds.
 //
 // Within each bucket the order is deterministic: attribute order for
 // columns, name order for constraints and indexes. schema
@@ -440,12 +453,13 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	partitioned := live.PartitionKey != ""
 
 	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
-	dropsOrRetypes := dropsOrRetypesColumn(live, desiredCols)
-	replaced, err := replacedInPlace(partitioned, dropsOrRetypes, schema, liveCons, liveIdx, desired, desiredIdx)
+	columnsFirst := changesColumnsFirst(live, desired.Columns)
+	replaced, err := replacedInPlace(partitioned, columnsFirst, schema, liveCons, liveIdx, desired, desiredIdx)
 	if err != nil {
 		return nil, err
 	}
-	replacedIdx, err := replacedIndexes(partitioned, dropsOrRetypes, schema, liveCons, liveIdx, desired, desiredIdx, adopted)
+	replacedLive := replacedLiveConstraints(replaced)
+	replacedIdx, err := replacedIndexes(partitioned, columnsFirst, schema, liveCons, liveIdx, desired, desiredIdx, adopted)
 	if err != nil {
 		return nil, err
 	}
@@ -475,25 +489,28 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	// A unique index or unique constraint the plan drops is held back until
 	// the plan's new unique indexes and constraints are in place, a foreign
-	// key until the plan's new foreign keys are, and so is a constraint the
-	// desired table declares again under another name. A
-	// uniqueness or rule that moves to another name or another kind of
-	// object keeps holding while its replacement builds, and a replacement
-	// that fails leaves the old one standing. A plan that drops or retypes a
-	// column keeps the drops first, since a dropped column takes the indexes
-	// and constraints that read it with it, and so does a drop whose name
-	// the desired table reuses.
+	// key until the plan's new foreign keys are, a CHECK until the plan's
+	// new CHECKs are, and so is a constraint the desired table declares
+	// again under another name. A uniqueness or rule that moves to another
+	// name or another kind of object keeps holding while its replacement
+	// builds, and a replacement that fails leaves the old one standing. A
+	// plan that changes its columns first (see changesColumnsFirst) keeps
+	// the drops first, and so does a drop whose name the desired table
+	// reuses. A plan that drops a column holds its drops like any other and
+	// drops the column last, so the column never takes an index or
+	// constraint with it before its replacement holds.
 	held := heldDrops{
 		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
 		renamedRules: renamedConstraintDefs(desired, liveCons),
 		foreignKeys:  installsForeignKey(desired, liveCons, desiredCons),
+		checks:       addsCheck(desired, liveCons),
 	}
 	// A held foreign key waits for the foreign keys the plan adds or
 	// validates, which come last; every other held drop goes before them, so a foreign key
 	// the plan adds cannot bind to a key the plan is about to drop.
 	var heldChanges, heldForeignKeys []Change
-	waits := func(ch Change) bool { return !dropsOrRetypes && held.holds(ch) }
+	waits := func(ch Change) bool { return !columnsFirst && held.holds(ch) }
 	appendDrop := func(ch Change) {
 		switch {
 		case !waits(ch):
@@ -517,7 +534,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
 			continue
 		}
-		if _, ok := replaced[con.Name]; ok {
+		if replacedLive[con.Name] {
 			continue
 		}
 		drop := dropConstraintChange(table, con)
@@ -570,7 +587,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
 			continue
 		}
-		if _, ok := replaced[con.Name]; ok {
+		if replacedLive[con.Name] {
 			continue
 		}
 		if r, ok := replacedIdx[con.Name]; ok && r.constraint.Name != "" {
@@ -587,32 +604,47 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// flagged destructive for the caller to gate. Generated columns go
 	// first: PostgreSQL refuses to drop a column a generated column still
 	// reads, and a generated column never reads another.
+	//
+	// A dropped column takes every index and constraint that reads it with
+	// it, so the column drops go last, after every replacement is built and
+	// every old object the plan drops itself is gone: a key, a check, or a
+	// foreign key the file changes on the columns that remain holds until
+	// its replacement does. A plan that changes its columns first (see
+	// changesColumnsFirst) keeps them here, after the drops and before the
+	// adds and retypes.
+	var columnDrops []Change
 	for _, generated := range []bool{true, false} {
 		for _, col := range live.Columns {
 			if _, ok := desiredCols[col.Name]; ok || col.IsGenerated() != generated {
 				continue
 			}
-			changes = append(changes, Change{
+			columnDrops = append(columnDrops, Change{
 				SQL:         "ALTER TABLE " + table + " DROP COLUMN " + pgx.Identifier{col.Name}.Sanitize(),
 				Kind:        ChangeDropColumn,
 				Destructive: true,
 				Drops: &DroppedObject{
 					Kind: DroppedColumn, Name: col.Name, Definition: col.DroppedDefinition(),
-					Dependents: DependentLines(col.Dependents),
+					Dependents: DependentLines(col.Dependents), DependentObjects: slices.Clone(col.Dependents),
 				},
 			})
 		}
 	}
 
-	// NOT NULLs to drop, after the columns dropped: a column that is part of
-	// a key the plan drops has lost its NOT NULL's owner by now. A primary
-	// key replaced in place still owns its columns' NOT NULL until the swap
-	// drops the old key, so when the plan replaces one, the NOT NULL drops
-	// wait for the constraints below. The new key is then built and swapped
-	// in while the old one keeps rejecting duplicates, and a column the old
-	// key covered loses its NOT NULL only once nothing requires it.
+	// NOT NULLs to drop, after the constraints dropped, and after the
+	// columns dropped when the plan changes its columns first: a column that
+	// is part of a key the plan drops has lost its NOT NULL's owner by now.
+	// A primary key replaced in place still owns its columns' NOT NULL until
+	// the swap drops the old key, so when the plan replaces one, the NOT
+	// NULL drops wait for the constraints below. The new key is then built
+	// and swapped in while the old one keeps rejecting duplicates, and a
+	// column the old key covered loses its NOT NULL only once nothing
+	// requires it.
 	notNullDrops := dropNotNullChanges(table, live, desiredCols)
-	notNullAfterKeySwap := replacesPrimaryKey(replaced, liveCons)
+	notNullAfterKeySwap := replacesPrimaryKey(replaced)
+	if columnsFirst {
+		changes = append(changes, columnDrops...)
+		columnDrops = nil
+	}
 	if !notNullAfterKeySwap {
 		changes = append(changes, notNullDrops...)
 	}
@@ -671,7 +703,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 		had, ok := liveCons[con.Name]
 		if r, inPlace := replaced[con.Name]; inPlace {
-			replacement, err := replaceInPlaceChanges(table, schema, had, con, r)
+			replacement, err := replaceInPlaceChanges(table, schema, r.live, con, r)
 			if err != nil {
 				return nil, err
 			}
@@ -762,6 +794,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// exists.
 	changes = append(changes, foreignKeys...)
 	changes = append(changes, heldForeignKeys...)
+
+	// Deferred column drops close the plan. Nothing before them can rewrite
+	// the table (changesColumnsFirst), so each still has the attribute
+	// number it was reviewed by.
+	changes = append(changes, columnDrops...)
 
 	return changes, nil
 }
