@@ -469,6 +469,13 @@ func introspectColumns(ctx context.Context, tx Querier, oid uint32) ([]Column, e
 		       ), ''),
 		       a.attidentity::pg_catalog.text,
 		       a.attgenerated::pg_catalog.text,
+		       EXISTS (
+		           SELECT 1
+		           FROM pg_catalog.pg_type bt
+		           WHERE bt.oid OPERATOR(pg_catalog.=) a.atttypid
+		             AND bt.typnamespace OPERATOR(pg_catalog.=) 'pg_catalog'::pg_catalog.regnamespace
+		             AND bt.typtype OPERATOR(pg_catalog.<>) 'd'
+		       ),
 		       seq.seqtype, seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache, seq.seqcycle
 		FROM pg_catalog.pg_attribute a
 		LEFT JOIN pg_catalog.pg_attrdef d
@@ -509,7 +516,7 @@ func introspectColumns(ctx context.Context, tx Querier, oid uint32) ([]Column, e
 		var seqStart, seqIncrement, seqMin, seqMax, seqCache *int64
 		var seqCycle *bool
 		if err := rows.Scan(&c.Name, &c.AttNum, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated,
-			&seqType, &seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle); err != nil {
+			&c.BuiltInType, &seqType, &seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle); err != nil {
 			return nil, fmt.Errorf("scan column: %w", err)
 		}
 		c.Identity = Identity(identity)

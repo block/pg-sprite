@@ -262,8 +262,8 @@ func TestCopySwapRunVerdict(t *testing.T) {
 	// holding it back stops a resume under the same ceiling again, so the
 	// remedy names the setting to raise on both front doors. A stream that
 	// fell behind leaves its slot holding more unconfirmed WAL than the
-	// ceiling, which a resume's first catch-up cycle reads before the stream
-	// has read through it, so its remedy names the ceiling, the hand drop of
+	// ceiling, which refuses a resume under the same ceiling before it
+	// starts, so its remedy names the ceiling, the hand drop of
 	// the slot, and the restart.
 	t.Run("a slot over the ceiling on retained WAL names the ceiling to raise", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetained,
@@ -297,6 +297,32 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "drop the slot by hand (pg_drop_replication_slot), which keeps the shadow and the checkpoint row")
 		assert.Contains(t, v.Detail, "(--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot")
 		assert.Contains(t, v.Detail, "checked against --free-disk as a fresh run")
+	})
+
+	// A resume refused for the slot's backlog is a refused verdict, not a
+	// stop. Its detail is built from the slot's figures the refusal
+	// carries and names the flags the CLI operator acts on, each remedy
+	// once, without the library's own remedy text.
+	t.Run("a resume refused for its slot's backlog names the ceiling to raise and the restart", func(t *testing.T) {
+		refused := &schemachange.RefusalError{Cause: schemachange.CauseResumeSlotBacklog, Detail: "the library's account, with a SlotLagCeiling remedy"}
+		backlog := &schemachange.SlotBacklogError{Slot: "pgsprite_x", Unconfirmed: 200 << 20, Ceiling: 128 << 20}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("run: %w: %w", refused, backlog))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
+		assert.Equal(t, verdict.Cause(schemachange.CauseResumeSlotBacklog), v.Cause)
+		assert.Equal(t, "slot pgsprite_x holds 209715200 bytes of WAL its stream has not confirmed, over the 134217728-byte slot-lag ceiling, "+
+			"so the resume was refused before its stream opened: no shadow row was cleared or copied and the slot confirmed nothing; "+
+			"the checkpoint row remains and its replication slot stays and pins WAL on the server: "+slotBacklogRemedy, v.Detail)
+	})
+
+	// The CLI's account of a backlog refusal needs the slot's figures, so
+	// a refusal of that cause that carries none is a broken contract with
+	// the library, not a verdict.
+	t.Run("a backlog refusal without the slot's figures is an invariant violation", func(t *testing.T) {
+		refused := &schemachange.RefusalError{Cause: schemachange.CauseResumeSlotBacklog, Detail: "no figures"}
+		_, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("run: %w", refused))
+		assert.ErrorIs(t, err, executor.ErrInvariantViolation)
 	})
 
 	t.Run("a cancelled run is coded as cancelled by the caller", func(t *testing.T) {

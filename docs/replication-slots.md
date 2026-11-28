@@ -193,8 +193,9 @@ Before you start:
 | `--slot-lag-ceiling SIZE` | Sets the stop threshold, the copy's pace, and the WAL the preflight reserves. Default `1GiB`. | Raise it for a busy cluster, or to resume after a `stream-behind` stop, with free space for about three times the value. |
 | `--free-disk SIZE` | The free space on the source volume; the preflight requires the shadow plus the ceiling. | Every copy-and-swap. Measure it; never pass a made-up value. |
 | Ctrl-C or `SIGTERM`, once | Stops the run cleanly: saves the copy's progress and exits. The slot stays. | Pausing a run. Resume soon. |
-| Run the same command again | Resumes from the saved progress and drains the slot. | After a stop whose detail says the same statement resumes. A divergence stop, or a data fault the run could not abandon, stops again on a rerun; its detail says to use `--restart`. |
-| `--restart SCHEMA.TABLE` | Discards the shadow, the slot, and the saved progress, then runs from the beginning in the same command, with a new copy and a new slot. | Starting over. On a volume that is nearly full, drop the slot by hand instead: `--restart` starts filling it again at once. |
+| Run the same command again | Resumes from the saved progress and drains the slot; a slot already holding more unconfirmed WAL than the ceiling is refused first (`resume-slot-backlog`). | After a stop whose detail says the same statement resumes. A divergence stop, or a data fault the run could not abandon, stops again on a rerun; its detail says to use `--restart`. After a `stream-behind` stop, raise `--slot-lag-ceiling` too. |
+| `--restart SCHEMA.TABLE` | Discards the shadow, the slot, and the saved progress, then runs from the beginning in the same command, with a new copy and a new slot. | Starting over. On a volume that is nearly full, drop the slot by hand or discard the run instead: `--restart` starts filling it again at once. |
+| `pg-sprite discard SCHEMA.TABLE` | Drops the stopped run's shadow, slot and publication, and saved progress, and does not run the change. Refused while a run holds the table and once the swap has committed. | Abandoning the change, or freeing the WAL and the shadow's disk when you will not run it soon. |
 | `pg-sprite reap` | Drops `pgsprite_` slots no in-flight run owns. Never touches a slot a run's row names. | Cleaning up after a run that ended before its row was written, or whose cleanup did not finish. |
 | `pg_drop_replication_slot('<name>')` | Drops a stopped run's slot by hand. The server frees the WAL at its next checkpoint; the shadow and saved progress stay. | Disk is running out and you cannot resume now. |
 | `max_slot_wal_keep_size` (server) | PostgreSQL's own hard limit for every slot on the server. | A backstop above the run's own hard limit: more than three times the ceiling plus a catch-up cycle of the cluster's WAL (`decode.RetainedHardLimit` gives the first figure). Set lower, it invalidates healthy runs, which then reconcile and compare every chunk. It invalidates any slot past it, not only pg-sprite's. |
@@ -261,10 +262,12 @@ holding WAL while you decide.
    running-transactions record, about 15 seconds later, and the segments go at the next
    checkpoint, not at once.
 3. **Resume** by running the same command again:
-   - `stream-behind`: the slot keeps the unconfirmed WAL over the ceiling after the stop, and
-     the resume reads the slot on its first catch-up cycle, before it has read through that
-     backlog, so a resume under the same ceiling stops again unless it reads through it within
-     that cycle. Once the write rate drops, resume with a higher ceiling, with margin above the
+   - `stream-behind`: the slot keeps the unconfirmed WAL over the ceiling after the stop, so a
+     resume under the same ceiling is refused with `resume-slot-backlog` before it opens the
+     stream or restarts the copy: no shadow row is cleared or copied and the slot confirms
+     nothing. The check reads the slot as it stands at the resume, so a resume admitted just
+     under the ceiling can still stop `stream-behind` once the cluster's writes add to it.
+     Once the write rate drops, resume with a higher ceiling, with margin above the
      slot's `unconfirmed` as [Check the slot](#check-the-slot) reads it at the resume, not the
      figure in the detail: the stopped slot keeps adding the cluster's writes to it. Do this only
      if the volume has room. Otherwise drop the slot by hand, which keeps the shadow and the saved
@@ -287,7 +290,7 @@ holding WAL while you decide.
 
 ### Free the WAL: resume, drop the slot, or start over
 
-There are three ways to stop a stopped run's slot from holding WAL. They differ in what the
+There are four ways to stop a stopped run's slot from holding WAL. They differ in what the
 next run has to redo:
 
 | Option | Frees | Next run | Cost |
@@ -295,12 +298,13 @@ next run has to redo:
 | **Resume** (run the same command) | The WAL, as the run confirms it | Continues from the saved progress | None: nothing is copied twice. Only after a stop whose detail says the same statement resumes (see [Your controls](#your-controls)). |
 | **Drop the slot by hand** | The WAL, at the server's next checkpoint | Reconciles, then continues | Compares every chunk already copied against the source and recopies the ones that differ. Takes time in proportion to the rows copied. The shadow keeps its disk. |
 | **`--restart SCHEMA.TABLE`** | The slot's WAL and the shadow's disk, but the same command then builds a new shadow and slot | Starts from the beginning | The whole copy again. |
+| **`pg-sprite discard SCHEMA.TABLE`** | The slot's WAL, at the server's next checkpoint, and the shadow's disk | None: the change is abandoned; running it later starts from the beginning | The whole copy again, if you run the change later. |
 
 Dropping the slot by hand does **not** throw the schema change away: the shadow and the checkpoint
 row stay, and the next run creates a fresh slot and repairs the gap by comparison instead of
-copying everything again. Only `--restart` starts from scratch. On a volume that is nearly
-full, the hand drop is the one that gives room back: `--restart` starts a new copy and a new
-slot in the same command.
+copying everything again. Only `--restart` and `discard` start from scratch. On a volume that
+is nearly full, the hand drop and `discard` are the ones that give room back: `--restart`
+starts a new copy and a new slot in the same command.
 
 To drop a stopped run's slot by hand, first confirm no run is going:
 
@@ -338,8 +342,18 @@ pg-sprite migrate --copy-and-swap --free-disk 50GiB --restart public.orders \
   --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 
-`--restart` runs the change again from the beginning in the same command; the CLI has no command
-that only discards. A library caller can discard without running with `Runner.Discard`.
+`--restart` runs the change again from the beginning in the same command. To discard without
+running the change, which gives back the shadow's disk at once and the slot's WAL at the
+server's next checkpoint:
+
+```sh
+pg-sprite discard public.orders
+```
+
+It is refused while a run holds the table, so stop a run that is still going first, and once
+the swap has committed, when the change is already live and the same `migrate` command
+finishes it ([Abandon a stopped copy-and-swap run](cli.md#abandon-a-stopped-copy-and-swap-run)).
+A library caller discards with `Runner.Discard`, which the command calls.
 
 ### The volume is already full
 
@@ -410,5 +424,10 @@ decisions as this page, from typed errors rather than the CLI's prose:
   the next run reconciles.
 - A resume refused because the old stream still holds the slot carries the refusal cause
   `schemachange.CauseResumeSlotHeld` (`resume-slot-held`); retry after `wal_sender_timeout`.
+- A resume refused because the slot already holds more unconfirmed WAL than the run's
+  `SlotLagCeiling` carries `schemachange.CauseResumeSlotBacklog` (`resume-slot-backlog`) and
+  wraps a `*schemachange.SlotBacklogError` with the slot, its `Unconfirmed` WAL, and the
+  `Ceiling`, in bytes; retry with a ceiling above `Unconfirmed` and room on the volume for it,
+  or start over with `RunOptions.Restart`.
 - `decode.RetainedHardLimit(ceiling)` is the retained WAL a run stops at regardless of grace,
   the figure to size a volume and `max_slot_wal_keep_size` by.

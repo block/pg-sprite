@@ -136,6 +136,20 @@ func TestDiffRefusesCollationChanges(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// A type change on a column with an explicit collation carries the
+// collation in its TYPE clause, so the retyped column keeps it: without the
+// clause PostgreSQL gives the column the new type's default.
+func TestDiffTypeChangeKeepsTheColumnsCollation(t *testing.T) {
+	collated := func(typ string) Model {
+		return Model{Table: "words", Columns: []Column{{Name: "tag", Type: typ, Collation: `pg_catalog."C"`}}}
+	}
+	changes, err := Diff("public", collated("character varying(20)"), collated("character varying(40)"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."words" ALTER COLUMN "tag" TYPE character varying(40) COLLATE pg_catalog."C"`,
+	}, sqls(changes))
+}
+
 func TestDiffAddColumn(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns, Column{
@@ -166,17 +180,17 @@ func TestDiffRenameShapeIsDropPlusAdd(t *testing.T) {
 		Table: "users",
 		Columns: []Column{
 			{Name: "id", Type: "bigint", NotNull: true},
-			{Name: "email_address", Type: "text"},
+			{Name: "email_address", Type: "text", BuiltInType: true},
 		},
 	}
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		`ALTER TABLE "public"."users" DROP COLUMN "email"`,
 		`ALTER TABLE "public"."users" ADD COLUMN "email_address" text`,
+		`ALTER TABLE "public"."users" DROP COLUMN "email"`,
 	}, sqls(changes))
-	assert.True(t, changes[0].Destructive)
-	assert.False(t, changes[1].Destructive)
+	assert.False(t, changes[0].Destructive)
+	assert.True(t, changes[1].Destructive)
 }
 
 func TestDiffDropColumnIsDestructive(t *testing.T) {
@@ -504,7 +518,11 @@ func TestDiffKeyConstraintAdoptsTheLiveIndex(t *testing.T) {
 		other := Index{Name: "events_name_key", Def: "CREATE UNIQUE INDEX events_name_key ON events USING btree (name) WHERE (id > 0)"}
 		changes, err := Diff("public", live(other), desired(unique))
 		require.NoError(t, err)
-		assert.Equal(t, rebuild, sqls(changes))
+		assert.Equal(t, []string{
+			"CREATE UNIQUE INDEX events_name_key_new ON public.events USING btree (name)",
+			`DROP INDEX "public"."events_name_key"`,
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key_new"`,
+		}, sqls(changes), "the constraint's index is built before the old index goes (see TestDiffSameNameKindSwapBuildsFirst)")
 	})
 
 	t.Run("an unfinished build", func(t *testing.T) {
@@ -640,12 +658,14 @@ func TestDiffPartitionedParentLeavesAValidIndexWithTheDesiredDefinition(t *testi
 	assert.Empty(t, changes)
 }
 
-func TestDiffOrderingDropsBeforeAddsBeforeIndexes(t *testing.T) {
+// A dropped column goes last: everything the plan adds is in place before
+// the column, and whatever reads it, is gone.
+func TestDiffOrderingDropsAColumnAfterAddsAndIndexes(t *testing.T) {
 	live := base()
 	live.Columns = append(live.Columns, Column{Name: "legacy", Type: "integer"})
 
 	desired := base()
-	desired.Columns = append(desired.Columns, Column{Name: "email", Type: "text", NotNull: true})
+	desired.Columns = append(desired.Columns, Column{Name: "email", Type: "text", BuiltInType: true, NotNull: true})
 	desired.Indexes = append(desired.Indexes, Index{
 		Name: "events_email_idx", Def: "CREATE INDEX events_email_idx ON events USING btree (email)",
 	})
@@ -653,9 +673,9 @@ func TestDiffOrderingDropsBeforeAddsBeforeIndexes(t *testing.T) {
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		`ALTER TABLE "public"."events" DROP COLUMN "legacy"`,
 		`ALTER TABLE "public"."events" ADD COLUMN "email" text NOT NULL`,
 		`CREATE INDEX events_email_idx ON public.events USING btree (email)`,
+		`ALTER TABLE "public"."events" DROP COLUMN "legacy"`,
 	}, sqls(changes))
 }
 

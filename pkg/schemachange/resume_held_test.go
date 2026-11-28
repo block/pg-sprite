@@ -8,8 +8,25 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/decode"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
+
+// The shadow's size read names every catalog relation, function, and
+// operator through pg_catalog, so a lookalike on the caller's search_path
+// cannot change the figure the disk check discounts (CO-9).
+func TestShadowBytesSQLQualifiesEveryName(t *testing.T) {
+	testutil.AssertCatalogQualified(t, shadowBytesSQL)
+}
+
+// A zero shape names no table, so there is no stopped run to measure. It
+// is refused before the checkpoint store or the server is read.
+func TestMeasureResumeHeldRefusesAZeroShapeWithoutReadingAnything(t *testing.T) {
+	held, err := MeasureResumeHeld(t.Context(), nil, nil, preflight.CopySwapShape{}, true)
+	require.ErrorIs(t, err, preflight.ErrCopySwapProofMismatch)
+	assert.Equal(t, preflight.CopySwapHeld{}, held)
+}
 
 // Only a reading that proves WAL the resumed run's own slot keeps on the
 // volume is discounted: a missing slot, another database's slot, a lost

@@ -74,7 +74,9 @@ func planWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string,
 // security, against one read of the live table. It returns nil when both
 // match, an error wrapping schemadiff.ErrOnlyTableDiffers when only the
 // table definition differs, and RowSecurityReviewRequired when the row
-// security differs.
+// security differs. A policy whose text the file keeps matches even when
+// the file retypes a column it reads and PostgreSQL would print it with a
+// new cast (see schemadiff.DiffWithRowSecurityOnDesired).
 func compareWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) error {
 	live, err := schemadiff.Introspect(ctx, pool, schema, desired.Table())
 	if err != nil {
@@ -84,7 +86,7 @@ func compareWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema stri
 	if err != nil {
 		return err
 	}
-	_, err = schemadiff.DiffWithRowSecurity(schema, live, model)
+	_, err = schemadiff.DiffWithRowSecurityOnDesired(ctx, pool, schema, live, model, desired)
 	if err == nil || errors.Is(err, schemadiff.ErrOnlyTableDiffers) {
 		return err
 	}

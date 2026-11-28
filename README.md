@@ -113,12 +113,13 @@ Connect directly to the primary, not through a pooler
 | [`pull`](docs/pull.md) | required | Write one desired file per supported table in a schema |
 | `status` | required | Show live pg-sprite sessions |
 | `reap` | required | Drop orphan replication slots that stopped copy-and-swap runs left behind |
+| `discard` | required | Abandon a stopped copy-and-swap run on one table without running its change ([cli.md](docs/cli.md#abandon-a-stopped-copy-and-swap-run)) |
 | `capabilities` | none | Print the support matrix (`--json` for automation) |
 | `fmt` | none | Canonicalize a schema file |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate |
 | `suggest` | none | Show the safer form the engine would run for risky DDL |
 
-Only `migrate` and `reap` ever write. If a multi-step change fails partway,
+Only `migrate`, `reap`, and `discard` ever write. If a multi-step change fails partway,
 [execution-model.md](docs/execution-model.md) says what state the table is in.
 
 ## What pg-sprite does not do yet
@@ -130,7 +131,7 @@ matrix is [capabilities.md](docs/capabilities.md).
 
 - **Copy-and-swap is in preview** and carries only `ALTER COLUMN TYPE`; other rewrites refuse ([running it](docs/copy-and-swap.md)).
 - **No connection poolers** on pg-sprite's own connection, except Supabase's session endpoint ([poolers](docs/limitations.md#connections-and-poolers)).
-- **Foreign keys** a desired file adds run online (`NOT VALID`, then `VALIDATE`, or partition by partition on a partitioned table before PostgreSQL 18, except the shapes [the build refuses when it runs](docs/partitioned-foreign-key-design.md#routing-from-a-desired-file)). One the file no longer declares is dropped as a destructive change, one it moves to a new name is added before the old one is dropped, and one it changes under the same name is dropped and re-added `NOT VALID` in one statement, then validated. The drop of a key a file cannot declare is refused, and so is a same-name change on a partitioned table or beside a dropped or retyped column.
+- **Foreign keys** a desired file adds run online (`NOT VALID`, then `VALIDATE`, or partition by partition on a partitioned table before PostgreSQL 18, except the shapes [the build refuses when it runs](docs/partitioned-foreign-key-design.md#routing-from-a-desired-file)). One the file no longer declares is dropped as a destructive change, one it moves to a new name is added before the old one is dropped, and one it changes under the same name is dropped and re-added `NOT VALID` in one statement, then validated. The drop of a key a file cannot declare is refused, and so is a same-name change on a partitioned table, beside a retyped column, or in a file that drops a column beside an added column that may rewrite the table.
 - **Renames are refused** unless `--force` names the table, since they break running application instances. An index a desired file declares under a new name is the exception: it is renamed in place and keeps serving.
 - **Destructive changes** need `--allow-destructive SCHEMA.TABLE`, and desired plans also need `--expect-fingerprint`.
 - **Index maintenance** (`DROP INDEX`, `REINDEX`) runs from `migrate --alter` only as an accepted blocking change ([passthrough](docs/lock-budgeted-passthrough.md)); a desired file drops an index concurrently under `--allow-destructive` and `--expect-fingerprint`, and a partitioned table's index only as an accepted blocking drop.

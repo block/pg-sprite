@@ -29,7 +29,9 @@ func TestNewRunnerRefusesANilStore(t *testing.T) {
 // too, and so is a pace for the copy, which a live run sets from that same
 // catch-up's lag. Its swap reads every key the pass leaves it under ACCESS
 // EXCLUSIVE, so a cap outside what a pass may leave is refused here rather
-// than by the pass, after the whole copy.
+// than by the pass, after the whole copy. A resume judges its slot by the
+// slot lag ceiling before its catch-up starts, so a negative ceiling is
+// refused here rather than read as a backlog on every slot.
 func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 	store := &checkpoint.Store{}
 	for name, opts := range map[string]schemachange.RunOptions{
@@ -41,6 +43,7 @@ func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 		"more keys left for the swap than a pass may leave": {Live: checksum.LiveOptions{CarryKeys: checksum.MaxCarryKeys + 1}},
 		"a negative count of keys left for the swap":        {Live: checksum.LiveOptions{CarryKeys: -1}},
 		"a pace for the copy":                               {Copier: copier.Options{Pace: copier.Pace{Backlog: func() uint64 { return 0 }, HighWater: 1}}},
+		"a negative slot lag ceiling":                       {Catchup: applier.CatchupOptions{SlotLagCeiling: -1}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := schemachange.NewRunner(dbconn.Config{}, store, opts)
