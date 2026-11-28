@@ -57,3 +57,10 @@ func PaceOverMark(r *Runner, readings int64, onOver func()) {
 func WrapLiveConfirmed(r *Runner, wrap func(*applier.Catchup) checksum.ConfirmedSource) {
 	r.liveWrap = wrap
 }
+
+// JoinDiscardRelease is the fold Runner.Discard makes of its table lock's
+// release error into its own outcome, so a test can drive a release
+// failure that a live lock session cannot be made to produce on demand.
+func JoinDiscardRelease(discardErr error, schema, table string, releaseErr error) error {
+	return joinDiscardRelease(discardErr, schema, table, releaseErr)
+}

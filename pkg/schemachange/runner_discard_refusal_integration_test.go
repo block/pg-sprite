@@ -78,9 +78,10 @@ func TestRunnerDiscardWithANilPoolIsAnInvariantViolation(t *testing.T) {
 // Two tables of one database can derive the same slot name, since the
 // name carries a short hash; the test searches for such a pair. Table
 // b has a stopped live run whose row names the slot. Table a has no row,
-// so a discard of a reads every table's rows for the slot under the slot's
-// lock, finds b's, and refuses the slot as resume-slot-foreign: b's slot,
-// publication, and row stand for b's run to resume.
+// so a discard of a reads every table's rows for the slot, finds b's, and
+// refuses the slot as resume-slot-foreign before it drops anything: b's
+// slot, publication, and row stand for b's run to resume, and a's shadow
+// stands beside them.
 func TestRunnerDiscardKeepsTheSlotAnotherTablesRowNames(t *testing.T) {
 	f := newDecodingFixture(t, 10)
 	schema := f.table.Schema
@@ -119,13 +120,22 @@ func TestRunnerDiscardKeepsTheSlotAnotherTablesRowNames(t *testing.T) {
 
 	shapeA := proveShape(t, f.pool, schema, nameA, true)
 	require.Equal(t, rowB.SlotName, shapeA.DecodingName(), "the two tables derive one slot name")
+	// A table under table a's shadow name, which no row records: the
+	// foreign slot is refused before it is dropped, so it stands too.
+	shadowA := pgx.Identifier{schema, schemachange.ShadowName(schema, nameA)}.Sanitize()
+	_, err = f.pool.Exec(t.Context(), `
+		CREATE TABLE `+shadowA+` (
+			id bigint PRIMARY KEY,
+			label text
+		)`)
+	require.NoError(t, err)
 	discarded, err := discardWith(t, f.cfg, f.store, f.pool, shapeA)
 	require.Error(t, err)
 	assert.Equal(t, schemachange.CauseResumeSlotForeign, schemachange.RefusalCauseOf(err))
 	assert.ErrorIs(t, err, decode.ErrForeignDecodingState)
-	assert.Equal(t, schemachange.Discarded{Schema: schema, Table: nameA}, discarded, "table a had nothing of its own to drop")
-	assert.Equal(t, leftoverState{Slot: true, Publication: true}, readLeftovers(t, f.pool, shapeA),
-		"table b's slot and publication stand")
+	assert.Equal(t, schemachange.Discarded{Schema: schema, Table: nameA}, discarded, "the refusal came before table a's shadow was dropped")
+	assert.Equal(t, leftoverState{Shadow: true, Slot: true, Publication: true}, readLeftovers(t, f.pool, shapeA),
+		"table a's shadow and table b's slot and publication stand")
 	stillB, err := f.store.Inspect(t.Context(), schema, nameB)
 	require.NoError(t, err)
 	assert.Equal(t, checkpoint.PhaseCopying, stillB.Phase)
@@ -189,16 +199,26 @@ func TestRunnerDiscardRefusesASlotWithoutAReplicationProofBeforeDroppingAnything
 }
 
 // With no row, a slot a walsender holds is refused at once with
-// decode.ErrSlotActive, never waited for: the shadow is dropped first and
-// reported beside the error, and the slot and publication stand.
-func TestRunnerDiscardRefusesAHeldUnrecordedSlotAfterDroppingTheShadow(t *testing.T) {
+// decode.ErrSlotActive, never waited for, and before anything is dropped:
+// the leftovers here are a quiesced run's shadow and write fence, whose
+// row an operator deleted, beside a slot and publication of the table's
+// derived name that a replication connection holds. All four stand after
+// the refusal, so the refusal leaves nothing half discarded. Once the
+// holder lets go, a second discard drops all four.
+func TestRunnerDiscardRefusesAHeldUnrecordedSlotBeforeDroppingAnything(t *testing.T) {
 	f := newDecodingFixture(t, 100)
 	shape := proveShape(t, f.pool, f.table.Schema, f.table.Table, true)
-	_, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: (&stopAfter{phase: checkpoint.PhaseCopying}).hook})
+	_, err := f.runOn(t, f.quiescedTarget(t), schemachange.RunOptions{
+		AfterCheckpoint: (&stopAfter{phase: checkpoint.PhaseCopying}).hook,
+	})
 	require.ErrorIs(t, err, errStopHere)
 	f.deleteRow(t)
+	slot, err := decode.CreateSlot(t.Context(), f.cfg, f.pool, f.target)
+	require.NoError(t, err)
+	require.NoError(t, slot.Close(t.Context()))
+	require.Equal(t, leftoverState{Shadow: true, Fence: true, Slot: true, Publication: true}, readLeftovers(t, f.pool, shape),
+		"the shadow, fence, slot, and publication stand with no row")
 	stream := holdSlot(t, f)
-	t.Cleanup(func() { assert.NoError(t, stream.Close(context.WithoutCancel(t.Context()))) })
 
 	// The deadline only bounds a discard that waits for the holder, which
 	// this one must not do.
@@ -209,12 +229,31 @@ func TestRunnerDiscardRefusesAHeldUnrecordedSlotAfterDroppingTheShadow(t *testin
 	require.NoError(t, err)
 	discarded, err := r.Discard(ctx, f.pool, shape)
 	require.ErrorIs(t, err, decode.ErrSlotActive)
+	assert.True(t, discarded.Nothing(), "the held slot was refused before anything was dropped")
+	assert.Equal(t, schemachange.Discarded{Schema: f.table.Schema, Table: f.table.Table}, discarded)
+	assert.Equal(t, leftoverState{Shadow: true, Fence: true, Slot: true, Publication: true}, readLeftovers(t, f.pool, shape))
+	assert.True(t, f.fenced(t), "the source stays fenced")
+
+	require.NoError(t, stream.Close(t.Context()))
+	const idleDeadline = 10 * time.Second
+	const idlePoll = 20 * time.Millisecond
+	require.Eventually(t, func() bool {
+		status, found, err := decode.InspectSlot(t.Context(), f.pool, shape.DecodingName())
+		require.NoError(t, err)
+		return found && !status.Active
+	}, idleDeadline, idlePoll, "the walsender should let go of the slot once its stream closes")
+	discarded, err = discardWith(t, f.cfg, f.store, f.pool, shape)
+	require.NoError(t, err)
 	assert.Equal(t, schemachange.Discarded{
-		Schema: f.table.Schema,
-		Table:  f.table.Table,
-		Shadow: schemachange.ShadowName(f.table.Schema, f.table.Table),
-	}, discarded, "the shadow went before the held slot was refused")
-	assert.Equal(t, leftoverState{Slot: true, Publication: true}, readLeftovers(t, f.pool, shape))
+		Schema:      f.table.Schema,
+		Table:       f.table.Table,
+		Shadow:      schemachange.ShadowName(f.table.Schema, f.table.Table),
+		Slot:        shape.DecodingName(),
+		Publication: shape.DecodingName(),
+		WriteFence:  true,
+	}, discarded)
+	assert.Equal(t, leftoverState{}, readLeftovers(t, f.pool, shape))
+	assert.False(t, f.fenced(t), "the source takes writes again")
 }
 
 // A row's slot is dropped with the waiting drop, bounded by the caller's
