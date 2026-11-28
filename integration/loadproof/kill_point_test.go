@@ -58,22 +58,29 @@ func (f copyFill) halfway() bool {
 	return f.SourceBytes > 0 && f.ShadowBytes*2 >= f.SourceBytes
 }
 
-// reached reports whether a poll that read cp and fill has seen the run at
-// the kill point. Mid-copy is a row in copying carrying a saved watermark
-// short of the key space, so the rerun has a save to resume from and the
-// rows landed above it to clear, or, while the copy has saved nothing, a
-// shadow at least half filled; mid-verify is a row in verifying, the pass
-// that follows the copy and the catch-up. The run the proof lets finish is
-// never reached.
-func (k killPoint) reached(cp checkpoint.Checkpoint, fill copyFill) bool {
+// reached reports whether a poll that read cp and fill, with verify the
+// last verify progress the run printed, has seen the run at the kill
+// point. Mid-copy is a row in copying carrying a saved watermark short of
+// the key space, so the rerun has a save to resume from and the rows
+// landed above it to clear, or, while the copy has saved nothing, a shadow
+// at least half filled; mid-verify is a row in verifying whose pass has
+// printed a percent above zero, so it has compared at least one chunk. The
+// run the proof lets finish is never reached.
+func (k killPoint) reached(cp checkpoint.Checkpoint, fill copyFill, verify verifySeen) bool {
 	switch k {
 	case killMidCopy:
 		return midCopyKill(cp, fill)
 	case killMidVerify:
-		return cp.Phase == checkpoint.PhaseVerifying
+		return midVerifyKill(cp, verify)
 	default:
 		return false
 	}
+}
+
+// midVerifyKill is killMidVerify's rule: the row in verifying and the
+// pass's progress line past 0%.
+func midVerifyKill(cp checkpoint.Checkpoint, verify verifySeen) bool {
+	return cp.Phase == checkpoint.PhaseVerifying && verify.compared()
 }
 
 // midCopyKill is killMidCopy's rule: the row in copying with a watermark
@@ -103,7 +110,7 @@ func (k killPoint) notReachedHint() string {
 		return "the copy ended before the poll saw a save short of the key space or, with nothing saved, the shadow's heap at half the source's; " +
 			"a source bloated by the load's updates keeps that ratio out of reach, so vacuum it or seed more rows (LOAD_PROOF_ROWS)"
 	case killMidVerify:
-		return "the verification pass ended between two polls; seed more rows (LOAD_PROOF_ROWS)"
+		return "the verification pass ended before the poll saw it print a percent above zero; seed more rows (LOAD_PROOF_ROWS)"
 	default:
 		return "no kill was aimed at this run"
 	}
@@ -197,10 +204,15 @@ var errNotKilled = errors.New("the run did not end where the harness killed it")
 // checkKilledAt holds a killed run to the kill point: the harness sent the
 // SIGKILL, the binary died of it rather than of its own accord or of a
 // SIGKILL from elsewhere, and the checkpoint row it left stands in the
-// phase the poll saw — for a kill mid-copy, with the copy not complete —
-// so the kill landed inside the phase. stdout is the binary's, quoted when
-// it exited on its own.
-func checkKilledAt(point killPoint, cp checkpoint.Checkpoint, sent bool, signal syscall.Signal, code int, stdout string) error {
+// phase the poll saw — for a kill mid-copy, with the copy not complete,
+// for a kill mid-verify, with verify, the progress line at the kill,
+// saying the pass had compared a chunk — so the kill landed inside the
+// phase. stdout is the binary's, quoted when it exited on its own.
+func checkKilledAt(point killPoint, cp checkpoint.Checkpoint, sent bool, verify verifySeen, signal syscall.Signal, code int, stdout string) error {
+	if signal != syscall.SIGKILL && point == killMidVerify {
+		return fmt.Errorf("%w: the binary exited with code %d before the kill in %s landed; %s; the last verify progress line was %q; stdout: %s",
+			errNotKilled, code, point.phase(), point.notReachedHint(), verify.Line, stdout)
+	}
 	if signal != syscall.SIGKILL {
 		return fmt.Errorf("%w: the binary exited with code %d before the kill in %s landed; %s; stdout: %s",
 			errNotKilled, code, point.phase(), point.notReachedHint(), stdout)
@@ -213,6 +225,9 @@ func checkKilledAt(point killPoint, cp checkpoint.Checkpoint, sent bool, signal 
 	}
 	if point == killMidCopy && cp.Watermark.Complete() {
 		return fmt.Errorf("%w: the row in copying carries the complete watermark, so the copy had ended before the kill", errNotKilled)
+	}
+	if point == killMidVerify && !verify.compared() {
+		return fmt.Errorf("%w: the last verify progress line before the kill was %q, so the pass had compared no chunk", errNotKilled, verify.Line)
 	}
 	return nil
 }
@@ -245,18 +260,34 @@ func TestMidCopyKillPrefersTheSaveAndFallsBackToAHalfFilledShadow(t *testing.T) 
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, killMidCopy.reached(tc.cp, tc.fill))
+			assert.Equal(t, tc.want, killMidCopy.reached(tc.cp, tc.fill, verifySeen{}))
 		})
 	}
 }
 
-// The binary is killed mid-verify at the first row in verifying, and at no
-// other phase.
-func TestMidVerifyKillIsTheVerifyingRow(t *testing.T) {
+// The binary is killed mid-verify only on a row in verifying whose pass
+// has printed a percent above zero: a row in verifying with no progress
+// line yet, or one at 0%, has compared no chunk, and a row in any other
+// phase is not the verify pass, whatever line was printed last.
+func TestMidVerifyKillNeedsTheVerifyingRowAndAComparedChunk(t *testing.T) {
 	full := copyFill{ShadowBytes: 8 << 20, SourceBytes: 8 << 20}
-	for _, phase := range []checkpoint.Phase{checkpoint.PhaseCopying, checkpoint.PhaseCatchingUp, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone} {
-		t.Run(phase.String(), func(t *testing.T) {
-			assert.Equal(t, phase == checkpoint.PhaseVerifying, killMidVerify.reached(checkpoint.Checkpoint{Phase: phase}, full))
+	compared := verifySeen{Percent: 15, Line: "step 4/6  checksum  15.00%  3.0K/20.0K rows"}
+	cases := map[string]struct {
+		phase  checkpoint.Phase
+		verify verifySeen
+		want   bool
+	}{
+		"verifying, no progress line yet":    {checkpoint.PhaseVerifying, verifySeen{}, false},
+		"verifying, the pass at 0%":          {checkpoint.PhaseVerifying, verifySeen{Percent: 0, Line: "step 4/6  checksum  0.00%  0/20.0K rows"}, false},
+		"verifying, a chunk compared":        {checkpoint.PhaseVerifying, compared, true},
+		"copying, a chunk compared":          {checkpoint.PhaseCopying, compared, false},
+		"catching up, a chunk compared":      {checkpoint.PhaseCatchingUp, compared, false},
+		"cutover after a chunk was compared": {checkpoint.PhaseCutover, compared, false},
+		"done after a chunk was compared":    {checkpoint.PhaseDone, compared, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.want, killMidVerify.reached(checkpoint.Checkpoint{Phase: tc.phase}, full, tc.verify))
 		})
 	}
 }
@@ -264,9 +295,10 @@ func TestMidVerifyKillIsTheVerifyingRow(t *testing.T) {
 // The run the proof lets finish is never killed, whatever the poll reads.
 func TestTheFinishingRunIsNeverKilled(t *testing.T) {
 	full := copyFill{ShadowBytes: 8 << 20, SourceBytes: 8 << 20}
+	compared := verifySeen{Percent: 15, Line: "step 4/6  checksum  15.00%  3.0K/20.0K rows"}
 	for _, phase := range []checkpoint.Phase{checkpoint.PhaseCopying, checkpoint.PhaseCatchingUp, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone} {
 		t.Run(phase.String(), func(t *testing.T) {
-			assert.False(t, killNever.reached(checkpoint.Checkpoint{Phase: phase, Watermark: copier.NewWatermark(2002)}, full))
+			assert.False(t, killNever.reached(checkpoint.Checkpoint{Phase: phase, Watermark: copier.NewWatermark(2002)}, full, compared))
 		})
 	}
 }
@@ -299,32 +331,37 @@ func TestExitSignalTellsAKillFromAnExit(t *testing.T) {
 // checkKilledAt accepts a kill the harness sent that left the row in the
 // phase it was aimed at, a copy killed before its first save included, and
 // refuses a binary that exited on its own, one a SIGKILL the harness did
-// not send ended, and a row that had moved on or finished its copy.
+// not send ended, a row that had moved on or finished its copy, and a kill
+// mid-verify before the pass had printed a percent above zero.
 func TestCheckKilledAtHoldsTheKillInsideItsPhase(t *testing.T) {
 	copying := checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: copier.NewWatermark(2002)}
 	verifying := checkpoint.Checkpoint{Phase: checkpoint.PhaseVerifying, Watermark: copier.NewWatermark(math.MaxInt64)}
-	require.NoError(t, checkKilledAt(killMidCopy, copying, true, syscall.SIGKILL, -1, ""))
-	require.NoError(t, checkKilledAt(killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, true, syscall.SIGKILL, -1, ""))
-	require.NoError(t, checkKilledAt(killMidVerify, verifying, true, syscall.SIGKILL, -1, ""))
+	compared := verifySeen{Percent: 15, Line: "step 4/6  checksum  15.00%  3.0K/20.0K rows"}
+	require.NoError(t, checkKilledAt(killMidCopy, copying, true, verifySeen{}, syscall.SIGKILL, -1, ""))
+	require.NoError(t, checkKilledAt(killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying}, true, verifySeen{}, syscall.SIGKILL, -1, ""))
+	require.NoError(t, checkKilledAt(killMidVerify, verifying, true, compared, syscall.SIGKILL, -1, ""))
 
 	refused := map[string]struct {
 		point  killPoint
 		cp     checkpoint.Checkpoint
 		sent   bool
+		verify verifySeen
 		signal syscall.Signal
 	}{
-		"exited on its own":                 {killMidVerify, checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}, false, 0},
-		"exited as the kill was sent":       {killMidVerify, checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}, true, 0},
-		"ended by another signal":           {killMidVerify, verifying, true, syscall.SIGTERM},
-		"a copy killed by someone else":     {killMidCopy, copying, false, syscall.SIGKILL},
-		"a verify pass killed by the clock": {killMidVerify, verifying, false, syscall.SIGKILL},
-		"the copy had moved on":             {killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCatchingUp}, true, syscall.SIGKILL},
-		"the copy had completed":            {killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: copier.NewWatermark(math.MaxInt64)}, true, syscall.SIGKILL},
-		"the verify pass had cut over":      {killMidVerify, checkpoint.Checkpoint{Phase: checkpoint.PhaseCutover}, true, syscall.SIGKILL},
+		"exited on its own":                  {killMidVerify, checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}, false, compared, 0},
+		"exited as the kill was sent":        {killMidVerify, checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}, true, compared, 0},
+		"ended by another signal":            {killMidVerify, verifying, true, compared, syscall.SIGTERM},
+		"a copy killed by someone else":      {killMidCopy, copying, false, verifySeen{}, syscall.SIGKILL},
+		"a verify pass killed by the clock":  {killMidVerify, verifying, false, compared, syscall.SIGKILL},
+		"the copy had moved on":              {killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCatchingUp}, true, verifySeen{}, syscall.SIGKILL},
+		"the copy had completed":             {killMidCopy, checkpoint.Checkpoint{Phase: checkpoint.PhaseCopying, Watermark: copier.NewWatermark(math.MaxInt64)}, true, verifySeen{}, syscall.SIGKILL},
+		"the verify pass had cut over":       {killMidVerify, checkpoint.Checkpoint{Phase: checkpoint.PhaseCutover}, true, compared, syscall.SIGKILL},
+		"the verify pass printed no percent": {killMidVerify, verifying, true, verifySeen{}, syscall.SIGKILL},
+		"the verify pass was at 0%":          {killMidVerify, verifying, true, verifySeen{Percent: 0, Line: "step 4/6  checksum  0.00%  0/20.0K rows"}, syscall.SIGKILL},
 	}
 	for name, tc := range refused {
 		t.Run(name, func(t *testing.T) {
-			require.ErrorIs(t, checkKilledAt(tc.point, tc.cp, tc.sent, tc.signal, 0, `{"outcome":"executed-via-copy-and-swap"}`), errNotKilled)
+			require.ErrorIs(t, checkKilledAt(tc.point, tc.cp, tc.sent, tc.verify, tc.signal, 0, `{"outcome":"executed-via-copy-and-swap"}`), errNotKilled)
 		})
 	}
 }

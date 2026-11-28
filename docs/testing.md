@@ -450,7 +450,13 @@ needs a `-timeout` above the two-hour run budget plus the cleanup, as the target
 `-timeout 3h` is.
 
 The harness polls the checkpoint row, the same read a status command makes, every 50
-milliseconds, and kills the binary from that poll; nothing is timed:
+milliseconds, and kills the binary from that poll; nothing is timed. The runs it kills print
+no verdict, so they run with `--progress=always` in place of `--json`, and the binary prints
+a plain progress line on stderr per change of step, operation, or ten-percent mark; the run
+it lets finish keeps `--json`. The harness seeds the table and runs `ANALYZE` on it, so the
+verify pass's line carries a percent from the source's catalog row count. That line is
+human-facing prose, so the harness reads only two of its fields: the `checksum` operation
+and the percent right after it.
 
 1. The first run is killed in `copying` at the first poll that sees the row carry a saved
    watermark short of the key space, so the rerun has a save to resume from and the rows
@@ -459,9 +465,16 @@ milliseconds, and kills the binary from that poll; nothing is timed:
    about a second, the kill lands after a save. Only while the row carries no watermark
    does the poll fall back to the heap sizes, killing once the shadow's heap is at least
    half the source's.
-2. The second run resumes from that row and is killed at the first poll that sees the row
-   in `verifying`. The poll also notes the first watermark it sees this run save in
-   `copying`.
+2. The second run resumes from that row and is killed once the row is in `verifying` and
+   the run has printed a verify progress line above 0%. The percent counts rows from chunks
+   whose comparison has ended, so the pass has compared at least one chunk. A line is
+   printed only while the pass runs, and the harness reads the row again as soon as one
+   arrives rather than at its next poll, so the kill follows the line by milliseconds. The
+   binary samples progress at most once a second, so this kill needs a pass that runs at
+   least that long after its first chunk compares; unlike the copy kill, it may not land
+   at a smoke size, and a pass that ends first fails the proof as not killed, quoting the
+   last verify line, with the hint to seed more rows (`LOAD_PROOF_ROWS`). The poll also
+   notes the first watermark it sees this run save in `copying`.
 3. The third run resumes from the `verifying` row and runs to its verdict, under the same
    poll, which sends nothing.
 
@@ -477,16 +490,15 @@ it held is refused as `resume-slot-held`; it never drops or takes over the slot.
 for the load to commit a few writes per worker, so the interval in which no binary runs holds
 writes only the kept slot can carry into the new table. A kill in `catching_up` is not made:
 at a smoke size that phase lasts less than a poll or two, so a kill aimed at it would land
-only some of the time. Nor is the kill in `verifying` held until the pass has compared a
-chunk, as the library proof's cancel is: the row records nothing of the pass's progress, and
-the binary reports it nowhere a harness outside the process can read.
+only some of the time.
 
 A pass proves, beyond what the load proof's oracles prove of the result:
 
 - each kill landed inside its phase: the binary died of the SIGKILL the harness sent, not
   of its own accord or of a SIGKILL from elsewhere (the run budget's deadline, the
   out-of-memory killer), and the row it left stands in the phase the poll saw, a killed
-  copy's watermark still short of the key space;
+  copy's watermark still short of the key space, and the last verify progress line before
+  the kill in `verifying` above 0%;
 - the killed copy's rerun resumed from its save: the first watermark the poll saw the rerun
   save is at or above the one the killed run left, where a copy started over would save one
   below it first, and the run's `resumed_from_save` is `true`. At a size where the kill
@@ -509,12 +521,13 @@ A pass proves, beyond what the load proof's oracles prove of the result:
 
 The record has the load proof's shape plus `runs`: per run, when it started and how long it
 ran, how long the harness waited for the slot before it, the phase it was killed in with the
-two heap sizes the poll read then, the signal that ended it and its exit code, how long the
-dead binary's backends took to leave (`backends_exit_wait_ms`), the row's phase and
-watermark after it (`watermark_at_kill`), for the killed copy's rerun the first watermark
-the poll saw it save (`first_saved_watermark`) and whether that was held to the killed
-run's save (`resumed_from_save`), the shadow's OID, the writes the load committed before
-the next run, and, for the last run, the verdict's outcome and code.
+two heap sizes the poll read then, the last verify progress line it judged and that line's
+percent (`verify_progress_at_kill`, `verify_percent_at_kill`), the signal that ended it and
+its exit code, how long the dead binary's backends took to leave (`backends_exit_wait_ms`),
+the row's phase and watermark after it (`watermark_at_kill`), for the killed copy's rerun
+the first watermark the poll saw it save (`first_saved_watermark`) and whether that was
+held to the killed run's save (`resumed_from_save`), the shadow's OID, the writes the load
+committed before the next run, and, for the last run, the verdict's outcome and code.
 The phase list the checkpoint poll records spans all three runs, `phase_sequence` lists the
 phases in the order the poll saw them, and `verdict` is the last run's stdout.
 
