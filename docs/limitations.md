@@ -83,9 +83,14 @@ per-operation status.
   key, the validation fails and both keys stay: the old one valid, the new one
   `NOT VALID` but checking every new write. Fix the rows and the next plan
   validates the new key and drops the old one; or take the new key out of the
-  file and the next plan drops it. The drop of a key changed under the same name is
-  refused, since writes would be checked against no key between the drop and
-  the add. So is the drop of a key a file cannot declare: one into another
+  file and the next plan drops it. A key changed under the same name is dropped
+  and re-added `NOT VALID` in one statement, so every write stays checked by
+  one key or the other, and then validated; if rows break the new key, it stays
+  `NOT VALID`, checking every new write, until the rows are fixed and the next
+  plan validates it. On a partitioned table, or in a plan that also drops or
+  retypes a column, the drop would come before the add and leave writes
+  checked against no key, so it is refused. So is the drop of a key a file
+  cannot declare: one into another
   schema, or one from a table to itself whose referenced columns are unique
   only through a standalone unique index. Both refusals use
   `declarative-foreign-key`. Export refuses foreign keys unless the caller

@@ -320,10 +320,11 @@ CREATE TABLE orders (
 	assert.True(t, newValidated)
 }
 
-// A file that changes the orders key under the same name is refused before
-// anything runs: the old key would be dropped before the new one could be
-// added, and writes between the two would be checked against no key.
-func TestRunDesiredRefusesAForeignKeyChangedUnderTheSameName(t *testing.T) {
+// A file that changes the orders key under the same name runs as one
+// statement that drops the old key and adds the new one NOT VALID, then the
+// validation of the new key, so every write is checked by one key or the
+// other throughout.
+func TestRunDesiredReplacesAForeignKeyChangedUnderTheSameName(t *testing.T) {
 	pool, schema := foreignKeySchema(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES %[1]s.users (id));
@@ -338,16 +339,70 @@ CREATE TABLE orders (
 	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 
 	require.NoError(t, err)
-	assert.Equal(t, verdict.OutcomeRefused, res.Outcome, res.Detail)
-	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, res.Reason)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
+	require.Len(t, res.Plan.Statements, 2)
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, res.Plan.Statements[0].Kind, "one statement drops the old key and adds the new one")
+	assert.Equal(t, schemadiff.ChangeValidateForeignKey, res.Plan.Statements[1].Kind)
 	exists, validated := ordersForeignKeyValidated(t, pool, schema)
-	assert.True(t, exists, "the live key stays")
-	assert.True(t, validated)
+	assert.True(t, exists)
+	assert.True(t, validated, "the run validates the rows under the new key")
 	var onDelete string
 	require.NoError(t, pool.QueryRow(t.Context(), `
 		SELECT confdeltype FROM pg_catalog.pg_constraint
 		WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_user_id_fkey'`, schema).Scan(&onDelete))
-	assert.Equal(t, "a", onDelete, "the live key is unchanged")
+	assert.Equal(t, "c", onDelete, "the key cascades deletes")
+}
+
+// A key changed under the same name whose new rule the existing rows break
+// stops at its validation with the new key in place NOT VALID: it checks
+// every new write, so no row it forbids gets in. Once the rows are fixed,
+// the next run only validates it.
+func TestRunDesiredForeignKeyChangedUnderTheSameNameStopsAtValidation(t *testing.T) {
+	pool, schema := foreignKeySchema(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.premium_users (id bigint PRIMARY KEY);
+		INSERT INTO %[1]s.premium_users VALUES (1);
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES %[1]s.users (id));
+		INSERT INTO %[1]s.orders VALUES (10, 1), (11, 2)`, schema))
+	require.NoError(t, err)
+	const desired = `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES premium_users (id)
+);`
+	references := func() string {
+		var table string
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT confrelid::regclass::text FROM pg_catalog.pg_constraint
+			WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_user_id_fkey'`, schema).Scan(&table))
+		return table
+	}
+
+	res, err := migrate.RunDesired(t.Context(), pool, reviewedDestructiveRequest(t, pool, schema, desired), runOptions())
+
+	require.Error(t, err)
+	var pgErr *pgconn.PgError
+	require.True(t, errors.As(err, &pgErr), "the server's own error is kept: %v", err)
+	assert.Equal(t, "23503", pgErr.Code)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	exists, validated := ordersForeignKeyValidated(t, pool, schema)
+	assert.True(t, exists, "the new key is in place")
+	assert.False(t, validated, "the new key is NOT VALID")
+	assert.Equal(t, schema+".premium_users", references())
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s.orders VALUES (12, 2)`, schema))
+	require.True(t, errors.As(err, &pgErr), "a write the new key forbids is refused: %v", err)
+	assert.Equal(t, "23503", pgErr.Code)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`DELETE FROM %s.orders WHERE id = 11`, schema))
+	require.NoError(t, err)
+	res, err = migrate.RunDesired(t.Context(), pool, reviewedDestructiveRequest(t, pool, schema, desired), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	require.Len(t, res.Plan.Statements, 1)
+	assert.Equal(t, schemadiff.ChangeValidateForeignKey, res.Plan.Statements[0].Kind)
+	_, validated = ordersForeignKeyValidated(t, pool, schema)
+	assert.True(t, validated)
 }
 
 // A foreign key the desired file adds to a live table with rows is applied:

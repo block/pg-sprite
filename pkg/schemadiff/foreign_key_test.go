@@ -37,10 +37,12 @@ func TestDiffClassifiesForeignKeyChanges(t *testing.T) {
 }
 
 // A foreign key the plan drops before the key that replaces it is added
-// leaves writes checked against no key in between: one changed under the
-// same name, and every dropped key in a plan that adds a foreign key and also
-// drops a column, since such a plan keeps its drops first. A key moved to a
-// new name waits for its replacement and is dropped after it, and a plan that
+// leaves writes checked against no key in between: every dropped key in a
+// plan that adds a foreign key and also drops a column, since such a plan
+// keeps its drops first, and one changed under the same name on a
+// partitioned parent, which cannot take a NOT VALID key. A key changed under
+// the same name elsewhere is replaced in one statement, a key moved to a new
+// name waits for its replacement and is dropped after it, and a plan that
 // adds no foreign key replaces nothing.
 func TestForeignKeysDroppedBeforeTheirReplacement(t *testing.T) {
 	fk := func(name, def string) Constraint {
@@ -62,7 +64,7 @@ func TestForeignKeysDroppedBeforeTheirReplacement(t *testing.T) {
 		desired Model
 		want    map[string]bool
 	}{
-		{"changed under the same name", withKeys(base(), fk("events_user_fk", cascade)), map[string]bool{"events_user_fk": true}},
+		{"changed under the same name", withKeys(base(), fk("events_user_fk", cascade)), map[string]bool{}},
 		{"moved to a new name", withKeys(base(), fk("events_user_cascade_fk", cascade)), map[string]bool{}},
 		{"moved to a new name beside a column drop", withKeys(withoutName(base()), fk("events_user_cascade_fk", cascade)), map[string]bool{"events_user_fk": true}},
 		{"dropped beside a column drop, with nothing added", withoutName(base()), map[string]bool{}},
@@ -72,6 +74,12 @@ func TestForeignKeysDroppedBeforeTheirReplacement(t *testing.T) {
 			assert.Equal(t, tt.want, ForeignKeysDroppedBeforeTheirReplacement(live, tt.desired))
 		})
 	}
+
+	parent := live
+	parent.PartitionKey = "RANGE (id)"
+	assert.Equal(t, map[string]bool{"events_user_fk": true},
+		ForeignKeysDroppedBeforeTheirReplacement(parent, withKeys(base(), fk("events_user_fk", cascade))),
+		"a partitioned parent drops a key changed under the same name before adding it again")
 
 	moved, err := Diff("app", live, withKeys(base(), fk("events_user_cascade_fk", cascade)))
 	require.NoError(t, err)

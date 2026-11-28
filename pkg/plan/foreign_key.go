@@ -21,7 +21,8 @@ func RefuseUndeclarableForeignKeyDrops(report *Report, undeclarable map[string]b
 // RefuseChangedForeignKeyDrops marks as refused every statement that drops
 // one of the named foreign keys: a live key the plan drops before the
 // foreign key that replaces it is added, such as one the desired file
-// changes under the same name. Between the two statements writes are checked
+// changes under the same name on a partitioned table, which cannot take the
+// in-place replacement. Between the two statements writes are checked
 // against no key, so rows the new key forbids could get in. Declaring the
 // changed key under a new name adds it before the old one is dropped.
 func RefuseChangedForeignKeyDrops(report *Report, changed map[string]bool) {

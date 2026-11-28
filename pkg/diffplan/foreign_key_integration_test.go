@@ -314,12 +314,12 @@ CREATE UNIQUE INDEX orders_code_idx ON orders (code);`)
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
 
-// A foreign key whose definition changes under the same name plans as the
-// drop of the live key and the online add of the new one, and the name is
-// taken until the drop, so the add cannot come first. Between the two, writes
-// would be checked against no key at all, so the drop is refused and the
-// live key stays.
-func TestPlanChangedForeignKeyDropIsRefused(t *testing.T) {
+// A foreign key whose definition changes under the same name is replaced by
+// one statement that drops the live key and adds the new one NOT VALID, then
+// validated on its own. Every write is checked by one key or the other at
+// every moment, so nothing is refused; the statement is destructive, naming
+// the key it drops, so the plan is reviewed as one that drops a key.
+func TestPlanChangedForeignKeyIsReplacedInOneStatement(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -335,14 +335,18 @@ CREATE TABLE orders (
 );`)
 
 	require.Len(t, report.Statements, 2)
-	drop := report.Statements[0]
-	assert.Equal(t, schemadiff.ChangeDropForeignKey, drop.Kind)
-	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), drop.SQL)
-	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
-	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
-	assert.Empty(t, drop.ExecSQL)
-	assert.Equal(t, schemadiff.ChangeAddForeignKey, report.Statements[1].Kind)
-	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	replace := report.Statements[0]
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, replace.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %[1]s.orders DROP CONSTRAINT orders_user_id_fkey, ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) ON DELETE CASCADE NOT VALID", schema), replace.SQL)
+	assert.Equal(t, router.DispositionExecute, replace.Disposition)
+	assert.True(t, replace.Destructive, "the statement drops the live key")
+	require.NotNil(t, replace.Drops)
+	assert.Equal(t, "orders_user_id_fkey", replace.Drops.Name)
+	validate := report.Statements[1]
+	assert.Equal(t, schemadiff.ChangeValidateForeignKey, validate.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_user_id_fkey", schema), validate.SQL)
+	assert.Equal(t, router.DispositionExecute, validate.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
 // A foreign key the file declares changed under a new name is added and

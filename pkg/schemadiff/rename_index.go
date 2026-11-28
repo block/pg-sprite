@@ -191,23 +191,27 @@ func installsForeignKey(desired Model, liveCons, desiredCons map[string]Constrai
 }
 
 // ForeignKeysDroppedBeforeTheirReplacement names the live foreign keys the
-// plan drops before a foreign key it adds or validates is in place, which leaves writes
-// between the two statements checked against no key at all. That is a key
-// the desired table declares under the same name with another definition,
-// since the name is taken until the drop, and every dropped key in a plan
-// that adds or validates a foreign key and also drops or retypes a column, since such a
-// plan keeps its drops first.
+// plan drops before a foreign key it adds or validates is in place, which
+// leaves writes between the two statements checked against no key at all.
+// That is every dropped key in a plan that adds or validates a foreign key
+// and also drops or retypes a column, since such a plan keeps its drops
+// first, and, on a partitioned parent, a key the desired table declares under
+// the same name with another definition: the server refuses a NOT VALID
+// foreign key there, so the key is dropped and added again in two statements.
+// Elsewhere a key changed under the same name is replaced by one statement
+// that drops it and adds the new key NOT VALID, which leaves no gap.
 func ForeignKeysDroppedBeforeTheirReplacement(live, desired Model) map[string]bool {
 	liveCons := constraintsByName(live.Constraints)
 	desiredCons := constraintsByName(desired.Constraints)
 	dropsFirst := dropsOrRetypesColumn(live, columnsByName(desired.Columns)) && installsForeignKey(desired, liveCons, desiredCons)
+	partitioned := live.PartitionKey != ""
 	keys := map[string]bool{}
 	for _, con := range live.Constraints {
 		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
 			continue
 		}
 		want, ok := desiredCons[con.Name]
-		if dropsFirst || (ok && want.ForeignKey) {
+		if dropsFirst || (partitioned && ok && want.ForeignKey) {
 			keys[con.Name] = true
 		}
 	}
