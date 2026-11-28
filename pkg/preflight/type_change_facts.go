@@ -19,6 +19,20 @@ func SessionTimeZone(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 	return zone, nil
 }
 
+// UTCTimeZone reports whether zone is one of the names PostgreSQL resolves
+// to UTC with no offset and no daylight saving time. The set is
+// deliberately narrow: a zone that is not on it is treated as one that
+// moves the stored values. The planner and the executor both decide with
+// it, so a change planned to relabel is never refused at execution for a
+// zone the planner accepted.
+func UTCTimeZone(zone string) bool {
+	switch zone {
+	case "UTC", "Etc/UTC":
+		return true
+	}
+	return false
+}
+
 // KeyedColumns names the columns of schema.table that an index or a
 // foreign key reads, on the table or on any of its partitions or
 // inheritance children, since a type change on the table changes the

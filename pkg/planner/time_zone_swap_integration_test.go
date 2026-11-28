@@ -2,6 +2,7 @@ package planner_test
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -52,11 +53,14 @@ func (z *zonePools) in(t *testing.T, zone string) *pgxpool.Pool {
 }
 
 // swapOutcome is the planner's verdict on a change and what the server
-// then did: whether it gave the table, and the named index, new storage.
+// then did: whether it gave the table, and the named index, new storage,
+// and whether it re-created any of the table's constraints, which is how
+// it checks a foreign key again.
 type swapOutcome struct {
-	decision     planner.Decision
-	rewrote      bool
-	rebuiltIndex bool
+	decision           planner.Decision
+	rewrote            bool
+	rebuiltIndex       bool
+	rebuiltConstraints bool
 }
 
 // classifyAndRun creates setup in a throwaway schema, which every
@@ -90,12 +94,21 @@ func classifyAndRun(t *testing.T, pool *pgxpool.Pool, setup, alter, table, index
 	}
 	const filenodes = "SELECT pg_relation_filenode($1::regclass)::int8, pg_relation_filenode($2::regclass)::int8"
 	var before, after, indexBefore, indexAfter int64
+	const constraints = "SELECT coalesce(array_agg(oid::int8 ORDER BY conname), '{}') FROM pg_constraint WHERE conrelid = $1::regclass"
+	var constraintsBefore, constraintsAfter []int64
 	require.NoError(t, pool.QueryRow(t.Context(), filenodes, tableName, indexName).Scan(&before, &indexBefore))
+	require.NoError(t, pool.QueryRow(t.Context(), constraints, tableName).Scan(&constraintsBefore))
 	_, err = pool.Exec(t.Context(), in(alter))
 	require.NoError(t, err)
 	require.NoError(t, pool.QueryRow(t.Context(), filenodes, tableName, indexName).Scan(&after, &indexAfter))
+	require.NoError(t, pool.QueryRow(t.Context(), constraints, tableName).Scan(&constraintsAfter))
 
-	out := swapOutcome{decision: plan.Decisions[0], rewrote: before != after, rebuiltIndex: index != "" && indexBefore != indexAfter}
+	out := swapOutcome{
+		decision:           plan.Decisions[0],
+		rewrote:            before != after,
+		rebuiltIndex:       index != "" && indexBefore != indexAfter,
+		rebuiltConstraints: !slices.Equal(constraintsBefore, constraintsAfter),
+	}
 	assert.False(t, out.decision.Unverified, "every fact was read")
 	return out
 }
@@ -290,6 +303,23 @@ func TestTimeZoneSwapOnAKeyedColumnTakesCopyAndSwapInUTC(t *testing.T) {
 			INSERT INTO $schema.days VALUES ('2026-11-28');
 			INSERT INTO $schema.events VALUES ('2026-11-28')`,
 			`ALTER TABLE $schema.events ALTER COLUMN seen_at TYPE timestamptz`, "events", "")
+		assertCopyAndSwap(t, out, "UTC")
+		assert.True(t, out.rebuiltConstraints, "the server re-creates the foreign key, which checks every row again")
+	})
+	// An INCLUDE column has no operator class, and PostgreSQL can keep the
+	// index when only such a column changes type. KeyedColumns reads every
+	// indkey column without telling INCLUDE columns from keys, so the planner
+	// routes the change to copy-and-swap anyway. That fails safe: the
+	// rewrite costs time, never stored values.
+	t.Run("INCLUDE column of an index", func(t *testing.T) {
+		out := classifyAndRun(t, pools.in(t, "UTC"), `
+			CREATE TABLE $schema.events (
+				id bigint,
+				seen_at timestamp
+			);
+			CREATE UNIQUE INDEX events_id_incl ON $schema.events (id) INCLUDE (seen_at);
+			INSERT INTO $schema.events VALUES (1, now())`,
+			`ALTER TABLE $schema.events ALTER COLUMN seen_at TYPE timestamptz`, "events", "events_id_incl")
 		assertCopyAndSwap(t, out, "UTC")
 	})
 }

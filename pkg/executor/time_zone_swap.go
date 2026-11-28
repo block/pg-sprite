@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -58,7 +59,14 @@ func refuseTimeZoneSwapOutsideUTC(ctx context.Context, tx pgx.Tx, st statement.S
 	if err := tx.QueryRow(ctx, "SELECT pg_catalog.current_setting('TimeZone')").Scan(&zone); err != nil {
 		return fmt.Errorf("read the session time zone for %q: %w", st.SQL(), err)
 	}
-	if zone == "UTC" || zone == "Etc/UTC" {
+	if preflight.UTCTimeZone(zone) {
+		// Pin the zone for the rest of the transaction. A configuration
+		// reload applies between client commands, even inside a
+		// transaction, so without the pin a reload landing before the
+		// ALTER would convert in the new zone after this check passed.
+		if _, err := tx.Exec(ctx, "SET LOCAL TimeZone = 'UTC'"); err != nil {
+			return fmt.Errorf("pin the session time zone to UTC for %q: %w", st.SQL(), err)
+		}
 		return nil
 	}
 	// INV: CO-9 — the table is resolved by its quoted, schema-qualified

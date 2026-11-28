@@ -31,6 +31,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -1321,7 +1322,7 @@ func classifyTimeZoneSwap(op statement.Op, next typeShape, facts Facts) (Route, 
 	if facts.SessionTimeZone == "" {
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if !utcTimeZone(facts.SessionTimeZone) {
+	if !preflight.UTCTimeZone(facts.SessionTimeZone) {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
 	if facts.KeyedColumns == nil {
@@ -1355,18 +1356,6 @@ func timeZoneSwap(old, next typeShape) bool {
 	}
 	return (old.name == "timestamp" && next.name == "timestamptz") ||
 		(old.name == "timestamptz" && next.name == "timestamp")
-}
-
-// utcTimeZone reports whether zone is one of the names PostgreSQL resolves
-// to UTC with no offset and no daylight saving time. The set is
-// deliberately narrow: a zone that is not on it is treated as one that
-// moves the stored values.
-func utcTimeZone(zone string) bool {
-	switch zone {
-	case "UTC", "Etc/UTC":
-		return true
-	}
-	return false
 }
 
 // typeShape is a normalized type family plus its modifiers and whether it
