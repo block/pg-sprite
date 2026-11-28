@@ -46,7 +46,7 @@ func TestDecideLeafForeignKey(t *testing.T) {
 	onDeleteCascade := requestedFK(41, "events_jan_cascade_fk", true)
 	onDeleteCascade.onDelete = "c"
 	withSetColumns := requestedFK(42, "events_jan_set_null_fk", true)
-	withSetColumns.onDelete, withSetColumns.deleteSetColumns = "n", true
+	withSetColumns.onDelete, withSetColumns.deleteSetColumns = "n", []int16{2}
 
 	tests := []struct {
 		name  string
@@ -139,7 +139,7 @@ func TestDecideLeafForeignKeyRefusals(t *testing.T) {
 	exact := requestedFK(40, derived, true)
 	exact.onDelete = "n"
 	listed := requestedFK(41, "a_jan_account_fk", true)
-	listed.onDelete, listed.deleteSetColumns = "n", true
+	listed.onDelete, listed.deleteSetColumns = "n", []int16{2}
 	for name, fks := range map[string][]catalogFK{
 		"alone":                    {listed},
 		"beside the requested one": {exact, listed},
@@ -165,7 +165,7 @@ func TestCatalogFKIsRequestedComparesEveryRule(t *testing.T) {
 		"MATCH FULL":                    func(k *catalogFK) { k.match = "f" },
 		"ON UPDATE CASCADE":             func(k *catalogFK) { k.onUpdate = "c" },
 		"ON DELETE RESTRICT":            func(k *catalogFK) { k.onDelete = "r" },
-		"an ON DELETE column list":      func(k *catalogFK) { k.deleteSetColumns = true },
+		"an ON DELETE column list":      func(k *catalogFK) { k.deleteSetColumns = []int16{2} },
 		"NOT ENFORCED":                  func(k *catalogFK) { k.notEnforced = true },
 		"DEFERRABLE":                    func(k *catalogFK) { k.deferrable = true },
 		"DEFERRABLE INITIALLY DEFERRED": func(k *catalogFK) { k.deferrable, k.initiallyDeferred = true, true },
@@ -199,6 +199,46 @@ func TestLeafFKStatements(t *testing.T) {
 	assert.Equal(t,
 		`ALTER TABLE "app"."events_2026_01" VALIDATE CONSTRAINT "events_account_fk_p700"`,
 		leafFKValidateSQL(node, "events_account_fk_p700"))
+
+	spec.onDelete, spec.deleteSetColumns = "d", []string{"Region"}
+	require.NoError(t, spec.validate())
+	assert.Equal(t,
+		`ALTER TABLE "app"."events_2026_01" ADD CONSTRAINT "events_account_fk_p700" `+
+			`FOREIGN KEY ("account_id", "Region") REFERENCES "app"."accounts" ("id", "Region") `+
+			`MATCH FULL ON UPDATE RESTRICT ON DELETE SET DEFAULT ("Region") DEFERRABLE INITIALLY DEFERRED NOT VALID`,
+		leafFKAddSQL(spec, node, derivedPartitionIndexName(spec.name, node.oid)))
+}
+
+// An ON DELETE column list is compared as the set of columns it names, by
+// each table's own attribute numbers: a partition may number its columns
+// differently from its parent, and the server keeps the list in the order
+// it was written.
+func TestCatalogFKIsRequestedComparesTheDeleteColumnList(t *testing.T) {
+	fk, _ := fkDecisionInput()
+	fk.spec.columns, fk.spec.refColumns = []string{"account_id", "region"}, []string{"id", "region"}
+	fk.spec.onDelete, fk.spec.deleteSetColumns = "n", []string{"region", "account_id"}
+	fk.ref.attnums = []int16{1, 2}
+	// On this leaf account_id is attribute 5 and region attribute 3.
+	leafAttnums := []int16{5, 3}
+	k := requestedFK(40, "fk", true)
+	k.key, k.refKey, k.onDelete = []int16{5, 3}, []int16{1, 2}, "n"
+
+	for name, tt := range map[string]struct {
+		list []int16
+		want bool
+	}{
+		"the same columns in the written order": {list: []int16{3, 5}, want: true},
+		"the same columns in another order":     {list: []int16{5, 3}, want: true},
+		"no list":                               {list: nil, want: false},
+		"one of the two columns":                {list: []int16{3}, want: false},
+		"other columns":                         {list: []int16{2, 1}, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			k.deleteSetColumns = tt.list
+			assert.Equal(t, tt.want, k.isRequested(fk.spec, leafAttnums, fk.ref))
+			assert.True(t, k.isAdoptable(fk.spec, leafAttnums, fk.ref), "the server adopts it whatever its list")
+		})
+	}
 }
 
 // A spec the step could not render faithfully is refused before anything
@@ -213,6 +253,15 @@ func TestPartitionedFKSpecValidate(t *testing.T) {
 		"INITIALLY DEFERRED not DEFERRABLE": func(s *partitionedFKSpec) { s.initiallyDeferred = true },
 		"a repeated column": func(s *partitionedFKSpec) {
 			s.columns, s.refColumns = []string{"a", "a"}, []string{"x", "y"}
+		},
+		"an ON DELETE column list on NO ACTION": func(s *partitionedFKSpec) {
+			s.deleteSetColumns = []string{"account_id"}
+		},
+		"an ON DELETE column outside the foreign key": func(s *partitionedFKSpec) {
+			s.onDelete, s.deleteSetColumns = "n", []string{"note"}
+		},
+		"an ON DELETE column named twice": func(s *partitionedFKSpec) {
+			s.onDelete, s.deleteSetColumns = "n", []string{"account_id", "account_id"}
 		},
 	}
 	for name, change := range tests {

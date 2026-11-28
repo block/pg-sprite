@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,16 +33,38 @@ import (
 // one-letter codes pg_constraint records (confmatchtype, confupdtype,
 // confdeltype).
 type partitionedFKSpec struct {
-	name              string
-	columns           []string
-	refSchema         string
-	refTable          string
-	refColumns        []string
-	match             string
-	onUpdate          string
-	onDelete          string
+	name       string
+	columns    []string
+	refSchema  string
+	refTable   string
+	refColumns []string
+	match      string
+	onUpdate   string
+	onDelete   string
+	// deleteSetColumns is the column list of an ON DELETE SET NULL or SET
+	// DEFAULT, a subset of columns; empty when there is none.
+	deleteSetColumns  []string
 	deferrable        bool
 	initiallyDeferred bool
+}
+
+// deleteSetColumnsMajor is the first PostgreSQL major that takes an ON
+// DELETE SET NULL or SET DEFAULT column list.
+const deleteSetColumnsMajor = 15
+
+// deleteSetAttnums maps the ON DELETE column list onto a table whose
+// foreign key columns are attnums, in spec.columns order: the
+// confdelsetcols that table's foreign key records. It is nil when there is
+// no list, and called only on a spec that validate accepted.
+func (s partitionedFKSpec) deleteSetAttnums(attnums []int16) []int16 {
+	if len(s.deleteSetColumns) == 0 {
+		return nil
+	}
+	out := make([]int16, 0, len(s.deleteSetColumns))
+	for _, c := range s.deleteSetColumns {
+		out = append(out, attnums[slices.Index(s.columns, c)])
+	}
+	return out
 }
 
 // fkMatchClause is the MATCH form of a confmatchtype code, and false for a
@@ -102,6 +125,30 @@ func (s partitionedFKSpec) validate() error {
 		}
 		seen[c] = struct{}{}
 	}
+	return s.validateDeleteSetColumns()
+}
+
+// validateDeleteSetColumns refuses an ON DELETE column list the server
+// refuses too: one on an action other than SET NULL or SET DEFAULT, one
+// that names a column outside the foreign key, or one that names a column
+// twice.
+func (s partitionedFKSpec) validateDeleteSetColumns() error {
+	if len(s.deleteSetColumns) == 0 {
+		return nil
+	}
+	if s.onDelete != "n" && s.onDelete != "d" {
+		return fmt.Errorf("%w: foreign key %s has an ON DELETE column list on action %q", ErrInvariantViolation, s.name, s.onDelete)
+	}
+	seen := make(map[string]struct{}, len(s.deleteSetColumns))
+	for _, c := range s.deleteSetColumns {
+		if !slices.Contains(s.columns, c) {
+			return fmt.Errorf("%w: foreign key %s sets column %q on delete, which is not one of its columns", ErrInvariantViolation, s.name, c)
+		}
+		if _, dup := seen[c]; dup {
+			return fmt.Errorf("%w: foreign key %s sets column %q on delete twice", ErrInvariantViolation, s.name, c)
+		}
+		seen[c] = struct{}{}
+	}
 	return nil
 }
 
@@ -126,6 +173,9 @@ func (s partitionedFKSpec) clause() string {
 	match, _ := fkMatchClause(s.match)
 	onUpdate, _ := fkActionClause(s.onUpdate)
 	onDelete, _ := fkActionClause(s.onDelete)
+	if len(s.deleteSetColumns) > 0 {
+		onDelete += " (" + quotedColumns(s.deleteSetColumns) + ")"
+	}
 	deferrable := "NOT DEFERRABLE"
 	if s.deferrable {
 		deferrable = "DEFERRABLE"

@@ -38,11 +38,13 @@ var (
 	// ErrPartitionedForeignKeyUnsupportedShape is returned when the ADD
 	// FOREIGN KEY names no constraint or carries a clause the build cannot
 	// carry to every partition: an unqualified referenced table, no
-	// referenced column list or one of another length, an ON DELETE column
-	// list, NOT VALID, ONLY, or a repeated column. Each partition's foreign key takes
-	// a name derived from the constraint's, and a rerun finds it by that
-	// name, so an unnamed constraint could not be resumed.
-	ErrPartitionedForeignKeyUnsupportedShape = errors.New("the partitioned foreign key build takes a named FOREIGN KEY over distinct columns, referencing a schema-qualified table's listed columns, with no ON DELETE column list, NOT VALID, or ONLY")
+	// referenced column list or one of another length, NOT VALID, ONLY, a
+	// repeated column, an ON DELETE column list that names a column outside
+	// the foreign key or one twice, or, on PostgreSQL 14, any ON DELETE
+	// column list. Each partition's foreign key takes a name derived from the
+	// constraint's, and a rerun finds it by that name, so an unnamed
+	// constraint could not be resumed.
+	ErrPartitionedForeignKeyUnsupportedShape = errors.New("the partitioned foreign key build takes a named FOREIGN KEY over distinct columns, referencing a schema-qualified table's listed columns, with no NOT VALID or ONLY")
 	// ErrPartitionedForeignKeyParentConflict is returned when the
 	// partitioned table already has a constraint under the requested name
 	// that is not the requested validated foreign key, or already has the
@@ -257,8 +259,8 @@ func admitPartitionedFK(sql string, pt preflight.PreflightedTable) (partitionedF
 // AdmitPartitionedForeignKeyShape is the statement-shape half of the
 // partitioned foreign key build's admission: exactly one schema-qualified
 // ALTER TABLE with one named ADD CONSTRAINT ... FOREIGN KEY over distinct
-// columns, referencing a schema-qualified table's listed columns, with no ON
-// DELETE column list, NOT VALID, or ONLY. It needs no
+// columns, referencing a schema-qualified table's listed columns, with no NOT
+// VALID or ONLY. It needs no
 // connection, so a dry run learns the shape refusals the build would return
 // before it runs anything: ErrNotAddForeignKey and
 // ErrPartitionedForeignKeyUnsupportedShape, typed. A statement the parser
@@ -307,7 +309,7 @@ func admitPartitionedFKShape(sql string) (statement.Statement, partitionedFKSpec
 	spec := partitionedFKSpec{
 		name: op.Name, columns: fk.Columns,
 		refSchema: fk.RefSchema, refTable: fk.RefTable, refColumns: fk.RefColumns,
-		match: fk.Match, onUpdate: fk.OnUpdate, onDelete: fk.OnDelete,
+		match: fk.Match, onUpdate: fk.OnUpdate, onDelete: fk.OnDelete, deleteSetColumns: fk.DeleteSetColumns,
 		deferrable: fk.Deferrable, initiallyDeferred: fk.InitiallyDeferred,
 	}
 	if err := spec.validate(); err != nil {
@@ -336,15 +338,22 @@ func unsupportedFKClauses(op statement.Op) []string {
 	if len(fk.RefColumns) > 0 && len(fk.RefColumns) != len(fk.Columns) {
 		clauses = append(clauses, fmt.Sprintf("%d columns referencing %d", len(fk.Columns), len(fk.RefColumns)))
 	}
-	if len(fk.DeleteSetColumns) > 0 {
-		clauses = append(clauses, "an ON DELETE column list")
-	}
 	seen := make(map[string]struct{}, len(fk.Columns))
 	for _, c := range fk.Columns {
 		if _, dup := seen[c]; dup {
 			clauses = append(clauses, fmt.Sprintf("column %q named twice", c))
 		}
 		seen[c] = struct{}{}
+	}
+	setSeen := make(map[string]struct{}, len(fk.DeleteSetColumns))
+	for _, c := range fk.DeleteSetColumns {
+		if _, ok := seen[c]; !ok {
+			clauses = append(clauses, fmt.Sprintf("ON DELETE column %q, which is not one of its columns", c))
+		}
+		if _, dup := setSeen[c]; dup {
+			clauses = append(clauses, fmt.Sprintf("ON DELETE column %q named twice", c))
+		}
+		setSeen[c] = struct{}{}
 	}
 	return clauses
 }

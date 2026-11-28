@@ -32,10 +32,16 @@ one is validated, and nothing is added twice.
 | No matching foreign key, derived name held by another constraint | refused, `partitioned-foreign-key-name-taken` |
 | Two or more matching foreign keys | refused, `partitioned-foreign-key-conflict` |
 | A matching foreign key already attached to a parent's | refused, `partitioned-foreign-key-conflict` |
+| A foreign key that would match but for its `ON DELETE` column list | refused, `partitioned-foreign-key-conflict` |
 
 "Matching" is the comparison the server makes before it adopts: the same referenced table, the
-same referencing and referenced columns in order, the same `MATCH`, `ON UPDATE`, `ON DELETE`, and
-deferrability, and no `ON DELETE` column list. Foreign keys of another definition are left alone.
+same referencing and referenced columns in order, the same `MATCH`, `ON UPDATE`, `ON DELETE`,
+enforcement, and deferrability, plus the same `ON DELETE SET NULL` or `SET DEFAULT` column list
+(PostgreSQL 15 and later), compared as the set of columns it names. The server does not compare
+that list, and among the foreign keys it would adopt it takes the first by name, so one that
+differs only in its list is refused rather than left for the server to pick over the step's.
+PostgreSQL 14 has no column list, and the build refuses one there under its table lock
+(`partitioned-foreign-key-unsupported-shape`). Foreign keys of another definition are left alone.
 
 ## Verified against PostgreSQL
 
@@ -85,8 +91,8 @@ the execution `partitioned-foreign-key-build`, the same one `migrate --alter` pl
 statement through `migrate.Run`'s routing below and ends in the same verdicts; its admission
 checks `migrate.Options.Connection` before any statement runs, as for a partitioned index build.
 A desired run has no admission between the plan and the run, so the plan routes only a foreign
-key the build's static admission takes; one it does not, such as an `ON DELETE` column list,
-keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, class
+key the build's static admission takes; one it does not, such as a foreign key that names a
+column twice, keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, class
 `environmental`, before anything runs. On 18 nothing is routed.
 
 The plan's routing reads the statement, not the catalog, so the refusals the build makes from the

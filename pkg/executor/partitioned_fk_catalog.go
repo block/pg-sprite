@@ -95,9 +95,10 @@ type catalogFK struct {
 	match    string
 	onUpdate string
 	onDelete string
-	// deleteSetColumns is whether the foreign key's ON DELETE names a
-	// column list (pg_constraint.confdelsetcols, from version 15).
-	deleteSetColumns bool
+	// deleteSetColumns is the attribute numbers of the foreign key's ON
+	// DELETE column list (pg_constraint.confdelsetcols, from version 15),
+	// empty when there is none.
+	deleteSetColumns []int16
 	// notEnforced is whether the foreign key is NOT ENFORCED
 	// (pg_constraint.conenforced false, from version 18).
 	notEnforced       bool
@@ -119,13 +120,13 @@ const foreignKeysSQLFormat = `SELECT k.oid, k.conname, k.confrelid, k.conkey, k.
 		  ORDER BY k.oid`
 
 // foreignKeysSQL lists a table's foreign keys. Version 14 has no
-// confdelsetcols, and no ON DELETE column lists, and versions before 18
-// have no conenforced, and no NOT ENFORCED foreign keys, so their queries
-// read false in those columns' places.
+// confdelsetcols, and no ON DELETE column lists, so its query reads an
+// empty list there; versions before 18 have no conenforced, and no NOT
+// ENFORCED foreign keys, so their queries read false there.
 func foreignKeysSQL(serverMajor int) string {
-	deleteSetColumns := `k.confdelsetcols IS NOT NULL`
-	if serverMajor < 15 {
-		deleteSetColumns = `false`
+	deleteSetColumns := `COALESCE(k.confdelsetcols, '{}'::pg_catalog.int2[])`
+	if serverMajor < deleteSetColumnsMajor {
+		deleteSetColumns = `'{}'::pg_catalog.int2[]`
 	}
 	notEnforced := `NOT k.conenforced`
 	if serverMajor < 18 {
@@ -159,10 +160,20 @@ func readForeignKeys(ctx context.Context, q querier, relOID uint32, relName stri
 
 // isRequested reports whether the foreign key has the requested
 // definition on a table whose foreign key columns are attnums: one the
-// parent's statement would adopt (isAdoptable), with no ON DELETE column
-// list. Whether it is validated or adopted is judged apart.
+// parent's statement would adopt (isAdoptable), with the requested ON
+// DELETE column list, compared as a set. Whether it is validated or adopted
+// is judged apart.
 func (k catalogFK) isRequested(spec partitionedFKSpec, attnums []int16, ref fkReference) bool {
-	return k.isAdoptable(spec, attnums, ref) && !k.deleteSetColumns
+	return k.isAdoptable(spec, attnums, ref) && sameColumnSet(k.deleteSetColumns, spec.deleteSetAttnums(attnums))
+}
+
+// sameColumnSet reports whether two attribute number lists hold the same
+// columns, in any order.
+func sameColumnSet(a, b []int16) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(a, b)
 }
 
 // isAdoptable reports whether the parent's statement would adopt the

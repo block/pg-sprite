@@ -20,7 +20,7 @@ import (
 // NOT VALID on a partitioned table, so the plan must route the statement to
 // the partitioned foreign key build before the partitioned-parent refusal
 // sees it; in the other order the whole plan is refused. A shape the build
-// does not carry, here an ON DELETE column list, keeps the NOT VALID steps
+// does not carry, here an unnamed foreign key, keeps the NOT VALID steps
 // and is refused as unsupported-partitioned-parent before anything runs.
 func TestRoutePartitionedTargetRoutesAForeignKeyBeforeTheParentRefusal(t *testing.T) {
 	addForeignKey := func(sql string) plan.Report {
@@ -49,7 +49,7 @@ func TestRoutePartitionedTargetRoutesAForeignKeyBeforeTheParentRefusal(t *testin
 	})
 
 	t.Run("a foreign key the build does not carry is refused before 18", func(t *testing.T) {
-		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts(id, region) ON DELETE SET NULL (account_id)`
+		const sql = `ALTER TABLE app.events ADD FOREIGN KEY (account_id) REFERENCES app.accounts(id)`
 		r := addForeignKey(sql)
 		require.NoError(t, routePartitionedTarget(&r, 16))
 		assert.Equal(t, router.DispositionRefuse, r.Disposition)
