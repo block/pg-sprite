@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -273,7 +274,10 @@ func TestRunDesiredRefusesACopyOnAServerWithoutLogicalDecoding(t *testing.T) {
 // A pulled column with an explicit collation, widened in the file with its
 // COLLATE clause kept, keeps that collation once the retype runs: the plan's
 // ALTER COLUMN ... TYPE carries the clause, where PostgreSQL would otherwise
-// give the column the new type's default. A second run plans nothing.
+// give the column the new type's default. The collation does not change, so
+// the widen runs natively, as it would on a column with the default
+// collation: the server rewrites neither the table nor the column's index.
+// A second run plans nothing.
 func TestRunDesiredRetypeKeepsAPulledCollation(t *testing.T) {
 	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", "wal_sender_timeout=2s")
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
@@ -294,9 +298,24 @@ func TestRunDesiredRetypeKeepsAPulledCollation(t *testing.T) {
 	widened := strings.Replace(pulled, "character varying(20) COLLATE", "character varying(40) COLLATE", 1)
 	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, widened)}
 
+	storage := func() (table, index uint32) {
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT pg_catalog.pg_relation_filenode($1::regclass), pg_catalog.pg_relation_filenode($2::regclass)`,
+			schema+".words", schema+".words_tag_idx").Scan(&table, &index))
+		return table, index
+	}
+	tableBefore, indexBefore := storage()
+
 	res, err := migrate.RunDesired(t.Context(), pool, req, desiredCopySwapOptions(serverURL))
 	require.NoError(t, err)
 	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	require.Len(t, res.Plan.Statements, 1)
+	require.Len(t, res.Plan.Statements[0].Decisions, 1)
+	assert.Equal(t, planner.RouteNative, res.Plan.Statements[0].Decisions[0].Route)
+	assert.Equal(t, planner.ReasonBinaryCoercible, res.Plan.Statements[0].Decisions[0].Reason)
+	tableAfter, indexAfter := storage()
+	assert.Equal(t, tableBefore, tableAfter, "the server did not rewrite the table")
+	assert.Equal(t, indexBefore, indexAfter, "the server kept the column's index")
 
 	var typ, collation string
 	require.NoError(t, pool.QueryRow(t.Context(), `
