@@ -1139,8 +1139,8 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
 - **A statement that names only an index or a constraint needs the entry point that re-checks
   it.** An adapter that runs planned statements through the executor directly, rather than
   through `migrate.RunDesired`, picks the entry point the way `migrate` does: a plan statement
-  (`plan.Statement`, carried over from `schemadiff.Change`) with `Adopts` set runs through
-  `executor.ExecuteNativeAdoptingWithProgress` with that `IndexAdoption`, one with `Validates`
+  (`plan.Statement`, carried over from `schemadiff.Change`) of a single step with `Adopts` set
+  runs through `executor.ExecuteNativeAdoptingWithProgress` with that `IndexAdoption`, one with `Validates`
   set through `executor.ExecuteNativeValidatingWithProgress` with that `ConstraintValidation`,
   a statement whose `statement.Kind` is `KindRenameIndex` through
   `executor.ExecuteIndexRenameWithProgress`, preflighted against the table that owns the index,

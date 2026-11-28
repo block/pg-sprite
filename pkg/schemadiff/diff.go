@@ -152,9 +152,11 @@ type Change struct {
 	// for Validates, so a validation that runs apart from its add never
 	// validates a constraint someone put under the same name in between.
 	AddsNotValid *ConstraintValidation `json:"-"`
-	// AddsKey is set on an ADD CONSTRAINT of a primary key or unique
-	// constraint: the index the constraint owns, under the constraint's
-	// name, and the definition introspection reads for it. A plan that runs
+	// AddsKey is set on an ADD CONSTRAINT of a new primary key or unique
+	// constraint the diff adds with its own index: the index the constraint
+	// owns, under the constraint's name, and the definition introspection
+	// reads for it. A key that takes over a live index, or replaces one in
+	// place, carries Adopts instead. A plan that runs
 	// the add as a concurrent build and then ADD CONSTRAINT ... USING INDEX
 	// checks that definition before the attach, as it does for Adopts, so an
 	// attach that runs apart from its build never takes over an index
@@ -684,6 +686,16 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 				sql = qualified
 				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), References: con.References})
 				continue
+			}
+			if isKey(con) {
+				// The definition leaves out the storage parameters of the
+				// key's index, which the build must carry for the index to
+				// match the one the attach checks.
+				withOptions, err := statement.WithKeyIndexOptions(sql, con.IndexDef)
+				if err != nil {
+					return nil, fmt.Errorf("carry the index options of key %s: %w", con.Name, err)
+				}
+				sql = withOptions
 			}
 			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), AddsKey: addedKey(con)})
 		}
