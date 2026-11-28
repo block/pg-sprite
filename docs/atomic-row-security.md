@@ -32,6 +32,13 @@ if err != nil {
 // report.Statements contains the committed statements; an empty slice means no change.
 ```
 
+The executors read no copy-and-swap checkpoint row. A host whose tables a
+copy-and-swap run may also change calls `migrate.RunRowSecurity` instead
+(`migrate.RunReviewedRowSecurity` for a reviewed sequence), as `migrate --desired`
+does: it takes the table's lock that a copy-and-swap run holds, never waiting for
+it, refuses the change over a stopped run, and then runs the same executor
+([stopped runs](schemabot-integration.md#a-stopped-run-holds-its-table)).
+
 `StatementTimeout` also caps the entire attempt. There is no approval token or
 saved fingerprint. Orchestrators retain their own replan and consent rules.
 Changing an RLS definition can widen access even when no data is deleted.

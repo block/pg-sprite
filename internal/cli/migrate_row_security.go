@@ -12,7 +12,6 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
-	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, desired statement.DesiredWithRowSecurity) error {
@@ -71,19 +70,14 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 		return err
 	}
 	// The atomic change runs no statement a stopped copy-and-swap run
-	// records, so a run stopped on the table refuses it before it locks
-	// the table.
-	refusal, held, err := migrate.AdmitRowSecurityStoppedRun(ctx, pool, c.Schema, desired.Table())
-	if err != nil {
-		return err
+	// records, so RunRowSecurity refuses it over a stopped run, read under
+	// the table's lock, before it locks the table.
+	v, runErr := migrate.RunRowSecurity(ctx, pool, migrate.RowSecurityRequest{Schema: c.Schema, Desired: desired}, c.desiredOptions(c.diag()))
+	if v.Outcome == "" {
+		// The run stopped before it reached the table, with no verdict.
+		return runErr
 	}
-	if held {
-		return c.emit(out, refusal)
-	}
-	runReport, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, b)
-	v := rowSecurityVerdict(c.Schema+"."+desired.Table(), runReport, runErr)
-	emitErr := c.emit(out, v)
-	return errors.Join(emitErr, runErr)
+	return errors.Join(c.emit(out, v), runErr)
 }
 
 // rejectPinOnAtomicRowSecurity refuses a pin or a destructive
@@ -126,30 +120,4 @@ func changesOnlyTheTable(report plan.Report, planErr error) bool {
 // terms a file without row security gets.
 func runsTheTablePlan(report plan.Report, planErr error) bool {
 	return changesOnlyTheTable(report, planErr) || errors.Is(planErr, schemadiff.ErrOnlyTableDiffers)
-}
-
-// A failed commit is not evidence of rollback. Preserve its distinct code and
-// explanation; never disclose uncommitted statements as executed SQL.
-func rowSecurityVerdict(table string, report executor.RowSecurityReport, err error) verdict.Verdict {
-	v := verdict.Verdict{Table: table, Outcome: verdict.OutcomeExecuted, ExecutedSQL: report.Statements,
-		Detail: "row security converged: all changes committed in one transaction"}
-	if err == nil {
-		if report.TableCreated {
-			v.TableCreated = true
-			v.ExtensionSchemas = report.ExtensionSchemas
-			v.Detail = "table created with its row security: all changes committed in one transaction"
-		}
-		if len(report.Statements) == 0 {
-			v.Detail = "already converged: row security matches; nothing to run"
-		}
-		return v
-	}
-	v.Outcome = verdict.OutcomeFailed
-	v.ExecutedSQL = nil
-	v.Detail = err.Error()
-	if refusal, ok := migrate.RowSecurityRefusal(err); ok {
-		return v.WithRefusal(refusal)
-	}
-	v.Code = string(executor.OutcomeCode(err))
-	return migrate.WithServerError(v, err)
 }

@@ -66,8 +66,9 @@ func PreviewCreateWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, at pr
 // ExecuteRowSecurity converges it. An absent table is created as
 // ExecuteCreateWithRowSecurity creates it, owned by createOwner when that is
 // non-empty. A standalone type at the table's name is a create collision.
-// It reads no copy-and-swap checkpoint row: a caller first refuses a run
-// stopped on an existing table with migrate.AdmitRowSecurityStoppedRun.
+// It reads no copy-and-swap checkpoint row: a host goes through
+// migrate.RunRowSecurity, which checks for a stopped copy-and-swap run under
+// the table's lock.
 func ExecuteDesiredRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema, createOwner string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
 	if err := b.validate(); err != nil {
 		return RowSecurityReport{}, err

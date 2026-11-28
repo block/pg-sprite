@@ -33,7 +33,7 @@ ALTER TABLE t ENABLE ROW LEVEL SECURITY;`)
 	assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
 	assert.Equal(t, verdict.ClassEnvironmental, res.Class)
-	assert.Equal(t, schema+".t was dropped after its row security was compared; create it with its row security through executor.ExecuteDesiredRowSecurity; nothing was executed", res.Detail)
+	assert.Equal(t, schema+".t was dropped after its row security was compared; create it with its row security through migrate.RunRowSecurity; nothing was executed", res.Detail)
 	assert.Empty(t, res.Verdicts)
 
 	var exists bool

@@ -45,10 +45,10 @@ type RowSecurityRequest struct {
 // The row security is checked before and after. Before: the plan is derived
 // with diffplan.PlanWithRowSecurity, and a file whose row security differs
 // from the live table is refused before anything runs. A file that changes
-// only the row security is converged by executor.ExecuteDesiredRowSecurity
-// instead, which replaces it in one transaction; a file that changes both is
-// refused on either path. A table that does not exist is refused too: the
-// executor creates it with its row security in one transaction. After: the
+// only the row security is converged by [RunRowSecurity] instead, which
+// replaces it in one transaction; a file that changes both is refused on
+// either path. A table that does not exist is refused too: RunRowSecurity
+// creates it with its row security in one transaction. After: the
 // run is executed only when the same comparison, derived again after the
 // last commit, is empty. Another session can change the policies while the
 // table plan runs; the run then reports that the row security no longer
@@ -148,7 +148,7 @@ func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowS
 // with its row security in one transaction.
 func refuseDroppedTable(report plan.Report) DesiredResult {
 	return DesiredResult{}.refused(plan.RowSecurityMissingTableRefusal(),
-		fmt.Sprintf("%s.%s was dropped after its row security was compared; create it with its row security through executor.ExecuteDesiredRowSecurity; nothing was executed", report.Schema, report.Table))
+		fmt.Sprintf("%s.%s was dropped after its row security was compared; create it with its row security through migrate.RunRowSecurity; nothing was executed", report.Schema, report.Table))
 }
 
 // rowSecurityPlanRefusal classifies a planning error that refuses the run
@@ -162,10 +162,10 @@ func rowSecurityPlanRefusal(err error) (DesiredResult, bool) {
 		return DesiredResult{}, false
 	case errors.As(err, &review):
 		return DesiredResult{}.refused(plan.RowSecurityReviewRefusal(),
-			fmt.Sprintf("%v; the row security differs from the file, and this path changes only the table: converge the row security first with executor.ExecuteDesiredRowSecurity, once AdmitRowSecurityStoppedRun finds no copy-and-swap run stopped on the table; nothing was executed", err)), true
+			fmt.Sprintf("%v; the row security differs from the file, and this path changes only the table: converge the row security first with migrate.RunRowSecurity, which refuses it under the table's lock while a copy-and-swap run is stopped on the table; nothing was executed", err)), true
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		return DesiredResult{}.refused(plan.RowSecurityMissingTableRefusal(),
-			fmt.Sprintf("%v; create the table with its row security through executor.ExecuteDesiredRowSecurity; nothing was executed", err)), true
+			fmt.Sprintf("%v; create the table with its row security through migrate.RunRowSecurity; nothing was executed", err)), true
 	}
 	if ref, ok := desiredPlanRefusal(err); ok {
 		return DesiredResult{}.refused(ref, fmt.Sprintf("%v; nothing was planned or executed", err)), true

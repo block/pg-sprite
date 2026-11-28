@@ -38,8 +38,10 @@ type stoppedRun struct {
 }
 
 // findStoppedRun reads the checkpoint row of the resolved table
-// schema.table, without the table's lock: a forecast, which a Runner
-// judges again under the lock. No table (a statement that names none), no row, no
+// schema.table. It takes no lock itself: read by a front door that does not
+// hold the table's lock, it is a forecast, which a Runner judges again
+// under the lock; [RunRowSecurity] reads it while it holds the lock. No
+// table (a statement that names none), no row, no
 // checkpoint store, and a terminal row are no stopped run. A row the read
 // cannot judge — the store refuses this role (42501), the store was shaped
 // by an older engine, or the row is in another format or a phase this
@@ -236,11 +238,13 @@ func AdmitPlanStoppedRun(ctx context.Context, pool *pgxpool.Pool, report plan.Re
 		committedPrefixDetail(0, len(report.Statements), "was refused at execution time")), true, nil
 }
 
-// AdmitRowSecurityStoppedRun is the check for a desired file's row
-// security change, which executor.ExecuteDesiredRowSecurity runs on
-// schema.table in one transaction of its own: no statement of a stopped
-// copy-and-swap run is among its changes, so a run stopped on the table
-// refuses it, and nothing runs.
+// AdmitRowSecurityStoppedRun is the dry run's forecast of the check
+// [RunRowSecurity] and [RunReviewedRowSecurity] make for a desired file's
+// row security change on schema.table, which runs in one transaction of
+// its own: no statement of a stopped copy-and-swap run is among its
+// changes, so a run stopped on the table refuses it, and nothing runs. The
+// row is read without the table's lock; the run reads it again under the
+// lock.
 func AdmitRowSecurityStoppedRun(ctx context.Context, pool *pgxpool.Pool, schema, table string) (verdict.Verdict, bool, error) {
 	stopped, err := findStoppedRun(ctx, pool, schema, table)
 	if err != nil {
@@ -249,8 +253,14 @@ func AdmitRowSecurityStoppedRun(ctx context.Context, pool *pgxpool.Pool, schema,
 	if !stopped.standing() {
 		return verdict.Verdict{}, false, nil
 	}
+	return rowSecurityStoppedRunVerdict(schema, table, stopped), true, nil
+}
+
+// rowSecurityStoppedRunVerdict is the refusal of a row security change on
+// schema.table over the stopped run.
+func rowSecurityStoppedRunVerdict(schema, table string, stopped stoppedRun) verdict.Verdict {
 	detail := desiredRunStoppedDetail("the file's row security runs on the table in one transaction", schema, table, stopped)
-	return verdict.Verdict{Table: schema + "." + table, Detail: detail}.WithRefusal(copySwapRunStoppedRefusal()), true, nil
+	return verdict.Verdict{Table: schema + "." + table, Detail: detail}.WithRefusal(copySwapRunStoppedRefusal())
 }
 
 // refuseEmptyPlanOverStoppedRun refuses an empty desired plan for a table a

@@ -876,7 +876,7 @@ corrects, so fix the wiring rather than routing either as an outcome:
 
 | Error | How to recognize it | Cause and fix |
 | --- | --- | --- |
-| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset and the statement runs as one of the builds above. Set it to the config the pool was dialed with |
+| `migrate.ErrConnectionRequired` | `errors.Is(err, migrate.ErrConnectionRequired)` | `Options.Connection` is unset and the statement runs as one of the builds above, or a row security change goes through `migrate.RunRowSecurity` or `migrate.RunReviewedRowSecurity`, which take the table's lock the same way. Set it to the config the pool was dialed with |
 | `*migrate.PartitionedIndexConnectionMismatchError` | `errors.AsType[*migrate.PartitionedIndexConnectionMismatchError](err)` | `Options.Connection` reaches another database than the pool, whether another database of the cluster or one of the same name on another cluster. Point it at the pool's database |
 
 The mismatch error names `Options.Connection` and carries the database name and the cluster's
@@ -1325,12 +1325,23 @@ included, is refused with
 `copy-and-swap-refused`, class `environmental`, cause `copy-and-swap-run-stopped`, and
 nothing executes; the `detail` names the stopped statement and its phase. The desired-state
 changes that run outside `Run` are refused the same way before they touch the table: a
-reviewed plan's `DROP INDEX CONCURRENTLY`, and a row security file's change, which
-`executor.ExecuteDesiredRowSecurity` runs in one transaction (`migrate --desired` checks with
-`migrate.AdmitRowSecurityStoppedRun` before it calls the executor; a library caller that calls
-the executor directly makes the same check first, since the executor reads no checkpoint row). Either would change the source under the run: a
+reviewed plan's `DROP INDEX CONCURRENTLY`, and a row security file's change, which runs in one
+transaction through `migrate.RunRowSecurity` (`migrate.RunReviewedRowSecurity` for a reviewed
+sequence), as `migrate --desired` runs it. Either would change the source under the run: a
 dropped index or an added policy makes the source differ from the shape the run recorded, and
-the resume or the cutover gate then refuses it. A host finishes the
+the resume or the cutover gate then refuses it. A library caller sends a row security change
+through one of the two migrate doors rather than the executors (`executor.ExecuteRowSecurity`,
+`executor.ExecuteReviewedRowSecurity`, `executor.ExecuteDesiredRowSecurity`), which read no
+checkpoint row: the migrate door takes the table's lock first, the lock a copy-and-swap run
+holds for its whole life, and reads the row under it, so no run can start between the check and
+the change's commit. A held lock is never waited for: the door ends at once in a failed verdict
+(`execution-failed`) with an error matching `*dbconn.TableLockHeldError` naming the holder, as
+`migrate.Run` reports a copy-and-swap run that finds the lock held, and nothing executes. The
+lock is taken on a session opened from `Options.Connection`, wired as for a partitioned index
+build ([above](#wiring-the-build-through-migraterun-and-migraterundesired)); the session is
+outside the pool, so a pool of one connection is enough, and it reads its own start from
+`pg_stat_activity`, so a connection that sets a role other than its login role needs that role
+to hold `pg_read_all_stats`, as a copy-and-swap run does. A host finishes the
 stopped run by running its statement again, then runs the new one. Before the swap, a new
 statement that itself routes to copy-and-swap can start over instead under `--restart
 SCHEMA.TABLE`, which discards the stopped run; a statement that routes anywhere else cannot
