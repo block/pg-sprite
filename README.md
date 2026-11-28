@@ -113,12 +113,13 @@ Connect directly to the primary, not through a pooler
 | [`pull`](docs/pull.md) | required | Write one desired file per supported table in a schema |
 | `status` | required | Show live pg-sprite sessions |
 | `reap` | required | Drop orphan replication slots that stopped copy-and-swap runs left behind |
+| `discard` | required | Abandon a stopped copy-and-swap run on one table without running its change ([cli.md](docs/cli.md#abandon-a-stopped-copy-and-swap-run)) |
 | `capabilities` | none | Print the support matrix (`--json` for automation) |
 | `fmt` | none | Canonicalize a schema file |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate |
 | `suggest` | none | Show the safer form the engine would run for risky DDL |
 
-Only `migrate` and `reap` ever write. If a multi-step change fails partway,
+Only `migrate`, `reap`, and `discard` ever write. If a multi-step change fails partway,
 [execution-model.md](docs/execution-model.md) says what state the table is in.
 
 ## What pg-sprite does not do yet
