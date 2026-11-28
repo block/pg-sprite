@@ -508,7 +508,7 @@ type Facts struct {
 	// absent from the map has the default collation. Retyping a column
 	// without a COLLATE clause resets it to the new type's default, so a
 	// column present here loses its collation and every index on it is
-	// rebuilt: never a relabel.
+	// rebuilt: never a relabel, unless the clause names this collation.
 	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// the tables below it key on; the zero value when none has one to
@@ -1246,11 +1246,17 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
-	if _, collated := facts.ColumnCollations[op.Column]; collated {
-		// The live column has a collation of its own, which the new type
-		// either resets to its default or (with a COLLATE clause) replaces;
-		// either way every index on the column is rebuilt.
-		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	collationKept := false
+	if live, collated := facts.ColumnCollations[op.Column]; collated {
+		// The live column has a collation of its own. A type change with
+		// no COLLATE clause resets it to the new type's default, and one
+		// naming another collation replaces it; either way every index on
+		// the column is rebuilt. A clause naming the live collation keeps
+		// it, and the type rules decide.
+		if !keepsCollation(live, op.NewTypeCollationName) {
+			return RouteCopyAndSwap, ReasonTypeRewrite, false
+		}
+		collationKept = true
 	}
 	oldType, ok := facts.ColumnTypes[op.Column]
 	if !ok {
@@ -1259,7 +1265,7 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op)) {
+	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op, collationKept)) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
@@ -1274,17 +1280,39 @@ type typeShape struct {
 	array bool
 }
 
+// keepsCollation reports whether a type change's COLLATE clause names the
+// live column's collation, rendered schema-qualified as schemadiff reads
+// it. An unqualified name keeps a pg_catalog collation of that name, since
+// the engine's sessions search pg_catalog first; a collation in any other
+// schema is kept only by a clause qualified with that schema, since an
+// unqualified name resolves through the search path. No clause, or a live
+// collation that does not parse, keeps nothing.
+func keepsCollation(live string, stated statement.QualifiedName) bool {
+	if stated.Name == "" {
+		return false
+	}
+	liveName, err := statement.ParseCollationName(live)
+	if err != nil {
+		return false
+	}
+	if stated.Schema == "" {
+		return liveName.Schema == "pg_catalog" && liveName.Name == stated.Name
+	}
+	return liveName == stated
+}
+
 // targetTypeShape reads the statement's target type into the shape
 // parseTypeText gives the live one. A type qualified with a schema other
 // than pg_catalog is a user type that only shares a built-in's name, and a
-// COLLATE clause changes the collation every index on the column is built
-// with, so neither gets a shape and neither matches a rule. The name is
+// COLLATE clause that changes the collation changes the one every index on
+// the column is built with, so neither gets a shape and neither matches a
+// rule. collationKept says the clause names the live collation. The name is
 // taken as the parser left it: the grammar already spells every built-in
 // the rules know by its catalog name (varchar, numeric, timestamptz), so a
 // target named "decimal" or "character varying" was quoted and names a
 // user type.
-func targetTypeShape(op statement.Op) typeShape {
-	if op.NewTypeSchema != "" || op.NewTypeCollation != "" {
+func targetTypeShape(op statement.Op, collationKept bool) typeShape {
+	if op.NewTypeSchema != "" || (op.NewTypeCollation != "" && !collationKept) {
 		return typeShape{}
 	}
 	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}

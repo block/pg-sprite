@@ -190,10 +190,10 @@ Before you start:
 | Control | What it does | When to use it |
 | --- | --- | --- |
 | `--block-writes SCHEMA.TABLE` | Runs offline: no slot at all, writes to the table fail until the swap. | The table can go without writes for the run, or the server lacks logical decoding. |
-| `--slot-lag-ceiling SIZE` | Sets the stop threshold, the copy's pace, and the WAL the preflight reserves. Default `1GiB`. | Raise it for a busy cluster, with free space for about three times the value. |
+| `--slot-lag-ceiling SIZE` | Sets the stop threshold, the copy's pace, and the WAL the preflight reserves. Default `1GiB`. | Raise it for a busy cluster, or to resume after a `stream-behind` stop, with free space for about three times the value. |
 | `--free-disk SIZE` | The free space on the source volume; the preflight requires the shadow plus the ceiling. | Every copy-and-swap. Measure it; never pass a made-up value. |
 | Ctrl-C or `SIGTERM`, once | Stops the run cleanly: saves the copy's progress and exits. The slot stays. | Pausing a run. Resume soon. |
-| Run the same command again | Resumes from the saved progress and drains the slot. | After a stop whose detail says the same statement resumes. A divergence stop, or a data fault the run could not abandon, stops again on a rerun; its detail says to use `--restart`. |
+| Run the same command again | Resumes from the saved progress and drains the slot; a slot already holding more unconfirmed WAL than the ceiling is refused first (`resume-slot-backlog`). | After a stop whose detail says the same statement resumes. A divergence stop, or a data fault the run could not abandon, stops again on a rerun; its detail says to use `--restart`. After a `stream-behind` stop, raise `--slot-lag-ceiling` too. |
 | `--restart SCHEMA.TABLE` | Discards the shadow, the slot, and the saved progress, then runs from the beginning in the same command, with a new copy and a new slot. | Starting over. On a volume that is nearly full, drop the slot by hand instead: `--restart` starts filling it again at once. |
 | `pg-sprite reap` | Drops `pgsprite_` slots no in-flight run owns. Never touches a slot a run's row names. | Cleaning up after a run that ended before its row was written, or whose cleanup did not finish. |
 | `pg_drop_replication_slot('<name>')` | Drops a stopped run's slot by hand. The server frees the WAL at its next checkpoint; the shadow and saved progress stay. | Disk is running out and you cannot resume now. |
@@ -261,9 +261,18 @@ holding WAL while you decide.
    running-transactions record, about 15 seconds later, and the segments go at the next
    checkpoint, not at once.
 3. **Resume** by running the same command again:
-   - `stream-behind`: resume when the write rate drops. If the slot's unconfirmed WAL is already
-     close to the ceiling, the resume can stop again at once; resume with a higher ceiling, above
-     what the slot holds, if the volume has room.
+   - `stream-behind`: the slot keeps the unconfirmed WAL over the ceiling after the stop, so a
+     resume under the same ceiling is refused with `resume-slot-backlog` before it opens the
+     stream or restarts the copy: no shadow row is cleared or copied and the slot confirms
+     nothing. The check reads the slot as it stands at the resume, so a resume admitted just
+     under the ceiling can still stop `stream-behind` once the cluster's writes add to it.
+     Once the write rate drops, resume with a higher ceiling, with margin above the
+     slot's `unconfirmed` as [Check the slot](#check-the-slot) reads it at the resume, not the
+     figure in the detail: the stopped slot keeps adding the cluster's writes to it. Do this only
+     if the volume has room. Otherwise drop the slot by hand, which keeps the shadow and the saved
+     progress and gives the next run a fresh slot with nothing unconfirmed, or start over with
+     `--restart`, which drops the slot and the WAL it holds and is checked against `--free-disk`
+     as a fresh run (see [Free the WAL](#free-the-wal-resume-drop-the-slot-or-start-over)).
    - `wal-retained` or `wal-retained-hard-limit` with the transaction ended: resume as is.
    - Either one with no transaction to blame: the cluster writes more than the ceiling holds.
      Resume with a higher ceiling, above the retained WAL the detail reports:
@@ -403,5 +412,10 @@ decisions as this page, from typed errors rather than the CLI's prose:
   the next run reconciles.
 - A resume refused because the old stream still holds the slot carries the refusal cause
   `schemachange.CauseResumeSlotHeld` (`resume-slot-held`); retry after `wal_sender_timeout`.
+- A resume refused because the slot already holds more unconfirmed WAL than the run's
+  `SlotLagCeiling` carries `schemachange.CauseResumeSlotBacklog` (`resume-slot-backlog`) and
+  wraps a `*schemachange.SlotBacklogError` with the slot, its `Unconfirmed` WAL, and the
+  `Ceiling`, in bytes; retry with a ceiling above `Unconfirmed` and room on the volume for it,
+  or start over with `RunOptions.Restart`.
 - `decode.RetainedHardLimit(ceiling)` is the retained WAL a run stops at regardless of grace,
   the figure to size a volume and `max_slot_wal_keep_size` by.

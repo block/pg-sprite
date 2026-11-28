@@ -26,7 +26,9 @@ import (
 //
 // The caller has admitted the plan against the acknowledgement and the
 // pinned fingerprint, so this audits the acknowledgement and reports it on
-// the verdict, as [Run] does for an acknowledged ALTER TABLE drop. A replica
+// the verdict, as [Run] does for an acknowledged ALTER TABLE drop. A
+// copy-and-swap run stopped on the table refuses the drop before it is
+// audited, as Run refuses any statement but the stopped one. A replica
 // identity index ends in the refusal verdict a native drop gets at its
 // re-check; every other failure is a failed verdict and an error, and the
 // verdict says whether the index may still stand.
@@ -37,6 +39,13 @@ func dropPlannedIndex(ctx context.Context, pool *pgxpool.Pool, report plan.Repor
 		return verdict.Verdict{}, err
 	}
 	table := desiredTable(report)
+	heldVerdict, held, err := refuseOverStoppedRun(ctx, pool, st, report.Schema, report.Table)
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	if held {
+		return heldVerdict, nil
+	}
 	auditAllowDestructive(opts.audit(), st, table)
 
 	opts.startStep(step, ps.SQL)
@@ -114,21 +123,42 @@ func plannedIndexDrop(report plan.Report, ps plan.Statement, st statement.Statem
 // checkPlannedReplacement refuses a drop whose replacement is named without
 // being carried, or carried under another name. A drop that names its
 // replacement runs only through the check that the replacement is still in
-// place, so one that reaches this path without the replacement it names,
-// such as a plan rebuilt from its JSON report, which leaves the replacement
-// out, would otherwise drop the old index unchecked.
+// place, so one that reaches here without the replacement it names, such as
+// a plan rebuilt from its JSON report, which leaves the replacement out,
+// would otherwise drop the old index or constraint unchecked.
 func checkPlannedReplacement(ps plan.Statement) error {
 	switch {
 	case ps.ReplacedBy == "" && ps.Replacement == nil:
 		return nil
 	case ps.Replacement == nil:
-		return fmt.Errorf("%w: planned index drop %q is replaced by %s but carries no replacement to check before the drop",
+		return fmt.Errorf("%w: planned drop %q is replaced by %s but carries no replacement to check before the drop",
 			executor.ErrInvariantViolation, ps.SQL, ps.ReplacedBy)
 	case ps.Replacement.Index != ps.ReplacedBy:
-		return fmt.Errorf("%w: planned index drop %q is replaced by %q but carries the replacement %q",
+		return fmt.Errorf("%w: planned drop %q is replaced by %q but carries the replacement %q",
 			executor.ErrInvariantViolation, ps.SQL, ps.ReplacedBy, ps.Replacement.Index)
 	}
 	return nil
+}
+
+// droppedWithReplacement returns what a destructive statement other than an index
+// drop removes, with the replacement the plan carries for it attached: a
+// unique constraint the plan replaces with a standalone index is dropped
+// only while that index is still in place. A replacement on any other drop
+// breaches the planner's contract, and nothing runs.
+func droppedWithReplacement(ps plan.Statement) (*schemadiff.DroppedObject, error) {
+	if err := checkPlannedReplacement(ps); err != nil {
+		return nil, err
+	}
+	if ps.Replacement == nil {
+		return ps.Drops, nil
+	}
+	if ps.Kind != schemadiff.ChangeDropConstraint || ps.Drops == nil || ps.Drops.Kind != schemadiff.DroppedConstraint {
+		return nil, fmt.Errorf("%w: planned statement %q is replaced by %s but drops no unique constraint",
+			executor.ErrInvariantViolation, ps.SQL, ps.Replacement.Index)
+	}
+	dropped := *ps.Drops
+	dropped.Replacement = ps.Replacement
+	return &dropped, nil
 }
 
 // droppedIndexFailureDetail says what a failed concurrent index drop left

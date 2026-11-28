@@ -43,8 +43,10 @@ const (
 	// ChangeDropConstraint drops a table constraint other than a foreign
 	// key.
 	ChangeDropConstraint ChangeKind = "drop-constraint"
-	// ChangeDropForeignKey drops a foreign-key constraint. Desired-state
-	// execution refuses it: a foreign-key drop is planned, not run.
+	// ChangeDropForeignKey drops a foreign-key constraint. It is
+	// destructive: the constraint stops checking writes to both tables.
+	// Desired-state execution refuses the drop of a key into another
+	// schema, which a desired file cannot declare.
 	ChangeDropForeignKey ChangeKind = "drop-foreign-key"
 	// ChangeDropColumn drops a column.
 	ChangeDropColumn ChangeKind = "drop-column"
@@ -150,6 +152,16 @@ type Change struct {
 	// for Validates, so a validation that runs apart from its add never
 	// validates a constraint someone put under the same name in between.
 	AddsNotValid *ConstraintValidation `json:"-"`
+	// AddsKey is set on an ADD CONSTRAINT of a new primary key or unique
+	// constraint the diff adds with its own index: the index the constraint
+	// owns, under the constraint's name, and the definition introspection
+	// reads for it. A key that takes over a live index, or replaces one in
+	// place, carries Adopts instead. A plan that runs
+	// the add as a concurrent build and then ADD CONSTRAINT ... USING INDEX
+	// checks that definition before the attach, as it does for Adopts, so an
+	// attach that runs apart from its build never takes over an index
+	// someone put under the same name in between.
+	AddsKey *IndexAdoption `json:"-"`
 	// References is set on an ADD CONSTRAINT of a FOREIGN KEY: the table
 	// and columns the key references, on which the role that runs the plan
 	// needs REFERENCES.
@@ -160,9 +172,10 @@ type Change struct {
 	// and execution refuses when the name now stands for something else.
 	Drops *DroppedObject `json:"-"`
 	// ReplacedBy is set on the DROP INDEX of a changed index the plan
-	// replaces: the index an earlier statement built under the desired
-	// definition, which is valid before the drop runs and takes the dropped
-	// index's name in the rename after it. The table has an index with the
+	// replaces, and on the DROP CONSTRAINT of a unique constraint the plan
+	// replaces with a standalone index: the index an earlier statement built
+	// under the desired definition, which is valid before the drop runs and
+	// takes the dropped object's name after it. The table has an index with the
 	// desired definition before the old one goes; what the desired
 	// definition drops from the old one, the drop removes.
 	ReplacedBy string `json:"-"`
@@ -216,6 +229,10 @@ type DroppedObject struct {
 	// refuses a drop that would take along anything the plan did not list;
 	// an entry the table has lost since is no reason to refuse.
 	Dependents []string `json:"dependents,omitempty"`
+	// Replacement, for a constraint, is the index that replaces it, which
+	// the run attaches from the plan's [Change.Replacement]. The constraint
+	// is dropped only while that index is still in place.
+	Replacement *IndexReplacement `json:"-"`
 }
 
 // Dependent is an object that goes with a column when the column is dropped.
@@ -432,24 +449,34 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	resumedBuilds := make(map[string]struct{}, len(replacedIdx))
+	// claimed are the live indexes a replacement accounts for: an earlier
+	// run's build it picks up, or a standalone index a unique constraint
+	// replaces. None of them is dropped or renamed on its own.
+	claimed := make(map[string]struct{}, len(replacedIdx))
 	for _, r := range replacedIdx {
-		resumedBuilds[r.temp] = struct{}{}
+		claimed[r.temp] = struct{}{}
 	}
 	for name, r := range replaced {
 		if r.built {
-			resumedBuilds[replacementIndexName(name)] = struct{}{}
+			claimed[replacementIndexName(name)] = struct{}{}
+		}
+		if r.index.Name != "" {
+			claimed[r.index.Name] = struct{}{}
 		}
 	}
-	renamed, err := renamedIndexes(partitioned, live.Indexes, desired.Indexes, liveIdx, desiredIdx, adopted, resumedBuilds)
+	renamed, err := renamedIndexes(partitioned, live.Indexes, desired.Indexes, liveIdx, desiredIdx, adopted, claimed, replacedIdx)
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseConstraintOnRenamedIndexName(renamed, liveCons, desiredCons); err != nil {
 		return nil, err
 	}
 	renameTargets := renameIndexTargets(renamed)
 
 	// A unique index or unique constraint the plan drops is held back until
-	// the plan's new unique indexes and constraints are in place, and so is
-	// a constraint the desired table declares again under another name. A
+	// the plan's new unique indexes and constraints are in place, a foreign
+	// key until the plan's new foreign keys are, and so is a constraint the
+	// desired table declares again under another name. A
 	// uniqueness or rule that moves to another name or another kind of
 	// object keeps holding while its replacement builds, and a replacement
 	// that fails leaves the old one standing. A plan that drops or retypes a
@@ -460,9 +487,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
 		renamedRules: renamedConstraintDefs(desired, liveCons),
+		foreignKeys:  installsForeignKey(desired, liveCons, desiredCons),
 	}
-	// A held foreign key waits for the foreign keys the plan adds, which
-	// come last; every other held drop goes before them, so a foreign key
+	// A held foreign key waits for the foreign keys the plan adds or
+	// validates, which come last; every other held drop goes before them, so a foreign key
 	// the plan adds cannot bind to a key the plan is about to drop.
 	var heldChanges, heldForeignKeys []Change
 	waits := func(ch Change) bool { return !dropsOrRetypes && held.holds(ch) }
@@ -477,12 +505,35 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
+	// Foreign keys to drop go first. A key a self-referencing foreign key
+	// rests on, its primary key, unique constraint, or unique index, cannot
+	// be dropped while the foreign key still depends on it, and a foreign
+	// key depends on nothing the rest of the plan drops.
+	// A foreign key whose drop waits for the plan's adds is still in place
+	// when a key it references is dropped, so only one dropped here frees
+	// that key.
+	droppedForeignKeys := make(map[string]bool)
+	for _, con := range live.Constraints {
+		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
+			continue
+		}
+		if _, ok := replaced[con.Name]; ok {
+			continue
+		}
+		drop := dropConstraintChange(table, con)
+		if !waits(drop) {
+			droppedForeignKeys[con.Name] = true
+		}
+		appendDrop(drop)
+	}
+
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below). An index a new key constraint
 	// adopts stays: the constraint takes it over below. A replaced index is
 	// dropped in the create bucket, once its replacement is built, and an
 	// earlier run's build of a replacement stays to be renamed, or, for a
-	// key, to be swapped in.
+	// key, to be swapped in. A standalone index a unique constraint replaces
+	// is dropped once the constraint's index is built.
 	for _, ix := range live.Indexes {
 		if _, ok := adopted[ix.Name]; ok {
 			continue
@@ -490,7 +541,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if _, ok := replacedIdx[ix.Name]; ok {
 			continue
 		}
-		if _, ok := resumedBuilds[ix.Name]; ok {
+		if _, ok := claimed[ix.Name]; ok {
 			continue
 		}
 		if _, ok := renamed[ix.Name]; ok {
@@ -498,7 +549,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			_, changed := desiredIdx[ix.Name]
-			if err := refuseReferencedIndexDrop(ix, changed); err != nil {
+			if err := refuseReferencedIndexDrop(schema, live.Table, ix, changed, droppedForeignKeys); err != nil {
 				return nil, err
 			}
 			appendDrop(Change{
@@ -510,34 +561,25 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
-	// Constraints to drop: gone from desired, or changed (re-added below).
-	// One left NOT VALID with the desired definition is validated below
-	// instead, and one replaced in place is dropped by the statement that
-	// adds its replacement.
-	droppedForeignKeys := make(map[string]bool)
+	// Other constraints to drop: gone from desired, or changed (re-added
+	// below). One left NOT VALID with the desired definition is validated
+	// below instead, and one replaced in place is dropped by the statement
+	// that adds its replacement. A unique constraint the desired table
+	// declares as a standalone index is dropped once that index is built.
 	for _, con := range live.Constraints {
+		if con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
+			continue
+		}
 		if _, ok := replaced[con.Name]; ok {
 			continue
 		}
-		want, ok := desiredCons[con.Name]
-		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
-			if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
-				return nil, err
-			}
-			drop := Change{
-				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
-				Kind:        dropConstraintKind(con),
-				Destructive: true,
-				Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
-			}
-			// A foreign key whose drop waits for the plan's adds is still in
-			// place when a key it references is dropped, so only one dropped
-			// here frees that key.
-			if con.ForeignKey && !waits(drop) {
-				droppedForeignKeys[con.Name] = true
-			}
-			appendDrop(drop)
+		if r, ok := replacedIdx[con.Name]; ok && r.constraint.Name != "" {
+			continue
 		}
+		if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
+			return nil, err
+		}
+		appendDrop(dropConstraintChange(table, con))
 	}
 
 	// Columns to drop. A rename is indistinguishable from drop+add at the
@@ -633,7 +675,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if err != nil {
 				return nil, err
 			}
-			changes = append(changes, replacement...)
+			if con.ForeignKey {
+				foreignKeys = append(foreignKeys, replacement...)
+			} else {
+				changes = append(changes, replacement...)
+			}
 			continue
 		}
 		if ok && validatesInPlace(had, con) {
@@ -660,7 +706,17 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 				foreignKeys = append(foreignKeys, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), References: con.References})
 				continue
 			}
-			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con)})
+			if isKey(con) {
+				// The definition leaves out the storage parameters of the
+				// key's index, which the build must carry for the index to
+				// match the one the attach checks.
+				withOptions, err := statement.WithKeyIndexOptions(sql, con.IndexDef)
+				if err != nil {
+					return nil, fmt.Errorf("carry the index options of key %s: %w", con.Name, err)
+				}
+				sql = withOptions
+			}
+			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con), AddsNotValid: addedNotValid(con), AddsKey: addedKey(con)})
 		}
 	}
 
@@ -675,7 +731,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// is injected.
 	for _, ix := range desired.Indexes {
 		if r, ok := replacedIdx[ix.Name]; ok {
-			replacement, err := replaceIndexChanges(schema, r)
+			if r.constraint.Name != "" {
+				if err := refuseReferencedKeyDrop(schema, live.Table, r.constraint, droppedForeignKeys); err != nil {
+					return nil, err
+				}
+			}
+			replacement, err := replaceIndexChanges(schema, table, r)
 			if err != nil {
 				return nil, err
 			}
@@ -740,7 +801,8 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	// the engine does not derive it, so a delta fails closed instead of
 	// diffing to silence.
 	if live.Collation != desired.Collation {
-		return nil, unsupported(CauseCollationChange, "%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
+		return nil, unsupported(CauseCollationChange, "%w: column %q collation changes from %s to %s, which rewrites the column and rebuilds its indexes; keep %s in the file",
+			ErrUnsupportedChange, live.Name, describeCollation(live.Collation), describeCollation(desired.Collation), keepCollation(live.Collation))
 	}
 	if desired.IsGenerated() && live.Type != desired.Type {
 		return nil, unsupported(CauseGenerated, "%w: column %q generated column type change", ErrUnsupportedChange, live.Name)
@@ -755,7 +817,7 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	}
 	if live.Type != desired.Type {
 		changes = append(changes, Change{
-			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + desired.Type,
+			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + collatedType(desired),
 			Kind: ChangeAlterType,
 		})
 	}
@@ -814,6 +876,17 @@ func dropNotNullChanges(table string, live Model, desiredCols map[string]Column)
 // columnDef renders a canonical column definition for ADD COLUMN. All parts
 // are server-canonical: the type from format_type, expressions from
 // pg_get_expr.
+// collatedType is the column's type with its COLLATE clause, for an ALTER
+// COLUMN ... TYPE: without the clause, PostgreSQL gives the retyped column
+// the new type's default collation, which changes its sort order and the
+// indexes built on it.
+func collatedType(c Column) string {
+	if c.Collation == "" {
+		return c.Type
+	}
+	return c.Type + " COLLATE " + c.Collation
+}
+
 func columnDef(c Column) string {
 	def := pgx.Identifier{c.Name}.Sanitize() + " " + c.Type
 	switch {
@@ -994,8 +1067,27 @@ func addUsingIndexClause(con Constraint, index string) string {
 	return clause
 }
 
+// constraintNeedsDrop reports whether a live constraint is gone from the
+// desired model, or changed in a way validation in place cannot reach, so the
+// plan drops it (and re-adds a changed one).
+func constraintNeedsDrop(con Constraint, desiredCons map[string]Constraint) bool {
+	want, ok := desiredCons[con.Name]
+	return !ok || (want.Def != con.Def && !validatesInPlace(con, want))
+}
+
+// dropConstraintChange is the destructive drop of a live constraint, with the
+// record the checked drop compares against.
+func dropConstraintChange(table string, con Constraint) Change {
+	return Change{
+		SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
+		Kind:        dropConstraintKind(con),
+		Destructive: true,
+		Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
+	}
+}
+
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in
-// their own kind so desired-state execution can refuse them.
+// their own kind so a consumer can gate them apart from other constraints.
 func dropConstraintKind(con Constraint) ChangeKind {
 	if con.ForeignKey {
 		return ChangeDropForeignKey
@@ -1033,6 +1125,15 @@ func addedNotValid(con Constraint) *ConstraintValidation {
 		return nil
 	}
 	return &ConstraintValidation{Constraint: con.Name, Def: con.Def + notValidSuffix}
+}
+
+// addedKey is the index a new primary key or unique constraint owns, under
+// the constraint's name, and nil for any other constraint.
+func addedKey(con Constraint) *IndexAdoption {
+	if !isKey(con) {
+		return nil
+	}
+	return &IndexAdoption{Index: con.Name, Def: con.IndexDef}
 }
 
 // validatesInPlace reports whether live is the desired constraint left NOT
@@ -1107,4 +1208,23 @@ func isUnfinishedBuild(partitioned bool, ix Index) bool {
 		return false
 	}
 	return ix.Invalid
+}
+
+// describeCollation names a column's collation for a refusal: the
+// schema-qualified name when the column declares one, and the type's default
+// otherwise.
+func describeCollation(collation string) string {
+	if collation == "" {
+		return "the type's default"
+	}
+	return collation
+}
+
+// keepCollation names, for a refusal, the declaration that leaves a column's
+// live collation as it is.
+func keepCollation(collation string) string {
+	if collation == "" {
+		return "the column without a COLLATE clause"
+	}
+	return "COLLATE " + collation
 }

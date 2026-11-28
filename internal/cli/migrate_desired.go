@@ -83,12 +83,26 @@ func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report
 // in a partition or inheritance tree, and then the partitioned key build's
 // catalog refusals and the partitioned foreign key build's checks of the
 // referenced table and the partition tree, which the run reads at admission
-// before anything executes; the dry run prints such a refusal or stop as the
-// run's result. Every other plan is previewed by writeDesiredPreview, which
-// reports plan admission's refusals as the run would.
+// before anything executes, and then a copy-and-swap run stopped on the
+// table, which the plan's first statement meets; the dry run prints any such
+// refusal or stop as the run's result, and refuses an empty plan over a
+// stopped run as the run does. Every other plan is previewed by
+// writeDesiredPreview, which reports plan admission's refusals as the run
+// would.
 func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out io.Writer, report plan.Report) error {
 	if err := migrate.CheckDesiredAllowDestructiveTable(c.AllowDestructive, report); err != nil {
 		return err
+	}
+	if len(report.Statements) == 0 {
+		// The run refuses an empty plan for a table a copy-and-swap run is
+		// stopped on before it checks the pin, and so does the dry run.
+		refusal, refused, err := migrate.AdmitPlanStoppedRun(ctx, pool, report)
+		if err != nil {
+			return err
+		}
+		if refused {
+			return c.finishDesired(out, refusal, nil)
+		}
 	}
 	req := migrate.DesiredRequest{ExpectedFingerprint: c.ExpectFingerprint, AllowDestructive: c.AllowDestructive}
 	if _, admitted := migrate.AdmitPlan(req, report); admitted && len(report.Statements) > 0 {
@@ -107,6 +121,16 @@ func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out
 		refusal, admitted, err := migrate.AdmitPlanPartitionedForeignKeys(ctx, pool, report)
 		if !admitted {
 			return c.finishDesired(out, refusal, err)
+		}
+		// The admitted plan's first statement meets a copy-and-swap run
+		// stopped on the table, which refuses it unless it is the stopped
+		// statement.
+		refusal, refused, err := migrate.AdmitPlanStoppedRun(ctx, pool, report)
+		if err != nil {
+			return err
+		}
+		if refused {
+			return c.finishDesired(out, refusal, nil)
 		}
 	}
 	return c.writeDesiredPreview(out, report)

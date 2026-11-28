@@ -322,15 +322,15 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// matches only because a stopped copy-and-swap run swapped its shape in
 	// is not converged: the run's row and what it still holds stand with
 	// nothing planned to finish them. A non-empty plan meets a stopped run
-	// in Run, statement by statement.
+	// in Run, statement by statement, and in the index drop that runs
+	// outside it.
 	if len(report.Statements) == 0 {
-		stopped, err := findStoppedRun(ctx, pool, report.Schema, report.Table)
+		refused, held, err := refuseEmptyPlanOverStoppedRun(ctx, pool, report)
 		if err != nil {
 			return DesiredResult{}, err
 		}
-		if stopped.standing() {
-			return DesiredResult{Plan: report}.refused(copySwapRunStoppedRefusal(),
-				desiredRunStoppedDetail(report.Schema, report.Table, stopped)), nil
+		if held {
+			return refused, nil
 		}
 		return DesiredResult{
 			Plan:    report,
@@ -450,7 +450,13 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 		case ps.Destructive:
 			stmtOpts := opts
 			stmtOpts.AllowDestructive = allowDestructive
-			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
+			dropped, err := droppedWithReplacement(ps)
+			if err != nil {
+				result.Outcome = verdict.OutcomeFailed
+				result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+				return result, fmt.Errorf("planned statement %d: %w", i+1, err)
+			}
+			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, dropped, ps.Renames)
 		default:
 			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
 		}
@@ -913,8 +919,8 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		}
 		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
 		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
-			return r, detail("drops a foreign key, which desired-state execution does not run yet — " +
-				"to apply it, run the statement through the imperative front door (migrate --alter)")
+			return r, detail("drops a foreign key into another schema, which a desired file cannot declare — " +
+				"to remove it, run the statement through the imperative front door (migrate --alter)")
 		}
 		if err == nil {
 			return r, detail("has no safe path")

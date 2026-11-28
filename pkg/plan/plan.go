@@ -71,7 +71,15 @@ import (
 // its part in the fingerprint.
 // Version 29 added the rename-index kind and the replaced_by statement
 // field, which a changed index the diff replaces rather than drops carries.
-const FormatVersion = 29
+// Version 30 runs the drop-foreign-key kind instead of refusing it, and
+// narrows the declarative-foreign-key reason to the drop of a key a desired
+// file cannot declare, or changes under the same name where it cannot be
+// replaced in one statement.
+// Version 31 also carries replaced_by on the drop of the old object when a
+// unique constraint and a unique index of the same name swap kinds: a
+// drop-constraint whose replacement is a standalone index, and a drop-index
+// whose replacement a constraint takes over.
+const FormatVersion = 31
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -110,8 +118,12 @@ type Statement struct {
 	Kind schemadiff.ChangeKind `json:"kind,omitempty"`
 	// Adopts is the index a diff-derived ADD CONSTRAINT ... USING INDEX
 	// takes over and the definition it must still have when execution
-	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
-	// of the JSON: the SQL already identifies the change.
+	// attaches it (see schemadiff.Change.Adopts). A diff-derived ADD
+	// CONSTRAINT of a primary key or unique constraint that runs as a
+	// concurrent build and then ADD CONSTRAINT ... USING INDEX carries the
+	// index its build leaves (schemadiff.Change.AddsKey), which its attach
+	// step checks. Nil otherwise, and out of the JSON: the SQL already
+	// identifies the change.
 	Adopts *schemadiff.IndexAdoption `json:"-"`
 	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
 	// validates and the definition it must still have when execution
@@ -134,7 +146,11 @@ type Statement struct {
 	// plan replaces rather than drops: the index an earlier statement of the
 	// plan built under the desired definition, valid before the drop runs,
 	// which the rename after the drop gives the dropped index's name (see
-	// schemadiff.Change.ReplacedBy). The table has an index with the desired
+	// schemadiff.Change.ReplacedBy). A unique constraint and a unique index
+	// of the same name that swap kinds carry it too, on the drop of the old
+	// object: a DROP CONSTRAINT whose replacement the rename after it names,
+	// or a DROP INDEX whose replacement the ADD CONSTRAINT ... USING INDEX
+	// after it takes over. The table has an index with the desired
 	// definition before the old one goes, so the drop removes only what the
 	// desired definition no longer asks for. That can still be a guarantee,
 	// as when a unique index becomes non-unique or its predicate narrows, so

@@ -23,7 +23,8 @@ import (
 // exactly as it does on apply, so a gated kind dry-runs to the same refusal
 // verdict (and refusal exit code) the apply would end in — for a
 // single-index DROP INDEX after the same catalog read of the index's kind
-// the apply makes; so does the
+// the apply makes; so does the refusal of any statement but the stopped
+// one while a copy-and-swap run on the table is stopped, the
 // destructive-change gate, unless --allow-destructive names the table, and
 // the executor's shape admission of the routed steps, once they are known, when
 // no earlier apply check refuses first, the partitioned index and key
@@ -81,11 +82,21 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	routed := router.Route([]planner.Plan{classified})
 	logger.Debug("statement routed",
 		"route", string(classified.Route), "disposition", string(routed.Disposition))
+	// The apply refuses any statement but the stopped one while a
+	// copy-and-swap run on the table is stopped, once it has routed the
+	// statement and before its other gates, and so does the dry run.
+	v, refused, err := migrate.AdmitStoppedRun(ctx, pool, st, facts.Schema, facts.Table)
+	if err != nil {
+		return err
+	}
+	if refused {
+		return c.emit(out, v)
+	}
 	// The apply refuses a destructive statement before any route runs it,
 	// so without the acknowledgement the dry run ends in that same refusal
 	// verdict; with it, the plan below is the one the acknowledged apply
 	// takes.
-	v, refused, err := migrate.AdmitDestructive(st, facts.Schema, routed.Statements[0], c.AllowDestructive)
+	v, refused, err = migrate.AdmitDestructive(st, facts.Schema, routed.Statements[0], c.AllowDestructive)
 	if err != nil {
 		return err
 	}
