@@ -505,6 +505,19 @@ const (
 	// statement again, or discarded by a copy-and-swap run started over
 	// under the restart acknowledgement.
 	CauseCopyAndSwapRunStopped Cause = "copy-and-swap-run-stopped"
+	// CauseChangedForeignKey: under ReasonDeclarativeForeignKey, the plan
+	// drops a foreign key it changes under the same name before the new key
+	// is added, because the two cannot share one statement: the table is
+	// partitioned, or the plan also retypes a column or drops one beside an
+	// added column that may rewrite the table. Declaring the
+	// changed key under a new name adds it before the old one is dropped.
+	CauseChangedForeignKey Cause = "changed-foreign-key"
+	// CauseUndeclarableForeignKey: under ReasonDeclarativeForeignKey, the
+	// plan drops a live foreign key a desired file cannot declare, one into
+	// another schema or one from a table to itself through a standalone
+	// unique index, so the diff plans its drop whatever the file says. The
+	// imperative front door removes it.
+	CauseUndeclarableForeignKey Cause = "undeclarable-foreign-key"
 )
 
 // Verdict is the structured outcome of one migrate invocation.
@@ -675,6 +688,13 @@ type Verdict struct {
 	// carries, present whenever one blocks the change, whatever the
 	// refusal's reason, and empty otherwise.
 	DependentTriggers []string `json:"dependent_triggers,omitempty"`
+	// DependentPublications names the publications whose column list or
+	// row filter for the table names the column a refused statement
+	// retypes or drops, each rendered "publication" with its identifier
+	// quoted, sorted. The same list the plan report's refused decision
+	// carries, present whenever one blocks the change, whatever the
+	// refusal's reason, and empty otherwise.
+	DependentPublications []string `json:"dependent_publications,omitempty"`
 	// DependentGeneratedColumns names the generated columns whose
 	// expression reads the column a refused statement retypes or drops,
 	// each rendered "schema"."table"."column" with every identifier quoted,

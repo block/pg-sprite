@@ -18,7 +18,9 @@ type Code string
 // The codes an executor outcome can carry.
 const (
 	// CodeBudgetLockExceeded: the lock was not granted within
-	// lock_timeout; nothing was executed.
+	// lock_timeout, or a transaction held a lock that reads or writes take
+	// on the table for the whole wait outside the lock queue, so the lock
+	// was never requested (*LingeringHolderError); nothing was executed.
 	CodeBudgetLockExceeded Code = "budget-lock-exceeded"
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
@@ -151,6 +153,18 @@ const (
 	// after its first transaction committed, leaving the partition
 	// detach-pending; running the same statement again finishes it.
 	CodeDetachInterrupted Code = "partition-detach-interrupted"
+	// CodeAttachPartitionUnsupportedShape: the online attach's statement is
+	// not one ALTER TABLE schema.parent ATTACH PARTITION ... FOR VALUES;
+	// nothing was executed.
+	CodeAttachPartitionUnsupportedShape Code = "attach-partition-unsupported-shape"
+	// CodeAttachPartitionTable: the table the online attach attaches is not
+	// a standalone plain table with the parent's columns, or the parent's
+	// DEFAULT partition is not a plain table; nothing was added.
+	CodeAttachPartitionTable Code = "attach-partition-table"
+	// CodeAttachPartitionDefaultWindow: the parent has a DEFAULT partition
+	// and the caller did not accept the write window its proof opens;
+	// nothing was added.
+	CodeAttachPartitionDefaultWindow Code = "attach-partition-default-window"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
@@ -188,63 +202,46 @@ const (
 	// CodePartitionedKeyUnsettled: partitions kept appearing without the key
 	// constraint until the build ran out of passes; a rerun resumes.
 	CodePartitionedKeyUnsettled Code = "partitioned-key-unsettled"
-	// CodeAttachUnsupportedShape: the statement handed to the online attach
-	// is not one ALTER TABLE schema.parent ATTACH PARTITION ... FOR VALUES:
-	// it attaches a DEFAULT partition, or leaves the parent unqualified;
-	// nothing was changed.
-	CodeAttachUnsupportedShape Code = "attach-unsupported-shape"
-	// CodeAttachTable: the table the online attach would attach does not
-	// exist, is not a plain table, or is already a partition or inheritance
-	// child of another table; nothing was changed.
-	CodeAttachTable Code = "attach-table"
-	// CodeAttachDefaultWindow: the parent has a DEFAULT partition, and the
-	// caller did not accept the write window its proof opens; nothing was
-	// changed.
-	CodeAttachDefaultWindow Code = "attach-default-window"
-	// CodeAttachBoundUnprovable: the online attach cannot derive a CHECK
+	// CodeAttachPartitionBoundUnprovable: the online attach cannot derive a CHECK
 	// the server accepts as proof of the bound, for the parent's partition
 	// key or for the bound's values; nothing was changed.
-	CodeAttachBoundUnprovable Code = "attach-bound-unprovable"
-	// CodeAttachProofNameTaken: a name a CHECK of the online attach needs on
+	CodeAttachPartitionBoundUnprovable Code = "attach-partition-bound-unprovable"
+	// CodeAttachPartitionProofNameTaken: a name a CHECK of the online attach needs on
 	// the table or the DEFAULT partition is held by another constraint; the
 	// occupant is left for an operator.
-	CodeAttachProofNameTaken Code = "attach-proof-name-taken"
-	// CodeAttachProofNotPlainTable: the parent's DEFAULT partition is not a
-	// plain table, so the online attach cannot prove it online; nothing was
-	// added to it.
-	CodeAttachProofNotPlainTable Code = "attach-proof-not-plain-table"
-	// CodeAttachColumnMissing: the table lacks a column the parent declares
+	CodeAttachPartitionProofNameTaken Code = "attach-partition-proof-name-taken"
+	// CodeAttachPartitionColumnMissing: the table lacks a column the parent declares
 	// NOT NULL, which the attach refuses.
-	CodeAttachColumnMissing Code = "attach-column-missing"
-	// CodeAttachNotNullNotValid: a column of the table the parent declares
+	CodeAttachPartitionColumnMissing Code = "attach-partition-column-missing"
+	// CodeAttachPartitionNotNullNotValid: a column of the table the parent declares
 	// NOT NULL has a NOT VALID not-null constraint (PostgreSQL 18), which
 	// setting it NOT NULL would validate under ACCESS EXCLUSIVE.
-	CodeAttachNotNullNotValid Code = "attach-not-null-not-valid"
-	// CodeAttachColumnRowType: a nullable column of a composite type is
+	CodeAttachPartitionNotNullNotValid Code = "attach-partition-not-null-not-valid"
+	// CodeAttachPartitionColumnRowType: a nullable column of a composite type is
 	// declared NOT NULL by the parent, which the online attach cannot set
 	// without a scan.
-	CodeAttachColumnRowType Code = "attach-column-row-type"
-	// CodeAttachIndexUnsupported: the parent has an index or key constraint
+	CodeAttachPartitionColumnRowType Code = "attach-partition-column-row-type"
+	// CodeAttachPartitionIndexUnsupported: the parent has an index or key constraint
 	// the online attach cannot give the table, such as an EXCLUDE
 	// constraint's or a DEFERRABLE key's; nothing was built for it.
-	CodeAttachIndexUnsupported Code = "attach-index-unsupported"
-	// CodeAttachForeignKeyUnsupported: the parent has a foreign key the
+	CodeAttachPartitionIndexUnsupported Code = "attach-partition-index-unsupported"
+	// CodeAttachPartitionForeignKeyUnsupported: the parent has a foreign key the
 	// online attach cannot give the table; nothing was added for it.
-	CodeAttachForeignKeyUnsupported Code = "attach-foreign-key-unsupported"
-	// CodeAttachUnderAnotherBound: the table is already a partition of the
+	CodeAttachPartitionForeignKeyUnsupported Code = "attach-partition-foreign-key-unsupported"
+	// CodeAttachPartitionUnderAnotherBound: the table is already a partition of the
 	// parent under a bound other than the statement's; it is left as it is.
-	CodeAttachUnderAnotherBound Code = "attach-under-another-bound"
-	// CodeAttachParentChanged: the parent's CHECKs or NOT NULL columns
+	CodeAttachPartitionUnderAnotherBound Code = "attach-partition-under-another-bound"
+	// CodeAttachPartitionParentChanged: the parent's CHECKs or NOT NULL columns
 	// changed while the online attach gave them to the table; what it
 	// finished stays, and a rerun brings the table to the parent as it is.
-	CodeAttachParentChanged Code = "attach-parent-changed"
-	// CodeAttachNotReady: the online attach found the table or the DEFAULT
+	CodeAttachPartitionParentChanged Code = "attach-partition-parent-changed"
+	// CodeAttachPartitionNotReady: the online attach found the table or the DEFAULT
 	// partition short of what its earlier steps give them (a proof missing
 	// or NOT VALID, an index the ATTACH would still build, a foreign key it
 	// would create), or the DEFAULT partition was another table, so the
 	// ATTACH would scan or build; nothing was attached, and a rerun gives
 	// them what is missing.
-	CodeAttachNotReady Code = "attach-not-ready"
+	CodeAttachPartitionNotReady Code = "attach-partition-not-ready"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -371,6 +368,11 @@ const (
 	// again under the table's lock; nothing was validated. Re-plan against
 	// the constraint as it stands.
 	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
+	// CodeTimeZoneDrift: a native change between timestamp and timestamptz
+	// reached a session whose time zone is not UTC, read inside the
+	// change's own transaction; nothing ran. The planner routes the change
+	// native only in UTC, so plan again in the zone the engine runs in.
+	CodeTimeZoneDrift Code = "time-zone-drift"
 	// CodeRenamedIndexDrift: the relation an ALTER INDEX ... RENAME TO
 	// names is no longer a plain index on the preflighted table, read
 	// again under the table's lock — gone, not an index, on another table,
@@ -465,6 +467,9 @@ func Codes() []Code {
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
 		CodeDetachInterrupted,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
 		CodePartitionedKeyNameTaken,
@@ -475,20 +480,16 @@ func Codes() []Code {
 		CodePartitionedKeyParentConflict,
 		CodePartitionedKeySubPartitioned,
 		CodePartitionedKeyUnsettled,
-		CodeAttachUnsupportedShape,
-		CodeAttachTable,
-		CodeAttachDefaultWindow,
-		CodeAttachBoundUnprovable,
-		CodeAttachProofNameTaken,
-		CodeAttachProofNotPlainTable,
-		CodeAttachColumnMissing,
-		CodeAttachNotNullNotValid,
-		CodeAttachColumnRowType,
-		CodeAttachIndexUnsupported,
-		CodeAttachForeignKeyUnsupported,
-		CodeAttachUnderAnotherBound,
-		CodeAttachParentChanged,
-		CodeAttachNotReady,
+		CodeAttachPartitionBoundUnprovable,
+		CodeAttachPartitionProofNameTaken,
+		CodeAttachPartitionColumnMissing,
+		CodeAttachPartitionNotNullNotValid,
+		CodeAttachPartitionColumnRowType,
+		CodeAttachPartitionIndexUnsupported,
+		CodeAttachPartitionForeignKeyUnsupported,
+		CodeAttachPartitionUnderAnotherBound,
+		CodeAttachPartitionParentChanged,
+		CodeAttachPartitionNotReady,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -517,6 +518,7 @@ func Codes() []Code {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -562,6 +564,9 @@ func (c Code) Permanent() bool {
 		CodePartitionedForeignKeyNotValidSupported,
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedKeyNameTaken,
 		CodePartitionedKeyConflict,
@@ -570,18 +575,14 @@ func (c Code) Permanent() bool {
 		CodePartitionedKeyUnsupportedShape,
 		CodePartitionedKeyParentConflict,
 		CodePartitionedKeySubPartitioned,
-		CodeAttachUnsupportedShape,
-		CodeAttachTable,
-		CodeAttachDefaultWindow,
-		CodeAttachBoundUnprovable,
-		CodeAttachProofNameTaken,
-		CodeAttachProofNotPlainTable,
-		CodeAttachColumnMissing,
-		CodeAttachNotNullNotValid,
-		CodeAttachColumnRowType,
-		CodeAttachIndexUnsupported,
-		CodeAttachForeignKeyUnsupported,
-		CodeAttachUnderAnotherBound,
+		CodeAttachPartitionBoundUnprovable,
+		CodeAttachPartitionProofNameTaken,
+		CodeAttachPartitionColumnMissing,
+		CodeAttachPartitionNotNullNotValid,
+		CodeAttachPartitionColumnRowType,
+		CodeAttachPartitionIndexUnsupported,
+		CodeAttachPartitionForeignKeyUnsupported,
+		CodeAttachPartitionUnderAnotherBound,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -608,6 +609,7 @@ func (c Code) Permanent() bool {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -648,6 +650,9 @@ func OutcomeCode(err error) Code {
 	}
 	if budgetErr, ok := errors.AsType[*BudgetError](err); ok {
 		return budgetErr.Code()
+	}
+	if holderErr, ok := errors.AsType[*LingeringHolderError](err); ok {
+		return holderErr.Code()
 	}
 	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return CodeRowSecurityOutcomeUnknown
@@ -731,6 +736,12 @@ func sentinelCode(err error) Code {
 		return CodeDetachDefaultPartition
 	case errors.Is(err, ErrDetachInterrupted):
 		return CodeDetachInterrupted
+	case errors.Is(err, ErrAttachPartitionUnsupportedShape):
+		return CodeAttachPartitionUnsupportedShape
+	case errors.Is(err, ErrAttachPartitionTable):
+		return CodeAttachPartitionTable
+	case errors.Is(err, ErrAttachPartitionDefaultWindow):
+		return CodeAttachPartitionDefaultWindow
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
@@ -751,38 +762,30 @@ func sentinelCode(err error) Code {
 		return CodePartitionedKeySubPartitioned
 	case errors.Is(err, ErrPartitionedKeyUnsettled):
 		return CodePartitionedKeyUnsettled
-	case errors.Is(err, ErrAttachPartitionUnsupportedShape):
-		return CodeAttachUnsupportedShape
-	case errors.Is(err, ErrAttachPartitionTable):
-		return CodeAttachTable
-	case errors.Is(err, ErrAttachPartitionDefaultWindow):
-		return CodeAttachDefaultWindow
 	case errors.Is(err, errAttachBoundUnprovable):
-		return CodeAttachBoundUnprovable
+		return CodeAttachPartitionBoundUnprovable
 	case errors.Is(err, errAttachProofNameTaken):
-		return CodeAttachProofNameTaken
+		return CodeAttachPartitionProofNameTaken
 	case errors.Is(err, errAttachProofViolation):
 		// Rows of the table outside the bound, or of the DEFAULT partition
 		// inside it: corrected in the data before a rerun.
 		return CodeDataFault
-	case errors.Is(err, errAttachProofNotPlainTable):
-		return CodeAttachProofNotPlainTable
 	case errors.Is(err, errAttachColumnMissing):
-		return CodeAttachColumnMissing
+		return CodeAttachPartitionColumnMissing
 	case errors.Is(err, errAttachNotNullNotValid):
-		return CodeAttachNotNullNotValid
+		return CodeAttachPartitionNotNullNotValid
 	case errors.Is(err, errAttachColumnRowType):
-		return CodeAttachColumnRowType
+		return CodeAttachPartitionColumnRowType
 	case errors.Is(err, errAttachIndexUnsupported):
-		return CodeAttachIndexUnsupported
+		return CodeAttachPartitionIndexUnsupported
 	case errors.Is(err, errAttachForeignKeyUnsupported):
-		return CodeAttachForeignKeyUnsupported
+		return CodeAttachPartitionForeignKeyUnsupported
 	case errors.Is(err, errAttachedUnderAnotherBound):
-		return CodeAttachUnderAnotherBound
+		return CodeAttachPartitionUnderAnotherBound
 	case errors.Is(err, errAttachParentChanged):
-		return CodeAttachParentChanged
+		return CodeAttachPartitionParentChanged
 	case attachNotReady(err):
-		return CodeAttachNotReady
+		return CodeAttachPartitionNotReady
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):
@@ -839,6 +842,8 @@ func sentinelCode(err error) Code {
 		return CodeDroppedColumnPartitionDependent
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
+	case errors.Is(err, ErrTimeZoneDrift):
+		return CodeTimeZoneDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
 		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrEnumTypeDrift):

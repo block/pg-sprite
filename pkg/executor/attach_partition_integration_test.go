@@ -282,7 +282,7 @@ func TestAttachPartitionOnlineFindsAnAttachedTableAndRefusesAMovedOne(t *testing
 
 			res, err := attachPartitionOnline(t.Context(), f.pool, target, attachPartitionBudget, 0, nil, nil)
 			require.NoError(t, err)
-			assert.Equal(t, attachPartitionResult{action: attachPartitionFound, bound: events2027Bound}, res)
+			assert.Equal(t, attachPartitionResult{action: attachPartitionFound, bound: events2027Bound, dropped: target.proofs()}, res)
 			assert.Empty(t, f.proofConstraints(t, "events_2027"))
 			assert.Empty(t, f.proofConstraints(t, "events_default"))
 		})

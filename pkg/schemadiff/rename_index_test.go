@@ -156,14 +156,28 @@ func TestDiffDropsAUniquenessOnlyAfterItsReplacement(t *testing.T) {
 		}, sqls(changes), "no new uniqueness replaces it, so nothing waits")
 	})
 
-	t.Run("a plan that drops a column keeps its drops first", func(t *testing.T) {
+	t.Run("a plan that drops a column drops the index, then the column, after the build", func(t *testing.T) {
 		live, desired := keyed(), keyed()
 		live.Columns = append(live.Columns, Column{Name: "legacy", Type: "text"})
 		live.Indexes = []Index{{Name: "events_legacy_uq", Def: "CREATE UNIQUE INDEX events_legacy_uq ON events USING btree (legacy)"}}
 		desired.Indexes = []Index{{Name: "events_email_uq", Def: "CREATE UNIQUE INDEX events_email_uq ON events USING btree (email)"}}
 		changes, err := Diff("public", live, desired)
 		require.NoError(t, err)
-		assert.Equal(t, `DROP INDEX "public"."events_legacy_uq"`, changes[0].SQL)
+		assert.Equal(t, []string{
+			"CREATE UNIQUE INDEX events_email_uq ON public.events USING btree (email)",
+			`DROP INDEX "public"."events_legacy_uq"`,
+			`ALTER TABLE "public"."events" DROP COLUMN "legacy"`,
+		}, sqls(changes))
+	})
+
+	t.Run("a plan that retypes a column keeps its drops first", func(t *testing.T) {
+		live, desired := keyed(), keyed()
+		live.Indexes = []Index{{Name: "events_name_uq", Def: "CREATE UNIQUE INDEX events_name_uq ON events USING btree (name)"}}
+		desired.Columns[1].Type = "text"
+		desired.Indexes = []Index{{Name: "events_email_uq", Def: "CREATE UNIQUE INDEX events_email_uq ON events USING btree (email)"}}
+		changes, err := Diff("public", live, desired)
+		require.NoError(t, err)
+		assert.Equal(t, `DROP INDEX "public"."events_name_uq"`, changes[0].SQL)
 	})
 }
 

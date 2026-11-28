@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/progress"
@@ -21,12 +22,16 @@ import (
 // is the ordinary traffic a lock budget exists to absorb.
 const lockHolderSampleGap = 200 * time.Millisecond
 
+// lockHolderReadReserve is the part of the wait kept back from its last
+// sleep for the read of the lock holders that follows it.
+const lockHolderReadReserve = 50 * time.Millisecond
+
 // DefaultHolderWait is the longest DefaultRetryPolicy waits outside the lock
 // queue for a transaction holding a lock that reads or writes take on the
 // table. It is long enough for a slow report or a batch job's transaction to
 // finish, and short enough that a step held up by an idle-in-transaction
-// session reaches its own lock budget, and the error that names the cause,
-// quickly.
+// session ends quickly with a *LingeringHolderError naming that session,
+// without ever requesting its lock.
 const DefaultHolderWait = 30 * time.Second
 
 // readLockModes and writeLockModes are the table lock modes, as pg_locks
@@ -147,16 +152,17 @@ func trackerHolderWaitReport(tracker *progress.Tracker) func(*progress.LockHolde
 
 // waitOutsideLockQueue returns once no transaction has held a conflicting
 // lock on any of the tables, or on a descendant the step also locks, across
-// two reads lockHolderSampleGap apart, or once one has for limit. Either way
-// the caller then requests its lock as it would without the wait, under its
-// own lock budget, so the wait can delay a step but never fails one. A zero
-// limit, or no tables, returns at once.
+// two reads lockHolderSampleGap apart, or once one has for limit, and says
+// which: the outcome is exhausted when a holder was still there at the limit,
+// and awaitLockQueue turns that into the step's failure. A zero limit, or no
+// tables, returns at once.
 //
 // While a holder lingers, report receives the holder that has held its lock
 // longest and the time waited; it receives nil when the wait ends.
 //
 // One deadline bounds the whole wait, resolving the tables and every read of
-// their holders included, and no sleep runs past it, so the wait never
+// their holders included, and the last sleep ends lockHolderReadReserve
+// before it, leaving time for the read that follows, so the wait never
 // outlasts limit by more than one catalog round trip. The reads take no lock
 // and use pg_locks alone, which every role can read in full, so the wait does
 // not depend on the privilege to see other roles' sessions in
@@ -233,7 +239,12 @@ func waitOutsideLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lock
 	}
 	oldest := oldestHolder(holders)
 	for len(holders) > 0 {
-		left := remaining()
+		// The sleep stops lockHolderReadReserve short of the deadline, so
+		// the read after it has time to see whether the holder finished. A
+		// read started with none of the wait left would always be cut off,
+		// and a holder that committed during the last sleep would be
+		// reported as lingering.
+		left := remaining() - lockHolderReadReserve
 		if left <= 0 {
 			return exhausted(oldest), nil
 		}
@@ -268,6 +279,116 @@ func waitOutsideLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lock
 		reported = true
 	}
 	return holderWaitOutcome{waited: clock.now().Sub(start)}, nil
+}
+
+// LingeringHolderError reports that a transaction kept a lock that reads or
+// writes take on a table the step locks for the whole of
+// RetryPolicy.HolderWait, so the step ended without requesting its lock: an
+// attempt queued behind that transaction would hold every later reader and
+// writer of the table behind itself for its lock budget, and a transaction
+// that outlasts the wait is not one the lock budget is there to absorb. The
+// step did not take effect. Once the holder finishes, or is ended, the step
+// runs again unchanged.
+type LingeringHolderError struct {
+	// PID is the backend of the transaction that had held its lock longest.
+	PID uint32
+	// Table is the schema-qualified table it holds the lock on.
+	Table string
+	// Watched is how long the wait saw it holding the lock, which is at most
+	// the wait itself; the transaction may have held it for far longer.
+	Watched time.Duration
+	// State is the backend's pg_stat_activity state, such as "idle in
+	// transaction" or "active", and TransactionAge is how long its
+	// transaction has been open. Both are empty when the role cannot see
+	// that session, the session ended before it was described, or the read
+	// that describes it failed.
+	State          string
+	TransactionAge time.Duration
+
+	// describeErr is the failed read of the holder's session, named in the
+	// message so the operator knows why State is empty.
+	describeErr error
+}
+
+// Code returns the lingering holder's stable code. The step ended without
+// requesting the lock its lock budget bounds, and nothing was executed, so it
+// reports the lock budget's code, as a lock that was not granted in time
+// does.
+func (e *LingeringHolderError) Code() Code {
+	return CodeBudgetLockExceeded
+}
+
+// Error implements the error interface.
+func (e *LingeringHolderError) Error() string {
+	backend := fmt.Sprintf("backend %d", e.PID)
+	switch {
+	case e.State != "" && e.TransactionAge > 0:
+		backend += fmt.Sprintf(" (%s, transaction open for %s)", e.State, e.TransactionAge.Round(time.Second))
+	case e.State != "":
+		backend += fmt.Sprintf(" (%s)", e.State)
+	}
+	msg := fmt.Sprintf("%s held a lock on %s for the whole %s the step waited, so the step did not request its lock and no reader or writer queued behind it",
+		backend, e.Table, e.Watched.Round(time.Second))
+	if e.describeErr != nil {
+		msg += fmt.Sprintf(" (its session could not be described: %v)", e.describeErr)
+	}
+	return msg
+}
+
+// awaitLockQueue waits outside the lock queue (waitOutsideLockQueue) and
+// returns a *LingeringHolderError when the wait ran out with a holder still
+// holding its lock. A wait that ran out on its catalog reads, with no holder
+// seen, returns nil: nothing is known to be in the way, so the step requests
+// its lock under its lock budget.
+func awaitLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lockedTable, limit time.Duration, clock holderWaitClock, report func(*progress.LockHolderWait)) error {
+	outcome, err := waitOutsideLockQueue(ctx, pool, tables, limit, clock, report)
+	if err != nil {
+		return err
+	}
+	if !outcome.exhausted || outcome.holder.pid == 0 {
+		return nil
+	}
+	lingering := &LingeringHolderError{
+		PID:     uint32(outcome.holder.pid),
+		Table:   outcome.holder.table,
+		Watched: outcome.waited - outcome.holder.since,
+	}
+	describeHolder(ctx, pool, lingering)
+	return lingering
+}
+
+// describeHolder fills in the holder's state and transaction age from
+// pg_stat_activity, so an operator can tell a session left idle in a
+// transaction from a long report. The wait itself reads only pg_locks, which
+// needs no privilege; pg_stat_activity shows another role's session only to
+// a role allowed to see it, so for any other role the two stay empty. A
+// session that ended since the wait's last read has nothing to describe.
+// The query text is left out: it can carry row values.
+//
+// The description is best effort: a read that fails leaves the two empty
+// and its error is named in the message, so the step still ends with the
+// typed error that names the holder and carries the lock budget's code, not
+// a generic failure.
+func describeHolder(ctx context.Context, pool *pgxpool.Pool, lingering *LingeringHolderError) {
+	var state *string
+	var age *time.Duration
+	err := pool.QueryRow(ctx, `
+		SELECT a.state, pg_catalog.now() OPERATOR(pg_catalog.-) a.xact_start
+		FROM pg_catalog.pg_stat_activity a
+		WHERE a.pid OPERATOR(pg_catalog.=) $1`, int32(lingering.PID)).Scan(&state, &age)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		lingering.describeErr = err
+		return
+	}
+	if state != nil {
+		lingering.State = *state
+	}
+	if age != nil {
+		lingering.TransactionAge = *age
+	}
 }
 
 // oldestHolder returns the holder first seen earliest.

@@ -31,15 +31,19 @@ var (
 	// every other partition's bound, or an unqualified parent.
 	ErrAttachPartitionUnsupportedShape = errors.New("the statement is not an ATTACH PARTITION ... FOR VALUES the online attach takes")
 	// ErrAttachPartitionTable is returned when the table the statement
-	// attaches does not exist, is not a plain table, or is already a
-	// partition or inheritance child of another table.
-	ErrAttachPartitionTable = errors.New("the table to attach is not a standalone plain table")
+	// attaches does not exist, is not a plain table, is already a partition
+	// or inheritance child of another table, or does not have the parent's
+	// columns by name, type, and collation; or when the parent's DEFAULT
+	// partition is not a plain table, which the flow cannot prove online.
+	// Every one of these is read before anything is changed.
+	ErrAttachPartitionTable = errors.New("the table to attach is not a standalone plain table with the parent's columns")
 	// ErrAttachPartitionDefaultWindow is returned, before anything is
-	// changed, when the parent has a DEFAULT partition and the caller did
+	// added, when the parent has a DEFAULT partition and the caller did
 	// not accept the write window its proof opens: from the moment the
 	// proof is added until the attach commits, a write the parent routes to
 	// the DEFAULT partition with a key inside the new bound fails with a
-	// check violation.
+	// check violation. A proof an earlier run left on the DEFAULT partition
+	// is dropped before the refusal returns.
 	ErrAttachPartitionDefaultWindow = errors.New("the parent has a DEFAULT partition, and the attach's write window on it was not accepted")
 )
 
@@ -53,8 +57,14 @@ type AttachPartitionOptions struct {
 	// Index bounds each concurrent build of one of the parent's indexes on
 	// the table.
 	Index ConcurrentBudget
-	// HolderWait is the longest a step that needs ACCESS EXCLUSIVE waits
-	// outside the lock queue while a reader or writer holds the table.
+	// HolderWait is the longest each of these waits outside the lock queue,
+	// while a reader or writer holds a table it locks, before it requests
+	// ACCESS EXCLUSIVE: the ADD of each proof, CHECK, and NOT NULL helper,
+	// the drop of a proof, and the ATTACH. The index step's ADD CONSTRAINT
+	// ... USING INDEX, which takes ACCESS EXCLUSIVE on the table, and the
+	// foreign key step's ADD ... NOT VALID, which takes SHARE ROW EXCLUSIVE
+	// on the table and the referenced table, do not wait outside the queue:
+	// each requests its lock at once, under the pool's lock_timeout.
 	HolderWait time.Duration
 	// AcceptDefaultWriteWindow accepts the write window the DEFAULT
 	// partition's proof opens (see ErrAttachPartitionDefaultWindow). The
@@ -108,9 +118,14 @@ type AttachPartitionStep struct {
 	// CHECK's name.
 	Name string `json:"name"`
 	// Action is what the step did: found, added, validated, built, keyed,
-	// or set-not-null.
+	// or set-not-null; for a proof, dropped when the run took it off
+	// outside the ATTACH's own transaction.
 	Action string `json:"action"`
 }
+
+// attachPartitionStepDropped is the Action of a proof the run dropped
+// outside the ATTACH's own transaction.
+const attachPartitionStepDropped = "dropped"
 
 // AttachPartitionReport says what an online attach did.
 type AttachPartitionReport struct {
@@ -126,8 +141,10 @@ type AttachPartitionReport struct {
 	// found it already attached.
 	Attached bool `json:"attached"`
 	// Steps lists what the run gave the table and the DEFAULT partition, in
-	// order, including what it found already in place. It is empty when the
-	// table was already attached.
+	// order, including what it found already in place, and each proof it
+	// dropped outside the ATTACH's own transaction: a proof an earlier run
+	// left on a table found already attached, or the DEFAULT partition's
+	// after a run that did not attach. It is returned with the error too.
 	Steps []AttachPartitionStep `json:"steps,omitempty"`
 	// Duration is the wall-clock time of the whole run. It encodes as
 	// integer nanoseconds.
@@ -146,7 +163,8 @@ type AttachPartitionReport struct {
 // that lock's session dials. Under the lock it:
 //
 //  1. resolves the parent, the table, and the parent's DEFAULT partition,
-//     and refuses a table that is not a standalone plain table
+//     and refuses a table that is not a standalone plain table with the
+//     parent's columns, or a DEFAULT partition that is not a plain table
 //     (ErrAttachPartitionTable), and a DEFAULT partition the caller did not
 //     accept the write window of (ErrAttachPartitionDefaultWindow);
 //  2. gives the table a validated CHECK that implies the bound, which from
@@ -161,8 +179,17 @@ type AttachPartitionReport struct {
 //     both proof CHECKs in its transaction.
 //
 // Every step reads the catalog and decides, so a failure keeps what earlier
-// steps finished, and rerunning the same statement resumes; a table found
-// already attached has any leftover proof dropped and is reported as found.
+// steps finished on the table, and rerunning the same statement resumes; a
+// table found already attached has any leftover proof dropped and is
+// reported as found. The DEFAULT partition's proof is the exception: a run
+// that stops without attaching, on an error, a cancel, or a lost table
+// lock, drops it under a context of its own, so the DEFAULT partition takes
+// the writes inside the new bound again, and reports the drop in Steps.
+// When that drop fails, the error names the CHECK and the statement that
+// drops it.
+//
+// A pool smaller than a concurrent index build needs is refused with
+// ErrPoolTooSmall before the lock is taken.
 func AttachPartitionOnline(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, pt preflight.PreflightedTable, sql string, o AttachPartitionOptions) (AttachPartitionReport, error) {
 	return attachPartitionAt(ctx, cfg, pool, pt, sql, o, nil, 0)
 }
@@ -186,6 +213,10 @@ func attachPartitionAt(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Poo
 	st, attach, err := admitAttachPartition(sql, pt)
 	if err != nil {
 		return rep, err
+	}
+	if pool.Config().MaxConns < buildMinConns {
+		return rep, fmt.Errorf("the online attach builds indexes concurrently, which needs %d pool connections, and the pool holds %d: %w",
+			buildMinConns, pool.Config().MaxConns, ErrPoolTooSmall)
 	}
 	start := time.Now()
 	if tracker != nil {
@@ -269,11 +300,24 @@ func (f attachPartitionFlow) run(ctx context.Context) error {
 		return err
 	}
 	target := attachPartitionTarget{st: f.st, searchPath: f.searchPath, parentOID: r.parentOID, bound: table.proof(attachProofBound, check, "")}
-	if r.deflt.oid != 0 {
-		target.deflt = attachProof{kind: attachProofDefault, tableOID: r.deflt.oid, schema: r.deflt.schema, table: r.deflt.name, expr: exclusion}
+	if r.deflt.oid == 0 {
+		return f.attachTarget(ctx, table, target)
 	}
+	target.deflt = attachProof{kind: attachProofDefault, tableOID: r.deflt.oid, schema: r.deflt.schema, table: r.deflt.name, expr: exclusion}
+	// A run that stops without attaching takes the DEFAULT partition's
+	// proof off again, whichever step stopped it: the write window it opens
+	// was accepted for an attach, not for a stopped run.
+	if err := f.attachTarget(ctx, table, target); err != nil {
+		return f.withdrawDefaultProof(ctx, target, err)
+	}
+	return nil
+}
+
+// attachTarget prepares the table and the DEFAULT partition unless the
+// table is already attached, then runs the attach step.
+func (f attachPartitionFlow) attachTarget(ctx context.Context, table attachTable, target attachPartitionTarget) error {
 	var m attachMembership
-	err = briefTx{pool: f.pool}.read(ctx, "read the parents of "+table.qualified(), func(ctx context.Context, q querier) error {
+	err := briefTx{pool: f.pool}.read(ctx, "read the parents of "+table.qualified(), func(ctx context.Context, q querier) error {
 		var err error
 		m, err = readAttachMembership(ctx, q, target.bound)
 		return err
@@ -284,12 +328,15 @@ func (f attachPartitionFlow) run(ctx context.Context) error {
 	// A table already attached to the parent, by an earlier run or by
 	// someone else, needs only its leftover proofs dropped, which the attach
 	// step does.
-	if !m.isPartitionOf(r.parentOID) {
-		if err := f.prepare(ctx, r.parentOID, m, table, target); err != nil {
+	if !m.isPartitionOf(target.parentOID) {
+		if err := f.prepare(ctx, target.parentOID, m, table, target); err != nil {
 			return err
 		}
 	}
 	res, err := attachPartitionOnline(ctx, f.pool, target, f.opts.Attach, f.opts.HolderWait, f.tracker, f.started)
+	for _, p := range res.dropped {
+		f.record(attachProofStepKind(p), p.name(), attachPartitionStepDropped)
+	}
 	if err != nil {
 		return err
 	}
@@ -297,9 +344,19 @@ func (f attachPartitionFlow) run(ctx context.Context) error {
 	return nil
 }
 
+// attachProofStepKind is the report's kind for a proof the attach step
+// dropped.
+func attachProofStepKind(p attachProof) AttachPartitionStepKind {
+	if p.kind == attachProofDefault {
+		return AttachPartitionStepDefaultProof
+	}
+	return AttachPartitionStepBoundProof
+}
+
 // resolve resolves the parent, the table as the statement spells it under
 // the attempt's search_path, and the parent's DEFAULT partition, and refuses
-// a table that is not a plain table.
+// a table that is not a plain table with the parent's columns, and a DEFAULT
+// partition that is not a plain table.
 func (f attachPartitionFlow) resolve(ctx context.Context) (attachResolved, error) {
 	var r attachResolved
 	err := briefTx{pool: f.pool}.run(ctx, "resolve the tables of the attach", f.searchPath, false, func(ctx context.Context, tx pgx.Tx) error {
@@ -333,6 +390,9 @@ func (f attachPartitionFlow) resolve(ctx context.Context) (attachResolved, error
 		if !found || r.table.relkind != "r" {
 			return fmt.Errorf("%w: %s is of kind %q, and the online attach takes a plain table", ErrAttachPartitionTable, spelled, r.table.relkind)
 		}
+		if err := requireAttachColumns(ctx, tx, parentOID, r.table); err != nil {
+			return err
+		}
 		var defaultOID uint32
 		if err := tx.QueryRow(ctx, attachDefaultPartitionSQL, parentOID).Scan(&defaultOID); err != nil {
 			return fmt.Errorf("read the DEFAULT partition of %s: %w", qualifiedName(parent.schema, parent.name), err)
@@ -343,6 +403,10 @@ func (f attachPartitionFlow) resolve(ctx context.Context) (attachResolved, error
 			}
 			if !found {
 				return fmt.Errorf("%w: ST-7: the DEFAULT partition %d of %s vanished", ErrInvariantViolation, defaultOID, qualifiedName(parent.schema, parent.name))
+			}
+			if r.deflt.relkind != "r" {
+				return fmt.Errorf("%w: the DEFAULT partition %s of %s is of kind %q, and the online attach proves only a plain table's rows",
+					ErrAttachPartitionTable, qualifiedName(r.deflt.schema, r.deflt.name), qualifiedName(parent.schema, parent.name), r.deflt.relkind)
 			}
 		}
 		return nil

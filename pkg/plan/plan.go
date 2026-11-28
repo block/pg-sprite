@@ -75,7 +75,13 @@ import (
 // narrows the declarative-foreign-key reason to the drop of a key a desired
 // file cannot declare, or changes under the same name where it cannot be
 // replaced in one statement.
-const FormatVersion = 30
+// Version 31 also carries replaced_by on the drop of the old object when a
+// unique constraint and a unique index of the same name swap kinds: a
+// drop-constraint whose replacement is a standalone index, and a drop-index
+// whose replacement a constraint takes over.
+// Version 32 added the dependent-publication planner reason and the
+// dependent_publications decision field.
+const FormatVersion = 32
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -142,7 +148,11 @@ type Statement struct {
 	// plan replaces rather than drops: the index an earlier statement of the
 	// plan built under the desired definition, valid before the drop runs,
 	// which the rename after the drop gives the dropped index's name (see
-	// schemadiff.Change.ReplacedBy). The table has an index with the desired
+	// schemadiff.Change.ReplacedBy). A unique constraint and a unique index
+	// of the same name that swap kinds carry it too, on the drop of the old
+	// object: a DROP CONSTRAINT whose replacement the rename after it names,
+	// or a DROP INDEX whose replacement the ADD CONSTRAINT ... USING INDEX
+	// after it takes over. The table has an index with the desired
 	// definition before the old one goes, so the drop removes only what the
 	// desired definition no longer asks for. That can still be a guarantee,
 	// as when a unique index becomes non-unique or its predicate narrows, so
@@ -209,6 +219,14 @@ type Statement struct {
 	// is the producer's answer, while Cause.Class() is the reading library's
 	// and answers "" for a cause added in a newer engine.
 	Cause executor.CreateShapeCause `json:"cause,omitempty"`
+	// RefusalCause is the refusal's own cause, where its reason spans more
+	// than one meaning: which kind of foreign-key drop a
+	// declarative-foreign-key refusal is, say. A host branches on it to name
+	// the one remedy that applies. Set once, by the refusal that first
+	// refused the statement, and empty for a refusal with no narrower cause.
+	// In-process only, like Adopts: the JSON report carries no field for it,
+	// and it is not part of the fingerprint.
+	RefusalCause verdict.Cause `json:"-"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`
 	// ExecSQL is the ordered SQL the native backend would run — the safer
@@ -581,6 +599,7 @@ func refuseStatements(report *Report, refused func(i int) (verdict.Refusal, exec
 			// INV: RF-7 — the statement's class comes from the proof.
 			st.Reason, st.Class, st.Owner = r.Reason(), r.Class(), r.Owner()
 			st.Cause = cause
+			st.RefusalCause = r.Cause()
 			st.BlockingPassthroughEligible = new(verdict.AcceptedBlockingEligible(r))
 		}
 		if report.Disposition != router.DispositionRefuse {

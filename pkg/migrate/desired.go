@@ -124,8 +124,10 @@ type DesiredResult struct {
 	Owner verdict.Owner `json:"owner,omitempty"`
 	// Cause narrows the refusal reason to its typed discriminator, the
 	// same token the statement verdict would carry: the copy-and-swap
-	// gate or preflight cause of a whole-plan refusal at admission, or the
-	// cause of the statement verdict that stopped execution. Empty when
+	// gate or preflight cause of a whole-plan refusal at admission, the
+	// changed-foreign-key or undeclarable-foreign-key cause of a
+	// declarative-foreign-key refusal at admission, or the cause of the
+	// statement verdict that stopped execution. Empty when
 	// the reason has none or Outcome is not refused.
 	Cause verdict.Cause `json:"cause,omitempty"`
 	// Detail is the human explanation: why refused, what committed, or
@@ -440,7 +442,13 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 		case ps.Destructive:
 			stmtOpts := opts
 			stmtOpts.AllowDestructive = allowDestructive
-			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
+			dropped, err := droppedWithReplacement(ps)
+			if err != nil {
+				result.Outcome = verdict.OutcomeFailed
+				result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+				return result, fmt.Errorf("planned statement %d: %w", i+1, err)
+			}
+			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, dropped, ps.Renames)
 		default:
 			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
 		}
@@ -903,10 +911,14 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		}
 		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
 		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
-			return r, detail("drops a foreign key into another schema, which a desired file cannot declare — " +
-				"to remove it, run the statement through the imperative front door (migrate --alter)")
+			return r.WithCause(ps.RefusalCause), detail(foreignKeyDropRefusalDetail(ps.RefusalCause))
 		}
 		if err == nil {
+			if d, ok := firstRefusedDecision(ps.Decisions); ok {
+				if why, specific := refusedDecisionDetail(d); specific {
+					return r, detail("has no safe path: " + why)
+				}
+			}
 			return r, detail("has no safe path")
 		}
 		// Keep the statement's own reason where it has one; the class
@@ -917,6 +929,23 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		return planIncoherentRefusal(), detail("is refused but carries no refusal class")
 	default:
 		return planIncoherentRefusal(), detail("carries a disposition this build does not know")
+	}
+}
+
+// foreignKeyDropRefusalDetail says why desired-state apply does not run a
+// planned foreign-key drop, and what to do instead, by the kind of drop
+// the plan refused.
+func foreignKeyDropRefusalDetail(cause verdict.Cause) string {
+	switch cause {
+	case verdict.CauseChangedForeignKey:
+		return "drops a foreign key the file changes under the same name where the new key cannot be added in the same statement, " +
+			"which would leave writes checked against no key until the new one is added — declare the changed key under a new name"
+	case verdict.CauseUndeclarableForeignKey:
+		return "drops a foreign key a desired file cannot declare, one into another schema or one onto its own table through a standalone unique index — " +
+			"to remove it, run the statement through the imperative front door (migrate --alter)"
+	default:
+		return "drops a foreign key: either the file changes it under the same name where the new key cannot be added in the same statement, so declare the changed key under a new name, " +
+			"or a desired file cannot declare it, so remove it through the imperative front door (migrate --alter)"
 	}
 }
 

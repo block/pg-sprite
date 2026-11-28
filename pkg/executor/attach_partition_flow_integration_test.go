@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -73,7 +74,13 @@ const orders2027Bound = "FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')"
 // for the fixture's schema, on pool, preflighting the orders table.
 func (f attachProofFixture) attachOnline(t *testing.T, pool *pgxpool.Pool, sql string, o AttachPartitionOptions, at RunStep) (AttachPartitionReport, error) {
 	t.Helper()
-	pt, err := preflight.CheckTable(t.Context(), f.pool, f.schema, "orders", preflight.NoSizeLimit)
+	return f.attachOnlineTo(t, "orders", pool, sql, o, at)
+}
+
+// attachOnlineTo is attachOnline under the partitioned table parent.
+func (f attachProofFixture) attachOnlineTo(t *testing.T, parent string, pool *pgxpool.Pool, sql string, o AttachPartitionOptions, at RunStep) (AttachPartitionReport, error) {
+	t.Helper()
+	pt, err := preflight.CheckTable(t.Context(), f.pool, f.schema, parent, preflight.NoSizeLimit)
 	require.NoError(t, err)
 	return AttachPartitionOnlineAsStep(t.Context(), dbconn.Config{URL: f.url}, pool, pt, fmt.Sprintf(sql, f.schema), o, at)
 }
@@ -105,7 +112,9 @@ func TestAttachPartitionOnlineGivesTheTableWhatTheParentRequiresAndAttachesWitho
 		f := newFixture(t)
 		f.exec(t, ordersAttachParent)
 		pool, notices := f.debugPool(t)
-		tracker, err := progress.NewTracker(progress.WallClock{})
+		// The tracker's clock stands still, so a Duration measured on it is
+		// zero, and one measured on the wall clock is not.
+		tracker, err := progress.NewTracker(&skewedClock{now: time.Date(2001, 1, 1, 0, 0, 0, 0, time.UTC)})
 		require.NoError(t, err)
 		tracker.Start(1, progress.OperationBrief)
 
@@ -127,6 +136,14 @@ func TestAttachPartitionOnlineGivesTheTableWhatTheParentRequiresAndAttachesWitho
 		assert.True(t, rep.Attached)
 		assert.Equal(t, orders2027Bound, rep.Bound)
 		assert.Equal(t, "orders_2027", rep.Table)
+		assert.Zero(t, rep.Duration, "the run is timed on the tracker's clock")
+		// The last statement the run reports on its step is the drop of the
+		// DEFAULT partition's proof, inside the ATTACH's transaction.
+		snap, err := tracker.Progress(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 1, snap.Step)
+		assert.Equal(t, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s",
+			pgx.Identifier{f.schema, "orders_default"}.Sanitize(), pgx.Identifier{rep.Steps[8].Name}.Sanitize()), snap.Detail.Statement)
 		// The validations before the attach each report the table they
 		// verify; the DEFAULT partition's proof is the last of them. What the
 		// server reports after it is the ATTACH, which scans neither table.
@@ -260,8 +277,8 @@ func TestAttachPartitionOnlineRefusesADefaultBound(t *testing.T) {
 
 // lastIndex is the index of the last notice equal to want, -1 for none.
 func lastIndex(notices []string, want string) int {
-	for i := len(notices) - 1; i >= 0; i-- {
-		if notices[i] == want {
+	for i, notice := range slices.Backward(notices) {
+		if notice == want {
 			return i
 		}
 	}

@@ -102,6 +102,9 @@ type attachPartitionResult struct {
 	action attachPartitionAction
 	// bound is the partition's FOR VALUES clause as the server prints it.
 	bound string
+	// dropped are the proofs the step dropped from a table it found
+	// already attached, set on an error too.
+	dropped []attachProof
 }
 
 // attachPartitionTarget is the reviewed ATTACH and what the run resolved
@@ -247,12 +250,14 @@ func attachPartitionOnline(ctx context.Context, pool *pgxpool.Pool, t attachPart
 		// table under the same bound: the proofs are redundant either way.
 		// Only those still there are dropped, so a rerun with nothing left
 		// to drop neither waits for nor locks either table.
+		var dropped []attachProof
 		for _, p := range present {
 			if err := dropAttachProof(ctx, pool, p, holderWait, tracker); err != nil {
-				return attachPartitionResult{}, err
+				return attachPartitionResult{dropped: dropped}, err
 			}
+			dropped = append(dropped, p)
 		}
-		return attachPartitionResult{action: attachPartitionFound, bound: membership.bound}, nil
+		return attachPartitionResult{action: attachPartitionFound, bound: membership.bound, dropped: dropped}, nil
 	}
 	// INV: LK-2 — the ATTACH takes ACCESS EXCLUSIVE on the table and the
 	// DEFAULT partition, and then SHARE ROW EXCLUSIVE on the tables it
