@@ -7,6 +7,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
 // swapBackend identifies the server process running one swap attempt. The
@@ -22,18 +24,30 @@ type swapBackend struct {
 const backendExitPoll = 50 * time.Millisecond
 
 // readSwapBackend records which backend the swap transaction runs on, so a
-// lost attempt can be followed to its end on the server.
+// lost attempt can be followed to its end on the server. A session that
+// cannot read its own start, because it logged in as one role and runs as
+// another without pg_read_all_stats, cannot be followed, so the attempt is
+// refused before it locks anything with an error wrapping
+// dbconn.ErrSessionStartHidden that names both roles.
 func readSwapBackend(ctx context.Context, tx pgx.Tx) (swapBackend, error) {
-	var backend swapBackend
+	var pid uint32
+	var started *time.Time
+	var sessionRole, currentRole string
 	// INV: CO-9
 	err := tx.QueryRow(ctx, `
-		SELECT pid, backend_start
+		SELECT pid, backend_start, session_user, current_user
 		FROM pg_catalog.pg_stat_activity
-		WHERE pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()`).Scan(&backend.pid, &backend.started)
+		WHERE pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()`).Scan(&pid, &started, &sessionRole, &currentRole)
 	if err != nil {
 		return swapBackend{}, fmt.Errorf("read cutover backend: %w", err)
 	}
-	return backend, nil
+	// INV: LK-4 — a lost attempt is followed by its PID and start together;
+	// a PID alone may name a later backend.
+	if started == nil {
+		return swapBackend{}, fmt.Errorf("%w: cutover backend %d logged in as %q and runs as %q",
+			dbconn.ErrSessionStartHidden, pid, sessionRole, currentRole)
+	}
+	return swapBackend{pid: pid, started: *started}, nil
 }
 
 // awaitBackendExit waits until the attempt's backend has left

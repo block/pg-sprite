@@ -265,7 +265,9 @@ func checkCopySwap(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.St
 // a plain error, no verdict, before the preflight reads anything. A pool
 // smaller than CopySwapMinConns is a failed verdict with the pool-too-small
 // code and an error wrapping executor.ErrPoolTooSmall, also before the
-// preflight, so nothing is created.
+// preflight, so nothing is created. A pool whose sessions cannot read when
+// they started is a failed verdict with the table-lock-unconfirmed code and
+// an error wrapping dbconn.ErrSessionStartHidden, before the preflight too.
 func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
 	if !opts.CopySwap.Enabled {
@@ -287,6 +289,9 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 		return verdict.Verdict{}, fmt.Errorf("migrate: copy-and-swap options: %w", err)
 	}
 	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
+		if errors.Is(err, dbconn.ErrSessionStartHidden) {
+			return copySwapRunVerdict(st, holdNone, fmt.Errorf("migrate: %w", err))
+		}
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", err)
 	}
 	if err := schemachange.CheckPool(pool, opts.CopySwap.Copier); err != nil {
@@ -477,7 +482,24 @@ func isDivergence(err error) bool {
 	return ok
 }
 
+// stoppedBeforeTableLock reports whether the run stopped on a session that
+// cannot read when it started (dbconn.ErrSessionStartHidden) before its
+// table lock was taken: the lock session's own refusal, or the route's
+// check of the pool. The same error from the swap's backend read comes
+// after the copy, and the rolled-back cutover that carries it leaves the
+// row and the hold the run made.
+func stoppedBeforeTableLock(err error) bool {
+	if !errors.Is(err, dbconn.ErrSessionStartHidden) {
+		return false
+	}
+	return !errors.Is(err, schemachange.ErrCutoverRolledBack)
+}
+
 // copySwapStoppedRemedy says what the operator does with a stopped run.
+// A session that cannot read when it started stops the run before its
+// table lock is taken (stoppedBeforeTableLock), so nothing was created,
+// saved, or held, and a rerun stops at the same place until the role is
+// fixed; the detail says so whatever hold the run would have taken.
 // A data fault from the server — a value the new type will not hold, a
 // constraint the rows break — is one the Runner has already acted on: the
 // next run would meet the same rows, so the Runner abandoned this one
@@ -509,6 +531,11 @@ func isDivergence(err error) bool {
 // CLI operator and names CLI flags; a host routes on the returned error
 // instead.
 func copySwapStoppedRemedy(hold sourceHold, err error) string {
+	if stoppedBeforeTableLock(err) {
+		return "the table lock was never taken, so nothing was created or changed; running the same statement again stops here again " +
+			"until the connection logs in as the role it runs as, or that role is granted pg_read_all_stats, " +
+			"which also lets it read every session's query text and statistics across the cluster"
+	}
 	if hold == holdNone {
 		return "the run stopped before it fenced the source, so the table kept taking writes and no checkpoint row was saved; running the same statement again starts from the beginning"
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
@@ -39,7 +40,8 @@ import (
 // Two shapes, as RunDesired's: a refusal is the refused result with a nil
 // error; a stop — the route's connection not wired, which is
 // ErrCopySwapConnectionRequired, wired to another database than the pool,
-// which is a CopySwapConnectionMismatchError, a pool smaller than
+// which is a CopySwapConnectionMismatchError, a pool whose sessions cannot
+// read when they started, which wraps dbconn.ErrSessionStartHidden, a pool smaller than
 // CopySwapMinConns, which wraps executor.ErrPoolTooSmall, or a preflight
 // that could not finish — is a failed result carrying the plan and no verdict, with
 // its error. Nothing has executed in either case and the detail says so.
@@ -67,6 +69,9 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
 		if _, ok := errors.AsType[*CopySwapConnectionMismatchError](err); ok {
 			return stopped("the route's connection reaches another database than the pool", err)
+		}
+		if errors.Is(err, dbconn.ErrSessionStartHidden) {
+			return stopped("the pool's sessions cannot read when they started", err)
 		}
 		return stopped("the route's connection could not be checked against the pool", err)
 	}

@@ -7,7 +7,11 @@
 
 package executor
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/block/pg-sprite/pkg/dbconn"
+)
 
 // Code is the stable string identity of one executor outcome; automation
 // branches on it, never on error text. Codes are part of the report
@@ -107,9 +111,12 @@ const (
 	// partition key of every partitioned table in the tree; nothing was
 	// created.
 	CodeUniqueIndexPartitionKey Code = "unique-index-partition-key"
-	// CodeTableLockUnconfirmed: the pool's role cannot see when the session
-	// holding the build's table lock started, so the build cannot confirm
-	// the lock is its own; nothing was created.
+	// CodeTableLockUnconfirmed: a role cannot see when the session holding
+	// the table lock started, so the lock cannot be confirmed as that
+	// session's own; nothing was created. It is the pool's role for a
+	// partitioned build (ErrTableLockUnconfirmed), or the role the lock
+	// session itself runs as for any table lock, refused before the lock
+	// is taken (dbconn.ErrSessionStartHidden).
 	CodeTableLockUnconfirmed Code = "table-lock-unconfirmed"
 	// CodePartitionedForeignKeyNameTaken: the name a partitioned table's
 	// foreign key needs on a partition is held by another constraint; the
@@ -659,6 +666,11 @@ func sentinelCode(err error) Code {
 	case errors.Is(err, ErrUniqueIndexPartitionKey):
 		return CodeUniqueIndexPartitionKey
 	case errors.Is(err, ErrTableLockUnconfirmed):
+		return CodeTableLockUnconfirmed
+	case errors.Is(err, dbconn.ErrSessionStartHidden):
+		// The lock session's own role cannot read its start: the same
+		// missing visibility as a pool that cannot read it, refused before
+		// the lock is taken, with the same remedy.
 		return CodeTableLockUnconfirmed
 	case errors.Is(err, ErrPartitionedForeignKeyNameTaken):
 		return CodePartitionedForeignKeyNameTaken

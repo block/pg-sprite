@@ -216,6 +216,17 @@ actually repairs the option — `GRANT ... WITH INHERIT TRUE` / `WITH SET TRUE` 
 PostgreSQL 16+, `ALTER ROLE ... INHERIT` on 14–15, where inheritance is a role attribute
 that `GRANT` cannot change.
 
+Log in as the engine role itself. A connection that logs in as one role and switches to
+the engine role (the `role` connection parameter, or `SET ROLE` in a login hook) cannot
+read its own session's start time from `pg_stat_activity`, which PostgreSQL shows only to
+a role with the privileges of the login role or of `pg_read_all_stats`. The table lock a
+copy-and-swap run, `discard`, and a partitioned build take identifies its session by that
+start time, and a copy-and-swap swap identifies its own session on the pool the same way,
+so such a connection, or a pool whose sessions switch role, is refused
+(`table-lock-unconfirmed`) before the lock is taken. Connect as the engine role directly.
+Only where the switch cannot be avoided, `GRANT pg_read_all_stats TO <engine role>`, which
+also lets the role read every session's query text and statistics across the cluster.
+
 ## What the engine role must not have
 
 The contract is as much about what is absent:
@@ -228,6 +239,10 @@ The contract is as much about what is absent:
   and after every schema change; the engine borrows owner rights through membership and
   `SET ROLE`, both revocable with one statement.
 - **No `GRANT OPTION` / no `CREATEROLE`.** The engine never grants anything to anyone.
+- **No `pg_read_all_stats`.** A connection that logs in as the engine role reads its own
+  session's start without it; the grant would let the role read every session's query
+  text and statistics across the cluster, so keep it for a connection that cannot avoid
+  switching role (above).
 
 ## How the engine enforces this
 

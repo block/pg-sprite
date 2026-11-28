@@ -39,6 +39,20 @@ var ErrInvariantViolation = errors.New("invariant violation")
 // from a breach that must fail closed, without reading the message.
 var ErrTableLockLost = errors.New("table lock lost")
 
+// ErrSessionStartHidden reports that the table lock session cannot read its
+// own backend start from pg_stat_activity. PostgreSQL shows a session's
+// start only to a current role with the privileges of the role the session
+// logged in as, or of pg_read_all_stats, so a connection that logs in as
+// one role and runs as another (the role connection parameter, or SET ROLE)
+// reads its own start as NULL. A table lock session is identified from
+// other connections by its PID and start together, so AcquireTableLock
+// refuses such a session before it takes the lock. A caller that identifies
+// its own sessions by PID and start the same way returns it for a session
+// of its own that cannot read its start.
+var ErrSessionStartHidden = errors.New("the session cannot read when it started; " +
+	"connect as the role it runs as directly instead of switching to it, or grant that role pg_read_all_stats, " +
+	"which also lets it read every session's query text and statistics across the cluster")
+
 // TableLockKey is the (classid, objid) pair pg_locks reports for a table
 // lock, as PostgreSQL's two-argument advisory lock functions take it.
 type TableLockKey struct {
@@ -148,10 +162,11 @@ type TableLockSession struct {
 // lock. It never retries a held lock: contention returns a
 // TableLockHeldError naming the holder when the catalog reports one, and
 // the ordering policy for a plan that touches several tables belongs to the
-// caller. ctx bounds acquisition only; Release or detected lock loss ends
-// the acquired session. schema and table must be catalog names as stored,
-// including case, rather than unquoted SQL identifiers that PostgreSQL has
-// not yet folded.
+// caller. A session that cannot read its own backend start is refused with
+// ErrSessionStartHidden before the lock is taken. ctx bounds acquisition
+// only; Release or detected lock loss ends the acquired session. schema and
+// table must be catalog names as stored, including case, rather than
+// unquoted SQL identifiers that PostgreSQL has not yet folded.
 func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, options ...TableLockOption) (*TableLockSession, error) {
 	if schema == "" || table == "" {
 		return nil, fmt.Errorf("%w: LK-1: table lock requires non-empty schema and table", ErrInvariantViolation)
@@ -183,16 +198,20 @@ func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, opt
 	}
 
 	qualified := tableLockQualifiedName(schema, table)
+	// INV: LK-1 — the session's PID and backend start are what identify it
+	// from any other connection, so both are read before the lock is taken:
+	// a session that cannot read its own start is refused holding nothing.
+	pid, backendStart, err := readTableLockSessionIdentity(ctx, conn, qualified)
+	if err != nil {
+		return nil, errors.Join(err, conn.Close(ctx))
+	}
 	var objID int32
 	var held bool
-	var pid uint32
-	var backendStart time.Time
 	// INV: LK-1 — the server derives and attempts the key atomically on the
 	// dedicated session, so no unprotected window follows a client-side hash.
 	err = conn.QueryRow(ctx, `SELECT `+tableLockObjIDSQL+`,
-		pg_try_advisory_lock($3, `+tableLockObjIDSQL+`), pg_backend_pid(),
-		(SELECT a.backend_start FROM pg_catalog.pg_stat_activity a WHERE a.pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid())`,
-		schema, table, TableLockClassID).Scan(&objID, &held, &pid, &backendStart)
+		pg_try_advisory_lock($3, `+tableLockObjIDSQL+`)`,
+		schema, table, TableLockClassID).Scan(&objID, &held)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("acquire table lock for %s: %w", qualified, err), conn.Close(ctx))
 	}
@@ -284,6 +303,28 @@ func lookupTableLockHolder(ctx context.Context, conn AdvisoryLockHolder, key Tab
 // tableLockQualifiedName renders schema.table for messages. It is not the
 // lock key's input; the server derives that from the quoted identifiers.
 func tableLockQualifiedName(schema, table string) string { return schema + "." + table }
+
+// readTableLockSessionIdentity reads the PID and backend start of the
+// session behind conn, refusing with ErrSessionStartHidden when
+// pg_stat_activity hides the start from the role the session runs as. The
+// refusal names the role the session logged in as and the one it runs as,
+// since the remedy is a connection as the second or a grant to it.
+func readTableLockSessionIdentity(ctx context.Context, conn *pgx.Conn, qualified string) (uint32, time.Time, error) {
+	var pid uint32
+	var backendStart *time.Time
+	var sessionRole, currentRole string
+	err := conn.QueryRow(ctx, `SELECT pg_catalog.pg_backend_pid(),
+		(SELECT a.backend_start FROM pg_catalog.pg_stat_activity a WHERE a.pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()),
+		session_user, current_user`).Scan(&pid, &backendStart, &sessionRole, &currentRole)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("read the table lock session for %s: %w", qualified, err)
+	}
+	if backendStart == nil {
+		return 0, time.Time{}, fmt.Errorf("%w: table lock session for %s (backend %d) logged in as %q and runs as %q",
+			ErrSessionStartHidden, qualified, pid, sessionRole, currentRole)
+	}
+	return pid, *backendStart, nil
+}
 
 func (s *TableLockSession) monitor(ctx context.Context, opts tableLockOptions) {
 	ticker := time.NewTicker(opts.keepalive)

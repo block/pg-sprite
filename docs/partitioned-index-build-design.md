@@ -249,7 +249,10 @@ ST-7 when a name moved:
   are caught before anything is created. When the pool's role cannot see that
   session's backend start, which `pg_stat_activity` hides from another role
   without `pg_read_all_stats`, the flow refuses with `ErrTableLockUnconfirmed`
-  instead.
+  instead. A lock session that cannot read its own backend start, because the
+  `dbconn.Config` logs in as one role and runs as another, is refused earlier,
+  before the lock is taken, with `dbconn.ErrSessionStartHidden`; both carry
+  the `table-lock-unconfirmed` code.
 - A lock that is lost voids the run: the flow's context ends with it, and the
   error joins `ErrInvariantViolation` and `dbconn.ErrTableLockLost` (LK-1),
   whatever the interrupted step reported, so a lost lock is never a retryable

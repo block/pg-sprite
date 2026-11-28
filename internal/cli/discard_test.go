@@ -93,6 +93,10 @@ func TestDiscardRefusalSortsCauses(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, discardCauseTableLockHeld, cause)
 
+	cause, ok = discardRefusal(fmt.Errorf("discard public.orders: %w", dbconn.ErrSessionStartHidden))
+	require.True(t, ok)
+	assert.Equal(t, "table-lock-unconfirmed", cause, "the token migrate's verdict carries for the same refusal")
+
 	cause, ok = discardRefusal(fmt.Errorf("discard unrecorded slot pgsprite_a725d037: %w", decode.ErrSlotActive))
 	require.True(t, ok)
 	assert.Equal(t, discardCauseSlotActive, cause)
@@ -145,7 +149,7 @@ func TestDocListsTheCausesDiscardNames(t *testing.T) {
 	_, row, found := strings.Cut(section, "\n| `cause` | ")
 	require.True(t, found, "the discard report has a cause row")
 	row, _, _ = strings.Cut(row, "\n")
-	for _, cause := range []string{discardCauseTableLockHeld, discardCauseSlotActive, string(verdict.ReasonInsufficientPrivileges)} {
+	for _, cause := range []string{discardCauseTableLockHeld, discardCauseTableLockUnconfirmed, discardCauseSlotActive, string(verdict.ReasonInsufficientPrivileges)} {
 		assert.Contains(t, row, "`"+cause+"`")
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -58,6 +59,11 @@ const (
 	// discardCauseSlotActive: a process holds the replication slot of the
 	// table's derived name that no checkpoint row records.
 	discardCauseSlotActive = "slot-active"
+	// discardCauseTableLockUnconfirmed: the table lock session runs as a
+	// role that cannot read when its own session started, so the lock was
+	// never taken. It is the token migrate's verdict carries for the same
+	// refusal.
+	discardCauseTableLockUnconfirmed = string(executor.CodeTableLockUnconfirmed)
 )
 
 // errDiscardTableAmbiguous reports a SCHEMA.TABLE name that names a table
@@ -302,14 +308,18 @@ func discardPreflightRefusal(err error) (string, bool) {
 
 // discardRefusal sorts an error from the discard into the refusal cause it
 // stands for. A shadow refusal carries its own cause; a lock another
-// session holds, a held unrecorded slot, and a slot the role may not drop
-// are refusals of their own. Anything else is not a refusal.
+// session holds, a lock session that cannot read its own start, a held
+// unrecorded slot, and a slot the role may not drop are refusals of their
+// own. Anything else is not a refusal.
 func discardRefusal(err error) (string, bool) {
 	if cause := schemachange.RefusalCauseOf(err); cause != "" {
 		return string(cause), true
 	}
 	if _, ok := errors.AsType[*dbconn.TableLockHeldError](err); ok {
 		return discardCauseTableLockHeld, true
+	}
+	if errors.Is(err, dbconn.ErrSessionStartHidden) {
+		return discardCauseTableLockUnconfirmed, true
 	}
 	if errors.Is(err, decode.ErrSlotActive) {
 		return discardCauseSlotActive, true

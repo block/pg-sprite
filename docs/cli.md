@@ -770,6 +770,14 @@ It is refused, with exit 2 and nothing dropped, when:
 
 - a run on the table is in progress (`table-lock-held`): stop it with Ctrl-C
   or `SIGTERM` first;
+- the connection logs in as one role and runs as another (the `role`
+  connection parameter, or `SET ROLE`) that cannot read when its own session
+  started, so the table lock cannot identify its session
+  (`table-lock-unconfirmed`: the refusal's cause here, and the code on the
+  failed verdict `migrate` reports for the same stop): connect as that role
+  directly, or grant it `pg_read_all_stats`, which also lets it read every
+  session's query text and statistics across the cluster, and run `discard`
+  again;
 - the run's swap already committed (`restart-swap-committed`): the change is
   live, so run the same `migrate` command again to finish it;
 - the change completed (`resume-row-terminal`);
@@ -815,7 +823,7 @@ removed, or changes meaning.
 | `format_version` | The report's shape, 1 |
 | `table` | The table as given |
 | `outcome` | `discarded`, `nothing-to-discard`, `refused` (exit 2, nothing dropped), or `stopped` (exit 1, the fields below name what was dropped before the failure) |
-| `cause` | The refusal cause of a `refused` or `stopped` discard; `""` otherwise, and for a stop that was not a refusal. It is one of the causes the command names, `table-lock-held`, `slot-active`, and `insufficient-privileges`; a copy-and-swap shape cause from the preflight ([`CopySwapRefusalCause`](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause)); or a shadow operation cause from the engine ([`RefusalCause`](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause)), of which a discard meets `restart-swap-committed`, `resume-row-terminal`, `resume-row-mismatch`, and `resume-slot-foreign` as above; `shadow-foreign-relation` and `shadow-owner-mismatch` when a relation under the shadow's name, or the table itself, is not the one the engine's run made or proved; and `shadow-lock-lost`, `shadow-lock-held-elsewhere`, and `shadow-lock-unconfirmed` when the table's lock is lost or cannot be confirmed mid-discard. A script that meets a cause it does not know treats it as a refusal to read by hand |
+| `cause` | The refusal cause of a `refused` or `stopped` discard; `""` otherwise, and for a stop that was not a refusal. It is one of the causes the command names, `table-lock-held`, `table-lock-unconfirmed`, `slot-active`, and `insufficient-privileges`; a copy-and-swap shape cause from the preflight ([`CopySwapRefusalCause`](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause)); or a shadow operation cause from the engine ([`RefusalCause`](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause)), of which a discard meets `restart-swap-committed`, `resume-row-terminal`, `resume-row-mismatch`, and `resume-slot-foreign` as above; `shadow-foreign-relation` and `shadow-owner-mismatch` when a relation under the shadow's name, or the table itself, is not the one the engine's run made or proved; and `shadow-lock-lost`, `shadow-lock-held-elsewhere`, and `shadow-lock-unconfirmed` when the table's lock is lost or cannot be confirmed mid-discard. A script that meets a cause it does not know treats it as a refusal to read by hand |
 | `detail` | The error behind a `refused` or `stopped` discard, `""` otherwise |
 | `row_phase` | The phase of the checkpoint row deleted, `""` when none was |
 | `shadow` | The shadow table dropped, in the table's schema, `""` when none was |
