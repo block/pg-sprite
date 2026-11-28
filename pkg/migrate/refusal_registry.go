@@ -415,7 +415,7 @@ func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 	if disallowed, isStatement := errors.AsType[*statement.DisallowedStatementError](err); isStatement {
 		sql = disallowed.SQL
 		detail = "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, " +
-			"so this statement is not allowed in it; nothing was planned or executed"
+			"so this " + disallowed.Object.String() + " is not allowed in it; nothing was planned or executed"
 	}
 	if extra, isExtra := errors.AsType[*statement.EnumTypeFileError](err); isExtra {
 		sql = extra.SQL

@@ -93,3 +93,61 @@ func TestParseDesiredFileNamesTheSecondTable(t *testing.T) {
 		})
 	}
 }
+
+// A refused statement names the object it declares, changes, or annotates,
+// finer than its kind: a comment, a trigger, and a domain share a kind, and
+// each belongs somewhere different instead of the desired file.
+func TestParseDesiredFileNamesTheObjectARefusedStatementDeclares(t *testing.T) {
+	const table = "CREATE TABLE t (id int);\n"
+	tests := []struct {
+		name   string
+		sql    string
+		object DeclaredObject
+	}{
+		{"comment", table + "COMMENT ON TABLE t IS 'people'", DeclaredComment},
+		{"comment on a column", table + "COMMENT ON COLUMN t.id IS 'key'", DeclaredComment},
+		{"trigger", table + "CREATE TRIGGER audit AFTER INSERT ON t FOR EACH ROW EXECUTE FUNCTION audit()", DeclaredTrigger},
+		{"function", table + "CREATE FUNCTION audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$", DeclaredFunction},
+		{"procedure", table + "CREATE PROCEDURE p() LANGUAGE sql AS $$ SELECT 1 $$", DeclaredFunction},
+		{"view", table + "CREATE VIEW v AS SELECT id FROM t", DeclaredView},
+		{"materialized view", table + "CREATE MATERIALIZED VIEW mv AS SELECT id FROM t", DeclaredMaterializedView},
+		{"materialized view alone", "CREATE MATERIALIZED VIEW mv AS SELECT 1 AS id", DeclaredMaterializedView},
+		{"table as select", table + "CREATE TABLE t2 AS SELECT id FROM t", DeclaredOther},
+		{"domain", "CREATE DOMAIN email AS text", DeclaredDomain},
+		{"statistics", table + "CREATE STATISTICS s ON id, id FROM t", DeclaredStatistics},
+		{"sequence", table + "CREATE SEQUENCE seq", DeclaredSequence},
+		{"composite type", "CREATE TYPE pair AS (a int, b int)", DeclaredType},
+		{"range type", table + "CREATE TYPE floatrange AS RANGE (subtype = float8)", DeclaredType},
+		{"extension", table + "CREATE EXTENSION citext", DeclaredExtension},
+		{"grant", table + "GRANT SELECT ON t TO reader", DeclaredGrant},
+		{"revoke", table + "REVOKE SELECT ON t FROM reader", DeclaredGrant},
+		{"role grant", table + "GRANT reader TO app", DeclaredGrant},
+		{"schema", table + "CREATE SCHEMA audit", DeclaredSchema},
+		{"rule", table + "CREATE RULE r AS ON INSERT TO t DO INSTEAD NOTHING", DeclaredRule},
+		{"data change", table + "DELETE FROM t", DeclaredOther},
+		{"comment beside row security",
+			table + "CREATE POLICY p ON t USING (true); COMMENT ON TABLE t IS 'people'", DeclaredComment},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseDesiredFile(tt.sql)
+			disallowed, ok := errors.AsType[*DisallowedStatementError](err)
+			require.True(t, ok, "the refusal carries the statement: %v", err)
+			assert.Equal(t, tt.object, disallowed.Object)
+		})
+	}
+}
+
+// Every declared object has a noun of its own, so a message that names one
+// never reads as another.
+func TestDeclaredObjectsHaveDistinctNames(t *testing.T) {
+	seen := map[string]DeclaredObject{}
+	for _, object := range DeclaredObjects() {
+		name := object.String()
+		require.NotEmpty(t, name)
+		other, dup := seen[name]
+		require.False(t, dup, "objects %d and %d share the name %q", other, object, name)
+		seen[name] = object
+	}
+	assert.Equal(t, "statement", DeclaredOther.String())
+}

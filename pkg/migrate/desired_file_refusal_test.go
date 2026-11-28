@@ -28,7 +28,7 @@ func TestDesiredFileRefusalVerdicts(t *testing.T) {
 	}{
 		{"domain file", "CREATE DOMAIN email AS text",
 			"CREATE DOMAIN email AS text", verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDirectOperator,
-			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"},
+			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this domain is not allowed in it; nothing was planned or executed"},
 		{"enum type in a table file", "CREATE TYPE mood AS ENUM ('happy', 'sad'); CREATE TABLE t (id int)",
 			"CREATE TYPE mood AS ENUM ('happy', 'sad')", verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDirectOperator,
 			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"},
