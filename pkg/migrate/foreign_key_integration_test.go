@@ -232,11 +232,44 @@ func reviewedDestructiveRequest(t *testing.T, pool *pgxpool.Pool, schema, desire
 	}
 }
 
-// A foreign key whose definition the desired file changes runs as the drop of
-// the live key, then the add of the new one NOT VALID and its validation, so
-// no step holds a lock that stops writes for longer than the brief budget.
-// The new key is in place and validated, with the changed action.
-func TestRunDesiredChangesAForeignKey(t *testing.T) {
+// A file that moves the orders key to a new name and adds ON DELETE CASCADE
+// runs as the add of the new key, NOT VALID then validated, and only then the
+// drop of the old one, so every write is checked against a key throughout.
+func TestRunDesiredChangesAForeignKeyUnderANewName(t *testing.T) {
+	pool, schema := foreignKeySchema(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES %[1]s.users (id));
+		INSERT INTO %[1]s.orders VALUES (10, 1), (11, 2)`, schema))
+	require.NoError(t, err)
+	req := reviewedDestructiveRequest(t, pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL CONSTRAINT orders_user_id_cascade_fkey REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
+	require.Len(t, res.Plan.Statements, 2)
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, res.Plan.Statements[0].Kind)
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, res.Plan.Statements[1].Kind)
+	exists, _ := ordersForeignKeyValidated(t, pool, schema)
+	assert.False(t, exists, "the old key is gone")
+	var onDelete string
+	var validated bool
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT confdeltype, convalidated FROM pg_catalog.pg_constraint
+		WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_user_id_cascade_fkey'`, schema).Scan(&onDelete, &validated))
+	assert.Equal(t, "c", onDelete, "the new key cascades deletes")
+	assert.True(t, validated, "the run validates the rows under the new key")
+}
+
+// A file that changes the orders key under the same name is refused before
+// anything runs: the old key would be dropped before the new one could be
+// added, and writes between the two would be checked against no key.
+func TestRunDesiredRefusesAForeignKeyChangedUnderTheSameName(t *testing.T) {
 	pool, schema := foreignKeySchema(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES %[1]s.users (id));
@@ -251,19 +284,16 @@ CREATE TABLE orders (
 	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 
 	require.NoError(t, err)
-	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
-	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
-	require.Len(t, res.Plan.Statements, 2)
-	assert.Equal(t, schemadiff.ChangeDropForeignKey, res.Plan.Statements[0].Kind)
-	assert.Equal(t, schemadiff.ChangeAddForeignKey, res.Plan.Statements[1].Kind)
+	assert.Equal(t, verdict.OutcomeRefused, res.Outcome, res.Detail)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, res.Reason)
 	exists, validated := ordersForeignKeyValidated(t, pool, schema)
-	assert.True(t, exists)
-	assert.True(t, validated, "the run validates the rows under the new key")
+	assert.True(t, exists, "the live key stays")
+	assert.True(t, validated)
 	var onDelete string
 	require.NoError(t, pool.QueryRow(t.Context(), `
 		SELECT confdeltype FROM pg_catalog.pg_constraint
 		WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_user_id_fkey'`, schema).Scan(&onDelete))
-	assert.Equal(t, "c", onDelete, "the new key cascades deletes")
+	assert.Equal(t, "a", onDelete, "the live key is unchanged")
 }
 
 // A foreign key the desired file adds to a live table with rows is applied:
@@ -420,10 +450,11 @@ CREATE TABLE employees (
 	assert.True(t, validated)
 }
 
-// A self-referencing foreign key and the key it rests on, a primary key, a
-// unique constraint, or a unique index, both leave the desired file. The plan
-// drops the foreign key first, since PostgreSQL refuses to drop the key while
-// the foreign key still depends on it, and the run converges.
+// A self-referencing foreign key and the key it rests on, a primary key or a
+// unique constraint, both leave the desired file. The plan drops the foreign
+// key first, since PostgreSQL refuses to drop the key while the foreign key
+// still depends on it, and the run converges. A key that rests on a
+// standalone unique index cannot be declared, so its drop is refused.
 func TestRunDesiredDropsASelfReferencingForeignKeyBeforeItsKey(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -442,14 +473,6 @@ func TestRunDesiredDropsASelfReferencingForeignKeyBeforeItsKey(t *testing.T) {
 			live:    `CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, code text CONSTRAINT orders_code_key UNIQUE, parent_code text CONSTRAINT orders_parent_fkey REFERENCES %[1]s.orders (code))`,
 			desired: `CREATE TABLE orders (id bigint PRIMARY KEY, code text, parent_code text);`,
 			keyDrop: `ALTER TABLE %s.orders DROP CONSTRAINT orders_code_key`,
-		},
-		{
-			name: "unique index",
-			live: `CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, code text, parent_code text);
-				CREATE UNIQUE INDEX orders_code_idx ON %[1]s.orders (code);
-				ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_parent_fkey FOREIGN KEY (parent_code) REFERENCES %[1]s.orders (code)`,
-			desired: `CREATE TABLE orders (id bigint PRIMARY KEY, code text, parent_code text);`,
-			keyDrop: `DROP INDEX %s.orders_code_idx`,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

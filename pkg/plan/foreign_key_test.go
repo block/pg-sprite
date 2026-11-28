@@ -14,9 +14,9 @@ import (
 )
 
 // A foreign-key drop keeps its route and runs, as an add or a validation
-// does. Only the drop of a key into another schema, which a desired file
-// cannot declare, stays in the plan for review and is refused for execution.
-func TestRefuseUndeclarableForeignKeyDropsRefusesOnlyKeysIntoOtherSchemas(t *testing.T) {
+// does. Only the drop of a key a desired file cannot declare stays in the
+// plan for review and is refused for execution.
+func TestRefuseUndeclarableForeignKeyDropsRefusesOnlyUndeclarableKeys(t *testing.T) {
 	executable := func(sql string, kind schemadiff.ChangeKind, drops string) plan.Statement {
 		st := plan.Statement{
 			SQL: sql, Kind: kind, Route: planner.RouteNative, Backend: router.BackendNative,

@@ -273,9 +273,53 @@ CREATE TABLE orders (
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
 
-// A foreign key whose definition changes plans as the drop of the live key
-// and the online add of the new one: ADD ... NOT VALID, then VALIDATE.
-func TestPlanChangedForeignKeyIsDroppedAndAddedOnline(t *testing.T) {
+// A live foreign key from a table to itself whose referenced column is
+// unique only through a standalone unique index cannot be declared either:
+// the file's CREATE TABLE would declare the key before the index exists. A
+// file that keeps the index and adds an unrelated column still plans the
+// key's drop, and the drop is shown for review and refused, so the change
+// never removes a key its author had no way to keep.
+func TestPlanDropOfASelfReferencingForeignKeyOnAStandaloneIndexIsRefused(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			code text NOT NULL,
+			parent_code text
+		);
+		CREATE UNIQUE INDEX orders_code_idx ON %[1]s.orders (code);
+		ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_parent_fkey FOREIGN KEY (parent_code) REFERENCES %[1]s.orders (code)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    code text NOT NULL,
+    parent_code text,
+    note text
+);
+CREATE UNIQUE INDEX orders_code_idx ON orders (code);`)
+
+	var drop *plan.Statement
+	for i, st := range report.Statements {
+		if st.Kind == schemadiff.ChangeDropForeignKey {
+			drop = &report.Statements[i]
+		}
+	}
+	require.NotNil(t, drop, "the diff plans the drop of the key the file cannot declare")
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_parent_fkey", schema), drop.SQL)
+	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
+	assert.Empty(t, drop.ExecSQL)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+}
+
+// A foreign key whose definition changes under the same name plans as the
+// drop of the live key and the online add of the new one, and the name is
+// taken until the drop, so the add cannot come first. Between the two, writes
+// would be checked against no key at all, so the drop is refused and the
+// live key stays.
+func TestPlanChangedForeignKeyDropIsRefused(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -291,14 +335,44 @@ CREATE TABLE orders (
 );`)
 
 	require.Len(t, report.Statements, 2)
-	requireForeignKeyDrop(t, schema, report.Statements[0])
-	add := report.Statements[1]
+	drop := report.Statements[0]
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, drop.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP CONSTRAINT orders_user_id_fkey", schema), drop.SQL)
+	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
+	assert.Empty(t, drop.ExecSQL)
+	assert.Equal(t, schemadiff.ChangeAddForeignKey, report.Statements[1].Kind)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+}
+
+// A foreign key the file declares changed under a new name is added and
+// validated before the old key is dropped, so every write is checked
+// against a key throughout, and a validation that fails leaves the old key
+// standing.
+func TestPlanForeignKeyMovedToANewNameIsAddedBeforeTheOldOneIsDropped(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id)
+		)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL CONSTRAINT orders_user_id_cascade_fkey REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	require.Len(t, report.Statements, 2)
+	add := report.Statements[0]
 	assert.Equal(t, schemadiff.ChangeAddForeignKey, add.Kind)
 	assert.Equal(t, router.DispositionExecute, add.Disposition)
 	assert.Equal(t, []string{
-		fmt.Sprintf("ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) ON DELETE CASCADE NOT VALID", schema),
-		fmt.Sprintf(`ALTER TABLE "%s"."orders" VALIDATE CONSTRAINT "orders_user_id_fkey"`, schema),
+		fmt.Sprintf("ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_cascade_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) ON DELETE CASCADE NOT VALID", schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."orders" VALIDATE CONSTRAINT "orders_user_id_cascade_fkey"`, schema),
 	}, add.ExecSQL)
+	requireForeignKeyDrop(t, schema, report.Statements[1])
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 

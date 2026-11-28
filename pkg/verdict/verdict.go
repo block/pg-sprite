@@ -127,8 +127,11 @@ const (
 	// occupant's shape.
 	ReasonCreateCollision Reason = "create-collision"
 	// ReasonDeclarativeForeignKey: the desired-state plan drops a foreign
-	// key into another schema, which a desired file cannot declare, so the
-	// plan drops it whatever the file says. The plan still shows the change;
+	// key it changes under the same name, which would leave writes checked
+	// against no key until the new one is added, or a key a desired file
+	// cannot declare, one into another schema or one from a table to itself
+	// through a standalone unique index, which the plan drops whatever the
+	// file says. The plan still shows the change;
 	// the imperative front door runs the drop.
 	ReasonDeclarativeForeignKey Reason = "declarative-foreign-key"
 	// ReasonCopyAndSwapRefused: the change routes to copy-and-swap and the

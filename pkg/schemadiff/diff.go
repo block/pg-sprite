@@ -450,8 +450,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	renameTargets := renameIndexTargets(renamed)
 
 	// A unique index or unique constraint the plan drops is held back until
-	// the plan's new unique indexes and constraints are in place, and so is
-	// a constraint the desired table declares again under another name. A
+	// the plan's new unique indexes and constraints are in place, a foreign
+	// key until the plan's new foreign keys are, and so is a constraint the
+	// desired table declares again under another name. A
 	// uniqueness or rule that moves to another name or another kind of
 	// object keeps holding while its replacement builds, and a replacement
 	// that fails leaves the old one standing. A plan that drops or retypes a
@@ -462,6 +463,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
 		renamedRules: renamedConstraintDefs(desired, liveCons),
+		foreignKeys:  addsForeignKey(desired, liveCons, desiredCons),
 	}
 	// A held foreign key waits for the foreign keys the plan adds, which
 	// come last; every other held drop goes before them, so a foreign key

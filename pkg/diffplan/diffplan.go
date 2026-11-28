@@ -78,6 +78,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	tableExists := true
 	var changes []schemadiff.Change
 	var facts planner.Facts
+	var changedForeignKeys map[string]bool
 	live, err := schemadiff.Introspect(ctx, pool, req.Schema, ds.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
@@ -113,6 +114,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
+		changedForeignKeys = schemadiff.ForeignKeysDroppedBeforeTheirReplacement(live, desired)
 		if changes, facts.NotNullHelpers, err = resumeNotNullHelpers(ctx, pool, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
@@ -149,7 +151,8 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if err := recordNotNullScaffolds(ctx, pool, report.Statements); err != nil {
 		return plan.Report{}, err
 	}
-	plan.RefuseUndeclarableForeignKeyDrops(&report, foreignKeysIntoOtherSchemas(live))
+	plan.RefuseUndeclarableForeignKeyDrops(&report, undeclarableForeignKeys(live))
+	plan.RefuseChangedForeignKeyDrops(&report, changedForeignKeys)
 	if !tableExists {
 		// Shape refusals are stamped first so the disclosure below only
 		// describes the statements that remain executable.
@@ -180,13 +183,16 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	return report, nil
 }
 
-// foreignKeysIntoOtherSchemas names the live table's foreign keys whose
-// referenced table is in another schema. A desired file cannot declare one,
-// so the diff always plans its drop.
-func foreignKeysIntoOtherSchemas(live schemadiff.Model) map[string]bool {
+// undeclarableForeignKeys names the live table's foreign keys a desired file
+// cannot declare, so the diff always plans their drop: a key into another
+// schema, since a file names tables unqualified, and a key from the table to
+// itself whose referenced columns are unique only through a standalone
+// unique index, since the file's CREATE TABLE declares the key before the
+// CREATE INDEX after it runs. Export refuses the same two shapes.
+func undeclarableForeignKeys(live schemadiff.Model) map[string]bool {
 	keys := map[string]bool{}
 	for _, con := range live.Constraints {
-		if con.ForeignKey && con.ReferencesOtherSchema {
+		if con.ForeignKey && (con.ReferencesOtherSchema || con.SelfReferencesStandaloneIndex) {
 			keys[con.Name] = true
 		}
 	}

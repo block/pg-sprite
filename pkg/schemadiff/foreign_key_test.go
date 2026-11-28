@@ -35,3 +35,47 @@ func TestDiffClassifiesForeignKeyChanges(t *testing.T) {
 	assert.False(t, ChangeAddConstraint.IsForeignKey())
 	assert.False(t, ChangeDropConstraint.IsForeignKey())
 }
+
+// A foreign key the plan drops before the key that replaces it is added
+// leaves writes checked against no key in between: one changed under the
+// same name, and every dropped key in a plan that adds a foreign key and also
+// drops a column, since such a plan keeps its drops first. A key moved to a
+// new name waits for its replacement and is dropped after it, and a plan that
+// adds no foreign key replaces nothing.
+func TestForeignKeysDroppedBeforeTheirReplacement(t *testing.T) {
+	fk := func(name, def string) Constraint {
+		return Constraint{Name: name, Def: def, ForeignKey: true}
+	}
+	withKeys := func(m Model, keys ...Constraint) Model {
+		m.Constraints = append(m.Constraints, keys...)
+		return m
+	}
+	live := withKeys(base(), fk("events_user_fk", "FOREIGN KEY (user_id) REFERENCES users(id)"))
+	cascade := "FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE"
+	withoutName := func(m Model) Model {
+		m.Columns = m.Columns[:1]
+		return m
+	}
+
+	for _, tt := range []struct {
+		name    string
+		desired Model
+		want    map[string]bool
+	}{
+		{"changed under the same name", withKeys(base(), fk("events_user_fk", cascade)), map[string]bool{"events_user_fk": true}},
+		{"moved to a new name", withKeys(base(), fk("events_user_cascade_fk", cascade)), map[string]bool{}},
+		{"moved to a new name beside a column drop", withKeys(withoutName(base()), fk("events_user_cascade_fk", cascade)), map[string]bool{"events_user_fk": true}},
+		{"dropped beside a column drop, with nothing added", withoutName(base()), map[string]bool{}},
+		{"dropped", base(), map[string]bool{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ForeignKeysDroppedBeforeTheirReplacement(live, tt.desired))
+		})
+	}
+
+	moved, err := Diff("app", live, withKeys(base(), fk("events_user_cascade_fk", cascade)))
+	require.NoError(t, err)
+	require.Len(t, moved, 2)
+	assert.Equal(t, ChangeAddForeignKey, moved[0].Kind, "the new key is added first")
+	assert.Equal(t, ChangeDropForeignKey, moved[1].Kind, "the old key is dropped once the new one is in place")
+}

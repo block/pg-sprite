@@ -85,7 +85,7 @@ func RouteRefusal() verdict.Refusal {
 }
 
 // ForeignKeyChangeRefusal classifies the desired-state drop of a foreign key
-// into another schema, which a desired file cannot declare. The plan keeps
+// changed under the same name, or of one a desired file cannot declare. The plan keeps
 // the statement, so the diff stays visible while execution refuses it.
 func ForeignKeyChangeRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey)
