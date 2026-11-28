@@ -967,15 +967,17 @@ cannot route.
 |---|---|---|---|
 | refused — never executed | — | — | 2 |
 
-The desired file no longer declares a live foreign key. `diff` shows the
-drop so the change is reviewable, but desired-state execution
-(`migrate --desired`) does not drop foreign keys yet. To drop one, run the
-statement with `pg-sprite migrate --alter --allow-destructive SCHEMA.TABLE`.
+The live table has a foreign key into another schema. A desired file names
+tables unqualified, so it cannot declare that key, and `diff` plans its drop
+whatever the file says. The drop is shown for review and refused, so a
+desired-state run never removes a key the file had no way to keep. To remove
+it, run the statement with
+`pg-sprite migrate --alter --allow-destructive SCHEMA.TABLE`.
 
-A foreign key the desired file adds is not refused: it runs as
-`ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT`, so writes
-keep flowing during the scan, and a new table is created with its foreign
-keys.
+Every other foreign-key change runs. A key the desired file drops runs as a
+destructive `DROP CONSTRAINT`; a key it adds runs as
+`ADD CONSTRAINT ... NOT VALID` followed by `VALIDATE CONSTRAINT`; and a
+changed key runs as the drop and the add.
 
 ### `table-not-found`
 

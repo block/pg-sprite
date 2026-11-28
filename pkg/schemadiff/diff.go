@@ -43,8 +43,10 @@ const (
 	// ChangeDropConstraint drops a table constraint other than a foreign
 	// key.
 	ChangeDropConstraint ChangeKind = "drop-constraint"
-	// ChangeDropForeignKey drops a foreign-key constraint. Desired-state
-	// execution refuses it: a foreign-key drop is planned, not run.
+	// ChangeDropForeignKey drops a foreign-key constraint. It is
+	// destructive: the constraint stops checking writes to both tables.
+	// Desired-state execution refuses the drop of a key into another
+	// schema, which a desired file cannot declare.
 	ChangeDropForeignKey ChangeKind = "drop-foreign-key"
 	// ChangeDropColumn drops a column.
 	ChangeDropColumn ChangeKind = "drop-column"
@@ -448,8 +450,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	renameTargets := renameIndexTargets(renamed)
 
 	// A unique index or unique constraint the plan drops is held back until
-	// the plan's new unique indexes and constraints are in place, and so is
-	// a constraint the desired table declares again under another name. A
+	// the plan's new unique indexes and constraints are in place, a foreign
+	// key until the plan's new foreign keys are, and so is a constraint the
+	// desired table declares again under another name. A
 	// uniqueness or rule that moves to another name or another kind of
 	// object keeps holding while its replacement builds, and a replacement
 	// that fails leaves the old one standing. A plan that drops or retypes a
@@ -460,9 +463,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
 		renamedRules: renamedConstraintDefs(desired, liveCons),
+		foreignKeys:  installsForeignKey(desired, liveCons, desiredCons),
 	}
-	// A held foreign key waits for the foreign keys the plan adds, which
-	// come last; every other held drop goes before them, so a foreign key
+	// A held foreign key waits for the foreign keys the plan adds or
+	// validates, which come last; every other held drop goes before them, so a foreign key
 	// the plan adds cannot bind to a key the plan is about to drop.
 	var heldChanges, heldForeignKeys []Change
 	waits := func(ch Change) bool { return !dropsOrRetypes && held.holds(ch) }
@@ -475,6 +479,28 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		default:
 			heldChanges = append(heldChanges, ch)
 		}
+	}
+
+	// Foreign keys to drop go first. A key a self-referencing foreign key
+	// rests on, its primary key, unique constraint, or unique index, cannot
+	// be dropped while the foreign key still depends on it, and a foreign
+	// key depends on nothing the rest of the plan drops.
+	// A foreign key whose drop waits for the plan's adds is still in place
+	// when a key it references is dropped, so only one dropped here frees
+	// that key.
+	droppedForeignKeys := make(map[string]bool)
+	for _, con := range live.Constraints {
+		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
+			continue
+		}
+		if _, ok := replaced[con.Name]; ok {
+			continue
+		}
+		drop := dropConstraintChange(table, con)
+		if !waits(drop) {
+			droppedForeignKeys[con.Name] = true
+		}
+		appendDrop(drop)
 	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
@@ -498,7 +524,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			_, changed := desiredIdx[ix.Name]
-			if err := refuseReferencedIndexDrop(ix, changed); err != nil {
+			if err := refuseReferencedIndexDrop(schema, live.Table, ix, changed, droppedForeignKeys); err != nil {
 				return nil, err
 			}
 			appendDrop(Change{
@@ -510,34 +536,21 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
-	// Constraints to drop: gone from desired, or changed (re-added below).
-	// One left NOT VALID with the desired definition is validated below
-	// instead, and one replaced in place is dropped by the statement that
-	// adds its replacement.
-	droppedForeignKeys := make(map[string]bool)
+	// Other constraints to drop: gone from desired, or changed (re-added
+	// below). One left NOT VALID with the desired definition is validated
+	// below instead, and one replaced in place is dropped by the statement
+	// that adds its replacement.
 	for _, con := range live.Constraints {
+		if con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
+			continue
+		}
 		if _, ok := replaced[con.Name]; ok {
 			continue
 		}
-		want, ok := desiredCons[con.Name]
-		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
-			if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
-				return nil, err
-			}
-			drop := Change{
-				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
-				Kind:        dropConstraintKind(con),
-				Destructive: true,
-				Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
-			}
-			// A foreign key whose drop waits for the plan's adds is still in
-			// place when a key it references is dropped, so only one dropped
-			// here frees that key.
-			if con.ForeignKey && !waits(drop) {
-				droppedForeignKeys[con.Name] = true
-			}
-			appendDrop(drop)
+		if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
+			return nil, err
 		}
+		appendDrop(dropConstraintChange(table, con))
 	}
 
 	// Columns to drop. A rename is indistinguishable from drop+add at the
@@ -633,7 +646,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if err != nil {
 				return nil, err
 			}
-			changes = append(changes, replacement...)
+			if con.ForeignKey {
+				foreignKeys = append(foreignKeys, replacement...)
+			} else {
+				changes = append(changes, replacement...)
+			}
 			continue
 		}
 		if ok && validatesInPlace(had, con) {
@@ -994,8 +1011,27 @@ func addUsingIndexClause(con Constraint, index string) string {
 	return clause
 }
 
+// constraintNeedsDrop reports whether a live constraint is gone from the
+// desired model, or changed in a way validation in place cannot reach, so the
+// plan drops it (and re-adds a changed one).
+func constraintNeedsDrop(con Constraint, desiredCons map[string]Constraint) bool {
+	want, ok := desiredCons[con.Name]
+	return !ok || (want.Def != con.Def && !validatesInPlace(con, want))
+}
+
+// dropConstraintChange is the destructive drop of a live constraint, with the
+// record the checked drop compares against.
+func dropConstraintChange(table string, con Constraint) Change {
+	return Change{
+		SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
+		Kind:        dropConstraintKind(con),
+		Destructive: true,
+		Drops:       &DroppedObject{Kind: DroppedConstraint, Name: con.Name, Definition: con.Def},
+	}
+}
+
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in
-// their own kind so desired-state execution can refuse them.
+// their own kind so a consumer can gate them apart from other constraints.
 func dropConstraintKind(con Constraint) ChangeKind {
 	if con.ForeignKey {
 		return ChangeDropForeignKey

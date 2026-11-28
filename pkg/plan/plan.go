@@ -71,7 +71,11 @@ import (
 // its part in the fingerprint.
 // Version 29 added the rename-index kind and the replaced_by statement
 // field, which a changed index the diff replaces rather than drops carries.
-const FormatVersion = 29
+// Version 30 runs the drop-foreign-key kind instead of refusing it, and
+// narrows the declarative-foreign-key reason to the drop of a key a desired
+// file cannot declare, or changes under the same name where it cannot be
+// replaced in one statement.
+const FormatVersion = 30
 
 // Source identifies which front door derived the plan.
 type Source string
