@@ -252,8 +252,8 @@ func refusedDecisionDetail(d planner.Decision) (string, bool) {
 func dependentDetail(d planner.Decision) (string, bool) {
 	switch d.Reason {
 	case planner.ReasonDependentView:
-		return fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
-			"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", ")), true
+		return fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; %s",
+			d.Operation, d.ViewsPhrase(), d.ViewsHelp()), true
 	case planner.ReasonDependentPolicy:
 		return fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a policy reads it; %s",
 			d.Operation, planner.DependentsPhrase("policy", "policies", d.DependentPolicies), d.DependentFix.Help("policies")), true
@@ -407,7 +407,7 @@ func failureVerdict(st statement.Statement, err error,
 	case len(v.ExecutedSQL) > 0:
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; the %d committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
 			stepErr.Step, stepErr.Total, len(v.ExecutedSQL))
-	case buildFault:
+	case buildFault, published != nil:
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; no earlier steps had committed",
 			stepErr.Step, stepErr.Total)
 	default:

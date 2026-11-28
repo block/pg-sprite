@@ -32,8 +32,10 @@ func columnType(t *testing.T, pool *pgxpool.Pool, schema, table, column string) 
 // while the view exists; PostgreSQL refuses even a type change it would
 // otherwise relabel without a rewrite, and one that needs a rewrite is
 // refused before the copy-and-swap route runs. The run is refused at plan
-// time with the views named, so the operator learns what to change before anything
-// reaches the server, and the column is left as it was. A rename, which the
+// time with each view named by its kind and the manual path the change
+// takes with the views out of the way, so the operator learns what to
+// change before anything reaches the server, and the column is left as it
+// was. A rename, which the
 // views follow, is not a dependent-view refusal — it runs once the override
 // names the table — and changes to a column no view reads still run.
 func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
@@ -53,14 +55,23 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 		return schema
 	}
 
+	const recreate = "in one transaction drop those views and materialized views, run the change, and recreate them; " +
+		"recreating a materialized view runs its query to fill it again while the transaction blocks the table"
 	for _, tc := range []struct {
 		name      string
 		statement string
+		help      string
 	}{
-		{name: "a type change the server would relabel", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)"},
-		{name: "a type change to text", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE text"},
-		{name: "a type change copy-and-swap would run", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(20)"},
-		{name: "a column drop", statement: "ALTER TABLE %s.users DROP COLUMN email"},
+		{name: "a type change the server would relabel", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)", help: recreate},
+		{name: "a type change to text", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE text", help: recreate},
+		{
+			name: "a type change copy-and-swap would run", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(20)",
+			help: "add a column of the new type instead, have the application write to both and backfill it, point those views and materialized views at it and switch reads to it, then drop the old column once nothing uses it",
+		},
+		{
+			name: "a column drop", statement: "ALTER TABLE %s.users DROP COLUMN email",
+			help: "change those views and materialized views so they no longer read the column, then re-plan the drop",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			schema := seed(t)
@@ -73,8 +84,8 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 				fmt.Sprintf(`"%s"."Mail Report"`, schema),
 				fmt.Sprintf(`"%s"."active_users"`, schema),
 			}, v.DependentViews)
-			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by "%s"."Mail Report", "%s"."active_users"`, schema, schema))
-			assert.Contains(t, v.Detail, "drop or redefine those views first, then re-plan")
+			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by view "%s"."active_users" and materialized view "%s"."Mail Report"`, schema, schema))
+			assert.Contains(t, v.Detail, tc.help)
 			assert.Equal(t, "character varying(50)", columnType(t, pool, schema, "users", "email"))
 		})
 	}
@@ -92,6 +103,23 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 			fmt.Sprintf(`"%s"."Mail Report"`, schema),
 			fmt.Sprintf(`"%s"."active_users"`, schema),
 		}, plan.Decisions[0].DependentViews)
+		assert.Equal(t, []string{fmt.Sprintf(`"%s"."Mail Report"`, schema)}, plan.Decisions[0].DependentMaterializedViews)
+		assert.Equal(t, planner.DependentFixRecreateAroundChange, plan.Decisions[0].DependentFix)
+	})
+
+	// A view that reads one of the blocking views has to be dropped
+	// before it, so the refusal gives the order to drop every view in and
+	// warns what recreating a view loses, a materialized view's indexes
+	// included.
+	t.Run("the refusal names the views that read the views", func(t *testing.T) {
+		schema := seed(t)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE VIEW %[1]s.mail_top AS SELECT email FROM %[1]s."Mail Report"`, schema))
+		require.NoError(t, err)
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Contains(t, v.Detail, fmt.Sprintf(`drop the views in this order: view "%[1]s"."mail_top", then materialized view "%[1]s"."Mail Report", then view "%[1]s"."active_users", and recreate them in reverse`, schema))
+		assert.Contains(t, v.Detail, "a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults, and a materialized view its indexes too")
 	})
 
 	for _, tc := range []struct {
@@ -173,7 +201,7 @@ func TestRunRefusesChangingAColumnAChildsViewReads(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 			assert.Equal(t, []string{fmt.Sprintf(`"%s"."admin_mail"`, schema)}, v.DependentViews)
-			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by "%s"."admin_mail"`, schema))
+			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by view "%s"."admin_mail"`, schema))
 			assert.Equal(t, "character varying(50)", columnType(t, pool, schema, "admins", "email"))
 		})
 	}

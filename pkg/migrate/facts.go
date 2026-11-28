@@ -51,7 +51,9 @@ type Facts struct {
 
 // LiveFacts introspects the statement's target table for classifier facts.
 // For an ALTER TABLE that retypes or drops a column it reads which views
-// and policies depend on each column (preflight.ReadColumnDependents), and
+// and policies depend on each column (preflight.ReadColumnDependents), the
+// session time zone (preflight.SessionTimeZone), and which columns an
+// index or a foreign key reads (preflight.KeyedColumns), and
 // for one that adds columns, has the server prove whether each one
 // rewrites the table (preflight.AddColumnRewrites), and for each of those
 // with no DEFAULT of its own whether it is NOT NULL, as spelled or through
@@ -101,12 +103,20 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 			return Facts{}, err
 		}
 		classifier.DependentViews, classifier.DropDependentViews, classifier.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
+		classifier.MaterializedViews = deps.MaterializedViews
+		classifier.ViewReaders = deps.ViewReaders
 		classifier.DependentPolicies, classifier.DropDependentPolicies, classifier.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 		classifier.DependentTriggers = planner.ColumnDependents(deps.Triggers)
 		classifier.DependentPublications = planner.ColumnDependents(deps.Publications)
 		classifier.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
 		classifier.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
 		classifier.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)
+		if classifier.SessionTimeZone, err = preflight.SessionTimeZone(ctx, pool); err != nil {
+			return Facts{}, err
+		}
+		if classifier.KeyedColumns, err = preflight.KeyedColumns(ctx, pool, schema, st.Table()); err != nil {
+			return Facts{}, err
+		}
 	}
 	if adds {
 		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, schema, st.Table(), st.SQL()); err != nil {

@@ -75,12 +75,13 @@ import (
 // narrows the declarative-foreign-key reason to the drop of a key a desired
 // file cannot declare, or changes under the same name where it cannot be
 // replaced in one statement.
-// Version 31 added the dependent-publication planner reason and the
-// dependent_publications decision field. It also carries replaced_by on the
-// drop of the old object when a unique constraint and a unique index of the
-// same name swap kinds: a drop-constraint whose replacement is a standalone
-// index, and a drop-index whose replacement a constraint takes over.
-const FormatVersion = 31
+// Version 31 also carries replaced_by on the drop of the old object when a
+// unique constraint and a unique index of the same name swap kinds: a
+// drop-constraint whose replacement is a standalone index, and a drop-index
+// whose replacement a constraint takes over.
+// Version 32 added the dependent-publication planner reason and the
+// dependent_publications decision field.
+const FormatVersion = 32
 
 // Source identifies which front door derived the plan.
 type Source string

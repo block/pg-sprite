@@ -469,11 +469,32 @@ PostgreSQL can prove. It accepts exactly:
 - for `timestamp`, `timestamptz`, `time`, and `timetz`, a precision that is higher, removed,
   or the maximum of 6, such as `timestamp(3) → timestamp(6)` or `timestamptz(6) → timestamptz`;
 - `varbit(n) → varbit(m)` with `m ≥ n`, and `varbit(n) → varbit`;
-- `cidr → inet`.
+- `cidr → inet`;
+- `timestamp ↔ timestamptz` when the session time zone is `UTC` or `Etc/UTC`, no index
+  or foreign key reads the column, and the target precision is unspecified or 6.
 
-Each rule leaves every stored value as it is, and the column's indexes are reused, not
-rebuilt. A lower temporal precision rounds every value, a shorter `varbit` truncates, and
+Each rule leaves every stored value as it is, and a plain, valid index on the column with
+its default operator class keeps its storage. Any other index on the column, such as an
+expression, partial, or invalid index or one with another operator class, is still rebuilt
+under the statement's `ACCESS EXCLUSIVE` lock, as
+[the index caveat above](#no-rewrite-is-not-no-cost) describes. A lower temporal precision rounds every value, a shorter `varbit` truncates, and
 `inet → cidr` masks host bits, so each of those rewrites.
+
+The `timestamp ↔ timestamptz` rule reads two facts off the live database: the session
+`TimeZone`, and the indexes and foreign keys on the column, across the table and its
+partitions. That includes the index behind a primary key, unique, or exclusion constraint.
+Even under UTC, an index on the column is rebuilt under `ACCESS EXCLUSIVE`, because its
+operator class changes with the type. A foreign key on the column is checked again with a
+scan of the table, because its equality operator changes too. A lower target precision
+rounds every value. A zone or a key that was not read, as in an offline lint, takes the
+rewrite route, marked unverified.
+
+The executor reads the zone again inside the change's own transaction. If it is no longer
+UTC there, the change is refused with `time-zone-drift` and nothing runs: plan again.
+
+Under any other zone, each value moves by the zone's offset and the table is rewritten.
+Either way, the text plan names the zone: `converts each stored value in the session time
+zone America/New_York`. The JSON plan report does not carry the zone.
 
 The widening rules apply to scalar columns only. An array column is a relabel only when
 its element type and modifier are unchanged (declared dimensions do not count); any other
@@ -501,8 +522,8 @@ keeps only a `pg_catalog` collation, because the engine's sessions search `pg_ca
 first. A collation in another schema is kept only by a clause qualified with that schema.
 
 Everything else — including changes PostgreSQL would relabel, such as `interval` precision
-widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔ timestamptz`
-case — is treated as `type-rewrite` and routed to the copy-and-swap path, which
+widening, unconstrained domains, `xml → text`, and `timestamp ↔ timestamptz` under a
+fixed zero offset with another name, such as `GMT` — is treated as `type-rewrite` and routed to the copy-and-swap path, which
 runs it only when the run opens that route with `--copy-and-swap`
 ([copy-and-swap.md](copy-and-swap.md)). The bias is intentional: a false "free" verdict
 would run a blocking rewrite on a hot table; a false "rewrite" verdict costs a slower but

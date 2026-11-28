@@ -328,6 +328,11 @@ const (
 	// again under the table's lock; nothing was validated. Re-plan against
 	// the constraint as it stands.
 	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
+	// CodeTimeZoneDrift: a native change between timestamp and timestamptz
+	// reached a session whose time zone is not UTC, read inside the
+	// change's own transaction; nothing ran. The planner routes the change
+	// native only in UTC, so plan again in the zone the engine runs in.
+	CodeTimeZoneDrift Code = "time-zone-drift"
 	// CodeRenamedIndexDrift: the relation an ALTER INDEX ... RENAME TO
 	// names is no longer a plain index on the preflighted table, read
 	// again under the table's lock — gone, not an index, on another table,
@@ -463,6 +468,7 @@ func Codes() []Code {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -545,6 +551,7 @@ func (c Code) Permanent() bool {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -753,6 +760,8 @@ func sentinelCode(err error) Code {
 		return CodeDroppedColumnPartitionDependent
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
+	case errors.Is(err, ErrTimeZoneDrift):
+		return CodeTimeZoneDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
 		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrEnumTypeDrift):

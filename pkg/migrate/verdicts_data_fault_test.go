@@ -74,7 +74,7 @@ func TestFailureVerdictNamesThePublicationThatRefusedADrop(t *testing.T) {
 		step := &executor.SequenceStepError{Step: 2, Total: 2, SQL: "x", Err: published}
 		v := failureVerdict(st, step, executor.SequenceReport{}, false)
 		assert.Equal(t, string(executor.CodeDroppedObjectDrift), v.Code)
-		assert.Contains(t, v.Detail, "sequence step 2 of 2 failed")
-		assert.Contains(t, v.Detail, named)
+		assert.Contains(t, v.Detail, "sequence step 2 of 2 failed; no earlier steps had committed; "+named)
+		assert.NotContains(t, v.Detail, "Code names the outcome")
 	})
 }

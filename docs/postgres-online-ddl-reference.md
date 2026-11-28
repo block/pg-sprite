@@ -121,8 +121,8 @@ the same dynamic via metadata locks. Read it first if any of that is unfamiliar.
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | ACCESS EXCLUSIVE | Yes | No | ✅ **Yes** | Values must be computed |
 | `ADD COLUMN ... UNIQUE` / `PRIMARY KEY` / `REFERENCES` / `CHECK` (inline constraint) | ACCESS EXCLUSIVE + index build or validation | No | No | ➖ Native pattern | Same work as the `ADD CONSTRAINT` form, under the `ADD COLUMN` lock — split: add the column first, then build the constraint online (`CONCURRENTLY` + `USING INDEX`, or `NOT VALID` + `VALIDATE`) |
 | `DROP COLUMN` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only; disk space reclaimed lazily by VACUUM |
-| `ALTER COLUMN TYPE` — binary-coercible (`varchar(50)→varchar(100)`, `varchar→text`, `numeric(10,2)→numeric(12,2)`, `timestamp(3)→timestamp(6)`, `varbit(8)→varbit(16)`, `cidr→inet`) | ACCESS EXCLUSIVE (brief) | **No** | No (brief) | ❌ No | No scan when binary-coercible and no length restriction is added |
-| `ALTER COLUMN TYPE` — general (`int→bigint`, `text→jsonb`, `timestamp→timestamptz` w/ conversion) | ACCESS EXCLUSIVE | **Yes** (rewrite + reindex + revalidate FKs) | No | ✅ **Yes** | The classic "needs a tool" case |
+| `ALTER COLUMN TYPE` — binary-coercible (`varchar(50)→varchar(100)`, `varchar→text`, `numeric(10,2)→numeric(12,2)`, `timestamp(3)→timestamp(6)`, `varbit(8)→varbit(16)`, `cidr→inet`, `timestamp→timestamptz` in a UTC session on a column no index or foreign key reads) | ACCESS EXCLUSIVE (brief) | **No** | No (brief) | ❌ No | No scan when binary-coercible and no length restriction is added |
+| `ALTER COLUMN TYPE` — general (`int→bigint`, `text→jsonb`, `timestamp→timestamptz` outside UTC, or on a column an index or foreign key reads) | ACCESS EXCLUSIVE | **Yes** (rewrite + reindex + revalidate FKs) | No | ✅ **Yes** | The classic "needs a tool" case |
 | `ALTER COLUMN SET DEFAULT` / `DROP DEFAULT` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only |
 | `ALTER COLUMN SET NOT NULL` | ACCESS EXCLUSIVE | No, but **full scan** | No | ➖ Native pattern | Use `NOT VALID` `CHECK` + `VALIDATE` (PG 12+) to skip the blocking scan |
 | `ALTER COLUMN DROP NOT NULL` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only |
@@ -686,7 +686,20 @@ column, or also inherits it from a table outside the drop, keeps its copy, so a
 view on that copy does not count, while a child that inherits it along two paths
 from the dropped table loses it, so a view on that copy does. The plan
 names each view in `decisions[].dependent_views`, and a refused run's verdict in
-`dependent_views`. Drop or redefine the views first, then re-plan. A rename is not
+`dependent_views`. The refusal names a materialized view by its kind, and its help
+gives the manual path the change takes, chosen as for
+[`dependent-policy`](#dependent-policy): change the views so they no longer read the
+column before a drop, recreate them around a type change PostgreSQL runs in place in
+one transaction, or point them at a new column for a type change that rewrites the
+table. Recreating a materialized view runs its query to fill it again while that
+transaction blocks the table. `CREATE OR REPLACE VIEW` cannot remove or retype a
+column, so changing a view, or pointing it at a new column, means dropping and recreating
+it in one transaction, and the help says so. PostgreSQL refuses to drop a view another
+view reads, so when one view reads another the help gives the order to drop every view
+in, the blocking views and the views that read them, deepest first, and says to
+recreate them in reverse. A dropped view loses its grants, comment, owner, options such
+as `security_barrier`, rules, `INSTEAD OF` triggers and column defaults, and a
+materialized view its indexes too, so the help says to recreate them. A rename is not
 refused, because a view follows the column. `DROP COLUMN … CASCADE`, which the
 server runs by dropping the views with the column, is refused as `cascading-drop`
 instead.
@@ -718,11 +731,11 @@ briefly without them, which hides the rows a permissive policy admitted and show
 rows a restrictive policy filtered out. A type change that rewrites the table cannot
 take that path, because the transaction would block the table for the whole rewrite,
 and copy-and-swap rebuilds the table's policies before it retypes the column, so it
-meets the same refusal. Add a column of the new type instead, backfill it, point the
-policies at it, then drop the old column. A rename is not refused, because a policy follows
+meets the same refusal. Add a column of the new type instead, have the application write to both and backfill it, point the
+policies at it and switch reads to it, then drop the old column once nothing uses it. A rename is not refused, because a policy follows
 the column. `DROP COLUMN … CASCADE`, which drops the policies with the column, is
 refused as `cascading-drop` instead. When a view and a policy both read the column,
-the decision is `dependent-view`; re-plan after the views are handled. The planner
+the decision is `dependent-view`, and the help gives the same path for both. The planner
 reads the policies from live facts, so the linter, which has none, never reports it,
 and the server's own refusal remains the backstop for a policy created after
 planning.

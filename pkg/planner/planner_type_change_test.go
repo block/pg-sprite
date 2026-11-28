@@ -191,3 +191,74 @@ func TestClassifyTypeChangeRelabelsTemporalPrecisionVarbitAndCidr(t *testing.T) 
 		})
 	}
 }
+
+// A change between timestamp and timestamptz relabels only when the
+// session time zone is UTC and no index reads the column. A zone or an
+// index that was not read, as in an offline lint, fails closed to the
+// rewrite route and says the change may be cheaper with live facts. Every
+// decision names the zone it was classified in.
+func TestClassifyTimeZoneSwapNeedsTheZoneAndTheIndexes(t *testing.T) {
+	unindexed := map[string]bool{"other": true}
+	for name, tc := range map[string]struct {
+		zone       string
+		indexed    map[string]bool
+		route      planner.Route
+		unverified bool
+	}{
+		"in UTC with no index":            {"UTC", unindexed, planner.RouteNative, false},
+		"in UTC with an index":            {"UTC", map[string]bool{"c": true}, planner.RouteCopyAndSwap, false},
+		"in UTC with indexes unread":      {"UTC", nil, planner.RouteCopyAndSwap, true},
+		"in another zone":                 {"Europe/Paris", unindexed, planner.RouteCopyAndSwap, false},
+		"in another zone, indexes unread": {"Europe/Paris", nil, planner.RouteCopyAndSwap, false},
+		"with the zone unread":            {"", unindexed, planner.RouteCopyAndSwap, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			facts := planner.Facts{
+				ColumnTypes:     map[string]string{"c": "timestamp without time zone"},
+				SessionTimeZone: tc.zone,
+				KeyedColumns:    tc.indexed,
+			}
+			plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE timestamptz", facts)
+			require.NoError(t, err)
+			require.Len(t, plan.Decisions, 1)
+			d := plan.Decisions[0]
+			assert.Equal(t, tc.route, d.Route)
+			assert.Equal(t, tc.unverified, d.Unverified)
+			assert.Equal(t, tc.zone, d.ReadsInTimeZone)
+		})
+	}
+
+	t.Run("a USING expression decides the conversion", func(t *testing.T) {
+		facts := planner.Facts{
+			ColumnTypes:     map[string]string{"c": "timestamp without time zone"},
+			SessionTimeZone: "UTC",
+			KeyedColumns:    unindexed,
+		}
+		plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE timestamptz USING c AT TIME ZONE 'UTC'", facts)
+		require.NoError(t, err)
+		require.Len(t, plan.Decisions, 1)
+		assert.Equal(t, planner.RouteCopyAndSwap, plan.Decisions[0].Route)
+		assert.Empty(t, plan.Decisions[0].ReadsInTimeZone)
+	})
+}
+
+// A policy that reads a column changed between timestamp and timestamptz
+// sends the operator to expand and contract even where the change relabels
+// in place, since the manual path runs in a session whose time zone the
+// plan did not read.
+func TestClassifyTimeZoneSwapUnderAPolicyExpandsAndContracts(t *testing.T) {
+	policies := []string{`"recent_rows" ON "public"."t"`}
+	facts := planner.Facts{
+		ColumnTypes:           map[string]string{"c": "timestamp without time zone"},
+		SessionTimeZone:       "UTC",
+		KeyedColumns:          map[string]bool{},
+		DependentPolicies:     map[string][]string{"c": policies},
+		DropDependentPolicies: map[string][]string{"c": policies},
+		OwnDependentPolicies:  map[string][]string{"c": policies},
+	}
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE timestamptz", facts)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.ReasonDependentPolicy, plan.Decisions[0].Reason)
+	assert.Equal(t, planner.DependentFixExpandContract, plan.Decisions[0].DependentFix)
+}

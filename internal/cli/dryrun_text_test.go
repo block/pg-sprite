@@ -510,10 +510,76 @@ func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := strings.Join(strings.Fields(out.String()), " ")
-	assert.Contains(t, text, `error[unsupported-statement]: refused — DROP COLUMN email changes a column read by "app"."active_users", "reports"."mail", and PostgreSQL refuses to retype or drop a column while a view reads it`)
+	assert.Contains(t, text, `error[unsupported-statement]: refused — DROP COLUMN email changes a column read by views "app"."active_users", "reports"."mail", and PostgreSQL refuses to retype or drop a column while a view reads it`)
 	assert.Contains(t, text, "help: drop or redefine those views first, then re-plan")
 	assert.Contains(t, text, onlineDDLReferenceURL+"#dependent-view")
 	assert.NotContains(t, text, "knows no safe path")
+}
+
+// A refusal because views read the changed column calls a materialized
+// view by its kind, and the help gives the manual path the change takes
+// with the views out of the way: for an in-place type change, recreating
+// them around it in one transaction, where a materialized view also runs
+// its query to fill itself again.
+func TestDryRunTextDependentViewRefusalNamesMaterializedViews(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fix        planner.DependentFix
+		readers    []string
+		views      []string
+		refusal    string
+		help       string
+		notContain string
+	}{
+		"a materialized view on an in-place type change": {
+			fix:     planner.DependentFixRecreateAroundChange,
+			views:   []string{`"app"."mail"`},
+			readers: []string{`"app"."mail_top"`, `"app"."mail"`},
+			refusal: `ALTER COLUMN email TYPE varchar(100) changes a column read by materialized view "app"."mail", and PostgreSQL refuses`,
+			help: "help: this type change runs in place, without rewriting the table, so in one transaction drop those materialized views, run the change, and recreate them; " +
+				"recreating a materialized view runs its query to fill it again while the transaction blocks the table; " +
+				`drop the views in this order: view "app"."mail_top", then materialized view "app"."mail", and recreate them in reverse; ` +
+				"a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults, and a materialized view its indexes too, so recreate those with each view",
+		},
+		"a view and a materialized view on a type change that rewrites the table": {
+			fix:        planner.DependentFixExpandContract,
+			views:      []string{`"app"."active_users"`, `"app"."mail"`},
+			refusal:    `ALTER COLUMN email TYPE varchar(100) changes a column read by view "app"."active_users" and materialized view "app"."mail", and PostgreSQL refuses`,
+			help:       "point those views and materialized views at it and switch reads to it, then drop the old column once nothing uses it",
+			notContain: "fill it again",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := plan.NewReport(plan.SourceAlter)
+			report.Schema, report.Table, report.ServerVersion = "app", "users", "16.10"
+			report.Disposition = router.DispositionRefuse
+			report.Statements = append(report.Statements, plan.Statement{
+				SQL:         "ALTER TABLE app.users ALTER COLUMN email TYPE varchar(100)",
+				Route:       planner.RouteRefuse,
+				Disposition: router.DispositionRefuse,
+				Reason:      verdict.ReasonUnsupportedStatement,
+				Class:       verdict.ClassCapabilityBoundary,
+				Decisions: []planner.Decision{{
+					Operation:                  "ALTER COLUMN email TYPE varchar(100)",
+					Route:                      planner.RouteRefuse,
+					Reason:                     planner.ReasonDependentView,
+					DependentViews:             tc.views,
+					DependentMaterializedViews: []string{`"app"."mail"`},
+					DependentViewDropOrder:     tc.readers,
+					DependentFix:               tc.fix,
+				}},
+			})
+
+			var out strings.Builder
+			require.NoError(t, writeDryRunText(&out, palette{}, report))
+			text := strings.Join(strings.Fields(out.String()), " ")
+			assert.Contains(t, text, "error[unsupported-statement]: refused — "+tc.refusal)
+			assert.Contains(t, text, tc.help)
+			assert.NotContains(t, text, "drop or redefine those")
+			if tc.notContain != "" {
+				assert.NotContains(t, text, tc.notContain)
+			}
+		})
+	}
 }
 
 // A refusal because row-level security policies read the changed column

@@ -1218,7 +1218,10 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   column, or NOT NULL under the
   lock it runs with (the dropping session, for an index) and refuses with `adopted-index-drift`,
   `validated-constraint-drift`, `renamed-index-drift`, `dropped-object-drift`, or
-  `dropped-index-drift` when it changed after planning. An index drop whose name was taken by a
+  `dropped-index-drift` when it changed after planning. A change between `timestamp` and
+  `timestamptz` planned to relabel reads the session's `TimeZone` inside its own transaction and
+  refuses with `time-zone-drift` when it is no longer UTC; when it is, it pins it there for the
+  statement. An index drop whose name was taken by a
   different index between its check and the drop reports `dropped-index-replaced` (permanent):
   unlike the drift refusals, an unreviewed index was dropped, and the error names it so the
   operator can check and recreate it. The drop of a changed index's old definition carries
@@ -1230,7 +1233,7 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
   rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
-  `Replacement`, `DropsHelper`, and `RefusalCause` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  `Replacement`, `DropsHelper`, `RefusalCause`, and a column drop's typed `Drops.DependentObjects` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
   fingerprint, so a stored plan carries it. `RefusalCause` also reaches the `RunDesired`
   verdict: a `declarative-foreign-key` refusal carries `cause` `changed-foreign-key` (declare
