@@ -545,6 +545,9 @@ and `statistics_refresh.pending` names the `ANALYZE` still to run. That happens 
 `VACUUM` or another `ANALYZE` holds a table past the lock budget, when the role cannot act
 as the owner of every table covered (the server would skip the others with only a warning),
 or when a child is a foreign table, whose wrapper may not be able to sample it.
+A type change that runs through copy-and-swap analyzes its shadow before the swap instead,
+so the new table has statistics the moment it is swapped in, and reports it in the same
+field ([copy-and-swap.md](copy-and-swap.md#run-it)).
 
 ## Source pointers
 

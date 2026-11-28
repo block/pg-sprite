@@ -28,8 +28,9 @@ const defaultCheckpointInterval = 10 * time.Second
 // of each step they configure. Applier, Catchup, and Live bound the steps
 // only a run that decodes WAL has, and are not read by a quiesced run.
 type RunOptions struct {
-	// Shadow bounds the shadow build, inspection, cutover gate, swapped
-	// table inspection, and old table drop.
+	// Shadow bounds the shadow build, inspection, cutover gate, the
+	// shadow's ANALYZE before the swap, swapped table inspection, and old
+	// table drop.
 	Shadow Options
 	// Copier bounds the copy.
 	Copier copier.Options
@@ -317,6 +318,13 @@ type Result struct {
 	// A run the slot lag ceiling stopped carries the same count on the
 	// *decode.SlotLagExceededError it returns.
 	CopyPaced copier.Paced
+	// Statistics is the outcome of the ANALYZE this run made of its shadow
+	// after the cutover gate and before the swap, which the swapped-in
+	// table's planner statistics come from. A failed ANALYZE stops
+	// nothing, so it is reported here rather than returned. It is nil
+	// when this run made no swap of its own (FinishedEarlierSwap): the run
+	// that made the swap made the ANALYZE too.
+	Statistics *ShadowStatistics
 }
 
 // NewRunner prepares runs over the database cfg names, writing the
@@ -390,7 +398,9 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // landed watermark once its first chunk past the row's lands, every
 // CheckpointInterval after, and when the copy ends; one
 // verification pass through the complete watermark under
-// checksum.DivergenceAbort; the cutover gate; the row saved in
+// checksum.DivergenceAbort; the cutover gate; an ANALYZE of the shadow,
+// so the table the swap moves in has planner statistics, whose failure is
+// reported on Result.Statistics and stops nothing; the row saved in
 // PhaseCutover; the swap; the old table drop, or under KeepOld the fence
 // taken off the old table; the row saved in PhaseDone.
 //
@@ -401,13 +411,14 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // ends once the stream has confirmed past a marker written to the WAL
 // after the copy; and through one live verification pass under
 // checksum.DivergenceAbort, which settles each chunk the stream was still
-// carrying changes for. Capture then stops, the row is saved in
-// PhaseCutover with the position confirmed so far, and the swap applies
-// every change committed since under its own lock, in its own
-// transaction, before it renames — so the renamed shadow holds every row
-// the source held at the swap (CO-1). The slot is dropped once the swap
-// has committed, then the old table is dropped or kept as for a quiesced
-// run and the row saved in PhaseDone.
+// carrying changes for; then the cutover gate and the shadow's ANALYZE, as
+// for a quiesced run, with the stream still applied. Capture then stops,
+// the row is saved in PhaseCutover with the position confirmed so far,
+// and the swap applies every change committed since under its own lock,
+// in its own transaction, before it renames — so the renamed shadow
+// holds every row the source held at the swap (CO-1). The slot is
+// dropped once the swap has committed, then the old table is dropped or
+// kept as for a quiesced run and the row saved in PhaseDone.
 //
 // The row is never written to PhaseFailed: a run that stops leaves the
 // row where its last save put it, with the fence or the slot in place,
@@ -488,6 +499,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 	result.Reconciled = state.reconciled
 	result.Reconciliation = state.reconciliation
 	result.CopyPaced = state.copyPaced
+	result.Statistics = state.statistics
 	if target.DecodesWAL() {
 		// The swap has committed, so the slot has carried its last change;
 		// a run resumed on a swapped row drops the slot it left too.
@@ -567,6 +579,7 @@ func (r *Runner) swapQuiesced(ctx context.Context, pool *pgxpool.Pool, lock *dbc
 	if err != nil {
 		return report, err
 	}
+	r.analyzeShadowStatistics(ctx, pool, lock, state)
 	if state.cp.Phase != checkpoint.PhaseCutover {
 		// INV: LK-4 — the row says cutover before the swap is attempted.
 		if err := r.save(ctx, lock, state, checkpoint.PhaseCutover); err != nil {

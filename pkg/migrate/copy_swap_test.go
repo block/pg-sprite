@@ -610,3 +610,45 @@ func TestCopySwapVerdictCarriesTheVerificationFigures(t *testing.T) {
 	assert.Equal(t, "verified 52693 rows in 26 chunks (1 settled against the stream); "+
 		"the retained source is dropped", v.Detail)
 }
+
+// The ANALYZE a run made of its shadow rides the verdict as the same
+// statistics_refresh object the native retype path reports. A statement
+// that retyped no column still had its new table analyzed, and its JSON
+// names an empty list of columns rather than null; a refresh that did not
+// run names the ANALYZE of the table under the source's name; and a run
+// that only finished an earlier run's swap made no ANALYZE and reports
+// none.
+func TestCopySwapVerdictCarriesTheShadowStatistics(t *testing.T) {
+	done := checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}
+	shadow := schemachange.Proof{Schema: "billing", SourceTable: "Order Lines"}
+	dropColumn, err := statement.ParseOne(`ALTER TABLE billing."Order Lines" DROP COLUMN note`)
+	require.NoError(t, err)
+
+	v, err := copySwapOutcome(dropColumn, holdSlot, schemachange.Result{
+		Checkpoint: done, Shadow: shadow, Statistics: &schemachange.ShadowStatistics{Analyzed: true},
+	}, nil)
+	require.NoError(t, err)
+	js, err := v.JSON()
+	require.NoError(t, err)
+	var decoded struct {
+		StatisticsRefresh json.RawMessage `json:"statistics_refresh"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(js), &decoded))
+	assert.JSONEq(t, `{"columns": [], "refreshed": true}`, string(decoded.StatisticsRefresh))
+	assert.Contains(t, v.Detail, "; the new table was analyzed before the swap")
+
+	v, err = copySwapOutcome(parseCopySwapStatement(t), holdSlot, schemachange.Result{
+		Checkpoint: done, Shadow: shadow,
+		Statistics: &schemachange.ShadowStatistics{Err: errors.New("canceling statement due to lock timeout")},
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, &verdict.StatisticsRefresh{Columns: []string{"id"}, Pending: `ANALYZE "billing"."Order Lines"`},
+		v.StatisticsRefresh)
+	assert.Contains(t, v.Detail, `; the new table was not analyzed before the swap and has no planner statistics: run ANALYZE "billing"."Order Lines"`)
+
+	v, err = copySwapOutcome(parseCopySwapStatement(t), holdSlot, schemachange.Result{
+		Checkpoint: done, Shadow: shadow, FinishedEarlierSwap: true,
+	}, nil)
+	require.NoError(t, err)
+	assert.Nil(t, v.StatisticsRefresh)
+}

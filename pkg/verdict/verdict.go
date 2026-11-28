@@ -761,7 +761,10 @@ type Verdict struct {
 	// StatementTimeout is the explicit statement execution budget.
 	StatementTimeout string `json:"statement_timeout,omitempty"`
 	// StatisticsRefresh reports the ANALYZE a committed type change owes
-	// the planner; nil when the statement retyped no column.
+	// the planner, and on a copy-and-swap verdict the ANALYZE of the new
+	// table the run made before its swap; nil when a native statement
+	// retyped no column, and when a copy-and-swap run only finished a swap
+	// an earlier run made.
 	StatisticsRefresh *StatisticsRefresh `json:"statistics_refresh,omitempty"`
 	// IndexUsage is the live usage evidence of the index a destructive-change
 	// refusal of an accepted DROP INDEX would have dropped; nil for every
@@ -866,13 +869,16 @@ func (u IndexUsage) Summary() string {
 	return s
 }
 
-// StatisticsRefresh is the outcome of re-analyzing a table after a
-// committed type change, which deletes the retyped columns' planner
-// statistics. The change stays committed whether or not the refresh ran,
-// so a refresh still owed leaves the verdict executed and names the
-// ANALYZE to run.
+// StatisticsRefresh is the outcome of analyzing a table a committed change
+// left without planner statistics: a native type change, which deletes the
+// retyped columns' statistics, or a copy-and-swap, whose swapped-in table
+// is a new relation with none of its own. The change stays committed
+// whether or not the refresh ran, so a refresh still owed leaves the
+// verdict executed and names the ANALYZE to run.
 type StatisticsRefresh struct {
 	// Columns are the columns the statement retyped, in statement order.
+	// On a copy-and-swap verdict the ANALYZE covers every column of the
+	// new table, and Columns is empty for a statement that retyped none.
 	Columns []string `json:"columns"`
 	// Refreshed reports that the ANALYZE committed.
 	Refreshed bool `json:"refreshed"`

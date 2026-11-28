@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/applier"
@@ -305,6 +306,7 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 		auditBlockWrites(opts.audit(), st)
 	}
 	result, err := runner.Run(ctx, pool, target, st)
+	logShadowStatistics(logger, st, result)
 	if hold == holdFence && err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
 		hold, err = fenceAfterStop(ctx, store, st, err)
 	}
@@ -323,19 +325,87 @@ func copySwapOutcome(st statement.Statement, hold sourceHold, result schemachang
 	if err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
 		return copySwapRunVerdict(st, hold, err)
 	}
-	detail := copySwapDetail(result, hold == holdFence)
+	refresh := copySwapStatistics(st, result)
+	detail := copySwapDetail(result, hold == holdFence) + copySwapStatisticsDetail(refresh)
 	if err != nil {
 		detail += "; the change is complete and its done row saved, but the run then returned: " + err.Error()
 	}
 	return verdict.Verdict{
-		Outcome:       verdict.OutcomeExecutedViaCopyAndSwap,
-		Statement:     st.SQL(),
-		Table:         qualified(st),
-		Detail:        detail,
-		WritesBlocked: hold == holdFence,
-		SwapLSN:       swapLSN(result),
-		Verification:  copySwapVerification(result.Verification),
+		Outcome:           verdict.OutcomeExecutedViaCopyAndSwap,
+		Statement:         st.SQL(),
+		Table:             qualified(st),
+		Detail:            detail,
+		WritesBlocked:     hold == holdFence,
+		SwapLSN:           swapLSN(result),
+		Verification:      copySwapVerification(result.Verification),
+		StatisticsRefresh: refresh,
 	}, nil
+}
+
+// copySwapStatistics renders the ANALYZE the run made of its shadow before
+// the swap as the verdict's statistics refresh, or nil when the run made
+// no swap of its own. Columns are the columns the statement retyped, the
+// same as the native path reports, and empty for a statement that retyped
+// none: the swapped-in table is a new relation, so the ANALYZE covers
+// every column whatever the statement changed. Pending is the ANALYZE of
+// the table under the source's name, which is the shadow once the swap has
+// committed.
+func copySwapStatistics(st statement.Statement, result schemachange.Result) *verdict.StatisticsRefresh {
+	if result.Statistics == nil {
+		return nil
+	}
+	columns := copySwapRetypedColumns(st)
+	if result.Statistics.Analyzed {
+		return &verdict.StatisticsRefresh{Columns: columns, Refreshed: true}
+	}
+	return &verdict.StatisticsRefresh{
+		Columns: columns,
+		Pending: "ANALYZE " + pgx.Identifier{result.Shadow.Schema, result.Shadow.SourceTable}.Sanitize(),
+	}
+}
+
+// copySwapRetypedColumns is the statement's retyped columns for a
+// copy-and-swap verdict: never nil, so the JSON field is an empty list for
+// a statement that retyped none. A statement that does not parse back for
+// its type changes names no column: it parsed once already to reach the
+// route, and whether the new table was analyzed does not depend on which
+// columns it retyped.
+func copySwapRetypedColumns(st statement.Statement) []string {
+	columns, err := retypedColumns(st)
+	if err != nil {
+		return []string{}
+	}
+	if columns == nil {
+		return []string{}
+	}
+	return columns
+}
+
+// copySwapStatisticsDetail is the sentence a copy-and-swap verdict's detail
+// gains from its statistics refresh; empty when there was none.
+func copySwapStatisticsDetail(r *verdict.StatisticsRefresh) string {
+	if r == nil {
+		return ""
+	}
+	if r.Refreshed {
+		return "; the new table was analyzed before the swap, so the planner has its statistics"
+	}
+	return "; the new table was not analyzed before the swap and has no planner statistics: run " + r.Pending
+}
+
+// logShadowStatistics records the outcome of the run's ANALYZE of its
+// shadow: a failure is a warning with its cause, since the verdict names
+// only the ANALYZE still to run.
+func logShadowStatistics(logger *slog.Logger, st statement.Statement, result schemachange.Result) {
+	switch {
+	case result.Statistics == nil:
+		// The run made no swap of its own, so it made no ANALYZE either.
+	case result.Statistics.Analyzed:
+		logger.Debug("the new table was analyzed before the swap", "table", qualified(st))
+	default:
+		logger.Warn("the new table was not analyzed before the swap and has no planner statistics",
+			"table", qualified(st), "error", result.Statistics.Err)
+	}
 }
 
 // copySwapVerification renders the run's verification pass for the
