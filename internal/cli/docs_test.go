@@ -76,7 +76,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 21, "the doc publishes twenty-one captured --json outputs")
+	require.Len(t, blocks, 22, "the doc publishes twenty-two captured --json outputs")
 
 	// A live plan proves the added column against the server; a nullable
 	// column with no default is added in place, so the plan marks it
@@ -144,6 +144,20 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 			"correct the data or the statement, then run it again, which starts from the beginning",
 		Abandoned: true,
 	}
+	// The mode-mismatch verdict is captured from a run: a --block-writes
+	// retype of orders stopped mid-copy, then run again without the flag.
+	// Its detail is the migrate package's rendering of the refusal, which
+	// TestBlockWritesRunStoppedMidCopyNamesTheWayOut pins.
+	modeMismatch := verdict.Verdict{
+		Statement: "ALTER TABLE public.orders ALTER COLUMN qty TYPE bigint",
+		Table:     "public.orders",
+		Detail: "a copy-and-swap run of this statement on public.orders stopped with the table's writes blocked, " +
+			"and this run would stream writes through a replication slot instead, so it cannot continue that run; " +
+			"finish the stopped run by running the same command again with --block-writes public.orders added (CopySwapOptions.BlockWrites), " +
+			"or abandon it with pg-sprite discard public.orders (schemachange.Runner.Discard); " +
+			"until then the source stays fenced and every write to it fails with SQLSTATE 55006; nothing was executed",
+		WritesBlocked: true,
+	}.WithRefusal(verdict.Environmental(verdict.ReasonCopyAndSwapRefused).WithCause("resume-mode-mismatch"))
 	// The executed verdict is captured from a run; its detail is the
 	// verdict's own rendering of the verification pass and the retained
 	// source's fate, which the migrate package's tests pin.
@@ -258,7 +272,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	tunedRefused, ok := migrate.DesiredFileRefusal(tunedErr, accounts.Statements()[0].SQL())
 	require.True(t, ok, "a storage parameter difference is a desired-file refusal: %v", tunedErr)
 
-	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, rewriteRequired,
+	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, dataFault, modeMismatch, rewriteRequired,
 		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitionedBuild, partitionedBuilt, partitioned,
 		destructiveRefused, destructive, dropNote, lintReport, partitionsRefused, diff, typeFileRefused, tunedRefused}
 	for i, w := range want {

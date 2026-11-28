@@ -324,25 +324,52 @@ func shadowGoneRemedy(cp checkpoint.Checkpoint) string {
 }
 
 // checkQuiescedRow refuses a row the quiesced runner cannot act on: one in
-// a terminal phase, whose run has ended; and one that belongs to a run
-// that decodes WAL — it names a slot, or is in a phase only such a run
-// enters — since continuing it without its slot would leave the slot
-// behind as nobody's and the changes it carried unapplied.
+// a terminal phase, whose run has ended; one a run that decodes WAL wrote —
+// it names a slot and publication — since continuing it without its slot
+// would leave the slot behind as nobody's and the changes it carried
+// unapplied; and one neither kind of run writes.
 func checkQuiescedRow(target preflight.CopySwapTarget, cp checkpoint.Checkpoint) error {
 	if cp.Phase.Terminal() {
 		return refuse(CauseResumeTerminal, nil, "checkpoint row for %s.%s is in phase %s", cp.Schema, cp.Table, cp.Phase)
 	}
 	// INV: ST-3
-	if cp.SlotName != "" || cp.PublicationName != "" {
-		return refuse(CauseResumeRowDecoding, nil, "checkpoint row for %s.%s names slot %s; a quiesced run has none", cp.Schema, cp.Table, cp.SlotName)
+	if isLiveRow(cp) {
+		return refuse(CauseResumeModeMismatch, nil, "checkpoint row for %s.%s records a run that decodes WAL through slot %s, stopped in phase %s, and this run is quiesced; "+
+			"finish the stopped run under a target that decodes WAL, or discard it", cp.Schema, cp.Table, cp.SlotName, cp.Phase)
 	}
-	if cp.Phase == checkpoint.PhaseCatchingUp || cp.Phase == checkpoint.PhaseReconciling {
-		return refuse(CauseResumeRowDecoding, nil, "checkpoint row for %s.%s is in phase %s, which only a run that decodes WAL enters", cp.Schema, cp.Table, cp.Phase)
+	if cp.SlotName != "" || cp.PublicationName != "" {
+		return refuse(CauseResumeRowDecoding, nil, "checkpoint row for %s.%s names slot %q and publication %q; a run that decodes WAL names both, a quiesced run neither",
+			cp.Schema, cp.Table, cp.SlotName, cp.PublicationName)
+	}
+	if isDecodingPhase(cp.Phase) {
+		return refuse(CauseResumeRowDecoding, nil, "checkpoint row for %s.%s is in phase %s, which only a run that decodes WAL enters, and names no slot", cp.Schema, cp.Table, cp.Phase)
 	}
 	if cp.Schema != target.Schema() || cp.Table != target.Table() {
 		return refuse(CauseResumeRowMismatch, nil, "checkpoint row is for %s.%s, target is %s.%s", cp.Schema, cp.Table, target.Schema(), target.Table())
 	}
 	return nil
+}
+
+// isLiveRow reports whether cp is a row a run that decodes WAL writes: it
+// names both the slot and the publication the run created.
+func isLiveRow(cp checkpoint.Checkpoint) bool {
+	return cp.SlotName != "" && cp.PublicationName != ""
+}
+
+// isQuiescedRow reports whether cp is a row a quiesced run writes: it names
+// neither a slot nor a publication, and stands in a phase such a run
+// enters.
+func isQuiescedRow(cp checkpoint.Checkpoint) bool {
+	if cp.SlotName != "" || cp.PublicationName != "" {
+		return false
+	}
+	return !isDecodingPhase(cp.Phase)
+}
+
+// isDecodingPhase reports whether phase is one only a run that decodes WAL
+// enters.
+func isDecodingPhase(phase checkpoint.Phase) bool {
+	return phase == checkpoint.PhaseCatchingUp || phase == checkpoint.PhaseReconciling
 }
 
 // checkRowStatement refuses a resume under a statement other than the one

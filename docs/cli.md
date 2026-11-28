@@ -328,7 +328,11 @@ executed via copy-and-swap
 Without `--copy-and-swap` the same command is refused with
 `copy-and-swap-refused` and nothing runs. A live run needs `wal_level=logical`;
 `--block-writes SCHEMA.TABLE` runs without it by blocking the table's writes
-until the swap. A stopped run resumes when you run the same command again,
+until the swap, and, if the run stops or is killed first, until it is finished
+or discarded. A stopped run resumes when you run the same command again, in the
+same mode: a run of the other mode, such as the stopped statement run without
+`--block-writes` after a run that had it, is refused with cause
+`resume-mode-mismatch` and told which flag to add or drop.
 `--restart SCHEMA.TABLE` starts it over, and
 [`discard SCHEMA.TABLE`](#abandon-a-stopped-copy-and-swap-run) abandons it
 without running the change. Choosing between live and

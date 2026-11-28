@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/refusal"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -62,10 +63,10 @@ func TestRunnerRefusesAShadowNoRowRecords(t *testing.T) {
 	assert.ErrorIs(t, err, checkpoint.ErrNotFound, "the refused run writes no row")
 }
 
-// A row that names a replication slot belongs to a run that decodes WAL;
-// the quiesced runner refuses it as resume-row-decoding (ST-3) rather than
-// continue without the slot and leave it, and the changes it carried,
-// behind.
+// A row that names a replication slot and its publication belongs to a run
+// that decodes WAL; the quiesced runner refuses it as resume-mode-mismatch
+// (ST-3), an environmental refusal, rather than continue without the slot
+// and leave it, and the changes it carried, behind.
 func TestRunnerRefusesARowThatNamesASlot(t *testing.T) {
 	f := newRunnerFixture(t)
 	f.createOrders(t)
@@ -77,7 +78,27 @@ func TestRunnerRefusesARowThatNamesASlot(t *testing.T) {
 
 	_, err := f.run(t, "orders", alter, schemachange.RunOptions{})
 	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseResumeModeMismatch, schemachange.RefusalCauseOf(err))
+	assert.Equal(t, refusal.ClassEnvironmental, schemachange.RefusalCauseOf(err).Class())
+	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the refused run leaves the row as it found it")
+}
+
+// A row that names a slot but no publication is one neither kind of run
+// writes: a run that decodes WAL records both, a quiesced run neither. The
+// quiesced runner refuses it as resume-row-decoding (ST-3), an invariant
+// violation, since nothing says which kind of run the row is from.
+func TestRunnerRefusesARowThatNamesASlotWithoutAPublication(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	f.leaveStoppedRun(t, alter, func(row *checkpoint.Checkpoint) {
+		row.SlotName = "pgsprite_orders"
+	})
+
+	_, err := f.run(t, "orders", alter, schemachange.RunOptions{})
+	require.Error(t, err)
 	assert.Equal(t, schemachange.CauseResumeRowDecoding, schemachange.RefusalCauseOf(err))
+	assert.Equal(t, refusal.ClassInvariantViolation, schemachange.RefusalCauseOf(err).Class())
 	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the refused run leaves the row as it found it")
 }
 

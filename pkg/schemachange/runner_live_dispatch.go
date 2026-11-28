@@ -97,17 +97,23 @@ func (r *Runner) resumeLive(ctx context.Context, pool *pgxpool.Pool, lock *dbcon
 }
 
 // checkLiveRow refuses a row the live runner cannot act on: one in a
-// terminal phase, whose run has ended; one that belongs to a quiesced
-// run — it names no slot — since the source behind it was fenced, not
-// captured, and no stream could replay what it missed; and one naming a
-// slot other than the target's derived name, which is not this route's.
+// terminal phase, whose run has ended; one a quiesced run wrote — it names
+// no slot or publication — since the source behind it was fenced, not
+// captured, and no stream could replay what it missed; one neither kind
+// of run writes; and one naming a slot other than the target's derived
+// name, which is not this route's.
 func checkLiveRow(target preflight.CopySwapTarget, cp checkpoint.Checkpoint) error {
 	if cp.Phase.Terminal() {
 		return refuse(CauseResumeTerminal, nil, "checkpoint row for %s.%s is in phase %s", cp.Schema, cp.Table, cp.Phase)
 	}
 	// INV: ST-3
-	if cp.SlotName == "" || cp.PublicationName == "" {
-		return refuse(CauseResumeRowDecoding, nil, "checkpoint row for %s.%s names no slot; a run that decodes WAL resumes only a row that names its own", cp.Schema, cp.Table)
+	if isQuiescedRow(cp) {
+		return refuse(CauseResumeModeMismatch, nil, "checkpoint row for %s.%s records a quiesced run, stopped in phase %s with the source's writes fenced, and this run decodes WAL; "+
+			"finish the stopped run under a quiesced target, or discard it", cp.Schema, cp.Table, cp.Phase)
+	}
+	if !isLiveRow(cp) {
+		return refuse(CauseResumeRowDecoding, nil, "checkpoint row for %s.%s names slot %q and publication %q in phase %s; a run that decodes WAL names both, a quiesced run neither and never enters %s or %s",
+			cp.Schema, cp.Table, cp.SlotName, cp.PublicationName, cp.Phase, checkpoint.PhaseCatchingUp, checkpoint.PhaseReconciling)
 	}
 	if cp.Schema != target.Schema() || cp.Table != target.Table() {
 		return refuse(CauseResumeRowMismatch, nil, "checkpoint row is for %s.%s, target is %s.%s", cp.Schema, cp.Table, target.Schema(), target.Table())
