@@ -182,7 +182,10 @@ func NewCatalogShadowingPool(t *testing.T, serverURL, schema string) *pgxpool.Po
 
 // NewSchema creates a unique throwaway schema on pool, sets it up for
 // cleanup, and returns its name. Tests qualify their objects with it so
-// parallel tests on one container never collide.
+// parallel tests on one container never collide. A schema isolates objects,
+// not sessions: pg_stat_activity spans the server, so a test that waits on
+// another session's lock wait names the session holding the lock
+// (BlockedBy) rather than matching statement text.
 func NewSchema(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	name := fmt.Sprintf("t_%d_%d", os.Getpid(), schemaSeq.Add(1))
