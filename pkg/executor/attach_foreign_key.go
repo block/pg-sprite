@@ -112,7 +112,7 @@ func ensureAttachForeignKeys(ctx context.Context, pool *pgxpool.Pool, parentOID 
 // and the leaf step cannot give the table two of one definition.
 func refuseParentForeignKeys(fks []parentForeignKey) error {
 	for i, pfk := range fks {
-		if pfk.catalog.deleteSetColumns {
+		if len(pfk.catalog.deleteSetColumns) > 0 {
 			return fmt.Errorf("%w: the ON DELETE of %s names a column list", errAttachForeignKeyUnsupported, pfk.spec.name)
 		}
 		for _, earlier := range fks[:i] {

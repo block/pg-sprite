@@ -97,6 +97,9 @@ func (f *partitionedFKFlow) resolve(ctx context.Context) error {
 			return fmt.Errorf("%w: PostgreSQL %d; add %s with ADD FOREIGN KEY ... NOT VALID, then VALIDATE CONSTRAINT",
 				ErrPartitionedForeignKeyNotValidSupported, major, f.req.spec.name)
 		}
+		if err := f.req.spec.refuseDeleteSetColumns(major); err != nil {
+			return err
+		}
 		target, err := resolveTarget(ctx, q, concurrentIndexBuild{tableSchema: f.req.schema, table: f.req.table})
 		if err != nil {
 			return err

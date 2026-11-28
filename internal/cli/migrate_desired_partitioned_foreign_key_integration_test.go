@@ -102,6 +102,48 @@ func TestMigrateDesiredAddsAForeignKeyToAPartitionedTable(t *testing.T) {
 	assert.Equal(t, "already converged: the live table matches the desired schema; nothing to run", again.Detail)
 }
 
+// A desired foreign key with an ON DELETE column list takes the same build on
+// PostgreSQL 15 to 17: the plan carries the list, every partition's foreign
+// key gets it, and a rerun finds the table converged. PostgreSQL 14 has no
+// column list, so the desired file itself is invalid there.
+func TestMigrateDesiredAddsAPartitionedForeignKeyWithAnOnDeleteColumnList(t *testing.T) {
+	pool, url, schema, major := partitionedForeignKeyFixture(t)
+	requireBeforeNotValidOnPartitions(t, major)
+	if major < 15 {
+		t.Skipf("PostgreSQL %d has no ON DELETE column list", major)
+	}
+	const desired = `
+CREATE TABLE events (
+    id         bigint NOT NULL,
+    created_at date NOT NULL,
+    account_id bigint,
+    CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES accounts (id)
+        ON DELETE SET NULL (account_id)
+) PARTITION BY RANGE (created_at);`
+
+	report := desiredPlan(t, url, schema, desired)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, fmt.Sprintf(
+		"ALTER TABLE %[1]s.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id) ON DELETE SET NULL (account_id)", schema),
+		report.Statements[0].SQL)
+	assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, report.Statements[0].Execution)
+
+	result, err := runDesired(t, url, schema, desired, "--expect-fingerprint", report.Fingerprint)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, result.Outcome, result.Detail)
+	fk, found := readForeignKeyAdoption(t, pool, schema, "events_account_fk")
+	require.True(t, found)
+	assert.Equal(t, map[string]bool{
+		schema + ".events_2026_01": true,
+		schema + ".events_2026_02": true,
+	}, fk.adopted)
+
+	again, err := runDesired(t, url, schema, desired)
+	require.NoError(t, err)
+	assert.Equal(t, "already converged: the live table matches the desired schema; nothing to run", again.Detail)
+}
+
 // A row that references no account breaks the foreign key. The desired run
 // fails with the build's failed verdict, which carries the server's error
 // naming the partition that holds the row; the parent gets no foreign key,

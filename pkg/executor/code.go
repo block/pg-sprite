@@ -118,7 +118,8 @@ const (
 	// CodePartitionedForeignKeyConflict: a partition already has a foreign
 	// key that keeps the parent's from adopting the requested one as the
 	// only one, such as a second one of the requested definition or one the
-	// parent's statement could adopt that has an ON DELETE column list;
+	// parent's statement could adopt whose ON DELETE column list is not the
+	// requested one;
 	// nothing was added to it.
 	CodePartitionedForeignKeyConflict Code = "partitioned-foreign-key-conflict"
 	// CodePartitionedForeignKeyReferencedTable: the foreign key references a
