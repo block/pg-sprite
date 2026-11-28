@@ -70,6 +70,18 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeDataFault,
 		},
 		{
+			name: "own invalid leftover of a build that hit temp_file_limit",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: fmt.Errorf("build: %w", &pgconn.PgError{Code: "53400"}), Cleanup: executor.ErrBuildLeftInvalidIndex},
+			want: executor.CodeResourceExhausted,
+		},
+		{
+			name: "unproven entry left by a build that ran out of disk",
+			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
+				Build: &pgconn.PgError{Code: "53100"}, Cleanup: executor.ErrAbandonmentUnproven},
+			want: executor.CodeResourceExhausted,
+		},
+		{
 			name: "own invalid leftover of a build that failed outside the data classes",
 			err: &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t",
 				Build: &pgconn.PgError{Code: "42P07"}, Cleanup: executor.ErrBuildLeftInvalidIndex},
@@ -350,6 +362,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeEnumNeighborMissing:                    true,
 		executor.CodeTableNotFound:                          true,
 		executor.CodeDataFault:                              true,
+		executor.CodeResourceExhausted:                      true,
 		executor.CodeInvariantViolation:                     true,
 		executor.CodeExecutionFailed:                        false,
 	}

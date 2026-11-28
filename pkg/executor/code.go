@@ -62,7 +62,8 @@ const (
 	// CodeInvalidIndexOwnLeftover: the failed build's own invalid index
 	// remains and is proven this run's leftover; the recovery runbook
 	// applies. A build that failed on its rows reports CodeDataFault
-	// instead, with the leftover still on its Cleanup.
+	// instead, and one that ran out of a resource CodeResourceExhausted,
+	// with the leftover still on its Cleanup.
 	CodeInvalidIndexOwnLeftover Code = "invalid-index-own-leftover"
 	// CodeInvalidIndexBuildInFlight: the invalid index under the requested
 	// name is another backend's concurrent build still in progress; wait.
@@ -384,6 +385,16 @@ const (
 	// so correct the rows, drop the leftover concurrently, and run the
 	// change again.
 	CodeDataFault Code = "data-fault"
+	// CodeResourceExhausted: a concurrent index build failed because the
+	// server ran out of a resource or hit a configured limit (SQLSTATE class
+	// 53: disk full, out of memory, or a limit such as temp_file_limit). Like
+	// CodeDataFault it names the fault, not what was left behind: every rerun
+	// fails the same way until an operator frees the resource or raises the
+	// limit. The build returns an *InvalidIndexError whose Recoverable is
+	// false and whose Cleanup still says what it left, so free the resource
+	// or raise the limit, drop the leftover concurrently, and run the change
+	// again.
+	CodeResourceExhausted Code = "resource-exhausted"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
 	// retry candidate.
 	CodeInvariantViolation Code = "invariant-violation"
@@ -487,6 +498,7 @@ func Codes() []Code {
 		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
+		CodeResourceExhausted,
 		CodeInvariantViolation,
 		CodeExecutionFailed,
 	}
@@ -570,6 +582,7 @@ func (c Code) Permanent() bool {
 		CodeEnumNeighborMissing,
 		CodeTableNotFound,
 		CodeDataFault,
+		CodeResourceExhausted,
 		CodeInvariantViolation:
 		return true
 	}
@@ -809,11 +822,12 @@ func (e *BudgetError) Code() Code {
 
 // Code returns the invalid-index outcome's stable code, derived from the
 // same state the error's rendering distinguishes: a build that failed on a
-// data fault, then the cleanup state — proven own leftover, another
+// data fault or on an exhausted resource, then the cleanup state — proven own leftover, another
 // backend's build in flight, abandoned on the target table, on another
-// table, not droppable, builder unobservable, or unproven. The data fault
+// table, not droppable, builder unobservable, or unproven. Either fault
 // outranks the cleanup state because it names what the operator corrects:
-// no handling of the leftover gets a rerun past the same rows. An invariant
+// no handling of the leftover gets a rerun past the same rows or the same
+// limit. An invariant
 // breach in either the build or the cleanup outranks both, as it does in
 // OutcomeCode. The cleanup sentinel stays in the chain for errors.Is.
 func (e *InvalidIndexError) Code() Code {
@@ -822,6 +836,8 @@ func (e *InvalidIndexError) Code() Code {
 		return CodeInvariantViolation
 	case e.buildDataFault():
 		return CodeDataFault
+	case isResourceExhausted(e.Build):
+		return CodeResourceExhausted
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
 		return CodeInvalidIndexOwnLeftover
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuildInFlight):

@@ -542,6 +542,49 @@ func TestBuildIndexConcurrentlyUniqueBuildOverDuplicatesIsDataFault(t *testing.T
 	assert.False(t, valid, "the leftover must be invalid")
 }
 
+// A build whose sort spills past temp_file_limit fails because the server
+// hit a configured limit, not on anything the leftover's recovery can fix:
+// a rebuild hits the same limit. The outcome names the exhausted resource,
+// the rebuild is not offered, the server's error reaches the message, and
+// the build's own invalid index is still reported and left in place.
+func TestBuildIndexConcurrentlyPastTempFileLimitIsResourceExhausted(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	dbURL := testutil.NewDatabase(t, serverURL)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: dbURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	var database string
+	require.NoError(t, admin.QueryRow(t.Context(), "SELECT current_database()").Scan(&database))
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (id int PRIMARY KEY, payload text NOT NULL);
+		INSERT INTO %[1]s.events SELECT g, md5(g::text) || md5((g * 7)::text) FROM generate_series(1, 100000) g;
+		ALTER DATABASE %[2]s SET temp_file_limit = '64kB';
+		ALTER DATABASE %[2]s SET maintenance_work_mem = '1MB'`,
+		schema, pgx.Identifier{database}.Sanitize()))
+	require.NoError(t, err)
+	// A fresh pool's sessions start under the database's new settings.
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: dbURL})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY events_payload_idx ON %s.events (payload)", schema), buildBudget)
+
+	assert.Equal(t, executor.CodeResourceExhausted, executor.OutcomeCode(err))
+	require.ErrorIs(t, err, executor.ErrBuildLeftInvalidIndex, "the leftover is still reported")
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, err, &invalidErr)
+	assert.False(t, invalidErr.Recoverable(), "a rebuild would hit the same limit")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the server error stays in the chain")
+	assert.Equal(t, "53400", pgErr.Code)
+	assert.Contains(t, err.Error(), "temp_file_limit", "the server's error reaches the message")
+	exists, valid := indexState(t, pool, schema, "events_payload_idx")
+	assert.True(t, exists, "the executor must not have dropped the leftover")
+	assert.False(t, valid, "the leftover must be invalid")
+}
+
 func TestBuildIndexConcurrentlyFailsClosedOnAbandonedInvalidLeftover(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(

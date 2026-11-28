@@ -46,10 +46,14 @@ type InvalidIndexError struct {
 // state are not this actor's to recover. A build that failed on a data
 // fault is not recoverable either, whatever it left: the rebuild would
 // meet the same rows and fail the same way, so the rows are corrected
-// first and the leftover removed as the error says.
+// first and the leftover removed as the error says. Nor is a build that
+// failed because the server ran out of a resource: the rebuild meets the
+// same limit until an operator frees the resource or raises the limit.
 func (e *InvalidIndexError) Recoverable() bool {
 	switch {
 	case e.buildDataFault():
+		return false
+	case isResourceExhausted(e.Build):
 		return false
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
 		return true
@@ -76,9 +80,11 @@ func (e *InvalidIndexError) Error() string {
 	switch {
 	case e.buildDataFault():
 		return e.dataFaultError(name)
+	case isResourceExhausted(e.Build):
+		return e.resourceExhaustedError(name)
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
-		return fmt.Sprintf("index %s is this build's own invalid leftover; recover with RebuildAbandonedIndex or DROP INDEX CONCURRENTLY %s, see docs/invalid-index-recovery.md: %v",
-			name, pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
+		return fmt.Sprintf("index %s is this build's own invalid leftover%s; recover with RebuildAbandonedIndex or DROP INDEX CONCURRENTLY %s, see docs/invalid-index-recovery.md: %v",
+			name, e.buildClause(), pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuildInFlight):
 		return fmt.Sprintf("index %s is invalid because backend %d is still building it; wait for that build to finish or fail, see docs/invalid-index-recovery.md: %v",
 			name, e.BuilderPID, e.Cleanup)
@@ -95,8 +101,8 @@ func (e *InvalidIndexError) Error() string {
 		return fmt.Sprintf("index %s is invalid on table %s and this role cannot see whether another backend is still building it; recover with RebuildAbandonedIndex, which proves the state under the table lock, or inspect pg_stat_progress_create_index as a role with pg_read_all_stats, see docs/invalid-index-recovery.md: %v",
 			name, e.Table, e.Cleanup)
 	default:
-		return fmt.Sprintf("index %s may be invalid but the catalog state could not be proven; inspect pg_index.indisvalid and pg_stat_progress_create_index yourself before any recovery, see docs/invalid-index-recovery.md: %v",
-			name, e.Cleanup)
+		return fmt.Sprintf("index %s may be invalid but the catalog state could not be proven%s; inspect pg_index.indisvalid and pg_stat_progress_create_index yourself before any recovery, see docs/invalid-index-recovery.md: %v",
+			name, e.buildClause(), e.Cleanup)
 	}
 }
 
@@ -133,6 +139,32 @@ func (e *InvalidIndexError) dataFaultError(name string) string {
 	}
 	return fmt.Sprintf("%s; an invalid index remains under the name that this run could not prove its own; correct the rows, and inspect pg_index.indisvalid and pg_stat_progress_create_index before any removal, see docs/invalid-index-recovery.md: %v",
 		fault, e.Cleanup)
+}
+
+// resourceExhaustedError renders a build that failed because the server ran
+// out of a resource or hit a configured limit. The server error rides in the
+// message, since it names the resource. The leftover is reported as in
+// dataFaultError: its proven removal is named once the resource is freed, and
+// an entry this run could not prove its own gets investigation steps.
+func (e *InvalidIndexError) resourceExhaustedError(name string) string {
+	fault := fmt.Sprintf("index %s was not built because the server ran out of a resource or hit a configured limit (%v); every rerun fails the same way until the resource is freed or the limit raised",
+		name, e.Build)
+	if errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex) {
+		return fmt.Sprintf("%s; the failed build left its own invalid index on table %s.%s, which blocks a rerun under the same name: free the resource or raise the limit, then DROP INDEX CONCURRENTLY %s and run the change again, see docs/invalid-index-recovery.md: %v",
+			fault, e.Schema, e.Table, pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
+	}
+	return fmt.Sprintf("%s; an invalid index remains under the name that this run could not prove its own; free the resource or raise the limit, and inspect pg_index.indisvalid and pg_stat_progress_create_index before any removal, see docs/invalid-index-recovery.md: %v",
+		fault, e.Cleanup)
+}
+
+// buildClause names the build failure that left the index invalid, so the
+// server's error reaches whoever reads the message; empty when no build
+// failure is carried.
+func (e *InvalidIndexError) buildClause() string {
+	if e.Build == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (the build failed: %v)", e.Build)
 }
 
 // Unwrap exposes the underlying failures to errors.Is/As.
