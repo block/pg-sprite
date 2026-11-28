@@ -112,7 +112,8 @@ GRANT SELECT ON events TO reader;
 }
 
 // An enum type file names every statement beside its CREATE TYPE, not only
-// the first.
+// the first: a comment no desired file holds is refused naming its object,
+// and a second type is refused as belonging in a file of its own.
 func TestParseDesiredFileEnumNamesEveryExtraStatement(t *testing.T) {
 	sql := `CREATE TYPE order_status AS ENUM ('placed', 'shipped');
 COMMENT ON TYPE order_status IS 'Where an order is';
@@ -124,9 +125,10 @@ CREATE TYPE order_status_old AS ENUM ('placed');
 	require.True(t, ok, "%v", err)
 	require.Len(t, refused.Refusals, 2)
 	assert.Equal(t, []int{2, 3}, []int{refused.Refusals[0].Line, refused.Refusals[1].Line})
-	for _, refusal := range refused.Refusals {
-		assert.ErrorIs(t, refusal, ErrEnumTypeAlone)
-	}
+	comment, ok := errors.AsType[*DisallowedStatementError](refused.Refusals[0])
+	require.True(t, ok, "%v", refused.Refusals[0])
+	assert.Equal(t, DeclaredComment, comment.Object)
+	assert.ErrorIs(t, refused.Refusals[1], ErrEnumTypeAlone)
 }
 
 // A row-security file's table and indexes are admitted apart from its row

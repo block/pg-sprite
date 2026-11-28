@@ -31,7 +31,7 @@ func TestDesiredFileRefusalVerdicts(t *testing.T) {
 			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this domain is not allowed in it; nothing was planned or executed"},
 		{"enum type in a table file", "CREATE TYPE mood AS ENUM ('happy', 'sad'); CREATE TABLE t (id int)",
 			"CREATE TYPE mood AS ENUM ('happy', 'sad')", verdict.ClassNoOnlineSafetyProblem, verdict.OwnerDirectOperator,
-			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"},
+			"a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this enum type belongs in a file of its own; nothing was planned or executed"},
 		{"enum label listed twice", "CREATE TYPE mood AS ENUM ('happy', 'happy')",
 			"unused", verdict.ClassByDesign, "",
 			"statement 1: a desired enum type's labels must be distinct, non-empty, and at most 63 bytes: \"happy\" is listed twice; nothing was planned or executed"},

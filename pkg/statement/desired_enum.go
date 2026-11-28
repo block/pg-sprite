@@ -90,7 +90,7 @@ func parseDesiredEnumTree(source *desiredSource, tree *pganalyze.ParseResult) (D
 		node := raw.GetStmt()
 		create := node.GetCreateEnumStmt()
 		if create == nil || declared {
-			if err := refused.refuse(i, raw, enumTypeAloneRefusal(source, raw)); err != nil {
+			if err := refused.refuse(i, raw, enumFileExtraRefusal(source, raw)); err != nil {
 				return DesiredEnumType{}, err
 			}
 			continue
@@ -126,8 +126,54 @@ func parseDesiredEnumTree(source *desiredSource, tree *pganalyze.ParseResult) (D
 	return desired, nil
 }
 
+// enumFileExtraRefusal returns the refusal for raw, a statement of an enum
+// type file other than its one CREATE TYPE ... AS ENUM. A statement another
+// desired file holds belongs in a file of its own; any other statement no
+// desired file holds, and is refused as a table file refuses it, naming its
+// object, so moving it to a file of its own never meets a second refusal.
+func enumFileExtraRefusal(source *desiredSource, raw *pganalyze.RawStmt) error {
+	if heldByADesiredFile(raw.GetStmt()) {
+		return enumTypeAloneRefusal(source, raw)
+	}
+	return disallowedStatement(source, raw)
+}
+
+// heldByADesiredFile reports whether some desired file admits node: an enum
+// type, a table, an index, a policy or its comment, or a change to the
+// table's row security.
+func heldByADesiredFile(node *pganalyze.Node) bool {
+	switch {
+	case node.GetCreateEnumStmt() != nil, node.GetCreateStmt() != nil,
+		node.GetIndexStmt() != nil, node.GetCreatePolicyStmt() != nil:
+		return true
+	case node.GetCommentStmt() != nil:
+		return node.GetCommentStmt().GetObjtype() == pganalyze.ObjectType_OBJECT_POLICY
+	case node.GetAlterTableStmt() != nil:
+		return changesOnlyRowSecurity(node.GetAlterTableStmt())
+	default:
+		return false
+	}
+}
+
+// changesOnlyRowSecurity reports whether every command of alter enables,
+// disables, forces, or stops forcing row security.
+func changesOnlyRowSecurity(alter *pganalyze.AlterTableStmt) bool {
+	if len(alter.GetCmds()) == 0 {
+		return false
+	}
+	for _, cmd := range alter.GetCmds() {
+		switch cmd.GetAlterTableCmd().GetSubtype() {
+		case pganalyze.AlterTableType_AT_EnableRowSecurity, pganalyze.AlterTableType_AT_DisableRowSecurity,
+			pganalyze.AlterTableType_AT_ForceRowSecurity, pganalyze.AlterTableType_AT_NoForceRowSecurity:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // enumTypeAloneRefusal returns the refusal for raw, a statement of an enum
-// type file other than its one CREATE TYPE ... AS ENUM.
+// type file that another desired file holds.
 func enumTypeAloneRefusal(source *desiredSource, raw *pganalyze.RawStmt) error {
 	sql, _, err := refusedStatement(source, raw)
 	if err != nil {

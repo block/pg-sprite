@@ -42,6 +42,9 @@ const (
 	DeclaredSchema
 	// DeclaredRule is CREATE RULE.
 	DeclaredRule
+	// DeclaredEnumType is CREATE TYPE ... AS ENUM. A desired file may hold
+	// one, but only alone, so beside a table it belongs in a file of its own.
+	DeclaredEnumType
 )
 
 // DeclaredObjects returns the closed set of declared objects,
@@ -63,6 +66,7 @@ func DeclaredObjects() []DeclaredObject {
 		DeclaredGrant,
 		DeclaredSchema,
 		DeclaredRule,
+		DeclaredEnumType,
 	}
 }
 
@@ -95,6 +99,8 @@ func (o DeclaredObject) String() string {
 		return "schema"
 	case DeclaredRule:
 		return "rule"
+	case DeclaredEnumType:
+		return "enum type"
 	default:
 		return "statement"
 	}
@@ -130,6 +136,8 @@ func declaredObject(node *pganalyze.Node) DeclaredObject {
 		return DeclaredSchema
 	case node.GetRuleStmt() != nil:
 		return DeclaredRule
+	case node.GetCreateEnumStmt() != nil:
+		return DeclaredEnumType
 	default:
 		return DeclaredOther
 	}
