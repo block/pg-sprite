@@ -1,0 +1,39 @@
+#!/bin/bash
+#
+# Stand-in gh for scripts/slot-release-proof-issue_test.sh. It appends every
+# call to $FAKE_DIR/calls, one argument per line after a "--- call" line, and
+# to $FAKE_DIR/lines as one line of space-joined arguments, so a test can pin
+# which flags travel together in one call. It answers from files in $FAKE_DIR:
+#   issues.json  the `issue list` answer, before --jq
+#   runs.json    the workflow's scheduled runs answer, before --jq
+#   jobs.json    the run's jobs answer, before --jq
+#   api.err      when present, the jobs listing prints it to stderr and fails
+# A call with --jq applies the filter with the real jq, so the script's
+# filters run against GitHub's response shapes. Other calls succeed silently.
+
+printf '%s\n' "--- call" "$@" >>"$FAKE_DIR/calls"
+printf '%s\n' "$*" >>"$FAKE_DIR/lines"
+
+filter=""
+args=("$@")
+for i in "${!args[@]}"; do
+	if [ "${args[$i]}" = "--jq" ]; then
+		filter="${args[$((i + 1))]}"
+	fi
+done
+
+case "$1 $2" in
+"issue list")
+	jq -r "$filter" "$FAKE_DIR/issues.json"
+	;;
+"api "*/workflows/*/runs*)
+	jq -r "$filter" "$FAKE_DIR/runs.json"
+	;;
+"api "*)
+	if [ -f "$FAKE_DIR/api.err" ]; then
+		cat "$FAKE_DIR/api.err" >&2
+		exit 1
+	fi
+	jq -r "$filter" "$FAKE_DIR/jobs.json"
+	;;
+esac

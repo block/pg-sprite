@@ -25,7 +25,8 @@ import (
 // errAttachIndexUnsupported is returned for an index of the parent the step
 // cannot give the table: an EXCLUDE constraint's, or a key constraint whose
 // index is not the plain unique btree index on its columns the leaf key step
-// builds, or that is DEFERRABLE. Nothing is built for it.
+// builds, or that is DEFERRABLE. Nothing is built for it. It is also returned
+// for a table to attach that is not a plain table, such as a partitioned one.
 var errAttachIndexUnsupported = errors.New("the step cannot give the table this index of the partitioned parent")
 
 // attachIndexAction says what the step did for one index of the parent.
@@ -65,64 +66,105 @@ type parentIndex struct {
 
 // ensureAttachIndexes gives the table every index of the parent the attach
 // will need, and returns what it did for each, in the parent indexes' OID
-// order. It reads and decides every call, so a rerun resumes: an index the
-// table has is found, an earlier build's invalid index under the derived
-// name is removed under proof and built again, and a key constraint resumes
-// as the leaf key step does. A table index counts for one parent index only,
-// as the attach takes it. A name the step needs held by something else, and
-// an index the step cannot give the table, are refused, typed, before that
-// index is built; earlier indexes stay. The table is a standalone node, not
-// yet a partition, and every build proves it still is. The caller holds the
+// order. It first pairs the table's indexes with the parent's as the attach
+// will (pairAttachIndexes): a parent index the pairing gives a table index
+// has it, whether or not that index backs a constraint, and only the rest
+// are built, each without adopting an index the pairing gives another. It
+// reads and decides every call, so a rerun resumes: an earlier build's
+// invalid index under the derived name is removed under proof and built
+// again, and a key constraint resumes as the leaf key step does. A name the
+// step needs held by something else, and an index the step cannot give the
+// table, are refused, typed, before that index is built; earlier indexes
+// stay. After the builds it reads both index lists again and refuses, with
+// errAttachIndexIncomplete, unless the attach would pair every parent index
+// with the table index reported for it. The table is a standalone node, not
+// yet a partition, and every read proves it still is. The caller holds the
 // parent's advisory table lock (LK-1), and the pool needs the concurrent
 // build's two connections.
 func ensureAttachIndexes(ctx context.Context, pool *pgxpool.Pool, parentOID uint32, table partitionNode, b ConcurrentBudget) ([]attachIndexResult, error) {
-	if !table.standalone || table.relkind != "r" {
-		return nil, fmt.Errorf("%w: the attach index step takes a standalone plain table, got %s of kind %q",
-			ErrInvariantViolation, table.qualified(), table.relkind)
+	if !table.standalone {
+		return nil, fmt.Errorf("%w: the attach index step takes a standalone table, got %s", ErrInvariantViolation, table.qualified())
+	}
+	if table.relkind != "r" {
+		return nil, fmt.Errorf("%w: %s is of kind %q, and the step gives indexes to a plain table only",
+			errAttachIndexUnsupported, table.qualified(), table.relkind)
 	}
 	if err := b.validate(); err != nil {
 		return nil, err
 	}
 	tx := briefTx{pool: pool}
-	var indexes []parentIndex
-	err := tx.read(ctx, "list the indexes of the partitioned parent of "+table.qualified(), func(ctx context.Context, q querier) error {
+	var first attachIndexState
+	err := tx.read(ctx, "read the indexes of "+table.qualified()+" and of its partitioned parent", func(ctx context.Context, q querier) error {
 		var err error
-		indexes, err = readParentIndexes(ctx, q, parentOID)
+		first, err = readAttachIndexState(ctx, q, parentOID, table)
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	claimed := map[uint32]bool{}
-	results := make([]attachIndexResult, 0, len(indexes))
-	for _, pi := range indexes {
+	paired := pairAttachIndexes(first)
+	tableIndexName := map[uint32]string{}
+	for _, c := range first.table {
+		tableIndexName[c.oid] = c.name
+	}
+	results := make([]attachIndexResult, 0, len(first.parent))
+	for i, pi := range first.parent {
+		taken := takenByOthers(first.parent, paired, results, i)
 		var res attachIndexResult
-		switch pi.contype {
-		case "":
-			res, err = ensureAttachPlainIndex(ctx, pool, tx, pi, table, claimed, b)
-		case "p", "u":
-			res, err = ensureAttachKeyIndex(ctx, pool, tx, pi, table, b)
+		switch {
+		case pi.contype == "x":
+			err = fmt.Errorf("%w: index %s backs an exclusion constraint", errAttachIndexUnsupported, pi.facts.name)
+		case pi.contype != "":
+			res, err = ensureAttachKeyIndex(ctx, pool, tx, pi, table, taken, b)
+		case paired[i] != 0:
+			res = attachIndexResult{parentIndex: pi.facts.name, action: attachIndexFound,
+				index: tableIndexName[paired[i]], indexOID: paired[i]}
 		default:
-			err = fmt.Errorf("%w: index %s backs a constraint of type %q", errAttachIndexUnsupported, pi.facts.name, pi.contype)
+			res, err = ensureAttachPlainIndex(ctx, pool, tx, pi, table, taken, b)
 		}
 		if err != nil {
 			return results, fmt.Errorf("give %s the index of %s: %w", table.qualified(), pi.facts.name, err)
 		}
-		claimed[res.indexOID] = true
 		results = append(results, res)
+	}
+	err = tx.read(ctx, "prove the attach to "+table.qualified()+" builds no index", func(ctx context.Context, q querier) error {
+		after, err := readAttachIndexState(ctx, q, parentOID, table)
+		if err != nil {
+			return err
+		}
+		return attachIndexesComplete(first.parent, after, results)
+	})
+	if err != nil {
+		return results, err
 	}
 	return results, nil
 }
 
-// ensureAttachPlainIndex gives the table an index the attach takes for a
-// parent index that backs no constraint: one it already has, of the parent
-// index's definition and claimed by no earlier parent index, or one built
-// concurrently under the derived name.
+// takenByOthers maps every table index that goes to a parent index other
+// than the i-th to that parent index's name: the one the pairing gives every
+// other parent index, and the one the step reported for each earlier one.
+func takenByOthers(parent []parentIndex, paired []uint32, results []attachIndexResult, i int) map[uint32]string {
+	taken := map[uint32]string{}
+	for j, oid := range paired {
+		if j != i && oid != 0 {
+			taken[oid] = parent[j].facts.name
+		}
+	}
+	for _, r := range results {
+		taken[r.indexOID] = r.parentIndex
+	}
+	return taken
+}
+
+// ensureAttachPlainIndex builds, concurrently under the derived name, the
+// table's index for a parent index that backs no constraint and that the
+// pairing gives no table index, unless an earlier run's build of it is
+// already there.
 func ensureAttachPlainIndex(ctx context.Context, pool *pgxpool.Pool, tx briefTx, pi parentIndex, table partitionNode,
-	claimed map[uint32]bool, b ConcurrentBudget) (attachIndexResult, error) {
+	taken map[uint32]string, b ConcurrentBudget) (attachIndexResult, error) {
 	name := derivedPartitionIndexName(pi.facts.name, table.oid)
 	res := attachIndexResult{parentIndex: pi.facts.name, action: attachIndexFound}
-	found, debris, err := findAttachIndex(ctx, tx, pi, table, name, claimed)
+	found, debris, err := findAttachIndex(ctx, tx, pi, table, name, taken)
 	if err != nil {
 		return attachIndexResult{}, err
 	}
@@ -135,7 +177,8 @@ func ensureAttachPlainIndex(ctx context.Context, pool *pgxpool.Pool, tx briefTx,
 		return attachIndexResult{}, fmt.Errorf("make the index statement for %s: %w", table.qualified(), err)
 	}
 	// INV: ST-7 — the table is still the one resolved, a partition of
-	// nothing; the build below asserts the same table on its own session.
+	// nothing. The build checks only the table's OID on its own session;
+	// the read after every build proves the table still standalone.
 	if err := tx.read(ctx, "prove "+table.qualified(), func(ctx context.Context, q querier) error {
 		return proveNodeIn(ctx, q, table)
 	}); err != nil {
@@ -162,25 +205,19 @@ func ensureAttachPlainIndex(ctx context.Context, pool *pgxpool.Pool, tx briefTx,
 	return res, nil
 }
 
-// findAttachIndex looks for the table's index for a plain parent index. The
-// derived name decides when it is held: the index there must be the one the
-// build would create, and an invalid one is debris. Otherwise any valid
-// index of the definition, backing no constraint, attached to nothing, and
-// claimed by no earlier parent index, is taken. It returns the zero value
-// when the build has to run, and whether debris must go first.
-func findAttachIndex(ctx context.Context, tx briefTx, pi parentIndex, table partitionNode, name string, claimed map[uint32]bool) (relationFacts, bool, error) {
+// findAttachIndex looks under the derived name for an earlier run's build of
+// the table's index for a plain parent index: the index there must be the
+// one the build would create, and an invalid one is debris. It returns the
+// zero value when the build has to run, and whether debris must go first.
+func findAttachIndex(ctx context.Context, tx briefTx, pi parentIndex, table partitionNode, name string, taken map[uint32]string) (relationFacts, bool, error) {
 	var (
 		occupant   relationFacts
 		occupied   bool
-		reusable   []relationFacts
 		quarantine []invalidIndex
 	)
 	err := tx.read(ctx, "inspect the indexes of "+table.qualified(), func(ctx context.Context, q querier) error {
 		var err error
 		if occupant, occupied, err = relationByName(ctx, q, table.schema, name); err != nil || occupied {
-			return err
-		}
-		if reusable, err = reusableIndexes(ctx, q, table.oid); err != nil {
 			return err
 		}
 		quarantine, err = listDroppableQuarantinedIndexes(ctx, q, indexTarget{tableOID: table.oid, schema: table.schema, table: table.name})
@@ -190,19 +227,7 @@ func findAttachIndex(ctx context.Context, tx briefTx, pi parentIndex, table part
 		return relationFacts{}, false, err
 	}
 	if occupied {
-		return judgeAttachIndexOccupant(occupant, pi, table)
-	}
-	for _, candidate := range reusable {
-		if claimed[candidate.oid] {
-			continue
-		}
-		key, err := candidate.definitionKey()
-		if err != nil {
-			return relationFacts{}, false, err
-		}
-		if key == pi.key {
-			return candidate, false, nil
-		}
+		return judgeAttachIndexOccupant(occupant, pi, table, taken)
 	}
 	return relationFacts{}, len(quarantine) > 0, nil
 }
@@ -210,9 +235,10 @@ func findAttachIndex(ctx context.Context, tx briefTx, pi parentIndex, table part
 // judgeAttachIndexOccupant decides whether the relation under the derived
 // name is the index the build would create on the table: an index on the
 // table, attached to nothing, backing no constraint, of the parent index's
-// definition. A valid one is taken, an invalid one is debris, and anything
-// else holds a name the step will not take from its owner.
-func judgeAttachIndexOccupant(occ relationFacts, pi parentIndex, table partitionNode) (relationFacts, bool, error) {
+// definition, that taken gives to no other parent index. A valid one is
+// taken, an invalid one is debris, and anything else holds a name the step
+// will not take from its owner.
+func judgeAttachIndexOccupant(occ relationFacts, pi parentIndex, table partitionNode, taken map[uint32]string) (relationFacts, bool, error) {
 	name := qualifiedName(occ.schema, occ.name)
 	if occ.relkind != "i" || occ.tableOID != table.oid {
 		return relationFacts{}, false, fmt.Errorf("%w: %s is %s, not the index %s needs",
@@ -233,6 +259,10 @@ func judgeAttachIndexOccupant(occ relationFacts, pi parentIndex, table partition
 	if !occ.valid {
 		return relationFacts{}, true, nil
 	}
+	if owner, ok := taken[occ.oid]; ok {
+		return relationFacts{}, false, fmt.Errorf("%w: %s is the index the attach takes for the parent's index %s",
+			ErrPartitionedIndexNameTaken, name, owner)
+	}
 	return occ, false, nil
 }
 
@@ -240,8 +270,11 @@ func judgeAttachIndexOccupant(occ relationFacts, pi parentIndex, table partition
 // KEY or UNIQUE constraint adopts at the attach, through the partitioned key
 // build's leaf step. That step builds a plain unique btree index on the key
 // columns and nothing else, so a parent constraint whose index is anything
-// more, or a DEFERRABLE one, is refused here before anything is built.
-func ensureAttachKeyIndex(ctx context.Context, pool *pgxpool.Pool, tx briefTx, pi parentIndex, table partitionNode, b ConcurrentBudget) (attachIndexResult, error) {
+// more, or a DEFERRABLE one, is refused here before anything is built. The
+// step neither adopts nor reports an index that taken gives another parent
+// index.
+func ensureAttachKeyIndex(ctx context.Context, pool *pgxpool.Pool, tx briefTx, pi parentIndex, table partitionNode,
+	taken map[uint32]string, b ConcurrentBudget) (attachIndexResult, error) {
 	if pi.deferrable {
 		return attachIndexResult{}, fmt.Errorf("%w: constraint %s is DEFERRABLE", errAttachIndexUnsupported, pi.constraint)
 	}
@@ -265,7 +298,7 @@ func ensureAttachKeyIndex(ctx context.Context, pool *pgxpool.Pool, tx briefTx, p
 		return attachIndexResult{}, fmt.Errorf("%w: the index of constraint %s is not a plain unique btree index on its columns",
 			errAttachIndexUnsupported, pi.constraint)
 	}
-	leaf, err := ensureLeafKey(ctx, pool, spec, table, b)
+	leaf, err := ensureLeafKeyExcept(ctx, pool, spec, table, taken, b)
 	if err != nil {
 		return attachIndexResult{}, err
 	}
@@ -277,9 +310,11 @@ func ensureAttachKeyIndex(ctx context.Context, pool *pgxpool.Pool, tx briefTx, p
 }
 
 // parentIndexesSQL lists the partitioned indexes of the table, in OID order,
-// with the constraint each backs and that constraint's columns by name, in
-// key order. Every relation, operator, and function is pg_catalog-qualified
-// (CO-9).
+// with the primary key, unique, or exclusion constraint each backs and that
+// constraint's columns by name, in key order. A foreign key also names an
+// index in conindid, the referenced table's, so a foreign key of the table to
+// itself would match its key's index a second time without the type filter.
+// Every relation, operator, and function is pg_catalog-qualified (CO-9).
 const parentIndexesSQL = `SELECT c.oid,
 		        COALESCE(k.contype::pg_catalog.text, ''),
 		        COALESCE(k.conname::pg_catalog.text, ''),
@@ -295,6 +330,7 @@ const parentIndexesSQL = `SELECT c.oid,
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
 		   LEFT JOIN pg_catalog.pg_constraint k ON k.conindid OPERATOR(pg_catalog.=) c.oid
 		                                       AND k.conrelid OPERATOR(pg_catalog.=) i.indrelid
+		                                       AND k.contype::pg_catalog.text OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog.text[])
 		  WHERE i.indrelid OPERATOR(pg_catalog.=) $1
 		    AND c.relkind OPERATOR(pg_catalog.=) 'I'
 		  ORDER BY c.oid`

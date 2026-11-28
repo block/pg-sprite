@@ -43,7 +43,7 @@ func ReadDroppedObject(ctx context.Context, q Querier, schema, table string, kin
 	}
 	switch kind {
 	case DroppedIndex:
-		indexes, err := introspectIndexes(ctx, q, oid)
+		indexes, err := introspectIndexes(ctx, q, oid, nil)
 		if err != nil {
 			return DroppedObject{}, false, fmt.Errorf("read the indexes of %s.%s: %w", schema, table, err)
 		}

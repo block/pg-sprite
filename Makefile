@@ -19,7 +19,7 @@ PINS_FILE ?= compose/supabase.yml
 # Guide whose tested versions must name each of those pins' versions.
 GUIDE_FILE ?= docs/supabase.md
 
-.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-guide-versions check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof load-proof-library slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-guide-versions check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof load-proof-library slot-release-proof test-slot-release-proof-issue lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -122,6 +122,12 @@ load-proof-library: $(LOAD_PROOF_DB)
 # proves: docs/testing.md#how-to-run.
 slot-release-proof:
 	SLOT_RELEASE_PROOF=1 $(GO) test -race -count=1 -timeout 10m -run '^TestCatchupKeepsRunningWhileTheServerReleasesTheSlotAtItsOwnCadence$$' -v ./pkg/applier
+
+# Drive the script that keeps the Slot Release Proof's failure issue in step
+# with its scheduled runs through each outcome, against a stand-in gh: no
+# network, no token. Needs jq.
+test-slot-release-proof-issue:
+	@scripts/slot-release-proof-issue_test.sh
 
 lint:
 	golangci-lint run
