@@ -355,12 +355,13 @@ type ConstraintValidation struct {
 
 // Diff derives the ordered statement list that converges live onto desired.
 // Order is dependency-correct: drops first (indexes, then constraints, then
-// columns, then NOT NULLs), then column adds and alters, then constraint
-// adds, then index creates, then foreign key adds — so an added column
-// exists before an index or constraint that references it. A plan that
-// drops a column drops it last, unless it changes its columns first (see
-// changesColumnsFirst). Four kinds of change keep the old object in place
-// until its replacement is, unless the plan changes its columns first:
+// NOT NULLs), then column adds and alters, then constraint adds, then index
+// creates, then foreign key adds — so an added column exists before an
+// index or constraint that references it. A plan that drops a column drops
+// it last, unless it changes its columns first (see changesColumnsFirst),
+// in which case the column drops follow the constraint drops. Five kinds of
+// change keep the old object in place until its replacement is, unless the
+// plan changes its columns first:
 //
 //   - A changed index is replaced in the create bucket, built under a
 //     temporary name before the old index is dropped (see replacedIndexes).
@@ -371,7 +372,10 @@ type ConstraintValidation struct {
 //     a unique index or constraint, and a constraint the file declares
 //     again under another name, are dropped after the index creates (see
 //     heldDrops).
-//   - Such a foreign key is dropped after the foreign key adds.
+//   - A CHECK the plan drops, when the plan adds a CHECK, is dropped after
+//     the constraint adds.
+//   - A foreign key the plan drops, when the plan adds or validates one, is
+//     dropped after the foreign key adds.
 //
 // Within each bucket the order is deterministic: attribute order for
 // columns, name order for constraints and indexes. schema
@@ -465,12 +469,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// the plan's new unique indexes and constraints are in place, a foreign
 	// key until the plan's new foreign keys are, a CHECK until the plan's
 	// new CHECKs are, and so is a constraint the desired table declares
-	// again under another name. A
-	// uniqueness or rule that moves to another name or another kind of
-	// object keeps holding while its replacement builds, and a replacement
-	// that fails leaves the old one standing. A plan that changes its
-	// columns first (see changesColumnsFirst) keeps the drops first, and so
-	// does a drop whose name the desired table reuses. A plan that drops a column holds its drops like any other and
+	// again under another name. A uniqueness or rule that moves to another
+	// name or another kind of object keeps holding while its replacement
+	// builds, and a replacement that fails leaves the old one standing. A
+	// plan that changes its columns first (see changesColumnsFirst) keeps
+	// the drops first, and so does a drop whose name the desired table
+	// reuses. A plan that drops a column holds its drops like any other and
 	// drops the column last, so the column never takes an index or
 	// constraint with it before its replacement holds.
 	held := heldDrops{
@@ -599,13 +603,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
-	// NOT NULLs to drop, after the columns dropped: a column that is part of
-	// a key the plan drops has lost its NOT NULL's owner by now. A primary
-	// key replaced in place still owns its columns' NOT NULL until the swap
-	// drops the old key, so when the plan replaces one, the NOT NULL drops
-	// wait for the constraints below. The new key is then built and swapped
-	// in while the old one keeps rejecting duplicates, and a column the old
-	// key covered loses its NOT NULL only once nothing requires it.
+	// NOT NULLs to drop, after the constraints dropped, and after the
+	// columns dropped when the plan changes its columns first: a column that
+	// is part of a key the plan drops has lost its NOT NULL's owner by now.
+	// A primary key replaced in place still owns its columns' NOT NULL until
+	// the swap drops the old key, so when the plan replaces one, the NOT
+	// NULL drops wait for the constraints below. The new key is then built
+	// and swapped in while the old one keeps rejecting duplicates, and a
+	// column the old key covered loses its NOT NULL only once nothing
+	// requires it.
 	notNullDrops := dropNotNullChanges(table, live, desiredCols)
 	notNullAfterKeySwap := replacesPrimaryKey(replaced)
 	if columnsFirst {

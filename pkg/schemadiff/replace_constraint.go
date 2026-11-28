@@ -309,8 +309,11 @@ func replaceInPlaceChanges(table, schema string, had, con Constraint, r inPlaceR
 // beside an added column that may rewrite the table: a rewrite renumbers the
 // columns, and a dropped column is reviewed by the number it has when the
 // plan is derived. An added column may rewrite when it carries a default, a
-// generation expression, or an identity, since only the planner can prove
-// such an add runs in place.
+// generation expression, or an identity, or when its type is not one of
+// PostgreSQL's own base types, such as a domain whose rules the add checks
+// against every row: only the planner can prove such an add runs in place,
+// and it routes one it cannot prove, or one that rewrites, to a copy of the
+// table.
 func changesColumnsFirst(live Model, desired []Column) bool {
 	liveCols := columnsByName(live.Columns)
 	desiredCols := columnsByName(desired)
@@ -339,7 +342,7 @@ func addsColumnThatMayRewrite(liveCols map[string]Column, desired []Column) bool
 		if _, ok := liveCols[col.Name]; ok {
 			continue
 		}
-		if col.Default != "" || col.Generated || col.Identity != IdentityNone {
+		if col.Default != "" || col.Generated || col.Identity != IdentityNone || !col.BuiltInType {
 			return true
 		}
 	}

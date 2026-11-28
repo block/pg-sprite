@@ -166,7 +166,7 @@ func TestDiffRenameShapeIsDropPlusAdd(t *testing.T) {
 		Table: "users",
 		Columns: []Column{
 			{Name: "id", Type: "bigint", NotNull: true},
-			{Name: "email_address", Type: "text"},
+			{Name: "email_address", Type: "text", BuiltInType: true},
 		},
 	}
 	changes, err := Diff("public", live, desired)
@@ -647,7 +647,7 @@ func TestDiffOrderingDropsAColumnAfterAddsAndIndexes(t *testing.T) {
 	live.Columns = append(live.Columns, Column{Name: "legacy", Type: "integer"})
 
 	desired := base()
-	desired.Columns = append(desired.Columns, Column{Name: "email", Type: "text", NotNull: true})
+	desired.Columns = append(desired.Columns, Column{Name: "email", Type: "text", BuiltInType: true, NotNull: true})
 	desired.Indexes = append(desired.Indexes, Index{
 		Name: "events_email_idx", Def: "CREATE INDEX events_email_idx ON events USING btree (email)",
 	})

@@ -222,3 +222,37 @@ func TestRunDesiredKeepsACheckWhileChangingItOnAPartitionedParent(t *testing.T) 
 		rule: "t_amt_chk", wantDef: func(string) string { return "CHECK (((amt >= 0) AND (amt < 500)))" },
 	})
 }
+
+// A column drop beside an added column of a domain runs first. The planner
+// may route that add to a copy of the table, since the add checks the
+// domain's rules against every row, and a copy renumbers the columns the
+// dropped one is reviewed by. Beside an added column of a built-in type the
+// drop still runs last, once the replaced rule is in place.
+func TestPlanDesiredDropsAColumnFirstBesideADomainAdd(t *testing.T) {
+	pool, schema := columnDropTable(t, `CREATE DOMAIN %[1]s.positive AS int CHECK (VALUE > 0);
+		CREATE TABLE %[1]s.t (
+			id int PRIMARY KEY,
+			legacy int,
+			CONSTRAINT t_rule CHECK (id > 0 AND legacy > 0)
+		);`)
+	drop := fmt.Sprintf(`ALTER TABLE %s.t DROP legacy`, schema)
+	statements := func(desired string) []string {
+		var sqls []string
+		for _, st := range plannedDrop(t, pool, schema, desired).Statements {
+			sqls = append(sqls, st.SQL)
+		}
+		return sqls
+	}
+
+	domain := statements(fmt.Sprintf(`CREATE TABLE t (id int PRIMARY KEY, score %s.positive, CONSTRAINT t_rule CHECK (id > 0));`, schema))
+	assert.Equal(t, []string{
+		fmt.Sprintf(`ALTER TABLE %s.t DROP CONSTRAINT t_rule`, schema),
+		drop,
+		fmt.Sprintf(`ALTER TABLE %s.t ADD COLUMN score positive`, schema),
+		fmt.Sprintf(`ALTER TABLE %s.t ADD CONSTRAINT t_rule CHECK (id > 0)`, schema),
+	}, domain, "the drop runs before the domain add")
+
+	builtIn := statements(`CREATE TABLE t (id int PRIMARY KEY, score int, CONSTRAINT t_rule CHECK (id > 0));`)
+	require.NotEmpty(t, builtIn)
+	assert.Equal(t, drop, builtIn[len(builtIn)-1], "the drop runs last beside a built-in add: %v", builtIn)
+}

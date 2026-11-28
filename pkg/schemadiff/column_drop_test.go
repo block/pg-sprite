@@ -124,10 +124,14 @@ func TestChangesColumnsFirst(t *testing.T) {
 
 	assert.False(t, changesColumnsFirst(base(), base().Columns), "no column change")
 	assert.False(t, changesColumnsFirst(withLegacy, base().Columns), "a drop alone")
-	assert.False(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "note", Type: "text"})), "a drop beside a plain add")
+	assert.False(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "note", Type: "text", BuiltInType: true})), "a drop beside a plain add")
 	assert.True(t, changesColumnsFirst(base(), retyped.Columns), "a retype")
-	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "note", Type: "text", Default: "'x'::text"})), "a drop beside a defaulted add")
-	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "total", Type: "integer", Default: "(id * 2)", Generated: true})), "a drop beside a generated add")
-	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "seq", Type: "bigint", Identity: IdentityAlways})), "a drop beside an identity add")
+	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "note", Type: "text", BuiltInType: true, Default: "'x'::text"})), "a drop beside a defaulted add")
+	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "total", Type: "integer", BuiltInType: true, Default: "(id * 2)", Generated: true})), "a drop beside a generated add")
+	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "seq", Type: "bigint", BuiltInType: true, Identity: IdentityAlways})), "a drop beside an identity add")
+	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "email", Type: "email_address"})),
+		"a drop beside an add of a domain, whose rules the add may check against every row")
+	assert.True(t, changesColumnsFirst(withLegacy, add(base(), Column{Name: "note", Type: "text"})),
+		"a drop beside an add whose type introspection did not read as built in")
 	assert.False(t, changesColumnsFirst(base(), add(base(), Column{Name: "note", Type: "text", Default: "'x'::text"})), "a defaulted add with no drop")
 }

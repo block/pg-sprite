@@ -48,6 +48,13 @@ type Column struct {
 	// Type is the canonical type text (format_type), e.g. "character
 	// varying(50)" — never an alias like varchar(50).
 	Type string
+	// BuiltInType reports that introspection read the column's type as one
+	// of PostgreSQL's own base types, not a domain and not a type a user
+	// defined. Adding a column of such a type with no default runs on the
+	// catalog alone; adding one of any other type may check a domain's rules
+	// against every row. False when unread, which is the cautious answer.
+	// It never reaches a digest.
+	BuiltInType bool `json:"-"`
 	// NotNull reports the NOT NULL attribute.
 	NotNull bool
 	// Default is the canonical default expression (pg_get_expr), empty when
