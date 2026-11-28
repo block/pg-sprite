@@ -105,7 +105,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 	columnLimitHelped := false
 	for _, d := range ps.Decisions {
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
-			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
+			fmt.Sprintf("%s — %s", d.Operation, decisionImpactText(d)))
 		codes = appendCode(codes, string(d.Reason))
 		if d.ReadsInTimeZone != "" {
 			w.diag("note", "", fmt.Sprintf("%s converts each stored value in the session time zone %s", d.Operation, d.ReadsInTimeZone))
@@ -363,6 +363,17 @@ func displayVersion(v string) string {
 // submitted statement itself.
 func substituted(ps plan.Statement) bool {
 	return len(ps.ExecSQL) > 0 && (len(ps.ExecSQL) != 1 || ps.ExecSQL[0] != ps.SQL)
+}
+
+// decisionImpactText is impactText for one decision, naming what the
+// decision's own facts let it name: a column-limit decision names the table
+// at the limit and how many numbers are left.
+func decisionImpactText(d planner.Decision) string {
+	if d.Reason == planner.ReasonColumnLimit && d.ColumnLimit != nil {
+		return "adds a column to " + planner.ColumnLimitSubject(d.ColumnLimit) +
+			"; a dropped column keeps its number until the table is rebuilt"
+	}
+	return impactText(d.Reason)
 }
 
 // impactText renders what running an operation's submitted form does to

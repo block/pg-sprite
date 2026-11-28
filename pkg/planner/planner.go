@@ -940,9 +940,13 @@ const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which Pos
 
 // ColumnLimitSubject names what is at the column limit for a column-limit
 // decision: the table itself, its partitions or inheritance children that have
-// used every number, or both.
+// used the most numbers, or both. When numbers are left it says how many, so
+// a refusal of the adds past them agrees with the help's offer to add fewer.
 func ColumnLimitSubject(numbers *preflight.ColumnNumbers) string {
 	full := fmt.Sprintf("all %d of PostgreSQL's column numbers", preflight.MaxColumnNumber)
+	if numbers != nil && numbers.Left > 0 {
+		full = fmt.Sprintf("all but %d of PostgreSQL's %d column numbers", numbers.Left, preflight.MaxColumnNumber)
+	}
 	root, children := columnLimitTables(numbers)
 	switch {
 	case len(children) == 0:

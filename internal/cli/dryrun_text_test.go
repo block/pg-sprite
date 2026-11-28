@@ -963,8 +963,9 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 }
 
 // A column add refused at the column limit says why in the refusal
-// sentence, naming the partition that has used every number, and every such
-// add of a statement shares one help line with that partition's rebuild.
+// sentence and in each add's own line, naming the partition that has used
+// every number, and every such add of a statement shares one help line with
+// that partition's rebuild.
 func TestDryRunTextColumnLimitRefusal(t *testing.T) {
 	numbers := &preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: `"app"."events_1"`, Partition: true}}}
 	report := plan.NewReport(plan.SourceAlter)
@@ -986,7 +987,7 @@ func TestDryRunTextColumnLimitRefusal(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := strings.Join(strings.Fields(out.String()), " ")
 	assert.Contains(t, text, `error[unsupported-statement]: refused — ADD COLUMN kind adds a column to a table whose partition "app"."events_1" has used all 1600 of PostgreSQL's column numbers, and a dropped column keeps its number until the table is rebuilt`)
-	assert.Contains(t, text, "note[column-limit]: ADD COLUMN note — adds a column to a table that has used all of PostgreSQL's column numbers")
+	assert.Contains(t, text, `note[column-limit]: ADD COLUMN note — adds a column to a table whose partition "app"."events_1" has used all 1600 of PostgreSQL's column numbers; a dropped column keeps its number until the table is rebuilt`)
 	assert.Equal(t, 1, strings.Count(text, "help: "+planner.ColumnLimitHelp(numbers)))
 	assert.Contains(t, text, `help: copy partition "app"."events_1" into a new table`)
 	assert.Contains(t, text, onlineDDLReferenceURL+"#column-limit")

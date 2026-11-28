@@ -1323,8 +1323,8 @@ func TestClassifyRefusesAColumnAddPastTheColumnLimit(t *testing.T) {
 
 // The column-limit refusal names the tables that have used every number,
 // the table itself or the partitions or inheritance children below it, and
-// gives the rebuild for each. It offers adding fewer columns only when the
-// table has numbers left, and says how many.
+// gives the rebuild for each. When the table has numbers left, the subject
+// and the offer to add fewer columns both say how many.
 func TestColumnLimitSubjectAndHelp(t *testing.T) {
 	const givesBack = "which gives back the numbers its dropped columns hold (VACUUM FULL does not)"
 	for name, tc := range map[string]struct {
@@ -1343,7 +1343,7 @@ func TestColumnLimitSubjectAndHelp(t *testing.T) {
 		},
 		"the table itself, one free": {
 			numbers: &preflight.ColumnNumbers{Left: 1, Fullest: []preflight.FullTable{{Name: `"app"."events"`, Root: true}}},
-			subject: "a table that has used all 1600 of PostgreSQL's column numbers",
+			subject: "a table that has used all but 1 of PostgreSQL's 1600 column numbers",
 			help:    "copy the table into a new one, " + givesBack + ", or add at most 1 column",
 		},
 		"a partition, none free": {
@@ -1354,7 +1354,7 @@ func TestColumnLimitSubjectAndHelp(t *testing.T) {
 		},
 		"an inheritance child, three free": {
 			numbers: &preflight.ColumnNumbers{Left: 3, Fullest: []preflight.FullTable{{Name: `"app"."child"`}}},
-			subject: `a table whose inheritance child "app"."child" has used all 1600 of PostgreSQL's column numbers`,
+			subject: `a table whose inheritance child "app"."child" has used all but 3 of PostgreSQL's 1600 column numbers`,
 			help: `copy inheritance child "app"."child" into a new table, ` + givesBack +
 				", then make the copy inherit from the same parent in its place, or add at most 3 columns",
 		},
