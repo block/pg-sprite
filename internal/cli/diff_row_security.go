@@ -117,7 +117,7 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error, create str
 func rowSecurityNextStep(review *diffplan.RowSecurityReviewRequired) string {
 	switch {
 	case review.ShapeRefusal != nil:
-		return "migrate --desired does not change row security on this table: " + review.ShapeRefusal.Error()
+		return rowSecurityShapeNextStep(review.ShapeRefusal)
 	case review.Review.TableChanged:
 		return "the file changes both the table and its row security, which are applied in separate runs: " +
 			"first run migrate --desired with the table definition as it is live and the new row security, " +
@@ -129,6 +129,53 @@ func rowSecurityNextStep(review *diffplan.RowSecurityReviewRequired) string {
 	default:
 		return "row security is not planned ahead: migrate --desired works out the change again under its own lock " +
 			"and applies what differs then in one transaction, so review this output right before you run it"
+	}
+}
+
+// rowSecurityShapeNextStep says why migrate --desired leaves the row
+// security of a table shaped like this one alone, in the table's terms, and
+// what to do instead. diff and migrate print the same text.
+func rowSecurityShapeNextStep(shape error) string {
+	return "migrate --desired does not change row security on this table because " +
+		rowSecurityShapeReason(shape) + "; change its row security outside pg-sprite"
+}
+
+// rowSecurityShapeReason names what the table has that the row security
+// path does not support, from the renderer's verdict in shape, or returns
+// that verdict's own text when no reason is listed, so a new verdict still
+// prints something true.
+func rowSecurityShapeReason(shape error) string {
+	refusal, ok := schemadiff.RenderRefusal(shape)
+	if !ok {
+		return shape.Error()
+	}
+	switch {
+	case errors.Is(refusal, schemadiff.ErrUnrenderablePartitionedRowSecurity):
+		return "it is a partitioned parent"
+	case errors.Is(refusal, schemadiff.ErrUnrenderablePartition):
+		return "it is a partition"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableInheritance):
+		return "it uses table inheritance"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableForeignKey):
+		return "it owns or is referenced by a foreign key"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableUnlogged):
+		return "it is unlogged"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableVirtual):
+		return "it has a virtual generated column"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableDefault):
+		return "a column default uses a sequence"
+	case errors.Is(refusal, schemadiff.ErrMultipleOwnedSequences):
+		return "a column default uses more than one sequence the column owns"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableSequenceOptions):
+		return "a sequence the table owns has options"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableToastOptions):
+		return "it sets TOAST storage parameters"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableMergedConstraints):
+		return "two of its constraints repeat each other on the same columns"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableUnattachedIndex):
+		return "one of its partitioned indexes is not attached on every partition"
+	default:
+		return refusal.Error()
 	}
 }
 

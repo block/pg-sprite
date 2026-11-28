@@ -12,6 +12,12 @@ import (
 // change before retrying. Wrapped causes retain the specific admission failure.
 var ErrRowSecurityRefused = errors.New("row security change refused")
 
+// ErrRowSecurityTableShape marks a refusal caused by the live table's shape,
+// such as a partitioned parent or an unlogged table, rather than by the
+// declaration or by privileges. It wraps the renderer's verdict, which
+// schemadiff.RenderRefusal reads back.
+var ErrRowSecurityTableShape = errors.New("the row security path does not support this table shape")
+
 // ErrRowSecurityPrivileges identifies a missing grant, distinct from unsupported declarations.
 var ErrRowSecurityPrivileges = errors.New("insufficient row security privileges")
 

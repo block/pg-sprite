@@ -288,12 +288,12 @@ func RowSecurityTableShapeRefusal(live schemadiff.Model) error {
 // happen to match.
 func rowSecurityTableShape(m schemadiff.Model) (schemadiff.Model, error) {
 	if m.PartitionKey != "" {
-		return schemadiff.Model{}, fmt.Errorf("row security target: partitioned parent (PARTITION BY %s): %w", m.PartitionKey, schemadiff.ErrUnrenderablePartitionedRowSecurity)
+		return schemadiff.Model{}, fmt.Errorf("%w: partitioned parent (PARTITION BY %s): %w", ErrRowSecurityTableShape, m.PartitionKey, schemadiff.ErrUnrenderablePartitionedRowSecurity)
 	}
 	table := withoutExportOnlyRefusals(m)
 	table.RowSecurity = schemadiff.RowSecurity{}
 	if _, err := schemadiff.Render(table); err != nil {
-		return schemadiff.Model{}, fmt.Errorf("row security target: %w", err)
+		return schemadiff.Model{}, fmt.Errorf("%w: %w", ErrRowSecurityTableShape, err)
 	}
 	return table, nil
 }

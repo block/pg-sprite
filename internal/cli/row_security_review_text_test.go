@@ -101,8 +101,8 @@ func TestRowSecurityRefusalSaysHowToApplyTheFile(t *testing.T) {
 		"a table shape migrate --desired does not change": {
 			review: schemadiff.RowSecurityReview{Version: 1, TableComparisonComplete: true, Changes: setting},
 			shape:  executor.RowSecurityTableShapeRefusal(schemadiff.Model{Table: "documents", PartitionKey: "RANGE (id)"}),
-			detail: "migrate --desired does not change row security on this table: " +
-				"row security target: partitioned parent (PARTITION BY RANGE (id)): " + schemadiff.ErrUnrenderablePartitionedRowSecurity.Error(),
+			detail: "migrate --desired does not change row security on this table because it is a partitioned parent; " +
+				"change its row security outside pg-sprite",
 		},
 		"row security alone": {
 			review: schemadiff.RowSecurityReview{Version: 1, TableComparisonComplete: true, Changes: setting},
