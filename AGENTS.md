@@ -243,7 +243,9 @@ no printing to process stdout) are enforced by `.golangci.yml`, not prose.
 - PR titles carry a prefix: either a conventional commit, `<type>(<scope>): <sentence>`,
   or the Go style, `<package>: <sentence>`. The type is `feat`, `fix`, `docs`, `refactor`,
   `perf`, `test`, `ci`, `build`, `chore`, or `deps`; the scope or package names the area the
-  change is about (`planner`, `executor`, `migrate`, `cli`). The sentence says what the
+  change is about (`planner`, `executor`, `migrate`, `cli`). A change with no package, such
+  as a docs, CI, or test-only change, may use a bare type in the Go style (`docs: …`,
+  `ci: …`), which the history already does. The sentence says what the
   change does in words a reviewer understands without the diff, starts lowercase, and has
   no trailing period: `feat(planner): refuse to retype or drop a column that a publication
   includes`, `migrate: walk every front door for its stopped-run check`. A plain sentence
