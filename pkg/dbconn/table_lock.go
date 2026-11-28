@@ -46,9 +46,12 @@ var ErrTableLockLost = errors.New("table lock lost")
 // one role and runs as another (the role connection parameter, or SET ROLE)
 // reads its own start as NULL. A table lock session is identified from
 // other connections by its PID and start together, so AcquireTableLock
-// refuses such a session before it takes the lock.
-var ErrSessionStartHidden = errors.New("the table lock session cannot read when its own session started; " +
-	"grant the role it runs as pg_read_all_stats, or connect as that role directly instead of switching to it")
+// refuses such a session before it takes the lock. A caller that identifies
+// its own sessions by PID and start the same way returns it for a session
+// of its own that cannot read its start.
+var ErrSessionStartHidden = errors.New("the session cannot read when it started; " +
+	"connect as the role it runs as directly instead of switching to it, or grant that role pg_read_all_stats, " +
+	"which also lets it read every session's query text and statistics across the cluster")
 
 // TableLockKey is the (classid, objid) pair pg_locks reports for a table
 // lock, as PostgreSQL's two-argument advisory lock functions take it.
@@ -305,7 +308,7 @@ func tableLockQualifiedName(schema, table string) string { return schema + "." +
 // session behind conn, refusing with ErrSessionStartHidden when
 // pg_stat_activity hides the start from the role the session runs as. The
 // refusal names the role the session logged in as and the one it runs as,
-// since the remedy is a grant to the second or a connection as it.
+// since the remedy is a connection as the second or a grant to it.
 func readTableLockSessionIdentity(ctx context.Context, conn *pgx.Conn, qualified string) (uint32, time.Time, error) {
 	var pid uint32
 	var backendStart *time.Time

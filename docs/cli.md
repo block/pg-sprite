@@ -773,9 +773,11 @@ It is refused, with exit 2 and nothing dropped, when:
 - the connection logs in as one role and runs as another (the `role`
   connection parameter, or `SET ROLE`) that cannot read when its own session
   started, so the table lock cannot identify its session
-  (`table-lock-unconfirmed`, the code `migrate` reports for the same
-  refusal): connect as that role directly, or grant it `pg_read_all_stats`,
-  and run `discard` again;
+  (`table-lock-unconfirmed`: the refusal's cause here, and the code on the
+  failed verdict `migrate` reports for the same stop): connect as that role
+  directly, or grant it `pg_read_all_stats`, which also lets it read every
+  session's query text and statistics across the cluster, and run `discard`
+  again;
 - the run's swap already committed (`restart-swap-committed`): the change is
   live, so run the same `migrate` command again to finish it;
 - the change completed (`resume-row-terminal`);

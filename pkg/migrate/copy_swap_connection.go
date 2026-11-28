@@ -77,7 +77,8 @@ func readDatabaseIdentity(ctx context.Context, session dbconn.RowQuerier) (datab
 // reads both identities, and closes the session again. A disagreement is a
 // *CopySwapConnectionMismatchError; a session that could not be opened or
 // identified is an ordinary error, since nothing is known about where it
-// would have landed.
+// would have landed. A pool whose sessions cannot read when they started
+// is refused after the identities agree (checkPoolReadsOwnStart).
 func checkCopySwapConnection(ctx context.Context, pool *pgxpool.Pool, cfg dbconn.Config) (err error) {
 	poolID, err := readDatabaseIdentity(ctx, pool)
 	if err != nil {
@@ -106,6 +107,35 @@ func checkCopySwapConnection(ctx context.Context, pool *pgxpool.Pool, cfg dbconn
 			ConnectionCluster:  connID.cluster,
 			ConnectionDatabase: connID.database,
 		}
+	}
+	return checkPoolReadsOwnStart(ctx, pool)
+}
+
+// ownStartSQL reads whether a session can see its own backend start in
+// pg_stat_activity, with the role it logged in as and the role it runs as.
+const ownStartSQL = `
+	SELECT a.backend_start IS NOT NULL, session_user, current_user
+	FROM pg_catalog.pg_stat_activity a
+	WHERE a.pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()`
+
+// checkPoolReadsOwnStart refuses a pool whose sessions cannot read when
+// they started, with an error wrapping dbconn.ErrSessionStartHidden that
+// names the roles the pool's session logged in as and runs as. The swap
+// runs on the pool and identifies its own backend by PID and start, so
+// such a pool would copy the whole table and then fail at the swap; every
+// session of the pool is opened from one configuration, so one session
+// answers for all of them.
+func checkPoolReadsOwnStart(ctx context.Context, pool *pgxpool.Pool) error {
+	var visible bool
+	var sessionRole, currentRole string
+	// INV: CO-9
+	err := pool.QueryRow(ctx, ownStartSQL).Scan(&visible, &sessionRole, &currentRole)
+	if err != nil {
+		return fmt.Errorf("read whether the pool's sessions can see when they started: %w", err)
+	}
+	if !visible {
+		return fmt.Errorf("%w: the pool's sessions log in as %q and run as %q, and the copy-and-swap swap runs on the pool",
+			dbconn.ErrSessionStartHidden, sessionRole, currentRole)
 	}
 	return nil
 }

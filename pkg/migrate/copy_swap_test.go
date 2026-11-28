@@ -259,19 +259,46 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.NotContains(t, v.Detail, "resumes from the row")
 	})
 
-	t.Run("a lock session that cannot read its own start is coded table-lock-unconfirmed", func(t *testing.T) {
-		// The Runner returns the lock's refusal as it stands: the session
-		// runs as a role without pg_read_all_stats, so the run took no lock
-		// and started nothing. The code is the one a partitioned build's
-		// unconfirmable lock carries, since the remedy is the same grant.
-		runErr := fmt.Errorf("read the table lock session for billing.orders: %w", dbconn.ErrSessionStartHidden)
-		v, err := copySwapRunVerdict(st, holdNone, runErr)
+	// The Runner returns the lock's refusal as it stands: the session runs
+	// as a role without pg_read_all_stats, so the run took no lock and
+	// started nothing, whichever hold a live or a quiesced run would have
+	// taken. The code is the one a partitioned build's unconfirmable lock
+	// carries, since the remedy is the same, and the detail claims no
+	// checkpoint row, slot, or resume.
+	for _, run := range []struct {
+		name string
+		hold sourceHold
+	}{
+		{name: "a live run", hold: holdSlot},
+		{name: "a blocked-writes run", hold: holdNone},
+	} {
+		t.Run(run.name+" whose lock session cannot read its own start is coded table-lock-unconfirmed", func(t *testing.T) {
+			runErr := fmt.Errorf("read the table lock session for billing.orders: %w", dbconn.ErrSessionStartHidden)
+			v, err := copySwapRunVerdict(st, run.hold, runErr)
+			assert.ErrorIs(t, err, dbconn.ErrSessionStartHidden)
+			assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+			assert.Equal(t, string(executor.CodeTableLockUnconfirmed), v.Code)
+			assert.Equal(t, verdict.CauseNone, v.Cause)
+			assert.False(t, v.WritesBlocked)
+			assert.False(t, v.Abandoned)
+			assert.Contains(t, v.Detail, "table lock was never taken")
+			assert.NotContains(t, v.Detail, "replication slot")
+			assert.NotContains(t, v.Detail, "resumes from the row")
+			assert.NotContains(t, v.Detail, "starts from the beginning")
+		})
+	}
+
+	// The same error from the swap's own backend read comes after the
+	// copy, inside a cutover that rolled back, so the row and the slot the
+	// run made remain and the detail says the rerun resumes from the row.
+	t.Run("a swap backend that cannot read its own start keeps the resume remedy", func(t *testing.T) {
+		runErr := fmt.Errorf("cutover: %w: %w", schemachange.ErrCutoverRolledBack, dbconn.ErrSessionStartHidden)
+		v, err := copySwapRunVerdict(st, holdSlot, runErr)
 		assert.ErrorIs(t, err, dbconn.ErrSessionStartHidden)
-		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 		assert.Equal(t, string(executor.CodeTableLockUnconfirmed), v.Code)
-		assert.Equal(t, verdict.CauseNone, v.Cause)
-		assert.False(t, v.WritesBlocked)
-		assert.False(t, v.Abandoned)
+		assert.Contains(t, v.Detail, "replication slot stays")
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.NotContains(t, v.Detail, "table lock was never taken")
 	})
 
 	// A slot that retained more WAL than the ceiling with no transaction
