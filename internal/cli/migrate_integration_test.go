@@ -1387,24 +1387,37 @@ func TestMigrateDebugDiagnostics(t *testing.T) {
 	})
 }
 
-// Both output modes report the empty case: an empty JSON list, and a
-// non-empty human explanation. The test gets a database of its own —
-// status scopes to the connected database, and on a shared server other
-// tests' pg-sprite sessions would otherwise show up here.
+// Both output modes report the empty case: a database where nothing ever
+// ran has no checkpoint table, so the JSON says so with both lists empty,
+// and the text says there is neither a session nor a stopped run. The test
+// gets a database of its own — status scopes to the connected database,
+// and on a shared server other tests' pg-sprite sessions would otherwise
+// show up here.
 func TestStatusReportsNoSessions(t *testing.T) {
 	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 
+	assert.Equal(t, statusReport{
+		FormatVersion:   statusFormatVersion,
+		Sessions:        []session{},
+		CheckpointTable: checkpointTableAbsent,
+		StoppedRuns:     []statusRun{},
+	}, runStatusJSON(t, url))
+
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}}
+	var text strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &text))
+	assert.Equal(t, "no pg-sprite sessions or stopped runs\n", text.String())
+}
+
+// runStatusJSON runs status --json against url and decodes its report.
+func runStatusJSON(t *testing.T, url string) statusReport {
+	t.Helper()
 	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}, JSON: true}
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
-	var sessions []session
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
-	assert.Empty(t, sessions)
-
-	cmd = &StatusCmd{DBFlags: DBFlags{URL: url}}
-	var text strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &text))
-	assert.NotEmpty(t, text.String())
+	var report statusReport
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report), out.String())
+	return report
 }
 
 // pg_stat_activity nulls out state and query for other roles' backends when
@@ -1445,12 +1458,7 @@ func TestStatusHandlesOtherRolesSessions(t *testing.T) {
 	require.NoError(t, err)
 	u.User = neturl.UserPassword(role, "limited-test-only")
 
-	cmd := &StatusCmd{DBFlags: DBFlags{URL: u.String()}, JSON: true}
-	var out strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &out))
-
-	var sessions []session
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
+	sessions := runStatusJSON(t, u.String()).Sessions
 	i := slices.IndexFunc(sessions, func(s session) bool { return s.PID == pid })
 	require.GreaterOrEqual(t, i, 0, "the other role's session must be listed, not crash the scan")
 }
@@ -1473,12 +1481,7 @@ func TestStatusScopesToConnectedDatabase(t *testing.T) {
 	var pid int
 	require.NoError(t, conn.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&pid))
 
-	cmd := &StatusCmd{DBFlags: DBFlags{URL: dbURL}, JSON: true}
-	var out strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &out))
-
-	var sessions []session
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
+	sessions := runStatusJSON(t, dbURL).Sessions
 	i := slices.IndexFunc(sessions, func(s session) bool { return s.PID == pid })
 	assert.Equal(t, -1, i, "a session on another database must not be listed")
 }
@@ -1502,12 +1505,7 @@ func TestStatusReportsActiveSession(t *testing.T) {
 	require.NoError(t, conn.QueryRow(t.Context(),
 		"SELECT pg_backend_pid() AS pgsprite_status_marker").Scan(&pid))
 
-	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}, JSON: true}
-	var out strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &out))
-
-	var sessions []session
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
+	sessions := runStatusJSON(t, url).Sessions
 	i := slices.IndexFunc(sessions, func(s session) bool { return s.PID == pid })
 	require.GreaterOrEqual(t, i, 0, "the held session must be listed")
 	assert.Equal(t, "idle", sessions[i].State)
@@ -1515,7 +1513,7 @@ func TestStatusReportsActiveSession(t *testing.T) {
 		"the session's last query must be reported")
 
 	// The human rendering carries the same session.
-	cmd = &StatusCmd{DBFlags: DBFlags{URL: url}}
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}}
 	var text strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &text))
 	assert.Contains(t, text.String(), strconv.Itoa(pid))

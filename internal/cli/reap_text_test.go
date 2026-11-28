@@ -26,6 +26,28 @@ func TestRenderReapDryRunSaysNothingWasDropped(t *testing.T) {
 		"dry run: nothing was dropped\n", text)
 }
 
+// A kept live slot is printed beside the table whose run owns it and the
+// discard that lets it go; a live slot whose owner was not read is
+// printed alone.
+func TestRenderReapNamesTheRunThatOwnsALiveSlot(t *testing.T) {
+	text := renderReap(reapReport{
+		DryRun:                true,
+		CheckpointTableExists: true,
+		WouldDrop:             []string{},
+		Live:                  []string{"pgsprite_cafebabe", "pgsprite_0badf00d"},
+		LiveRuns:              []reapLiveRun{{Slot: "pgsprite_cafebabe", Table: "public.orders"}},
+		Active:                []string{},
+		Foreign:               []string{},
+	})
+	assert.Equal(t, "would drop (orphans, with any publication of the engine's shape): 0\n"+
+		"live (kept: a checkpoint row in a non-terminal phase names it): 2\n"+
+		"  pgsprite_cafebabe  run on public.orders; resume it with the same migrate command, or let it go: pg-sprite discard public.orders\n"+
+		"  pgsprite_0badf00d\n"+
+		"active (kept: a process holds it): 0\n"+
+		"foreign (kept: wears the pgsprite_ prefix without the engine's name shape or output plugin): 0\n"+
+		"dry run: nothing was dropped\n", text)
+}
+
 // A stopped pass names the slot it stopped at and says the slots after it
 // were not reached; a real run has no dry-run footer.
 func TestRenderReapStoppedPassNamesTheSlotItStoppedAt(t *testing.T) {

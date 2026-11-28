@@ -29,6 +29,7 @@ import (
 type reapFixture struct {
 	url     string
 	pool    *pgxpool.Pool
+	schema  string
 	orphan  string
 	live    string
 	foreign string
@@ -50,7 +51,7 @@ func newReapFixture(t *testing.T) reapFixture {
 	require.NoError(t, store.Ensure(t.Context()))
 	schema := testutil.NewSchema(t, pool)
 
-	f := reapFixture{url: url, pool: pool, foreign: "pgsprite_backup"}
+	f := reapFixture{url: url, pool: pool, schema: schema, foreign: "pgsprite_backup"}
 	f.orphan = reapSlotFor(t, cfg, pool, schema, "ledger")
 	f.live = reapSlotFor(t, cfg, pool, schema, "orders")
 
@@ -154,6 +155,7 @@ func TestReapDryRunListsTheOrphanAndDropsNothing(t *testing.T) {
 		PublicationLeft:       []string{},
 		WouldDrop:             []string{f.orphan},
 		Live:                  []string{f.live},
+		LiveRuns:              []reapLiveRun{{Slot: f.live, Table: f.schema + ".orders"}},
 		Active:                []string{},
 		Foreign:               []string{f.foreign},
 	}, report)
@@ -178,6 +180,7 @@ func TestReapDropsTheOrphanAndKeepsLiveAndForeignSlots(t *testing.T) {
 		PublicationLeft:       []string{},
 		WouldDrop:             []string{},
 		Live:                  []string{f.live},
+		LiveRuns:              []reapLiveRun{{Slot: f.live, Table: f.schema + ".orders"}},
 		Active:                []string{},
 		Foreign:               []string{f.foreign},
 	}, report)
@@ -219,7 +222,8 @@ func TestReapJSONListsAreArraysWhenEmpty(t *testing.T) {
 	assert.JSONEq(t, `false`, string(raw["dry_run"]))
 	assert.JSONEq(t, `false`, string(raw["stopped"]))
 	assert.JSONEq(t, `""`, string(raw["failed"]))
-	assert.JSONEq(t, `2`, string(raw["format_version"]))
+	assert.JSONEq(t, `[]`, string(raw["live_runs"]))
+	assert.JSONEq(t, `3`, string(raw["format_version"]))
 }
 
 // A drop that fails partway still reports what was dropped, marks the
@@ -278,6 +282,7 @@ func TestReapReportsWhatWasDroppedBeforeAFailedDrop(t *testing.T) {
 		PublicationLeft:       []string{second},
 		WouldDrop:             []string{},
 		Live:                  []string{},
+		LiveRuns:              []reapLiveRun{},
 		Active:                []string{},
 		Foreign:               []string{},
 	}, report)
@@ -320,6 +325,7 @@ func TestReapReportsAnAbsentCheckpointTableAndExitsZero(t *testing.T) {
 			PublicationLeft: []string{},
 			WouldDrop:       []string{},
 			Live:            []string{},
+			LiveRuns:        []reapLiveRun{},
 			Active:          []string{},
 			Foreign:         []string{},
 		}, report, "dry run %t", dryRun)
@@ -382,6 +388,7 @@ func TestReapReportsTheSlotItStoppedAtWhenTheOnlyDropFails(t *testing.T) {
 		PublicationLeft:       []string{orphan},
 		WouldDrop:             []string{},
 		Live:                  []string{},
+		LiveRuns:              []reapLiveRun{},
 		Active:                []string{},
 		Foreign:               []string{},
 	}, report)
@@ -431,6 +438,7 @@ func TestReapKeepsWhatItDroppedWhenTheCheckpointTableGoesMidPass(t *testing.T) {
 		PublicationLeft:       []string{},
 		WouldDrop:             []string{},
 		Live:                  []string{},
+		LiveRuns:              []reapLiveRun{},
 		Active:                []string{},
 		Foreign:               []string{},
 	}, report)

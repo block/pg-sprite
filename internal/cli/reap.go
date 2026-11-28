@@ -16,7 +16,7 @@ import (
 // reapFormatVersion identifies the reap report's JSON shape. It is bumped
 // whenever a field is added, removed, or changes meaning; a consumer must
 // reject a version it does not know.
-const reapFormatVersion = 2
+const reapFormatVersion = 3
 
 // reapReport is the reap command's output: every engine-prefixed slot of
 // the connected database the pass reached, in exactly one list or in
@@ -52,11 +52,21 @@ type reapReport struct {
 	WouldDrop []string `json:"would_drop"`
 	// Live slots are kept: a checkpoint row in a non-terminal phase names each.
 	Live []string `json:"live"`
+	// LiveRuns names the table whose run owns each slot of Live, read
+	// after the pass; a slot whose row went terminal since is not in it.
+	LiveRuns []reapLiveRun `json:"live_runs"`
 	// Active slots are kept: a process holds each.
 	Active []string `json:"active"`
 	// Foreign slots are kept: each wears the pgsprite_ prefix without the
 	// engine's name shape or output plugin.
 	Foreign []string `json:"foreign"`
+}
+
+// reapLiveRun is a kept live slot and the table whose run owns it, which
+// `pg-sprite discard` takes to let the slot go.
+type reapLiveRun struct {
+	Slot  string `json:"slot"`
+	Table string `json:"table"`
 }
 
 // newReapReport turns the store's sorting into the report.
@@ -70,6 +80,7 @@ func newReapReport(dryRun bool, reaped checkpoint.Reaped) reapReport {
 		PublicationLeft:       []string{},
 		WouldDrop:             orEmpty(reaped.WouldDrop),
 		Live:                  orEmpty(reaped.Live),
+		LiveRuns:              []reapLiveRun{},
 		Active:                orEmpty(reaped.Active),
 		Foreign:               orEmpty(reaped.Foreign),
 	}
@@ -121,6 +132,9 @@ func (c *ReapCmd) run(ctx context.Context, out io.Writer) error {
 		err = probeReplication(ctx, cfg)
 	}
 	report := newReapReport(c.DryRun, reaped)
+	if err == nil && len(reaped.Live) > 0 {
+		report.LiveRuns, err = liveRuns(ctx, store, reaped.Live)
+	}
 	report.Stopped = reaped.Failed != ""
 	if errors.Is(err, decode.ErrSlotDroppedPublicationLeft) {
 		report.PublicationLeft = []string{reaped.Failed}
@@ -139,6 +153,29 @@ func (c *ReapCmd) run(ctx context.Context, out io.Writer) error {
 func reapedNothing(reaped checkpoint.Reaped) bool {
 	filed := len(reaped.Dropped) + len(reaped.WouldDrop) + len(reaped.Live) + len(reaped.Active) + len(reaped.Foreign)
 	return filed == 0 && reaped.Failed == ""
+}
+
+// liveRuns pairs each kept live slot with the table whose unfinished
+// checkpoint row names it, in the order of live. The rows are read after
+// the pass, so a slot whose row went terminal in between is left out.
+func liveRuns(ctx context.Context, store *checkpoint.Store, live []string) ([]reapLiveRun, error) {
+	rows, err := store.Unfinished(ctx)
+	if err != nil {
+		return []reapLiveRun{}, fmt.Errorf("read the runs that own the live slots: %w", err)
+	}
+	owners := make(map[string]string, len(rows))
+	for _, row := range rows {
+		if _, seen := owners[row.SlotName]; !seen {
+			owners[row.SlotName] = row.Schema + "." + row.Table
+		}
+	}
+	runs := []reapLiveRun{}
+	for _, slot := range live {
+		if table, ok := owners[slot]; ok {
+			runs = append(runs, reapLiveRun{Slot: slot, Table: table})
+		}
+	}
+	return runs, nil
 }
 
 // probeReplication opens and closes one replication connection from cfg,
@@ -186,7 +223,7 @@ func renderReap(report reapReport) string {
 		writeReapSection(&b, "dropped (orphans, with their publications except any left below)", report.Dropped)
 		writeReapSection(&b, "publication left (its slot dropped above; the publication of its name was refused or failed to drop)", report.PublicationLeft)
 	}
-	writeReapSection(&b, "live (kept: a checkpoint row in a non-terminal phase names it)", report.Live)
+	writeLiveSection(&b, report.Live, report.LiveRuns)
 	writeReapSection(&b, "active (kept: a process holds it)", report.Active)
 	writeReapSection(&b, "foreign (kept: wears the pgsprite_ prefix without the engine's name shape or output plugin)", report.Foreign)
 	if report.Stopped {
@@ -196,6 +233,24 @@ func renderReap(report reapReport) string {
 		b.WriteString("dry run: nothing was dropped\n")
 	}
 	return b.String()
+}
+
+// writeLiveSection writes the kept live slots, each beside the table whose
+// run owns it and the discard that lets it go.
+func writeLiveSection(b *strings.Builder, live []string, runs []reapLiveRun) {
+	fmt.Fprintf(b, "live (kept: a checkpoint row in a non-terminal phase names it): %d\n", len(live))
+	owners := make(map[string]string, len(runs))
+	for _, run := range runs {
+		owners[run.Slot] = run.Table
+	}
+	for _, name := range live {
+		table, ok := owners[name]
+		if !ok {
+			fmt.Fprintf(b, "  %s\n", name)
+			continue
+		}
+		fmt.Fprintf(b, "  %s  run on %s; resume it with the same migrate command, or let it go: pg-sprite discard %s\n", name, table, table)
+	}
 }
 
 // writeReapSection writes one list under its label.

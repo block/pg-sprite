@@ -604,11 +604,71 @@ active pg-sprite sessions:
 ```
 
 `status` lists every pg-sprite session on the connected database, from
-`pg_stat_activity`, with what each is running and waiting on; `--json` prints
-the same list. Here one session streams the table's writes from its
-replication slot while the copy workers insert into the shadow table. A
-session on a `Lock` wait event is waiting for another transaction, for at
-most its lock budget (`--lock-timeout`) before that attempt gives up.
+`pg_stat_activity`, with what each is running and waiting on. Here one session
+streams the table's writes from its replication slot while the copy workers
+insert into the shadow table. A session on a `Lock` wait event is waiting for
+another transaction, for at most its lock budget (`--lock-timeout`) before that
+attempt gives up. `status` changes nothing in the database.
+
+### Find stopped copy-and-swap runs
+
+A copy-and-swap run that stops before it finishes, whether killed, cut off,
+or refused at its cutover, has no session left, but it still holds its shadow
+table, its checkpoint row, and either a replication slot (a live run) or a
+write fence (a `--block-writes` run). The slot keeps WAL on the server until
+someone acts, and the fence refuses every write to the table. `status` lists
+every run with a checkpoint row in a non-terminal phase after the sessions:
+
+```console
+$ pg-sprite status
+no active pg-sprite sessions
+copy-and-swap runs with a checkpoint row: 1
+  public.orders: stopped in phase copying, last saved 2026-11-28T10:15:02Z
+    statement: ALTER TABLE public.orders ALTER COLUMN qty TYPE bigint
+    replication slot pgsprite_b32f988b: inactive, wal_status reserved, retaining 523.0 MiB of WAL
+    next: re-run the same pg-sprite migrate --copy-and-swap command to resume, or abandon the change with: pg-sprite discard public.orders
+```
+
+Each run shows its phase, when it last saved its row, the statement, and what
+it holds: the slot with its `wal_status` and the WAL it retains
+(`pg_current_wal_lsn()` minus its `restart_lsn`), and the write fence when one
+is installed, in which case the resume line adds `--block-writes`. A run a
+session holds the table's lock for is shown as `running (pid N)` with no next
+step. A stopped run ends with its two ways out: run the same statement again,
+which [resumes](copy-and-swap.md#stop-resume-and-start-over) it, or
+[`discard`](#abandon-a-stopped-copy-and-swap-run) it. With nothing to show,
+`status` prints `no pg-sprite sessions or stopped runs`.
+
+A database where no copy-and-swap run ever ran has no checkpoint table, and
+`status` reports no runs. A role that may not read
+`pgsprite.pgsprite_checkpoint`, or a table an older pg-sprite created that no
+run of this version has upgraded, makes the runs unknown: `status` says so in
+place of the list, never that there are none.
+
+`--json` prints the [status report](#status-report).
+
+#### Status report
+
+`status --json` prints one object, `format_version` 1. A consumer must reject a
+version it does not know; the version is bumped whenever a field is added,
+removed, or changes meaning.
+
+| Field | Meaning |
+|---|---|
+| `format_version` | The report's shape, 1 |
+| `sessions` | The live pg-sprite sessions on the connected database: `pid`, `state`, `wait_event`, `running_for`, and the first 80 characters of `query` |
+| `checkpoint_table` | `present` when the runs were read; `absent` when the database has no checkpoint table, so no run ever saved one; `permission-denied` or `older-engine` when the runs could not be read, and `stopped_runs` is empty without meaning there are none |
+| `stopped_runs` | Every copy-and-swap run with a checkpoint row in a non-terminal phase, in table order, with the fields below; a run in progress is included with `running` true |
+| `stopped_runs[].table` | The table, as `SCHEMA.TABLE` in the spelling `discard` and `--restart` take |
+| `stopped_runs[].statement` | The statement the run carries out, `""` in a row an older pg-sprite wrote |
+| `stopped_runs[].phase` | The row's phase: `copying`, `catching_up`, `reconciling`, `verifying`, `cutover`, or a phase a newer pg-sprite wrote |
+| `stopped_runs[].updated_at` | When the run last saved its row, RFC 3339 |
+| `stopped_runs[].running` | True while a session holds the table's lock, as a run in progress or a discard does |
+| `stopped_runs[].running_pid` | That session's backend pid, `0` when `running` is false |
+| `stopped_runs[].slot` | The replication slot the row names, `null` for a run that decodes no WAL: `name`; `exists`, false when no logical slot of the name is in this database, so a resume makes a new one and reconciles; `active`; `wal_status`; `retained_bytes`, the WAL it keeps, `null` when it does not exist or the server cannot say, as on a standby |
+| `stopped_runs[].write_fence` | True when the table carries the write fence, which refuses every write to it |
+
+Both lists are always arrays, never `null`.
 
 ### Watch a concurrent index build
 
@@ -676,12 +736,18 @@ $ pg-sprite reap --dry-run
 would drop (orphans, with any publication of the engine's shape): 1
   pgsprite_deadbeef
 live (kept: a checkpoint row in a non-terminal phase names it): 1
-  pgsprite_cafebabe
+  pgsprite_cafebabe  run on public.orders; resume it with the same migrate command, or let it go: pg-sprite discard public.orders
 active (kept: a process holds it): 0
 foreign (kept: wears the pgsprite_ prefix without the engine's name shape or output plugin): 1
   pgsprite_backup
 dry run: nothing was dropped
 ```
+
+A live slot belongs to a stopped or running copy-and-swap run, which `reap`
+names beside it: run the same statement again to resume it, or let the slot go
+with the [`discard`](#abandon-a-stopped-copy-and-swap-run) it prints, which
+drops the run's shadow and checkpoint row with it.
+[`status`](#find-stopped-copy-and-swap-runs) shows how much WAL it retains.
 
 A slot a live row names, a slot a process holds, and a `pgsprite_` slot the
 engine did not make (another name shape, or an output plugin other than
@@ -709,13 +775,13 @@ an orphan, so `reap` examines no slot there, drops nothing, and exits 0. A
 
 #### Reap report
 
-`reap --json` prints one object, `format_version` 2. A consumer must reject a
+`reap --json` prints one object, `format_version` 3. A consumer must reject a
 version it does not know; the version is bumped whenever a field is added,
 removed, or changes meaning.
 
 | Field | Meaning |
 |---|---|
-| `format_version` | The report's shape, 2 |
+| `format_version` | The report's shape, 3 |
 | `dry_run` | True for `--dry-run` |
 | `checkpoint_table_exists` | False when the database has no checkpoint table: no slot was examined and every list is empty |
 | `stopped` | True when the pass failed at a slot; the lists hold what was sorted before it, and the command exits 1 |
@@ -724,6 +790,7 @@ removed, or changes meaning.
 | `publication_left` | The slot of `dropped` whose same-named publication the drop refused or failed to drop, left in place; at most the `failed` slot, empty in a dry run |
 | `would_drop` | Orphans a real run would drop now; empty in a real run |
 | `live` | Kept: a checkpoint row in a non-terminal phase names each |
+| `live_runs` | For each slot of `live`, `slot` and the `table` whose run owns it, as `discard` takes it; read after the pass, so a slot whose row finished in between is left out |
 | `active` | Kept: a process holds each |
 | `foreign` | Kept: wears the `pgsprite_` prefix without the engine's name shape or output plugin |
 
@@ -863,6 +930,7 @@ Each JSON shape is versioned:
 - [plan-report.md](plan-report.md) for `migrate --dry-run` and `diff`
 - [lint-report.md](lint-report.md) and [suggest-report.md](suggest-report.md)
 - [capabilities-contract.md](capabilities-contract.md) for `capabilities`
+- [Status report](#status-report) above for `status`
 - [Reap report](#reap-report) above for `reap`
 - [Discard report](#discard-report) above for `discard`
 

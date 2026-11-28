@@ -231,8 +231,12 @@ FROM pgsprite.pgsprite_checkpoint
 ORDER BY updated_at DESC;
 ```
 
-`pg-sprite status` lists the pg-sprite sessions running now; a live run's stream shows as a
-`START_REPLICATION SLOT pgsprite_…` query.
+`pg-sprite status` lists the pg-sprite sessions running now, where a live run's stream shows as a
+`START_REPLICATION SLOT pgsprite_…` query, and then every run with a checkpoint row that has not
+finished: its table, phase, slot, `wal_status`, and retained WAL, whether a session is running it,
+and, for a stopped run, the resume and `pg-sprite discard` commands
+([Find stopped copy-and-swap runs](cli.md#find-stopped-copy-and-swap-runs)).
+`pg-sprite reap --dry-run` names the table whose run owns each slot it keeps.
 
 ### The run stopped at the ceiling
 
@@ -308,8 +312,9 @@ starts a new copy and a new slot in the same command.
 
 To drop a stopped run's slot by hand, first confirm no run is going:
 
-- `pg-sprite status` shows no `START_REPLICATION SLOT` query for the slot, and the checkpoint
-  row's `updated_at` (the query in [Check the slot](#check-the-slot)) has stopped advancing.
+- `pg-sprite status` shows no `START_REPLICATION SLOT` query for the slot and lists the run as
+  `stopped`, not `running`, and the checkpoint row's `updated_at` (its `last saved` time, or the
+  query in [Check the slot](#check-the-slot)) has stopped advancing.
 - The slot reads `active = false`:
 
   ```sql
