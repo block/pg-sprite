@@ -185,7 +185,25 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "migrate --alter --copy-and-swap --restart")
 	})
 
-	for _, flag := range []string{"--copy-and-swap", "--free-disk=1GiB", "--slot-lag-ceiling=2GiB", "--keep-old", "--block-writes=public.t"} {
+	// A dry run takes --copy-and-swap: whether the route is open decides
+	// whether the run refuses a statement routed to it, so the dry run needs
+	// it to report the run's outcome.
+	t.Run("accepts --copy-and-swap with --dry-run", func(t *testing.T) {
+		c := New("test")
+		k, err := kong.New(c, kong.Vars{"version": "test"})
+		require.NoError(t, err)
+		_, err = k.Parse([]string{
+			"migrate",
+			"--url", "postgres://user@localhost:5432/app",
+			"--alter", "ALTER TABLE t ALTER COLUMN c TYPE bigint",
+			"--dry-run",
+			"--copy-and-swap",
+		})
+		require.NoError(t, err)
+		assert.True(t, c.Migrate.CopyAndSwap)
+	})
+
+	for _, flag := range []string{"--free-disk=1GiB", "--slot-lag-ceiling=2GiB", "--keep-old", "--block-writes=public.t"} {
 		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
 			c := New("test")
 			k, err := kong.New(c, kong.Vars{"version": "test"})

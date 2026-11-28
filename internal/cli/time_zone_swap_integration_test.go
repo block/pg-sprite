@@ -40,6 +40,9 @@ func TestMigrateDryRunNamesTheTimeZoneATimestampChangeConvertsIn(t *testing.T) {
 
 			cmd := newMigrateCmd(u.String(), fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN seen_at TYPE timestamptz", schema))
 			cmd.DryRun = true
+			// The rewrite routes to copy-and-swap, whose plan the dry run
+			// prints only with the route opened.
+			cmd.CopyAndSwap = true
 			var out strings.Builder
 			runErr := cmd.run(t.Context(), &out)
 			// The text wraps at the terminal width; compare it unwrapped.

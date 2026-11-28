@@ -54,9 +54,30 @@ func writeDryRunText(out io.Writer, pal palette, report plan.Report) error {
 	w.printf("  nothing was executed\n")
 	if refused == 0 && steps > 0 && !tableMissing(report) {
 		w.entry("apply:")
-		w.printf("  re-run without --dry-run\n")
+		if routesCopySwap(report) {
+			// The dry run reached this plan with --copy-and-swap, which
+			// the re-run keeps. The route's preflight also reads the free
+			// space a dry run cannot take and, for a live run, logical
+			// decoding on the server.
+			text := fmt.Sprintf("re-run without --dry-run, adding --free-disk SIZE, the free space on the table's volume; "+
+				"the server needs logical decoding, or add --block-writes %s.%s to block the table's writes instead",
+				report.Schema, report.Table)
+			for _, line := range wrapWords(text, dryRunTextWidth-2) {
+				w.printf("  %s\n", line)
+			}
+		} else {
+			w.printf("  re-run without --dry-run\n")
+		}
 	}
 	return w.err
+}
+
+// routesCopySwap reports whether the plan runs a statement through the
+// copy-and-swap backend.
+func routesCopySwap(report plan.Report) bool {
+	return slices.ContainsFunc(report.Statements, func(ps plan.Statement) bool {
+		return ps.Disposition == router.DispositionExecute && ps.Backend == router.BackendCopyAndSwap
+	})
 }
 
 // writeDependentHelp writes the manual path for each kind of dependent

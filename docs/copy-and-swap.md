@@ -38,13 +38,16 @@ $ pg-sprite migrate --free-disk 1GiB --json \
   "cause": "copy-and-swap-not-enabled",
   "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
   "table": "public.order_archive",
-  "detail": "copy-and-swap is in preview and not enabled for this run: the change needs a shadow-table copy and cutover, which runs only when the policy opts in (migrate --copy-and-swap on the CLI, Options.CopySwap.Enabled in the library); nothing was executed"
+  "detail": "copy-and-swap is in preview and not enabled for this run: the change needs a shadow-table copy and cutover, which runs only when the policy opts in (migrate --copy-and-swap on the CLI, with --free-disk SIZE naming the free space on the table's volume, which the route's preflight checks; Options.CopySwap.Enabled in the library); nothing was executed"
 }
 ```
 
 The other route flags — `--free-disk`, `--slot-lag-ceiling`, `--block-writes`, `--keep-old`,
-`--restart` — open nothing on their own; they govern a run that `--copy-and-swap` has opened. The flag does not
-combine with `--dry-run`, which never runs anything and so needs no opening. With
+`--restart` — open nothing on their own; they govern a run that `--copy-and-swap` has opened.
+`--dry-run` takes the flag as the run does: without it, the dry run ends in this same refusal
+verdict and exit 2, so a check on the dry run never passes a change its run refuses; with it,
+the dry run prints the plan the opened route runs, and its `apply:` line names the
+`--free-disk` the run still needs. With
 `--desired`, a derived plan that routes any statement to copy-and-swap is refused whole,
 native statements included, unless the flag is set. `--force` keeps its meaning: it runs the
 statement natively, bypassing the route and this gate alike.
@@ -230,7 +233,7 @@ resume with a higher ceiling, is the runbook's
 export PGSPRITE_URL='postgres://app_owner:…@db-primary.example.com:5432/shop?sslmode=verify-full'
 
 # Preview: route the statement and print the plan, run nothing
-pg-sprite migrate --dry-run \
+pg-sprite migrate --dry-run --copy-and-swap \
   --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
 
 # Live: the application keeps writing

@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -121,6 +122,42 @@ func partitionedForeignKeyCatalogRefusal(err error) (verdict.Refusal, bool) {
 		return r, true
 	}
 	return partitionedForeignKeyRefusal(err)
+}
+
+// AdmitCopySwapRoute is the dry run's reading of the gate that keeps the
+// copy-and-swap route closed until a run opens it: when rs, st's routed
+// statement, would run through copy-and-swap under opts — the router sends
+// it there, or st resumes a copy-and-swap run stopped on schema.table — and
+// opts keep the route closed, it returns the verdict [Run] ends in: reason
+// copy-and-swap-refused, cause copy-and-swap-not-enabled. It asks the
+// predicate Run asks, so a dry run handed the options the run would take
+// cannot report as executable a statement the run refuses, and one handed
+// the opened route reports the plan as before. Run asks it once the
+// stopped-run and destructive gates have passed, and so should the dry
+// run. schema.table is the resolved target, and the stopped run is read
+// from its checkpoint row without the table's lock, as Run reads it.
+// schema, the verdict, and the error mean what they mean for
+// [AdmitRoutedSteps]; the boolean is true when it refuses.
+func AdmitCopySwapRoute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema, table string,
+	rs router.Statement, opts Options) (verdict.Verdict, bool, error) {
+	unqualified := st.Schema() == "" && st.Table() != ""
+	if unqualified && schema == "" {
+		return verdict.Verdict{}, false, fmt.Errorf("admit copy-and-swap route for %s: %w", st.Table(), errAdmissionSchemaUnknown)
+	}
+	stopped, err := findStoppedRun(ctx, pool, schema, table)
+	if err != nil {
+		return verdict.Verdict{}, false, err
+	}
+	if !refusesClosedCopySwap(rs, stopped.resumedBy(st), opts) {
+		return verdict.Verdict{}, false, nil
+	}
+	target := st
+	if unqualified {
+		if target, err = resolveForVerdict(st, schema); err != nil {
+			return verdict.Verdict{}, false, err
+		}
+	}
+	return copySwapNotEnabledVerdict(target), true, nil
 }
 
 // AdmitCopySwapPartitioning is the dry run's reading of the copy-and-swap

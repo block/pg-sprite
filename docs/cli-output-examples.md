@@ -479,10 +479,13 @@ plan's disposition is `execute`, the statement's `route` and `backend` are
 `copy-and-swap`, and the decision's `reason` says why the native path was
 not taken. No `exec_sql` is offered — the backend derives the shadow
 table's shape by running the statement against an empty copy, so there is
-no native SQL to show.
+no native SQL to show. The route is in preview, so the dry run takes
+`--copy-and-swap` as the run does; without it, the dry run prints the run's
+own refusal verdict instead of this report — `copy-and-swap-refused`, cause
+`copy-and-swap-not-enabled` — and exits 2.
 
 ```console
-$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
+$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --copy-and-swap --json
 {
   "format_version": 32,
   "source": "alter",

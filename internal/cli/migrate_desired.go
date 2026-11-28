@@ -79,8 +79,9 @@ func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report
 
 // previewDesired is a desired-state dry run's admission and preview. A plan
 // the run's plan admission accepts, under the dry run's pin and
-// acknowledgement, next meets the copy-and-swap route's refusal of a table
-// in a partition or inheritance tree, and then the partitioned key build's
+// acknowledgement, next meets the closed copy-and-swap route's refusal of a
+// plan that routes a statement there without --copy-and-swap, then the
+// route's refusal of a table in a partition or inheritance tree, and then the partitioned key build's
 // catalog refusals and the partitioned foreign key build's checks of the
 // referenced table and the partition tree, which the run reads at admission
 // before anything executes, and then a copy-and-swap run stopped on the
@@ -106,6 +107,12 @@ func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out
 	}
 	req := migrate.DesiredRequest{ExpectedFingerprint: c.ExpectFingerprint, AllowDestructive: c.AllowDestructive}
 	if _, admitted := migrate.AdmitPlan(req, report); admitted && len(report.Statements) > 0 {
+		// The run refuses a plan that routes a statement to copy-and-swap
+		// unless --copy-and-swap opens the route, first, and so does the dry
+		// run, asking the same gate with the options the run builds.
+		if refusal, admitted := migrate.AdmitPlanCopySwapRoute(report, c.desiredOptions(c.diag())); !admitted {
+			return c.finishDesired(out, refusal, nil)
+		}
 		for _, admit := range []func(context.Context, *pgxpool.Pool, plan.Report) (migrate.DesiredResult, bool, error){
 			migrate.AdmitPlanCopySwapPartitioning,
 			migrate.AdmitPlanPartitionedKeys,

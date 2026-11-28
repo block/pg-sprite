@@ -1586,6 +1586,11 @@ table in a partition or inheritance tree through `preflight.CheckCopySwapPartiti
 `migrate.AdmitCopySwapPartitioning` and `migrate.AdmitPlanCopySwapPartitioning` call: the
 same catalog facts and the same `CheckCopySwapShape` decision, minting no proof, so it too is a
 read-only surface rather than a second enforcement.
+Ahead of that, they read whether the run's options open the copy-and-swap route at all through
+`migrate.AdmitCopySwapRoute` and `migrate.AdmitPlanCopySwapRoute`, built from the same flags the
+run's options are: the first asks the gate `Run` asks (`refusesClosedCopySwap`), and the second is
+the gate `RunDesired`'s admission asks, so a dry run without `--copy-and-swap` ends in the run's
+`copy-and-swap-not-enabled` refusal rather than an executable plan.
 The partitioned foreign key build's catalog refusals are read before the first write through
 `executor.AdmitPartitionedForeignKey` (for a desired plan, `migrate.AdmitPlanPartitionedForeignKeys`);
 the build repeats them under its lock, and that reading decides.

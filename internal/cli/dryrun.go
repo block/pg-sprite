@@ -25,7 +25,8 @@ import (
 // single-index DROP INDEX after the same catalog read of the index's kind
 // the apply makes; so does the refusal of any statement but the stopped
 // one while a copy-and-swap run on the table is stopped, the
-// destructive-change gate, unless --allow-destructive names the table, and
+// destructive-change gate, unless --allow-destructive names the table, the
+// closed copy-and-swap route, unless --copy-and-swap opens it, and
 // the executor's shape admission of the routed steps, once they are known, when
 // no earlier apply check refuses first, the partitioned index and key
 // builds' check of a unique key against the tree's partition keys, and the
@@ -108,6 +109,22 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	report.Schema = facts.Schema
 	report.Table = facts.Table
 	report.TableExists = facts.TableExists
+	// The apply refuses a statement that would run through copy-and-swap
+	// unless --copy-and-swap opens the route, next, and so does the dry run,
+	// asking the same gate with the options the apply builds from the same
+	// flags. A missing target table keeps its table-not-found report, which
+	// exits with the refusal code too: an unqualified one is where the apply
+	// stops first.
+	if !tableMissing(report) {
+		v, refused, err = migrate.AdmitCopySwapRoute(ctx, pool, st, facts.Schema, facts.Table,
+			routed.Statements[0], c.options(logger))
+		if err != nil {
+			return err
+		}
+		if refused {
+			return c.emit(out, v)
+		}
+	}
 	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {
 		return err
 	}

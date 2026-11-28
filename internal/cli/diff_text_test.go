@@ -79,6 +79,39 @@ apply:
 `, out.String())
 }
 
+// A plan that routes a statement to copy-and-swap points at migrate as any
+// executable plan does, and names what migrate needs to run that statement:
+// without --copy-and-swap it refuses it, and without --free-disk the
+// route's preflight does.
+func TestDiffTextCopyAndSwapApplyNamesTheRouteFlags(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "app", "orders", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `ALTER TABLE "app"."orders" ALTER COLUMN "qty" TYPE bigint`,
+		Route:       planner.RouteCopyAndSwap,
+		Backend:     router.BackendCopyAndSwap,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "ALTER COLUMN qty TYPE int8",
+			Route:     planner.RouteCopyAndSwap,
+			Reason:    planner.ReasonTypeRewrite,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, report))
+	assert.True(t, strings.HasSuffix(out.String(), `
+apply:
+  run each statement via pg-sprite migrate --alter '…', which refuses
+  blocking forms and substitutes safer online sequences
+  a copy-and-swap statement also needs --copy-and-swap, which opens
+  the preview route, and --free-disk SIZE
+`), out.String())
+}
+
 // A missing table is diff's greenfield case, not an error: the report leads
 // with a note that the plan creates the table from the full desired schema.
 func TestDiffTextGreenfieldLeadsWithNote(t *testing.T) {

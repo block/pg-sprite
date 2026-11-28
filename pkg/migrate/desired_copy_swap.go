@@ -48,10 +48,8 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 	if !routed {
 		return DesiredResult{}, true, nil
 	}
-	if !opts.CopySwap.Enabled {
-		return DesiredResult{Plan: report}.refused(copySwapNotEnabledRefusal(), fmt.Sprintf(
-			"planned statement %d (%s) routes to copy-and-swap, which is not enabled for this run: %s",
-			first+1, report.Statements[first].SQL, copySwapNotEnabledDetail)), false, nil
+	if refusal, admitted := AdmitPlanCopySwapRoute(report, opts); !admitted {
+		return refusal, false, nil
 	}
 	stopped := func(what string, err error) (DesiredResult, bool, error) {
 		return DesiredResult{
@@ -94,6 +92,29 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 			report.Schema, report.Table)
 	}
 	return refuseCopySwapPlan(report, first, r, detail), false, nil
+}
+
+// AdmitPlanCopySwapRoute is the gate desired-state admission asks first of
+// a plan the router sends in part through copy-and-swap: while opts keep
+// the route closed (CopySwapOptions.Enabled unset), the plan is refused
+// whole, native statements included, with reason copy-and-swap-refused and
+// cause copy-and-swap-not-enabled, naming the first routed statement,
+// before anything is read or runs. [RunDesired] asks it before the route's
+// preflight; a desired-state dry run asks it with the options the run would
+// take, so its preview cannot report as executable a plan the run refuses.
+// A plan with no copy-and-swap statement is admitted. The boolean is false
+// when it refuses, as for [AdmitPlan].
+func AdmitPlanCopySwapRoute(report plan.Report, opts Options) (DesiredResult, bool) {
+	first, routed := firstCopySwapStatement(report)
+	if !routed {
+		return DesiredResult{}, true
+	}
+	if opts.CopySwap.Enabled {
+		return DesiredResult{}, true
+	}
+	return DesiredResult{Plan: report}.refused(copySwapNotEnabledRefusal(), fmt.Sprintf(
+		"planned statement %d (%s) routes to copy-and-swap, which is not enabled for this run: %s",
+		first+1, report.Statements[first].SQL, copySwapNotEnabledDetail)), false
 }
 
 // AdmitPlanCopySwapPartitioning is [AdmitCopySwapPartitioning] for a

@@ -415,10 +415,7 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	// audit line: an acknowledgement is audited only by a run that acts on
 	// it, and the closed route acts on nothing. copyAndSwap keeps its own
 	// gate for callers that reach it directly.
-	if routesToClosedCopySwap(rs, opts) {
-		return copySwapNotEnabledVerdict(st), nil
-	}
-	if resumes && !opts.CopySwap.Enabled {
+	if refusesClosedCopySwap(rs, resumes, opts) {
 		return copySwapNotEnabledVerdict(st), nil
 	}
 	if opts.CopySwap.Restart != "" {
