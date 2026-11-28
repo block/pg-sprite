@@ -194,7 +194,10 @@ func ensureAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachProo
 		// INV: LK-2 — the ADD takes ACCESS EXCLUSIVE, so it requests its
 		// lock once no long-lived reader or writer holds the table, or once
 		// holderWait runs out, rather than queue every later statement on
-		// the table behind it.
+		// the table behind it. Unlike a brief step's awaitLockQueue, a
+		// holder that outlasts the wait does not end the proof step: the
+		// ADD still requests its lock under its lock budget, so the
+		// outcome is not read.
 		if _, err := waitOutsideLockQueue(ctx, pool, proof.lockedTables(), holderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
 			return attachProofResult{}, err
 		}

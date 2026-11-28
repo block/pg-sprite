@@ -180,7 +180,9 @@ func TestExecuteNativeEndsWithoutQueueingWhenAReaderOutlastsTheWait(t *testing.T
 	assert.Contains(t, err.Error(), fmt.Sprintf("backend %d (idle in transaction, transaction open for ", readerPID))
 	assert.Contains(t, err.Error(), fmt.Sprintf(") held a lock on %s.t for the whole ", schema))
 	assert.False(t, errors.As(err, new(*executor.BudgetError)), "no attempt ran, so no lock budget was spent")
-	assert.GreaterOrEqual(t, elapsed, retry.HolderWait, "the step waited out the whole wait")
+	assert.Equal(t, executor.CodeBudgetLockExceeded, executor.OutcomeCode(err), "a lingering holder reports the lock budget's code")
+	assert.GreaterOrEqual(t, elapsed, retry.HolderWait-100*time.Millisecond,
+		"the step waited out the wait, less the moment kept back for its last read of the holders")
 	assert.Less(t, elapsed, retry.HolderWait+budget.LockTimeout, "the step never requested its lock")
 	require.NoError(t, writeUnderTightLockBudget(t, pool, schema), "nothing is queued ahead of a writer")
 	assert.False(t, hasColumn(t, pool, schema, "coupon_code"))

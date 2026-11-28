@@ -40,6 +40,19 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeBudgetStatementExceeded,
 		},
 		{
+			name: "a lingering holder is the lock budget's outcome",
+			err:  fmt.Errorf("brief step: %w", &executor.LingeringHolderError{PID: 4242, Table: "s.t", Watched: 30 * time.Second}),
+			want: executor.CodeBudgetLockExceeded,
+		},
+		{
+			name: "a lingering holder on a substituted step keeps the lock budget's code",
+			err: &executor.SequenceStepError{
+				Step: 2, Total: 3, Kind: executor.StepBrief, SQL: "ALTER TABLE s.t ADD c int",
+				Err: &executor.LingeringHolderError{PID: 4242, Table: "s.t", Watched: 30 * time.Second},
+			},
+			want: executor.CodeBudgetLockExceeded,
+		},
+		{
 			name: "own invalid leftover",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrBuildLeftInvalidIndex},
 			want: executor.CodeInvalidIndexOwnLeftover,

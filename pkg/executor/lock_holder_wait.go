@@ -22,12 +22,16 @@ import (
 // is the ordinary traffic a lock budget exists to absorb.
 const lockHolderSampleGap = 200 * time.Millisecond
 
+// lockHolderReadReserve is the part of the wait kept back from its last
+// sleep for the read of the lock holders that follows it.
+const lockHolderReadReserve = 50 * time.Millisecond
+
 // DefaultHolderWait is the longest DefaultRetryPolicy waits outside the lock
 // queue for a transaction holding a lock that reads or writes take on the
 // table. It is long enough for a slow report or a batch job's transaction to
 // finish, and short enough that a step held up by an idle-in-transaction
-// session reaches its own lock budget, and the error that names the cause,
-// quickly.
+// session ends quickly with a *LingeringHolderError naming that session,
+// without ever requesting its lock.
 const DefaultHolderWait = 30 * time.Second
 
 // readLockModes and writeLockModes are the table lock modes, as pg_locks
@@ -157,7 +161,8 @@ func trackerHolderWaitReport(tracker *progress.Tracker) func(*progress.LockHolde
 // longest and the time waited; it receives nil when the wait ends.
 //
 // One deadline bounds the whole wait, resolving the tables and every read of
-// their holders included, and no sleep runs past it, so the wait never
+// their holders included, and the last sleep ends lockHolderReadReserve
+// before it, leaving time for the read that follows, so the wait never
 // outlasts limit by more than one catalog round trip. The reads take no lock
 // and use pg_locks alone, which every role can read in full, so the wait does
 // not depend on the privilege to see other roles' sessions in
@@ -234,7 +239,12 @@ func waitOutsideLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lock
 	}
 	oldest := oldestHolder(holders)
 	for len(holders) > 0 {
-		left := remaining()
+		// The sleep stops lockHolderReadReserve short of the deadline, so
+		// the read after it has time to see whether the holder finished. A
+		// read started with none of the wait left would always be cut off,
+		// and a holder that committed during the last sleep would be
+		// reported as lingering.
+		left := remaining() - lockHolderReadReserve
 		if left <= 0 {
 			return exhausted(oldest), nil
 		}
@@ -290,9 +300,22 @@ type LingeringHolderError struct {
 	// State is the backend's pg_stat_activity state, such as "idle in
 	// transaction" or "active", and TransactionAge is how long its
 	// transaction has been open. Both are empty when the role cannot see
-	// that session or the session ended before it was described.
+	// that session, the session ended before it was described, or the read
+	// that describes it failed.
 	State          string
 	TransactionAge time.Duration
+
+	// describeErr is the failed read of the holder's session, named in the
+	// message so the operator knows why State is empty.
+	describeErr error
+}
+
+// Code returns the lingering holder's stable code. The step ended without
+// requesting the lock its lock budget bounds, and nothing was executed, so it
+// reports the lock budget's code, as a lock that was not granted in time
+// does.
+func (e *LingeringHolderError) Code() Code {
+	return CodeBudgetLockExceeded
 }
 
 // Error implements the error interface.
@@ -304,8 +327,12 @@ func (e *LingeringHolderError) Error() string {
 	case e.State != "":
 		backend += fmt.Sprintf(" (%s)", e.State)
 	}
-	return fmt.Sprintf("%s held a lock on %s for the whole %s the step waited, so the step did not request its lock and no reader or writer queued behind it",
+	msg := fmt.Sprintf("%s held a lock on %s for the whole %s the step waited, so the step did not request its lock and no reader or writer queued behind it",
 		backend, e.Table, e.Watched.Round(time.Second))
+	if e.describeErr != nil {
+		msg += fmt.Sprintf(" (its session could not be described: %v)", e.describeErr)
+	}
+	return msg
 }
 
 // awaitLockQueue waits outside the lock queue (waitOutsideLockQueue) and
@@ -326,9 +353,7 @@ func awaitLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lockedTabl
 		Table:   outcome.holder.table,
 		Watched: outcome.waited - outcome.holder.since,
 	}
-	if err := describeHolder(ctx, pool, lingering); err != nil {
-		return err
-	}
+	describeHolder(ctx, pool, lingering)
 	return lingering
 }
 
@@ -339,7 +364,12 @@ func awaitLockQueue(ctx context.Context, pool *pgxpool.Pool, tables []lockedTabl
 // a role allowed to see it, so for any other role the two stay empty. A
 // session that ended since the wait's last read has nothing to describe.
 // The query text is left out: it can carry row values.
-func describeHolder(ctx context.Context, pool *pgxpool.Pool, lingering *LingeringHolderError) error {
+//
+// The description is best effort: a read that fails leaves the two empty
+// and its error is named in the message, so the step still ends with the
+// typed error that names the holder and carries the lock budget's code, not
+// a generic failure.
+func describeHolder(ctx context.Context, pool *pgxpool.Pool, lingering *LingeringHolderError) {
 	var state *string
 	var age *time.Duration
 	err := pool.QueryRow(ctx, `
@@ -347,10 +377,11 @@ func describeHolder(ctx context.Context, pool *pgxpool.Pool, lingering *Lingerin
 		FROM pg_catalog.pg_stat_activity a
 		WHERE a.pid OPERATOR(pg_catalog.=) $1`, int32(lingering.PID)).Scan(&state, &age)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
+		return
 	}
 	if err != nil {
-		return fmt.Errorf("describe backend %d, which held a lock on %s for the whole wait: %w", lingering.PID, lingering.Table, err)
+		lingering.describeErr = err
+		return
 	}
 	if state != nil {
 		lingering.State = *state
@@ -358,7 +389,6 @@ func describeHolder(ctx context.Context, pool *pgxpool.Pool, lingering *Lingerin
 	if age != nil {
 		lingering.TransactionAge = *age
 	}
-	return nil
 }
 
 // oldestHolder returns the holder first seen earliest.

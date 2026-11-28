@@ -83,7 +83,9 @@ autocommit-each-step has two shapes in the executor:
   runs again unchanged once that transaction ends. It never ends another
   session. A step that
   takes only `SHARE UPDATE EXCLUSIVE` conflicts with no reader or writer,
-  so it does not wait.
+  so it does not wait. The `CHECK` an online `ATTACH PARTITION` adds and
+  drops as its proof waits the same way, but when the wait runs out it
+  still requests its lock under its lock budget.
 - **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is
   true autocommit on a dedicated budgeted session: it refuses to run inside
   any transaction block and internally manages multiple transactions of its
@@ -375,7 +377,7 @@ concurrently is.
 
 | Code | Permanent | Meaning |
 | --- | --- | --- |
-| `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`; nothing executed |
+| `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`, or a transaction held the table for the whole wait outside the lock queue, so the lock was never requested; nothing executed |
 | `budget-statement-exceeded` | no | The statement ran past `statement_timeout` and was cancelled |
 | `row-security-plan-changed` | yes | Preview again and review the new ordered SQL before retrying; no target RLS statements ran |
 | `row-security-refused` | yes | Change the declaration, unsupported target shape, or privileges before retrying |
