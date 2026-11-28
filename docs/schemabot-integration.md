@@ -743,8 +743,8 @@ so "what persists" below is also what the rerun builds on. Route each outcome by
 its own key constraint (a concurrent unique index build, then `ADD CONSTRAINT ... USING INDEX`),
 then adds the parent's constraint, which adopts them, in one brief transaction. `migrate --alter`
 (`migrate.Run`) routes a lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned table to
-it ([below](#outcomes-of-a-partitioned-key-build-1)); desired-state plans do not yet, and a
-library caller may call it directly. It stops at the first error and keeps every partition's
+it ([below](#outcomes-of-a-partitioned-key-build-1)), `migrate.RunDesired` runs a key a desired
+file adds the same way, and a library caller may call it directly. It stops at the first error and keeps every partition's
 finished key constraint, and **running the same statement again resumes from them**. The report
 it returns with an error says what the stop left: `leaves` lists the partitions that got their
 constraint, and `changed` is true once a partition's concurrent index build began, which can
@@ -814,8 +814,8 @@ step rolls back, every partition's foreign key stays, and the rerun adopts them.
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
 as this build; the plan statement carries `execution: partitioned-index-build`. The same wiring
-serves the key build, which `migrate.Run` alone routes a lone `ADD PRIMARY KEY` or `ADD UNIQUE`
-on a partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
+serves the key build, which both route a lone `ADD PRIMARY KEY` or `ADD UNIQUE` on a
+partitioned table to (`partitioned-key-build`), and the foreign key build, which both route
 a foreign key on a partitioned table to before PostgreSQL 18 (`partitioned-foreign-key-build`).
 Each build takes
 the parent's table lock on a dedicated session, which the pool cannot supply, so the adapter
@@ -854,8 +854,23 @@ index is built concurrently and given the constraint, then the parent's `ADD CON
 them in one brief transaction. The `migrate --dry-run` plan statement carries
 `execution: partitioned-key-build` (plan `format_version` 27). It needs `migrate.Options.Connection`
 for its table lock session exactly as the partitioned index build does, with the same two wiring
-errors. `migrate.RunDesired` does not route it yet: a desired-state plan refuses the statement
-with `unsupported-partitioned-parent`, cause `parent-concurrent-index-build`. A forced run meets
+errors. A key a desired file adds plans the same way: the `diff` plan statement carries
+`execution: partitioned-key-build`, schema-qualified and named, under the same `format_version`
+27, and `migrate.RunDesired` runs it through `migrate.Run` with the verdicts below, checking
+`Options.Connection` for the whole plan before its first statement. A desired key whose shape
+the build refuses, such as a `DEFERRABLE` one, is not routed: its plan statement stays refused
+with `unsupported-partitioned-parent`. A primary key over a column the table allows to be `NULL`
+is planned after the `SET NOT NULL` the file implies, so `partitioned-key-nullable-column` is
+not reached from a desired file unless the column loses `NOT NULL` between the two statements.
+`migrate.RunDesired` also runs the build's catalog admission for every key the plan routes
+before its first statement (`migrate.AdmitPlanPartitionedKeys`, which `migrate --desired
+--dry-run` calls too): a key that lacks a partition key column, or a tree with a sub-partitioned
+partition, refuses the whole plan with the verdict the table below gives it, so a statement
+planned ahead of the key never commits first. A host that assembles its own report routes a
+desired plan's keys with `plan.RouteDesiredPartitionedKeyBuilds`, which routes only shapes the
+build admits; `plan.RoutePartitionedKeyBuilds` is the imperative dry run's router, which routes
+every key and relies on the build's admission afterward.
+A forced run meets
 cause `parent-blocking-index-build`, and `ADD CONSTRAINT ... USING INDEX` meets
 `parent-index-adoption`, as before.
 
@@ -1155,10 +1170,16 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `dropped-index-drift` when it changed after planning. An index drop whose name was taken by a
   different index between its check and the drop reports `dropped-index-replaced` (permanent):
   unlike the drift refusals, an unreviewed index was dropped, and the error names it so the
-  operator can check and recreate it. `ExecuteNativeWithProgress` carries no
+  operator can check and recreate it. The drop of a changed index's old definition carries
+  `Replacement`, the index the plan built under the temporary name and its definition; an adapter
+  passes it to `ExecuteReplacedIndexDropConcurrently`, which also refuses, dropping nothing, with
+  `replacement-index-drift` when that index is gone, invalid, or no longer has that definition.
+  A drop that carries `ReplacedBy` never runs without its `Replacement`: the migrate path refuses
+  one as an invariant violation, and an adapter that stores plans persists `Replacement` itself.
+  `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
-  rename under ST-7, since the statement names no table. `Adopts`, `Validates`, and
-  `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
+  `Replacement`, and `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
   fingerprint, so a stored plan carries it.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
@@ -1243,16 +1264,24 @@ change already has a shadow and a native attempt would leave it behind. Any othe
 on the table, an index rename and a blocking index statement under `--accept-blocking`
 included, is refused with
 `copy-and-swap-refused`, class `environmental`, cause `copy-and-swap-run-stopped`, and
-nothing executes; the `detail` names the stopped statement and its phase. A host finishes the
+nothing executes; the `detail` names the stopped statement and its phase. The desired-state
+changes that run outside `Run` are refused the same way before they touch the table: a
+reviewed plan's `DROP INDEX CONCURRENTLY`, and a row security file's change, which
+`executor.ExecuteDesiredRowSecurity` runs in one transaction (`migrate --desired` checks with
+`migrate.AdmitRowSecurityStoppedRun` before it calls the executor; a library caller that calls
+the executor directly makes the same check first, since the executor reads no checkpoint row). Either would change the source under the run: a
+dropped index or an added policy makes the source differ from the shape the run recorded, and
+the resume or the cutover gate then refuses it. A host finishes the
 stopped run by running its statement again, then runs the new one. Before the swap, a new
 statement that itself routes to copy-and-swap can start over instead under `--restart
 SCHEMA.TABLE`, which discards the stopped run; a statement that routes anywhere else cannot
 take `--restart`, so the stopped run has to be finished, or discarded by hand as for
-`resume-shadow-gone`. `migrate.RunDesired` refuses the same way, with the same cause, when the
-plan for the table is empty while such a row stands — the table matches the desired schema
-only because the stopped run swapped it in, and the retained source and the row would
-otherwise stay with nothing to finish them; a non-empty plan meets the row statement by
-statement through `Run`. A read of the row that fails stops `Run` before a verdict, with
+`resume-shadow-gone`. `migrate.RunDesired` and `migrate.RunDesiredWithRowSecurity` refuse the
+same way, with the same cause, when the plan for the table is empty while such a row stands —
+the table matches the desired schema only because the stopped run has not changed it yet or
+has already swapped it in, and the run's row and what it holds would otherwise stay with
+nothing to finish them; a non-empty plan meets the row statement by statement through `Run`
+and in its index drops. A read of the row that fails stops `Run` before a verdict, with
 nothing executed. A row that is `done` holds nothing. A row this engine cannot judge — in
 another format or an unknown phase (a rolling upgrade), in a checkpoint store an older engine
 created that no copy-and-swap run has evolved yet, or in a store the connecting role has no
@@ -1261,8 +1290,17 @@ retained source (the `pgsprite_…_new` or `pgsprite_…_old` relation the engin
 table's name): the same refusal, whose `detail` names the relation and why the row cannot be
 judged; `--restart` lifts it only for a statement that routes to copy-and-swap, whose route
 then judges the row itself under the table's lock. With neither relation standing, statements route
-as they would with no row. `--dry-run` does not read the row, so a preview can show a route the
-apply then refuses or resumes.
+as they would with no row. `--dry-run` reads the row the same way, imperative and desired-state
+alike (`migrate.AdmitStoppedRun`, `migrate.AdmitPlanStoppedRun`, and
+`migrate.AdmitRowSecurityStoppedRun` are the checks it makes), and ends in the refusal the
+apply would give, at the point the apply gives it; the dry run of the stopped statement itself
+is not refused and shows the route against the table's current shape, while the apply resumes
+it through copy-and-swap. Two paths make no check, deliberately: `ALTER TYPE ... ADD VALUE`
+names a type and locks no table, and an enum label is not part of a table's shape, so it
+cannot change what a stopped run holds — the label is added and the stopped run still resumes
+and finishes; and a reviewed plan's blocking drop of a partitioned table's index (under
+`--accept-blocking`) can never meet a stopped run, since copy-and-swap refuses a partitioned
+table before it builds anything.
 
 **What `--restart` excludes.** It is a copy-and-swap acknowledgement, so it is an error —
 before any verdict, with nothing executed or discarded — on a statement the router sends

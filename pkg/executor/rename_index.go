@@ -11,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -19,9 +20,11 @@ import (
 // under the table's lock: it is gone, it is not an index (PostgreSQL's
 // ALTER INDEX ... RENAME also renames a table), it belongs to another
 // table, or it now backs a primary-key, unique, or exclusion constraint,
-// which the rename would rename with it. It also means another session
-// moved the name to a different relation between that check and the
-// rename, so the rename reached a relation other than the one checked.
+// which the rename would rename with it. For a planned rename
+// (schemadiff.Change.Renames), it also means the index is invalid or no
+// longer has the definition the plan matched it by. It also means another
+// session moved the name to a different relation between that check and
+// the rename, so the rename reached a relation other than the one checked.
 // Nothing was renamed. The outcome is permanent: re-plan against the
 // catalog as it stands.
 var ErrRenamedIndexDrift = errors.New("the index the rename names is no longer a plain index on the preflighted table")
@@ -47,7 +50,37 @@ var ErrRenamedIndexDrift = errors.New("the index the rename names is no longer a
 // back with ErrRenamedIndexDrift otherwise. The rename holds that index's
 // lock until the commit, so nothing renames it in between.
 func ExecuteIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
-	return executeIndexRename(ctx, pool, pt, st, b, retry, nil)
+	return executeIndexRename(ctx, pool, pt, st, b, retry, nil, nil)
+}
+
+// ExecutePlannedIndexRenameWithProgress is ExecuteIndexRenameWithProgress
+// for a planned rename (schemadiff.Change.Renames): under the same lock and
+// in the same transaction, each attempt also refuses with
+// ErrRenamedIndexDrift unless the index is valid and still has
+// renames.Def, so an index replaced under the same name since planning is
+// not given the desired name. A statement that does not rename
+// renames.Index is refused as an invariant violation before anything runs.
+func ExecutePlannedIndexRenameWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, renames schemadiff.IndexRename, tracker *progress.Tracker) (err error) {
+	if tracker == nil {
+		return fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
+	}
+	tracker.Start(1, progress.OperationOptimistic)
+	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
+	defer func() { tracker.Finish(err) }()
+	return executeIndexRename(ctx, pool, pt, st, b, retry, &renames, tracker)
+}
+
+// ExecutePlannedIndexRenameAsStep is ExecutePlannedIndexRenameWithProgress
+// reported to the run step at, as ExecuteNativeAsStep reports a native
+// attempt. A zero at runs untracked.
+func ExecutePlannedIndexRenameAsStep(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, renames schemadiff.IndexRename, at RunStep) error {
+	if err := at.validate(); err != nil {
+		return err
+	}
+	if at.Tracker != nil {
+		at.Tracker.StartStep(at.Step, progress.OperationOptimistic, st.SQL())
+	}
+	return executeIndexRename(ctx, pool, pt, st, b, retry, &renames, at.Tracker)
 }
 
 // ExecuteIndexRenameWithProgress runs ExecuteIndexRename, with the same
@@ -61,12 +94,13 @@ func ExecuteIndexRenameWithProgress(ctx context.Context, pool *pgxpool.Pool, pt 
 	tracker.Start(1, progress.OperationOptimistic)
 	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
 	defer func() { tracker.Finish(err) }()
-	return executeIndexRename(ctx, pool, pt, st, b, retry, tracker)
+	return executeIndexRename(ctx, pool, pt, st, b, retry, nil, tracker)
 }
 
-// executeIndexRename is ExecuteIndexRename, reporting each bounded attempt
-// to tracker when one is set.
-func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
+// executeIndexRename is ExecuteIndexRename, also checking the index
+// against renames when it is set, and reporting each bounded attempt to
+// tracker when one is set.
+func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, renames *schemadiff.IndexRename, tracker *progress.Tracker) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -77,6 +111,10 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pr
 	if st.Kind() != statement.KindRenameIndex || rel.Kind != statement.IndexRelationIndex {
 		return fmt.Errorf("%w: ExecuteIndexRename runs ALTER INDEX ... RENAME TO, got %s", ErrInvariantViolation, st.Kind())
 	}
+	if renames != nil && renames.Index != rel.Name {
+		return fmt.Errorf("%w: the planned rename of index %s runs %q, which renames %s",
+			ErrInvariantViolation, renames.Index, st.SQL(), rel.Name)
+	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
 		// INV: ST-7 — the rename runs only against the index of the table
 		// the preflight proof verified: checked under that table's lock
@@ -86,7 +124,7 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pr
 			if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(pt.Schema())); err != nil {
 				return fmt.Errorf("pin search_path to %s for the index rename: %w", pt.Schema(), err)
 			}
-			oid, err := refuseRenamedIndexDrift(ctx, tx, pt, rel)
+			oid, err := refuseRenamedIndexDrift(ctx, tx, pt, rel, renames)
 			checked = oid
 			return err
 		}
@@ -104,15 +142,18 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, pt preflight.Pr
 // refuseRenamedIndexDrift locks pt's table alone in SHARE UPDATE
 // EXCLUSIVE and refuses unless rel names a plain index of that table: an
 // index (plain or partitioned) whose owner is the table and which backs no
-// primary-key, unique, or exclusion constraint. It returns that index's
-// OID.
+// primary-key, unique, or exclusion constraint. With renames set, the
+// index must also be valid and have the definition the plan matched it by;
+// the lock conflicts with every statement that builds, drops, or replaces
+// an index of the table, so the definition holds until the commit. It
+// returns that index's OID.
 //
 // INV: CO-9 — every function, operator, and relation is
 // pg_catalog-qualified, so a planted overload on the search_path cannot
 // change which relation the check reads. to_regclass still resolves an
 // unqualified index name on the attempt's search_path, exactly as the
 // statement will.
-func refuseRenamedIndexDrift(ctx context.Context, tx pgx.Tx, pt preflight.PreflightedTable, rel statement.IndexRelation) (uint32, error) {
+func refuseRenamedIndexDrift(ctx context.Context, tx pgx.Tx, pt preflight.PreflightedTable, rel statement.IndexRelation, renames *schemadiff.IndexRename) (uint32, error) {
 	table := pgx.Identifier{pt.Schema(), pt.Table()}.Sanitize()
 	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+table+" IN SHARE UPDATE EXCLUSIVE MODE"); err != nil {
 		return 0, fmt.Errorf("lock %s to check the index the rename names: %w", table, err)
@@ -123,6 +164,8 @@ func refuseRenamedIndexDrift(ctx context.Context, tx pgx.Tx, pt preflight.Prefli
 	}
 	const q = `
 		SELECT i.indexrelid,
+		       pg_catalog.pg_get_indexdef(i.indexrelid),
+		       i.indisvalid,
 		       i.indrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($2),
 		       EXISTS (
 		           SELECT FROM pg_catalog.pg_constraint con
@@ -131,8 +174,9 @@ func refuseRenamedIndexDrift(ctx context.Context, tx pgx.Tx, pt preflight.Prefli
 		FROM pg_catalog.pg_index i
 		WHERE i.indexrelid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)`
 	var oid uint32
-	var onTable, backsConstraint bool
-	err := tx.QueryRow(ctx, q, name.Sanitize(), table).Scan(&oid, &onTable, &backsConstraint)
+	var def string
+	var valid, onTable, backsConstraint bool
+	err := tx.QueryRow(ctx, q, name.Sanitize(), table).Scan(&oid, &def, &valid, &onTable, &backsConstraint)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return 0, fmt.Errorf("%w: %s is not an index; nothing was renamed", ErrRenamedIndexDrift, name.Sanitize())
@@ -143,6 +187,20 @@ func refuseRenamedIndexDrift(ctx context.Context, tx pgx.Tx, pt preflight.Prefli
 	case backsConstraint:
 		return 0, fmt.Errorf("%w: %s backs a constraint the rename would rename with it; nothing was renamed",
 			ErrRenamedIndexDrift, name.Sanitize())
+	}
+	if renames == nil {
+		return oid, nil
+	}
+	if !valid {
+		return 0, fmt.Errorf("%w: %s is invalid; nothing was renamed, re-plan", ErrRenamedIndexDrift, name.Sanitize())
+	}
+	same, got, err := sameIndexDefinition(def, *renames)
+	if err != nil {
+		return 0, fmt.Errorf("read the definition of index %s on %s: %w", name.Sanitize(), table, err)
+	}
+	if !same {
+		return 0, fmt.Errorf("%w: %s is now %q, not the %q the plan matched; nothing was renamed, re-plan",
+			ErrRenamedIndexDrift, name.Sanitize(), got, renames.Def)
 	}
 	return oid, nil
 }
@@ -172,4 +230,23 @@ func refuseRenamedOtherRelation(ctx context.Context, tx pgx.Tx, pt preflight.Pre
 			ErrRenamedIndexDrift, pgx.Identifier{rel.Name}.Sanitize())
 	}
 	return nil
+}
+
+// sameIndexDefinition reports whether def, an index's pg_get_indexdef,
+// has the definition the plan carried for it, both printed under the
+// planned index's name by the same deparser, and returns def as compared.
+func sameIndexDefinition(def string, planned schemadiff.IndexRename) (bool, string, error) {
+	unqualified, err := statement.Qualify(def, "")
+	if err != nil {
+		return false, "", err
+	}
+	got, err := statement.RenameIndex(unqualified, planned.Index)
+	if err != nil {
+		return false, "", err
+	}
+	want, err := statement.RenameIndex(planned.Def, planned.Index)
+	if err != nil {
+		return false, "", err
+	}
+	return got == want, got, nil
 }

@@ -69,7 +69,9 @@ import (
 // partitioned-key-build execution contract and its part in the fingerprint.
 // Version 28 added the partitioned-foreign-key-build execution contract and
 // its part in the fingerprint.
-const FormatVersion = 28
+// Version 29 added the rename-index kind and the replaced_by statement
+// field, which a changed index the diff replaces rather than drops carries.
+const FormatVersion = 29
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -128,6 +130,29 @@ type Statement struct {
 	// name stood for, the fingerprint covers it, and execution refuses when
 	// the object has changed since. Absent on every other statement.
 	Drops *schemadiff.DroppedObject `json:"drops,omitempty"`
+	// ReplacedBy is set on a diff-derived DROP INDEX of a changed index the
+	// plan replaces rather than drops: the index an earlier statement of the
+	// plan built under the desired definition, valid before the drop runs,
+	// which the rename after the drop gives the dropped index's name (see
+	// schemadiff.Change.ReplacedBy). The table has an index with the desired
+	// definition before the old one goes, so the drop removes only what the
+	// desired definition no longer asks for. That can still be a guarantee,
+	// as when a unique index becomes non-unique or its predicate narrows, so
+	// the drop stays destructive and a consumer reviews it as one.
+	// Explanatory: the fingerprint covers the statements that build and
+	// rename the replacement.
+	ReplacedBy string `json:"replaced_by,omitempty"`
+	// Replacement is the index ReplacedBy names and the definition it must
+	// still have when the drop runs (see schemadiff.Change.Replacement). Set
+	// with ReplacedBy. Out of the JSON report for the same reason as
+	// Adopts, and out of the fingerprint, which covers the statement that
+	// builds the replacement.
+	Replacement *schemadiff.IndexReplacement `json:"-"`
+	// Renames is the index a diff-derived ALTER INDEX ... RENAME TO
+	// renames and the definition it must still have when the rename runs
+	// (see schemadiff.Change.Renames). Out of the JSON report for the same
+	// reason as Adopts: the SQL already identifies the change.
+	Renames *schemadiff.IndexRename `json:"-"`
 	// DropsHelper is the helper CHECK that a SET NOT NULL running as the
 	// online helper-constraint sequence adds and then drops in a later
 	// step, with the definition the helper has once validated (see
@@ -345,11 +370,33 @@ func discloseBlockingIndexDrop(st *Statement) {
 // for a plain table (a concurrent unique build and ADD CONSTRAINT ... USING
 // INDEX) cannot run on a partitioned parent. The partitions are not in the
 // plan; the build lists them when it runs. The imperative dry run calls it
-// before RoutePartitionedParent, which leaves the routed statements alone;
-// the declarative plan does not route keys, so its statements meet
-// RoutePartitionedParent's refusal. A report on a table that is not
-// partitioned must not pass through here.
+// before RoutePartitionedParent, which leaves the routed statements alone,
+// and then runs the build's admission, which refuses a shape the build does
+// not carry. A report on a table that is not partitioned must not pass
+// through here. A desired-state plan, which runs no such admission, uses
+// RouteDesiredPartitionedKeyBuilds instead.
 func RoutePartitionedKeyBuilds(report *Report) error {
+	return routePartitionedKeyBuilds(report, false)
+}
+
+// RouteDesiredPartitionedKeyBuilds is RoutePartitionedKeyBuilds for a
+// desired-state plan, which runs no admission of its own between the plan
+// and the run: it routes only a key whose shape the build admits
+// (executor.AdmitPartitionedKeyShape), so a plan that shows the build is one
+// the run executes as the build, once the run's whole-plan admission has
+// read the build's catalog refusals (migrate.AdmitPlanPartitionedKeys). A
+// key a desired file adds is planned schema-qualified and named, the
+// server's default name filled in for an unnamed one; a key with a clause
+// the build cannot carry, such as DEFERRABLE or INCLUDE, keeps the
+// planner's steps and meets RoutePartitionedParent's refusal.
+func RouteDesiredPartitionedKeyBuilds(report *Report) error {
+	return routePartitionedKeyBuilds(report, true)
+}
+
+// routePartitionedKeyBuilds routes each executable statement
+// preflight.RoutesToPartitionedKeyBuild accepts, and with admittedShapeOnly
+// only those the build's static admission accepts too.
+func routePartitionedKeyBuilds(report *Report, admittedShapeOnly bool) error {
 	for i := range report.Statements {
 		st := &report.Statements[i]
 		if st.Disposition != router.DispositionExecute {
@@ -359,9 +406,13 @@ func RoutePartitionedKeyBuilds(report *Report) error {
 		if err != nil {
 			return err
 		}
-		if routes {
-			routeToPartitionedBuild(st, planner.ExecutionPartitionedKeyBuild)
+		if !routes {
+			continue
 		}
+		if admittedShapeOnly && executor.AdmitPartitionedKeyShape(st.SQL) != nil {
+			continue
+		}
+		routeToPartitionedBuild(st, planner.ExecutionPartitionedKeyBuild)
 	}
 	return nil
 }

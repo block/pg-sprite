@@ -833,7 +833,13 @@ cancelled wait leaves is a detach-pending partition, which the server keeps cons
 through the table leave it out, rows in its range are refused) and the executor detects from
 `pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors; `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+native and copy-and-swap executors; before a native step, a create step that adds a foreign key, or a table drop
+first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
+lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
+`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, and then
+requests its lock under its lock budget either way, so the wait adds at most `HolderWait` to the bound and never
+fails a step (`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
+`TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then
@@ -1137,7 +1143,7 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 | RS-2 | Policy changes and convergence verification commit together or roll back | `ExecuteRowSecurity`; real DDL fault injection restores original policies |
 | RS-3 | Bound lock waits, statements, and the whole attempt | `ExecuteRowSecurity`; lock contention and deadline cancellation |
 | RS-4 | Run only admitted, qualified RLS DDL; keep scratch disposable | `RenderRowSecurity` from the scratch catalog and executor readback; qualified-helper, quoted-name, and scratch-cleanup tests |
-| RS-5 | Reviewed RLS execution compares the full ordered generated SQL under the target lock before target DDL; a mismatch refuses without target changes | `ExecuteReviewedRowSecurity`; `TestReviewedRowSecurityRechecksAfterLockWait`, `TestReviewedRowSecurityRefusesDifferentSequences` |
+| RS-5 | Reviewed RLS execution compares the full ordered generated SQL before target DDL, under the target lock for an existing table; a mismatch refuses without target changes | `ExecuteReviewedRowSecurity`, `ExecuteReviewedCreateWithRowSecurity`; `TestReviewedRowSecurityRechecksAfterLockWait`, `TestReviewedRowSecurityRefusesDifferentSequences`, `TestExecuteReviewedCreateWithRowSecurityRefusesADifferentSequence`, `TestExecuteReviewedCreateWithRowSecurityRefusesATableThatNowExists` |
 | RS-6 | A table created with row security commits together with its RLS or not at all | `ExecuteCreateWithRowSecurity`; `TestExecuteCreateWithRowSecurityNeverExposesTheTableWithoutItsPolicies`, `TestExecuteCreateWithRowSecurityRollsBackTheTableWhenAPolicyFails`, `TestExecuteCreateWithRowSecurityRollsBackANameTakenAfterTheProbe` |
 
 ## State, checkpoint, and resume (ST)
@@ -1185,7 +1191,15 @@ front door, where a native route reads no row: before routing any statement on a
 `findStoppedRun` reads the table's row, and a statement other than the stopped run's own,
 compared as parsed, is refused (`copy-and-swap-run-stopped`); a row it cannot judge — another
 format or phase, a store an older engine created, a store the role may not read — holds the
-table while the catalog shows the run's shadow or retained source. `pkg/schemachange` applies the
+table while the catalog shows the run's shadow or retained source. Every other door that acts
+on the table reads the row the same way before it does: `refuseOverStoppedRun` for an index
+rename, the accepted blocking passthrough, and a reviewed plan's index drop;
+`refuseEmptyPlanOverStoppedRun` for an empty plan in `RunDesired` and
+`RunDesiredWithRowSecurity`; `AdmitRowSecurityStoppedRun` before a row security file's atomic
+change; and `AdmitStoppedRun` and `AdmitPlanStoppedRun` in the dry runs, which end in the
+refusal the apply gives. `ALTER TYPE ... ADD VALUE` is exempt: it locks no table and changes
+nothing in a table's model; so is a reviewed plan's blocking drop of a partitioned table's
+index, since no copy-and-swap run can stop on a partitioned table. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
 `checkResumeRow` — the row must name this table and the derived slot (`resume-row-mismatch`),
 be non-terminal (`resume-row-terminal`), and not be a row whose cutover already began
@@ -1802,8 +1816,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   on its own. An unforced lone named `ADD PRIMARY KEY` or `ADD UNIQUE` on a partitioned parent
   through `migrate --alter` is not refused either: it runs as the partitioned key build (each
   partition's key built concurrently and constrained, then the parent's `ADD CONSTRAINT` adopts
-  them). On PostgreSQL before 18, an unforced lone named `ADD FOREIGN KEY` on a partitioned
-  parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
+  them); a key a desired file adds runs as the same build when the build admits its shape
+  (`plan.RouteDesiredPartitionedKeyBuilds`, gated by `executor.AdmitPartitionedKeyShape`), one it
+  does not keeps the planner's steps and is refused, and a key the build's catalog admission
+  refuses (a partition key column left out, a sub-partitioned partition) refuses the whole
+  desired plan before its first statement. On PostgreSQL before 18, an unforced lone named
+  `ADD FOREIGN KEY` on a partitioned parent through `migrate --alter` is not refused either: it runs as the partitioned foreign key
   build (each partition's foreign key added `NOT VALID` and validated, then the parent's
   `ADD CONSTRAINT` adopts them); a foreign key a desired file adds runs as the same build when
   the build admits its shape (`plan.RouteDesiredPartitionedForeignKeyBuilds`), and one it does
@@ -1817,6 +1835,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   sequence-executor admission, which refuses every index-building step on a parent because each
   build is its own executor entry point (`BuildPartitionedIndexAsStep` for the index,
   `AddPartitionedKeyAsStep` for the key, `AddPartitionedForeignKeyAsStep` for the foreign key);
+  for a desired key, the routing in `diffplan.Plan` and the whole-plan admission
+  `migrate.AdmitPlanPartitionedKeys`, which `RunDesired` and the desired dry run call;
   the concurrent drop by preflight and plan reporting,
   since sequence-executor admission refuses every `DROP INDEX` step on any table before it reads
   the relation kind, and `GateWithCatalog` in `pkg/migrate` for the imperative `DROP INDEX`.

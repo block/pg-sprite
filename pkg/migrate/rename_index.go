@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -81,7 +82,7 @@ func renamedIndexFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Sta
 // is the one that owns the index, read from the catalog. A plain index
 // rename runs natively; a rename of an index that backs a constraint
 // renames the constraint and is refused as rewrite-required.
-func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
+func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, step int, renames *schemadiff.IndexRename, logger *slog.Logger) (verdict.Verdict, error) {
 	if opts.Force != "" {
 		return verdict.Verdict{}, fmt.Errorf("%w: force names a table, and this statement names an index; nothing was executed",
 			ErrIndexRenameAcknowledgement)
@@ -120,7 +121,7 @@ func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 
 	switch rs.Disposition {
 	case router.DispositionExecute:
-		return executeIndexRename(ctx, pool, st, facts, rs.Plan, opts, step, logger)
+		return executeIndexRename(ctx, pool, st, facts, rs.Plan, opts, step, renames, logger)
 	case router.DispositionRewriteRequired:
 		v, err := rewriteRequiredVerdict(st, rs)
 		v.Table = table
@@ -137,9 +138,11 @@ func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 // executeIndexRename preflights the table that owns the renamed index,
 // checks the connected role at the tier the rename needs, and runs the
 // rename as one bounded attempt, which re-checks under the table's lock
-// that the name still resolves to a plain index of that table.
+// that the name still resolves to a plain index of that table and, for a
+// planned rename, that the index still has the definition the plan
+// matched it by.
 func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, facts Facts,
-	plan planner.Plan, opts Options, step int, logger *slog.Logger) (verdict.Verdict, error) {
+	plan planner.Plan, opts Options, step int, renames *schemadiff.IndexRename, logger *slog.Logger) (verdict.Verdict, error) {
 	table := facts.Schema + "." + facts.Table
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, false) {
@@ -168,9 +171,13 @@ func executeIndexRename(ctx context.Context, pool *pgxpool.Pool, st statement.St
 		return verdict.Verdict{}, err
 	}
 
-	opts.startStep(step, st.SQL())
 	start := time.Now()
-	err = executor.ExecuteIndexRename(ctx, pool, pt, st, opts.Budget.Brief, opts.retry())
+	if renames != nil {
+		err = executor.ExecutePlannedIndexRenameAsStep(ctx, pool, pt, st, opts.Budget.Brief, opts.retry(), *renames, opts.runStep(step))
+	} else {
+		opts.startStep(step, st.SQL())
+		err = executor.ExecuteIndexRename(ctx, pool, pt, st, opts.Budget.Brief, opts.retry())
+	}
 	elapsed := time.Since(start)
 	if v, refused := execRefusal(st, err, false, false, false); refused {
 		v.Table = table

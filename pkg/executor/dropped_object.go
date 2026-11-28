@@ -52,10 +52,11 @@ func opDrops(op statement.Op, d *schemadiff.DroppedObject) bool {
 }
 
 // dropsObject reports whether st is an ALTER TABLE whose only operation
-// drops the column, constraint, or NOT NULL that d names. It is an error
-// for st to drop d in any other shape, because only a step whose sole
-// operation is the drop is checked against the plan: a statement that
-// drops d alongside other operations is refused. Any operation that says
+// drops the column, constraint, or NOT NULL that d names, or one that
+// replaces constraint d in place (replacesConstraint). It is an error for
+// st to drop d in any other shape, because only the drop is checked
+// against the plan: a statement that drops d alongside other operations is
+// refused. Any operation that says
 // CASCADE is refused too, whichever object it names and however many
 // operations the statement has: it would remove objects no plan lists, and
 // a plan never drops with CASCADE.
@@ -76,13 +77,27 @@ func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, err
 		if !opDrops(op, d) {
 			continue
 		}
-		if len(ops) != 1 {
+		if len(ops) != 1 && !replacesConstraint(ops, d) {
 			return false, fmt.Errorf("%w: %q drops %s %s alongside other operations, and only a step whose sole operation is the drop is checked",
 				ErrInvariantViolation, st.SQL(), d.Kind, d.Name)
 		}
 		return true, nil
 	}
 	return false, nil
+}
+
+// replacesConstraint reports whether ops replace constraint d in place:
+// the drop of d, then the add of a constraint under the same name in a
+// form that takes no long lock, NOT VALID or USING INDEX. The add's own
+// check runs beside the drop's on the same statement (an adoption's
+// index, or the later VALIDATE's definition), so nothing in it goes
+// unchecked, and the table is never without one rule or the other.
+func replacesConstraint(ops []statement.Op, d *schemadiff.DroppedObject) bool {
+	if d.Kind != schemadiff.DroppedConstraint || len(ops) != 2 || !opDrops(ops[0], d) {
+		return false
+	}
+	add := ops[1]
+	return add.Kind == statement.OpAddConstraint && add.Name == d.Name && (add.NotValid || add.UsingIndex)
 }
 
 // refuseDroppedObjectDrift locks st's table in ACCESS EXCLUSIVE, the lock

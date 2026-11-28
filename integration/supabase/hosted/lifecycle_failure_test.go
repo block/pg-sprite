@@ -68,6 +68,8 @@ func TestHostedCLIRefuseCopySwap(t *testing.T) {
 }
 
 // A held lock prevents removing the last policy; access must remain unchanged.
+// The holder takes SHARE, as a CREATE INDEX does: a lock that strong is not
+// waited out, so the step goes straight to requesting its own.
 func TestHostedCLIRLSLockFailure(t *testing.T) {
 	f := newFixture(t)
 	f.seedUnpublished(t)
@@ -86,7 +88,7 @@ ALTER TABLE %s ENABLE ROW LEVEL SECURITY;`, name, name))
 		defer cancel()
 		_ = holder.Rollback(ctx)
 	})
-	_, err = holder.Exec(t.Context(), "LOCK TABLE "+f.table+" IN ACCESS SHARE MODE")
+	_, err = holder.Exec(t.Context(), "LOCK TABLE "+f.table+" IN SHARE MODE")
 	require.NoError(t, err)
 	result := f.cli(t, 1, "migrate", "--desired", path, "--lock-timeout", "200ms", "--json")
 	assert.Equal(t, "budget-lock-exceeded", result["code"])
