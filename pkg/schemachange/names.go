@@ -16,7 +16,10 @@ import (
 var ErrNotDerivedName = errors.New("name is not derived from any table in the schema")
 
 // namePrefix marks every relation the copy-and-swap route creates or
-// retains, so an operator can list the engine's leftovers by prefix.
+// retains, so an operator can list the engine's leftovers by prefix. The
+// full shape of every name derived here is schemadiff.IsEngineRelationName,
+// which keeps the engine's tables out of the managed-table listing; a change
+// to a deriver below changes that shape with it.
 const namePrefix = "_pgsprite_"
 
 // DerivedKind says which derived name a source table produced.

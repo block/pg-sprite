@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/lint"
+	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -82,6 +85,65 @@ func TestPullRefusesBothSidesOfClassicInheritance(t *testing.T) {
 	assert.Contains(t, out.String(), "REFUSED child:")
 	assert.Contains(t, out.String(), "REFUSED parent:")
 	assert.Contains(t, out.String(), "Summary: 0 pulled, 2 refused, 0 errors")
+}
+
+// A copy-and-swap run with --keep-old leaves the pre-swap table behind under
+// its derived _old name as a rollback copy. That table is the engine's, not
+// one the owner declares: pull writes a file for orders alone, and the
+// pulled file plans nothing against the swapped table, so neither front
+// door offers the rollback copy as a table to declare or drop.
+func TestPullLeavesOutTheTableKeepOldRetains(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.orders (
+			id    int PRIMARY KEY,
+			total numeric(10,2) NOT NULL
+		)`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.orders SELECT g, g FROM generate_series(1, 100) g", schema))
+	require.NoError(t, err)
+
+	migrate := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN id TYPE bigint", schema))
+	migrate.CopyAndSwap = true
+	migrate.FreeDisk = byteSize(testutil.UnlimitedDisk)
+	migrate.BlockWrites = schema + ".orders"
+	migrate.KeepOld = true
+	migrate.JSON = true
+	var migrateOut strings.Builder
+	require.NoError(t, migrate.run(t.Context(), &migrateOut))
+	retained := schemachange.OldName(schema, "orders")
+	var retainedExists bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		"SELECT to_regclass($1) IS NOT NULL", schema+"."+retained).Scan(&retainedExists))
+	require.True(t, retainedExists, "--keep-old leaves %s in the schema", retained)
+
+	outDir := filepath.Join(t.TempDir(), "pulled")
+	var pullOut strings.Builder
+	require.NoError(t, (&PullCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Out: outDir}).run(t.Context(), &pullOut))
+	assert.Contains(t, pullOut.String(), "Summary: 1 pulled, 0 refused, 0 errors")
+	assert.NotContains(t, pullOut.String(), retained)
+	entries, err := os.ReadDir(outDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "orders.sql", entries[0].Name())
+
+	// The pulled file describes the swapped-in table, so diffing it back
+	// plans no statement at all, and none touching the rollback copy.
+	pulled, err := os.ReadFile(filepath.Join(outDir, "orders.sql"))
+	require.NoError(t, err)
+	diff := newDiffCmd(t, url, schema, string(pulled))
+	diff.JSON = true
+	var diffOut strings.Builder
+	require.NoError(t, diff.run(t.Context(), &diffOut))
+	var report plan.Report
+	require.NoError(t, json.Unmarshal([]byte(diffOut.String()), &report))
+	assert.Equal(t, "orders", report.Table)
+	assert.Empty(t, report.Statements)
 }
 
 func TestPullRejectsMissingSchema(t *testing.T) {

@@ -364,7 +364,9 @@ CREATE INDEX orders_total_idx ON orders USING btree (total);
 
 `pull` never overwrites a file, and refuses a table it cannot render
 faithfully. A `diff` against a freshly pulled file reports no changes, which
-proves the baseline. [pull.md](pull.md) covers the refused shapes.
+proves the baseline. [pull.md](pull.md) covers the refused shapes. `pull`
+writes no file for a copy-and-swap run's own tables, such as the
+`_pgsprite_<hash>_old` table `--keep-old` retains.
 `pg-sprite fmt schema/orders.sql` prints a hand-edited file in canonical form,
 without a database. `pg-sprite lint --desired schema/orders.sql` runs, also
 without a database, the file admission `diff` and `migrate --desired` share: a

@@ -278,6 +278,17 @@ On this outcome a non-zero `unsettled` or `carried` is a record, not a warning: 
 The old table is dropped once the swap commits. Add `--keep-old` to keep it under its `_old`
 name for a rollback window; you drop it yourself when the window ends.
 
+Every table the route makes or keeps is named from a hash of the source's schema-qualified
+name, sixteen lowercase hex digits: the shadow is `_pgsprite_<hash>_new` while a run is
+under way or stopped, and the kept table is `_pgsprite_<hash>_old`, with its indexes,
+extended statistics, and identity sequences renamed to `_pgsprite_<hash>_old_<hash>`. These
+are the engine's tables, not yours to declare: `pull` writes no file for them, and
+`schemadiff.ListManagedTables` and `schemadiff.IsEngineRelationName` leave them out of the
+tables an orchestrator expects schema files to account for
+([how a host hides them](schemabot-integration.md#the-engines-own-tables-in-a-hosts-table-listing)).
+Treat `_pgsprite_` as a reserved prefix: a table of your own named in exactly that shape is
+treated as the engine's too.
+
 ## Stop, resume, and start over
 
 | You want to | Do this |

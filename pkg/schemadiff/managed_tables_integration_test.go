@@ -47,6 +47,30 @@ func TestListManagedTables(t *testing.T) {
 		}, tables)
 	})
 
+	// The copy-and-swap route's own tables are the engine's: a stopped
+	// run's shadow and a source retained under --keep-old are left out, so
+	// a directory owner is never asked to declare or drop them. A user
+	// table that only wears the engine's prefix is still listed.
+	t.Run("leaves out the engine's own tables", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		qualified := pgx.Identifier{schema}.Sanitize()
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.orders (id bigint);
+			CREATE TABLE %[1]s._pgsprite_c74da4a21f58f903_new (id bigint);
+			CREATE TABLE %[1]s._pgsprite_c74da4a21f58f903_old (id bigint);
+			CREATE TABLE %[1]s._pgsprite_orders (id bigint);
+			CREATE TABLE %[1]s._pgsprite_foo_old (id bigint);`, qualified))
+		require.NoError(t, err)
+
+		tables, err := ListManagedTables(t.Context(), pool, schema)
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			"_pgsprite_foo_old",
+			"_pgsprite_orders",
+			"orders",
+		}, tables)
+	})
+
 	t.Run("empty schema", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 

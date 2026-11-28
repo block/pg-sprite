@@ -18,6 +18,7 @@ points here.
 - [Invalid-index outcomes of a concurrent index build](#invalid-index-outcomes-of-a-concurrent-index-build)
 - [Execution-mode verdicts and direct execution](#execution-mode-verdicts-and-direct-execution)
 - [Stopping, resuming, and starting over](#stopping-resuming-and-starting-over)
+- [The engine's own tables in a host's table listing](#the-engines-own-tables-in-a-hosts-table-listing)
 - [Design constraints the integration imposes](#design-constraints-the-integration-imposes)
 
 ## Overview
@@ -166,7 +167,9 @@ implementation time):
   plans one, so there is no `verdict.Verdict` to map. The adapter enumerates the namespace's
   live tables itself with `schemadiff.ListManagedTables`, the catalog query `pull` uses. Its
   exclusions are explained under
-  [Deliberately operator-owned](capabilities.md#deliberately-operator-owned).
+  [Deliberately operator-owned](capabilities.md#deliberately-operator-owned); the engine's
+  own copy-and-swap tables are among them
+  ([The engine's own tables in a host's table listing](#the-engines-own-tables-in-a-hosts-table-listing)).
 
   For each undeclared table the adapter synthesizes an `engine.TableChange` that drops it:
   `IsUnsafe`, with a data-loss `UnsafeReason`, behind the same unsafe acknowledgment as
@@ -1434,6 +1437,32 @@ error comes back beside a `Discarded` that names what the call dropped before it
 | error wrapping `decode.ErrSlotActive` | No row records the table's derived slot and a process holds it, so the discard, which drops such a slot only as the reaper would, left it; the shadow and fence before it are gone, and `Discarded` names them | Find the holder, end it, and call `Discard` again |
 | error wrapping `preflight.ErrCopySwapProofMismatch` | A slot stands to be dropped and the shape was proven without replication access. Nothing was dropped | Prove the shape with `LogicalDecoding` and call again |
 | any other error | A drop failed partway, or the context's deadline ended the wait for a walsender holding a live row's slot. `Discarded` names each leftover the call dropped before it; a drop the error interrupted is not named, though part of it may be gone (a slot dropped before its publication). The row still records whatever stands | Call `Discard` again, after ending a holder if one kept the slot; each step is idempotent, and its `Discarded` names only what that call dropped |
+
+## The engine's own tables in a host's table listing
+
+A copy-and-swap run leaves tables of its own in the target's schema: a stopped run's shadow
+(`_pgsprite_<hash>_new`), and, under `KeepOld` (`--keep-old`), the pre-swap table retained
+for a rollback window (`_pgsprite_<hash>_old`), whose indexes, extended statistics, and
+identity sequences are renamed to `_pgsprite_<hash>_old_<hash>`. `<hash>` is sixteen
+lowercase hex digits. None of these is a table a schema file declares, and a host that
+treats a live table with no file as one to drop would otherwise plan `DROP TABLE` of a
+rollback copy or a resumable run's shadow.
+
+`schemadiff.ListManagedTables` leaves them out, so a host that enumerates a schema's
+tables through it — for its undeclared-table check and for the baseline it renders — needs
+no change of its own. A host that lists relations another way applies
+`schemadiff.IsEngineRelationName(name)`: a name-only check, with no database read, true
+exactly for the three derived shapes above and false for a name that merely starts with
+`_pgsprite_` (such as `_pgsprite_orders`). The shadow's own indexes and constraints carry
+names the server chose and do not match; they belong to the shadow table and leave with it.
+The retained table is the operator's to drop when the rollback window ends; the shadow is
+ended by finishing, restarting, or discarding the run (see
+[Stopping, resuming, and starting over](#stopping-resuming-and-starting-over)).
+
+The engine's checkpoint table lives in its own schema, `pgsprite`, and the planner's scratch
+objects in a `pgsprite_scratch_<random>` schema inside a transaction that is always rolled
+back; a listing scoped to the host's own schemas never sees either, so neither needs a filter
+unless a host manages the `pgsprite` schema itself.
 
 ## Design constraints the integration imposes
 

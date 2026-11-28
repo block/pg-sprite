@@ -117,7 +117,10 @@ without losing meaning. Current refusals include:
 - sequence-backed defaults that cannot be rendered as an owned `serial` form,
   including a serial whose sequence is declared away from the defaults.
 
-Extension-owned tables are excluded from enumeration. Storage parameters are
+Extension-owned tables are excluded from enumeration, and so are the copy-and-swap
+route's own tables — a stopped run's `_pgsprite_<hash>_new` shadow and a table
+`--keep-old` retains as `_pgsprite_<hash>_old` (see
+[copy-and-swap.md](copy-and-swap.md)). Storage parameters are
 exported as a `WITH (...)` clause on the `CREATE TABLE`. Table/column comments and
 non-table objects are outside the declarative model and are not exported; manage
 them separately. See the complete

@@ -464,6 +464,11 @@ Three related jobs stay with humans on purpose:
   tables, and sequences are outside the model and are not undeclared tables. The planner's scratch
   objects live in a schema of their own (`pgsprite_scratch_<random>`) inside a transaction
   that is always rolled back, so a listing scoped to the owner's schema never sees them.
+  The copy-and-swap route's own tables do live in the owner's schema — a stopped run's
+  `_pgsprite_<hash>_new` shadow and a `--keep-old` source retained as
+  `_pgsprite_<hash>_old` — so `ListManagedTables` leaves out of its result every row whose
+  name `schemadiff.IsEngineRelationName` matches; an owner running the query by hand
+  applies the same check, or it is asked to declare or drop a rollback copy.
 
   Once a reviewer has accepted a drop, the owner runs it with `executor.ExecuteDropTable`.
   At plan time, record the table's definition with `schemadiff.DroppedTableDefinition` on
