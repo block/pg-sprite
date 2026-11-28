@@ -105,6 +105,9 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
 		codes = appendCode(codes, string(d.Reason))
+		if d.ReadsInTimeZone != "" {
+			w.diag("note", "", fmt.Sprintf("%s converts each stored value in the session time zone %s", d.Operation, d.ReadsInTimeZone))
+		}
 		writeDependentHelp(w, d)
 		if len(d.PartitionKeyTables) > 0 {
 			w.diag("help", "", planner.PartitionKeyHelp)

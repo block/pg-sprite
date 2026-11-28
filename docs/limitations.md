@@ -198,6 +198,9 @@ per-operation status.
   index changed after planning. Nor is a live check constraint left `NOT VALID`
   with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
   refuses with `validated-constraint-drift` if the constraint changed after planning.
+  A change between `timestamp` and `timestamptz` planned to relabel in a UTC
+  session refuses with `time-zone-drift` if the session that runs it is no
+  longer in UTC; plan again.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state (and named by `diff` as a
   typed plan advisory), and the proven removal

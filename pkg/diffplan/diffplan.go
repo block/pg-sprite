@@ -144,6 +144,12 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			facts.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
 			facts.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
 			facts.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)
+			if facts.SessionTimeZone, err = preflight.SessionTimeZone(ctx, pool); err != nil {
+				return plan.Report{}, err
+			}
+			if facts.KeyedColumns, err = preflight.KeyedColumns(ctx, pool, req.Schema, ds.Table()); err != nil {
+				return plan.Report{}, err
+			}
 		}
 	}
 	report.TableExists = &tableExists
