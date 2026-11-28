@@ -36,6 +36,11 @@ func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 		// leftover but never the rebuild, which would meet the same rows.
 		{name: "own leftover of a duplicate-row build names the drop only", cleanup: ErrBuildLeftInvalidIndex, build: &pgconn.PgError{Code: "23505"}, wantsDrop: true},
 		{name: "unobservable builder after a data-fault build names neither", cleanup: ErrInvalidIndexBuilderUnobservable, build: &pgconn.PgError{Code: "22012"}},
+		// A build that ran out of a resource likewise names the drop of its
+		// proven own leftover but never the rebuild, which would hit the
+		// same limit.
+		{name: "own leftover of a temp_file_limit build names the drop only", cleanup: ErrBuildLeftInvalidIndex, build: &pgconn.PgError{Code: "53400"}, wantsDrop: true},
+		{name: "unproven entry after a disk-full build names neither", cleanup: ErrAbandonmentUnproven, build: &pgconn.PgError{Code: "53100"}},
 		{name: "proven own leftover names the drop", cleanup: ErrBuildLeftInvalidIndex, wantsDrop: true, wantsRecovery: true},
 		{name: "abandoned entry names the recovery only", cleanup: ErrAbandonedInvalidIndex, wantsRecovery: true},
 		{name: "in-flight build does not", cleanup: ErrInvalidIndexBuildInFlight},
@@ -61,6 +66,36 @@ func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 				assert.NotContains(t, msg, "RebuildAbandonedIndex")
 			}
 			assert.Equal(t, tt.wantsRecovery, e.Recoverable(), "the advice and Recoverable must agree")
+		})
+	}
+}
+
+// TestInvalidIndexErrorNamesTheBuildFailure pins that the server's error for
+// the build that left the entry reaches the message in every state that
+// carries one, so a log of the error says why the build failed, not only
+// what it left.
+func TestInvalidIndexErrorNamesTheBuildFailure(t *testing.T) {
+	build := &pgconn.PgError{Severity: "ERROR", Message: "temporary file size exceeds temp_file_limit (1024kB)", Code: "53400"}
+	for _, cleanup := range []error{ErrBuildLeftInvalidIndex, ErrAbandonmentUnproven} {
+		t.Run(cleanup.Error(), func(t *testing.T) {
+			e := &InvalidIndexError{Schema: "s", Index: "i", Table: "t", Build: build, Cleanup: cleanup}
+			assert.Contains(t, e.Error(), "temporary file size exceeds temp_file_limit (1024kB) (SQLSTATE 53400)")
+			assert.Contains(t, e.Error(), "ran out of a resource or hit a configured limit")
+		})
+	}
+	other := &pgconn.PgError{Severity: "ERROR", Message: "could not open file", Code: "58P01"}
+	for _, cleanup := range []error{
+		ErrBuildLeftInvalidIndex,
+		ErrInvalidIndexBuildInFlight,
+		ErrAbandonedInvalidIndex,
+		ErrInvalidIndexOnOtherTable,
+		ErrInvalidIndexNotDroppable,
+		ErrInvalidIndexBuilderUnobservable,
+		ErrAbandonmentUnproven,
+	} {
+		t.Run("outside the fault classes: "+cleanup.Error(), func(t *testing.T) {
+			e := &InvalidIndexError{Schema: "s", Index: "i", Table: "t", Build: other, Cleanup: cleanup}
+			assert.Contains(t, e.Error(), "(the build failed: ERROR: could not open file (SQLSTATE 58P01))")
 		})
 	}
 }

@@ -36,3 +36,17 @@ func isDataFault(err error) bool {
 		return false
 	}
 }
+
+// sqlstateClassInsufficientResources is SQLSTATE class 53: the server ran
+// out of a resource or hit a configured limit — disk full (53100), out of
+// memory (53200), or a limit such as temp_file_limit (53400).
+const sqlstateClassInsufficientResources = "53"
+
+// isResourceExhausted reports whether err is the server running out of a
+// resource or hitting a configured limit. Every rerun of the same statement
+// meets the same limit until an operator frees the resource or raises the
+// limit.
+func isResourceExhausted(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && len(pgErr.Code) >= 2 && pgErr.Code[:2] == sqlstateClassInsufficientResources
+}

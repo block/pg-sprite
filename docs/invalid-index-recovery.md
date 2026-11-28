@@ -80,6 +80,15 @@ build left, and the server error stays in the chain (`errors.As` to `*pgconn.PgE
 for `23505` its `Detail` names the duplicated key). See
 [a build that failed on its rows](#a-build-that-failed-on-its-rows-data-fault).
 
+A build that failed because the server ran out of a **resource** — a full disk (`53100`),
+out of memory (`53200`), or a configured limit such as `temp_file_limit` (`53400`) —
+outranks the table the same way: it reports `resource-exhausted`, and `Recoverable()` is
+false. A rebuild hits the same limit until an operator frees the resource or raises the
+limit. See [a build that ran out of a resource](#a-build-that-ran-out-of-a-resource-resource-exhausted).
+
+Every invalid-index error carries the build failure that left the entry, when there is
+one, in its message as well as in the chain, so the server's error reaches the log.
+
 ## The automatic recovery: `RebuildAbandonedIndex` and `DropAbandonedIndex`
 
 `executor.RebuildAbandonedIndex` takes exactly the statement `BuildIndexConcurrently`
@@ -203,6 +212,33 @@ abandoned, drops it, builds it again, and resumes from the partitions already do
 Dropping it first with `DROP INDEX CONCURRENTLY` also works. Partitions are built one at a
 time and the build stops at the first fault, so a later partition whose rows also break the
 index stops the rerun the same way.
+
+### A build that ran out of a resource (`resource-exhausted`)
+
+The build's own failure was the server running out of a resource or hitting a configured
+limit (SQLSTATE class `53`): a full disk, no memory left, or a limit such as
+`temp_file_limit`, which a large index build's sort reaches when it spills to temporary
+files. The outcome code is `resource-exhausted`, and `Recoverable()` is false: until the
+resource is freed or the limit raised, `RebuildAbandonedIndex` meets the same limit and
+leaves a new invalid index behind. The error names the server's message, which says which
+resource ran out.
+
+A full disk (`53100`) or out of memory (`53200`) can come from other sessions' load, so it
+may clear without an operator, for example once space frees up. The executor stops rather
+than retry, since each retry can fill the disk again. Check the resource first: free disk
+space (`df`, or the platform's storage metric) and memory against what the build needs. If
+it has recovered, skip to step 2 and the build can succeed; if the build alone exhausts it,
+or the limit is a configured one such as `temp_file_limit`, it fails the same way until you
+act:
+
+1. Free the resource or raise the limit. For `temp_file_limit`, raise it for the role the
+   build runs as, or raise `maintenance_work_mem` so the sort spills less.
+2. Drop the leftover with the statement the error names, or let `RebuildAbandonedIndex`
+   drop it and build in one call.
+3. Run the change again.
+
+An entry the run could not prove its own is reported with the same code; follow its
+state's section below before removing anything.
 
 ### Another backend's build is in flight (`ErrInvalidIndexBuildInFlight`)
 
