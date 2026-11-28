@@ -190,13 +190,13 @@ func (d CatchupDeadlocks) text() string {
 func (e *SlotLagExceededError) ceilingText() string {
 	switch e.Cause {
 	case SlotLagStreamBehind:
-		// The slot keeps the unconfirmed WAL after the stop, and a resume
-		// whose slot is over its ceiling is refused before it starts
-		// (schemachange's resume-slot-backlog); only a higher ceiling or a
-		// fresh slot changes that.
+		// The slot keeps the unconfirmed WAL after the stop, so a resume
+		// under the same ceiling meets the slot over it before its stream
+		// can read through it, whichever layer judges the slot; only a
+		// higher ceiling or a fresh slot changes that.
 		return fmt.Sprintf("slot %s has %s of WAL its stream has not confirmed, over the %s ceiling (%d > %d bytes); "+
 			"the stream has fallen behind the source's writes, and the slot keeps that WAL unconfirmed after the stop, "+
-			"so a resume under the same SlotLagCeiling is refused before it starts: "+
+			"so a resume under the same SlotLagCeiling finds the slot already over it: "+
 			"once the write rate has dropped, resume with a SlotLagCeiling with margin above the WAL the slot holds unconfirmed by then, "+
 			"which grows past this figure while the run is stopped, and room on the volume for it, "+
 			"or start the schema change over, which drops the slot and the WAL it holds",

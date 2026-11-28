@@ -427,9 +427,13 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 		}
 		v := refusedVerdict(st, r, err.Error())
 		if cause == schemachange.CauseResumeSlotBacklog {
-			// The library names SlotLagCeiling and a restart; the CLI
-			// operator acts on the flags.
-			v.Detail += "; the checkpoint row remains and its replication slot stays and pins WAL on the server: " + slotBacklogRemedy
+			// The CLI operator acts on the flags, so the detail is built
+			// from the slot's figures rather than the library's text.
+			backlog, ok := errors.AsType[*schemachange.SlotBacklogError](err)
+			if !ok {
+				return verdict.Verdict{}, fmt.Errorf("%w: %s refusal carries no slot reading", executor.ErrInvariantViolation, cause)
+			}
+			v.Detail = slotBacklogRefusalDetail(backlog)
 		}
 		if hold == holdFence {
 			// A refusal raised after the row was saved leaves the run's
@@ -540,6 +544,16 @@ const slotBacklogRemedy = "to resume, raise the slot-lag ceiling (--slot-lag-cei
 	"; or drop the slot by hand (pg_drop_replication_slot), which keeps the shadow and the checkpoint row, so the next run reconciles with a fresh slot instead of copying everything again" +
 	"; or start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot" +
 	", deletes the checkpoint row, and runs the change from the start, checked against --free-disk as a fresh run"
+
+// slotBacklogRefusalDetail is the CLI's account of a resume refused for
+// its slot's backlog: the slot's figures, what the refusal left, and the
+// flags that let a resume go on.
+func slotBacklogRefusalDetail(backlog *schemachange.SlotBacklogError) string {
+	return fmt.Sprintf("slot %s holds %d bytes of WAL its stream has not confirmed, over the %d-byte slot-lag ceiling, "+
+		"so the resume was refused before its stream opened: no shadow row was cleared or copied and the slot confirmed nothing; "+
+		"the checkpoint row remains and its replication slot stays and pins WAL on the server: ",
+		backlog.Slot, backlog.Unconfirmed, backlog.Ceiling) + slotBacklogRemedy
+}
 
 // copySwapFailureCode names the executor outcome code for an error out of
 // the Runner. The Runner's errors are not the executor's, so the

@@ -1324,9 +1324,10 @@ before its row; a first save whose row does not land drops the slot and the shad
 a slot of the derived name the run did not make is reported as the `*decode.SlotExistsError`
 it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
-row's position — a ceiling abort included, whose backlog a resume drains, though after a
-`stream-behind` abort a resume under the same ceiling is refused as `resume-slot-backlog`
-before it opens the stream, so it needs a ceiling above the slot's unconfirmed WAL — or the
+row's position — a retained-WAL ceiling abort included, whose backlog a resume drains, while
+after a `stream-behind` abort a resume under the same ceiling is refused as
+`resume-slot-backlog` before it opens the stream, judged on the slot as it stands at the
+resume, so it needs a ceiling above the slot's unconfirmed WAL — or the
 operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`, or has a
 restart (`RunOptions.Restart`) do the same sequence under the run's own lock, or a discard
 (`Runner.Discard`) do it under a lock of its own without running the change — a data fault

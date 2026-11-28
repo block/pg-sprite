@@ -219,7 +219,7 @@ func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
 	assert.Equal(t,
 		"slot pgsprite_0123abcd has 1.2 GiB of WAL its stream has not confirmed, over the 1 GiB ceiling (1288490188 > 1073741824 bytes); "+
 			"the stream has fallen behind the source's writes, and the slot keeps that WAL unconfirmed after the stop, "+
-			"so a resume under the same SlotLagCeiling is refused before it starts: "+
+			"so a resume under the same SlotLagCeiling finds the slot already over it: "+
 			"once the write rate has dropped, resume with a SlotLagCeiling with margin above the WAL the slot holds unconfirmed by then, "+
 			"which grows past this figure while the run is stopped, and room on the volume for it, "+
 			"or start the schema change over, which drops the slot and the WAL it holds",
@@ -281,7 +281,7 @@ func TestStreamBehindStopNamesTheDeadlocksInProgress(t *testing.T) {
 		Deadlocks: decode.CatchupDeadlocks{Consecutive: 6, BackingOff: true}}
 	assert.Equal(t, "slot pgsprite_0123abcd has 1.2 KiB of WAL its stream has not confirmed, over the 1000 B ceiling (1200 > 1000 bytes); "+
 		"the stream has fallen behind the source's writes, and the slot keeps that WAL unconfirmed after the stop, "+
-		"so a resume under the same SlotLagCeiling is refused before it starts: "+
+		"so a resume under the same SlotLagCeiling finds the slot already over it: "+
 		"once the write rate has dropped, resume with a SlotLagCeiling with margin above the WAL the slot holds unconfirmed by then, "+
 		"which grows past this figure while the run is stopped, and room on the volume for it, "+
 		"or start the schema change over, which drops the slot and the WAL it holds"+

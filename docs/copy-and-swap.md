@@ -201,8 +201,9 @@ same ceiling can stop again, depending on the cause:
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
   pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
   stop, so running the same command again under the same ceiling is refused
-  (`resume-slot-backlog`) before it opens the stream or restarts the copy, and nothing is
-  written.
+  (`resume-slot-backlog`) before it opens the stream or restarts the copy: no shadow row is
+  cleared or copied and the slot confirms nothing. The check reads the slot as it stands at
+  the resume, so a resume admitted just under the ceiling can still stop `stream-behind`.
 - **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
   for longer than it takes to release WAL pg-sprite has confirmed: an open or prepared
   transaction holds it back, or the cluster writes more WAL per release interval and cycle than

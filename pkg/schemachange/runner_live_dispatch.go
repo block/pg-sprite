@@ -128,7 +128,8 @@ func checkLiveRow(target preflight.CopySwapTarget, cp checkpoint.Checkpoint) err
 // refused as resume-slot-backlog when it already holds more unconfirmed
 // WAL than the run's slot lag ceiling, from the same reading, before the
 // stream opens or the copy restarts (ST-3); a reconcile's fresh slot holds
-// none.
+// none. A row swapLive wrote back from cutover stays at catching_up on
+// that refusal.
 func (r *Runner) liveReady(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, state *runState) error {
 	resume, err := InspectResume(ctx, pool, target, state.cp)
 	if err != nil {

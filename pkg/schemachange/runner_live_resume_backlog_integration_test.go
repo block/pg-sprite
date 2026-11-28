@@ -91,3 +91,89 @@ func TestRunnerRefusesAResumeOverItsSlotBacklogUntilTheCeilingIsRaised(t *testin
 	require.NoError(t, err)
 	f.assertLiveDone(t, result)
 }
+
+// laterSaveCeiling is the slot lag ceiling of a run stopped after its copy
+// and of its refused resume: the filler's WAL written while the run is
+// stopped, about 26 MiB, is over it.
+const laterSaveCeiling = 16 << 20
+
+// A resume of a run stopped after its copy goes through the same check: the
+// source writes more WAL than the ceiling while nothing captures it, so a
+// resume under that ceiling is refused as resume-slot-backlog, carrying
+// the slot's figures, and the slot confirms nothing. A row stopped in
+// catching_up or verifying is left as it was. A row stopped in cutover,
+// before its swap ran, is the one the refusal leaves changed: the run
+// writes it back to catching_up before it reads the slot, since the resume
+// inspection reads a cutover row as a swap still deciding, and the refusal
+// leaves it there, the phase the admitted resume would write anyway. A
+// resume under a ceiling above the backlog carries each to done.
+func TestRunnerRefusesAResumeOverItsSlotBacklogFromEveryLaterSave(t *testing.T) {
+	for phase, refusedPhase := range map[checkpoint.Phase]checkpoint.Phase{
+		checkpoint.PhaseCatchingUp: checkpoint.PhaseCatchingUp,
+		checkpoint.PhaseVerifying:  checkpoint.PhaseVerifying,
+		checkpoint.PhaseCutover:    checkpoint.PhaseCatchingUp,
+	} {
+		t.Run(phase.String(), func(t *testing.T) {
+			f := newDecodingFixture(t, 2500)
+			_, err := f.pool.Exec(t.Context(), walFillerTable)
+			require.NoError(t, err)
+			_, err = f.runLive(t, backlogRunOptions(laterSaveCeiling, schemachange.RunOptions{
+				AfterCheckpoint: (&stopAfter{phase: phase}).hook,
+			}))
+			require.ErrorIs(t, err, errStopHere)
+			row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+			require.NoError(t, err)
+			require.Equal(t, phase, row.Phase)
+			require.NoError(t, fillWAL(t.Context(), f.pool, 24000))
+			stopped, found, err := decode.InspectSlot(t.Context(), f.pool, row.SlotName)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.True(t, stopped.Unconfirmed.Known)
+			require.Greater(t, stopped.Unconfirmed.Bytes, int64(laterSaveCeiling), "the filler left the stopped slot over the ceiling")
+
+			_, err = f.runLive(t, backlogRunOptions(laterSaveCeiling, schemachange.RunOptions{}))
+			require.Error(t, err)
+			assert.Equal(t, schemachange.CauseResumeSlotBacklog, schemachange.RefusalCauseOf(err))
+			var backlog *schemachange.SlotBacklogError
+			require.ErrorAs(t, err, &backlog)
+			assert.Equal(t, row.SlotName, backlog.Slot)
+			assert.Equal(t, int64(laterSaveCeiling), backlog.Ceiling)
+			assert.GreaterOrEqual(t, backlog.Unconfirmed, stopped.Unconfirmed.Bytes, "no stream confirmed anything after the filler")
+			refused, found, err := decode.InspectSlot(t.Context(), f.pool, row.SlotName)
+			require.NoError(t, err)
+			require.True(t, found)
+			assert.Equal(t, stopped.ConfirmedFlushLSN, refused.ConfirmedFlushLSN, "no stream confirmed anything")
+			after, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+			require.NoError(t, err)
+			assert.Equal(t, refusedPhase, after.Phase)
+			assert.Equal(t, row.LastAppliedLSN, after.LastAppliedLSN, "the position the stream resumes from is unchanged")
+			assert.Equal(t, row.Watermark, after.Watermark, "the copy's progress is unchanged")
+
+			result, err := f.runLive(t, backlogRunOptions(raisedBacklogCeiling, schemachange.RunOptions{}))
+			require.NoError(t, err)
+			f.assertLiveDone(t, result)
+		})
+	}
+}
+
+// A stream-behind stop leaves the slot holding the WAL its stream had not
+// confirmed, over the ceiling, so a resume under the same ceiling is
+// refused as resume-slot-backlog: the chain the stop's own remedy names,
+// from a stop the catch-up made rather than a backlog built by hand.
+func TestRunnerRefusesAResumeAfterAStreamBehindStopUnderTheSameCeiling(t *testing.T) {
+	f, err := stopStreamBehindInCopy(t)
+	var exceeded *decode.SlotLagExceededError
+	require.ErrorAs(t, err, &exceeded)
+	require.Equal(t, decode.SlotLagStreamBehind, exceeded.Cause)
+
+	_, err = f.runLive(t, backlogRunOptions(paceStopCeiling, schemachange.RunOptions{}))
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseResumeSlotBacklog, schemachange.RefusalCauseOf(err))
+	var backlog *schemachange.SlotBacklogError
+	require.ErrorAs(t, err, &backlog)
+	assert.Equal(t, exceeded.Slot, backlog.Slot)
+	assert.Equal(t, int64(paceStopCeiling), backlog.Ceiling)
+	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseCopying, row.Phase, "the refused resume left the stopped copy's row")
+}

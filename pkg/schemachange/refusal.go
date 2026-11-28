@@ -237,10 +237,14 @@ const (
 	CauseResumeSlotHeld RefusalCause = "resume-slot-held"
 	// CauseResumeSlotBacklog means the row's slot is intact and free, but
 	// it already holds more WAL its stream has not confirmed than the
-	// run's slot lag ceiling (ST-3): the catch-up's first reading would
-	// stop the resume stream-behind before the stream could read through
-	// that backlog. Nothing is written; the resume needs a higher ceiling,
-	// with room on the volume for the backlog, or a restart.
+	// run's slot lag ceiling (ST-3), as the resume reads it before its
+	// stream opens: the catch-up's first reading is expected to stop the
+	// resume stream-behind before the stream reads through that backlog.
+	// No shadow row is cleared or copied and the slot confirms nothing; a
+	// row stopped in cutover whose swap rolled back is first written back
+	// to catching_up. The refusal wraps a *SlotBacklogError with the
+	// slot's figures. The resume needs a higher ceiling, with room on the
+	// volume for the backlog, or a restart.
 	CauseResumeSlotBacklog RefusalCause = "resume-slot-backlog"
 	// CauseCopyShadowMismatch means the shadow the Runner handed its copier
 	// does not describe a copy into the proven target's shadow (ST-6): the
