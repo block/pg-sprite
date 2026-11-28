@@ -40,34 +40,54 @@ func TestAttachProofNameIsDerivedFromKindAndExpression(t *testing.T) {
 func TestDecideAttachProof(t *testing.T) {
 	p := attachProof{kind: attachProofBound, tableOID: 1, schema: "app", table: "events_2027_01", expr: "true"}
 
-	state, oid, err := decideAttachProof(p, "c", "true", true, 42)
+	state, oid, err := decideAttachProof(p, attachProofConstraint{oid: 42, contype: "c", validated: true, expr: "true"})
 	require.NoError(t, err)
 	assert.Equal(t, attachProofDone, state)
 	assert.Equal(t, uint32(42), oid)
 
-	state, _, err = decideAttachProof(p, "c", "true", false, 42)
+	state, _, err = decideAttachProof(p, attachProofConstraint{oid: 42, contype: "c", expr: "true"})
 	require.NoError(t, err)
 	assert.Equal(t, attachProofValidatePending, state)
 
 	for _, contype := range []string{"u", "p", "f", "x"} {
-		_, _, err := decideAttachProof(p, contype, "", true, 42)
+		_, _, err := decideAttachProof(p, attachProofConstraint{oid: 42, contype: contype, validated: true})
 		assert.ErrorIs(t, err, errAttachProofNameTaken, contype)
 	}
 }
 
 // A parent's CHECK keeps the parent's name, which the attach matches by, and
 // is the proof only when it also carries the parent's expression as the
-// server prints it: the same name over another expression is refused.
+// server prints it and is inheritable: the same name over another
+// expression, or over a NO INHERIT CHECK the attach will not merge with the
+// parent's, is refused.
 func TestDecideAttachProofForAParentsCheck(t *testing.T) {
 	p := attachProof{kind: attachProofParent, tableOID: 1, schema: "app", table: "payments_2027",
 		expr: "(amount > 0)", constraint: "payments_amount_positive"}
 	assert.Equal(t, "payments_amount_positive", p.name())
 
-	state, _, err := decideAttachProof(p, "c", "(amount > 0)", true, 7)
+	state, _, err := decideAttachProof(p, attachProofConstraint{oid: 7, contype: "c", validated: true, expr: "(amount > 0)"})
 	require.NoError(t, err)
 	assert.Equal(t, attachProofDone, state)
 
-	_, _, err = decideAttachProof(p, "c", "(amount >= 0)", true, 7)
+	_, _, err = decideAttachProof(p, attachProofConstraint{oid: 7, contype: "c", validated: true, expr: "(amount >= 0)"})
+	assert.ErrorIs(t, err, errAttachProofNameTaken)
+
+	_, _, err = decideAttachProof(p, attachProofConstraint{oid: 7, contype: "c", validated: true, noInherit: true, expr: "(amount > 0)"})
+	assert.ErrorIs(t, err, errAttachProofNameTaken, "NO INHERIT")
+}
+
+// A CHECK under the not-null helper's derived name is the helper only when
+// it carries the helper's expression as the server prints it. Taking another
+// CHECK for it would let SET NOT NULL scan under ACCESS EXCLUSIVE, or drop a
+// CHECK the step did not create.
+func TestDecideAttachProofForANotNullHelper(t *testing.T) {
+	p := attachProof{kind: attachProofNotNull, tableOID: 1, schema: "app", table: "events_2027", expr: "(id IS NOT NULL)"}
+
+	state, _, err := decideAttachProof(p, attachProofConstraint{oid: 9, contype: "c", validated: true, expr: "(id IS NOT NULL)"})
+	require.NoError(t, err)
+	assert.Equal(t, attachProofDone, state)
+
+	_, _, err = decideAttachProof(p, attachProofConstraint{oid: 9, contype: "c", validated: true, expr: "(id > 0)"})
 	assert.ErrorIs(t, err, errAttachProofNameTaken)
 }
 

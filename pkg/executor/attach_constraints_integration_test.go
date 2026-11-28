@@ -131,8 +131,9 @@ func TestEnsureAttachConstraintsGivesTheTableTheParentsChecksAndNotNulls(t *test
 			func(_ progress.Operation, sql string) { ran = append(ran, sql) })
 		require.NoError(t, err)
 		qualified := pgx.Identifier{f.schema, "payments_2027"}.Sanitize()
-		idHelper := table.proof(attachProofNotNull, `"id" IS NOT NULL`, "")
-		paidHelper := table.proof(attachProofNotNull, `"paid" IS NOT NULL`, "")
+		// Each helper's expression is the server's own print of it.
+		idHelper := table.proof(attachProofNotNull, "(id IS NOT NULL)", "")
+		paidHelper := table.proof(attachProofNotNull, "(paid IS NOT NULL)", "")
 		assert.Equal(t, []string{
 			table.proof(attachProofParent, "(amount > 0)", "payments_amount_positive").addSQL(),
 			table.proof(attachProofParent, "(amount > 0)", "payments_amount_positive").validateSQL(),
@@ -185,7 +186,7 @@ func TestEnsureAttachConstraintsFailsOnANullAndResumesOnceFixed(t *testing.T) {
 		f.exec(t, paymentsParent)
 		f.exec(t, `INSERT INTO %[1]s.payments_2027 VALUES (NULL, '2027-03-01', 9, 'EUR')`)
 		parent, table := f.tableOID(t, "payments"), f.attachTable(t, "payments_2027")
-		helper := table.proof(attachProofNotNull, `"id" IS NOT NULL`, "")
+		helper := table.proof(attachProofNotNull, "(id IS NOT NULL)", "")
 
 		_, err := ensureAttachConstraints(t.Context(), f.pool, parent, table, attachProofTestBudget, 0, nil, nil)
 		require.ErrorIs(t, err, errAttachProofViolation)
@@ -219,7 +220,7 @@ func TestEnsureAttachConstraintsDropsAHelperAStopLeft(t *testing.T) {
 				day date
 			)`)
 		table := f.attachTable(t, "events_2027")
-		helper := table.proof(attachProofNotNull, `"id" IS NOT NULL`, "")
+		helper := table.proof(attachProofNotNull, "(id IS NOT NULL)", "")
 		f.prove(t, "events_2027", helper.name(), helper.expr)
 		f.exec(t, `ALTER TABLE %[1]s.events_2027 ALTER COLUMN id SET NOT NULL`)
 

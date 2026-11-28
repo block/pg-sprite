@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,11 +21,13 @@ import (
 // This file gives the table both first, while writes go on:
 //
 //   - each CHECK of the parent is added under its name NOT VALID, then
-//     validated under SHARE UPDATE EXCLUSIVE (ensureAttachProof);
+//     validated under SHARE UPDATE EXCLUSIVE (ensureAttachProof). The copy
+//     is validated even when the parent's own CHECK is NOT VALID: the step
+//     is deliberately stricter there than the attach;
 //   - each column the parent declares NOT NULL gets a helper CHECK (column
-//     IS NOT NULL), added NOT VALID and validated the same way, then SET NOT
-//     NULL in a brief transaction, which the validated CHECK lets skip its
-//     scan, and the helper is dropped.
+//     IS NOT NULL, as the server prints it), added NOT VALID and validated
+//     the same way, then SET NOT NULL in a brief transaction, which the
+//     validated CHECK lets skip its scan, and the helper is dropped.
 //
 // Every step reads the catalog and decides, so a rerun resumes, and a helper
 // left behind by a stop after SET NOT NULL is dropped by the next call.
@@ -37,6 +40,16 @@ var (
 	// constraint is NOT VALID (PostgreSQL 18). Setting it NOT NULL would
 	// validate it under ACCESS EXCLUSIVE.
 	errAttachNotNullNotValid = errors.New("the column's not-null constraint is NOT VALID")
+	// errAttachColumnRowType is returned for a nullable column of a
+	// composite type the parent declares NOT NULL. Its IS NOT NULL is the
+	// row test, true only when every field is non-null, so a helper CHECK
+	// would refuse rows the attach takes and would not let SET NOT NULL
+	// skip its scan.
+	errAttachColumnRowType = errors.New("the column is of a composite type, which the step cannot set NOT NULL without a scan")
+	// errAttachParentChanged is returned when the parent's CHECKs or NOT
+	// NULL columns changed while the step ran. What the step finished
+	// stays, and a rerun brings the table to the parent as it is now.
+	errAttachParentChanged = errors.New("the partitioned parent's constraints changed while the step ran")
 )
 
 // attachConstraintAction says what the step did for one of the parent's
@@ -84,26 +97,18 @@ func (t attachTable) proof(kind attachProofKind, expr, constraint string) attach
 // ensureAttachConstraints gives the table every CHECK constraint of the
 // parent, then every NOT NULL the parent declares, and returns what it did
 // for each, CHECKs first. Each validation is bounded by b. It stops at the
-// first error and keeps what it finished. The caller holds the parent's
+// first error and keeps what it finished. Once done, it reads the parent
+// again and returns errAttachParentChanged when its constraints are no
+// longer the ones the step gave the table. The caller holds the parent's
 // advisory table lock (LK-1).
 func ensureAttachConstraints(ctx context.Context, pool *pgxpool.Pool, parentOID uint32, table attachTable, b ValidateBudget,
 	holderWait time.Duration, tracker *progress.Tracker, started attachProofStatementStarted) ([]attachConstraintResult, error) {
 	tx := briefTx{pool: pool}
-	var (
-		checks   []parentCheck
-		notNulls []string
-	)
-	err := tx.read(ctx, "read the constraints of the partitioned parent of "+table.qualified(), func(ctx context.Context, q querier) error {
-		var err error
-		if checks, err = readParentChecks(ctx, q, parentOID); err != nil {
-			return err
-		}
-		notNulls, err = readParentNotNullColumns(ctx, q, parentOID)
-		return err
-	})
+	want, err := readAttachParent(ctx, tx, parentOID, table)
 	if err != nil {
 		return nil, err
 	}
+	checks, notNulls := want.checks, want.notNulls
 	results := make([]attachConstraintResult, 0, len(checks)+len(notNulls))
 	for _, c := range checks {
 		res, err := ensureAttachProof(ctx, pool, table.proof(attachProofParent, c.expr, c.name), b, holderWait, tracker, started)
@@ -119,8 +124,57 @@ func ensureAttachConstraints(ctx context.Context, pool *pgxpool.Pool, parentOID 
 		}
 		results = append(results, attachConstraintResult{column: column, action: action})
 	}
+	now, err := readAttachParent(ctx, tx, parentOID, table)
+	if err != nil {
+		return results, err
+	}
+	if !now.equal(want) {
+		return results, fmt.Errorf("%w: the parent of %s now has CHECKs %v and NOT NULL columns %v; rerun to bring the table to them",
+			errAttachParentChanged, table.qualified(), now.checks, now.notNulls)
+	}
 	return results, nil
 }
+
+// attachParentConstraints is what the attach requires of the table from the
+// parent: its CHECKs and its NOT NULL columns.
+type attachParentConstraints struct {
+	checks   []parentCheck
+	notNulls []string
+}
+
+func (c attachParentConstraints) equal(o attachParentConstraints) bool {
+	return slices.Equal(c.checks, o.checks) && slices.Equal(c.notNulls, o.notNulls)
+}
+
+// readAttachParent proves the parent is still a partitioned table and
+// reads its CHECKs and NOT NULL columns (ST-7): a parent dropped since the
+// run resolved it is not a parent with no constraints.
+func readAttachParent(ctx context.Context, tx briefTx, parentOID uint32, table attachTable) (attachParentConstraints, error) {
+	var c attachParentConstraints
+	err := tx.read(ctx, "read the constraints of the partitioned parent of "+table.qualified(), func(ctx context.Context, q querier) error {
+		var relkind string
+		err := q.QueryRow(ctx, parentRelkindSQL, parentOID).Scan(&relkind)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: ST-7: the partitioned parent %d of %s no longer exists", ErrInvariantViolation, parentOID, table.qualified())
+		}
+		if err != nil {
+			return fmt.Errorf("prove the partitioned parent %d of %s: %w", parentOID, table.qualified(), err)
+		}
+		if relkind != "p" {
+			return fmt.Errorf("%w: ST-7: the parent %d of %s is of kind %q, not a partitioned table", ErrInvariantViolation, parentOID, table.qualified(), relkind)
+		}
+		if c.checks, err = readParentChecks(ctx, q, parentOID); err != nil {
+			return err
+		}
+		c.notNulls, err = readParentNotNullColumns(ctx, q, parentOID)
+		return err
+	})
+	return c, err
+}
+
+// parentRelkindSQL reads a relation's kind by OID. Every relation and
+// operator is pg_catalog-qualified (CO-9).
+const parentRelkindSQL = `SELECT relkind::pg_catalog.text FROM pg_catalog.pg_class WHERE oid OPERATOR(pg_catalog.=) $1`
 
 // checkAction is the proof step's action as the constraint step reports it.
 func checkAction(a attachProofAction) attachConstraintAction {
@@ -137,15 +191,21 @@ func checkAction(a attachProofAction) attachConstraintAction {
 // ensureAttachNotNull brings one column to NOT NULL online: the helper CHECK
 // proves it holds no NULL, SET NOT NULL then skips its scan, and the helper
 // is dropped. A column already NOT NULL only has a leftover helper dropped.
+// A nullable column of a composite type is refused before anything is
+// added. A CHECK under the helper's name with another expression is
+// refused, and neither used as the proof nor dropped (decideAttachProof).
 func ensureAttachNotNull(ctx context.Context, pool *pgxpool.Pool, tx briefTx, table attachTable, column string, b ValidateBudget,
 	holderWait time.Duration, tracker *progress.Tracker, started attachProofStatementStarted) (attachConstraintAction, error) {
-	helper := table.proof(attachProofNotNull, pgx.Identifier{column}.Sanitize()+" IS NOT NULL", "")
-	notNull, err := readAttachColumnNotNull(ctx, tx, table, column)
+	col, err := readAttachColumn(ctx, tx, table, column)
 	if err != nil {
 		return "", err
 	}
+	helper := table.proof(attachProofNotNull, "("+col.printed+" IS NOT NULL)", "")
 	action := attachConstraintFound
-	if !notNull {
+	if !col.notNull {
+		if col.rowType {
+			return "", fmt.Errorf("%w: column %q of %s", errAttachColumnRowType, column, table.qualified())
+		}
 		if _, err := ensureAttachProof(ctx, pool, helper, b, holderWait, tracker, started); err != nil {
 			return "", err
 		}
@@ -169,12 +229,25 @@ func ensureAttachNotNull(ctx context.Context, pool *pgxpool.Pool, tx briefTx, ta
 	return action, nil
 }
 
-// readAttachColumnNotNull reads whether the column refuses NULL. A column
-// the table lacks, and a NOT VALID not-null constraint, are refused.
-func readAttachColumnNotNull(ctx context.Context, tx briefTx, table attachTable, column string) (bool, error) {
-	var found, notNull, notValid bool
+// attachColumn is one column of the table as the step reads it.
+type attachColumn struct {
+	notNull  bool
+	notValid bool
+	// printed is the column's name as the server prints it in an
+	// expression (quote_ident), so the helper CHECK's expression is the
+	// text pg_get_expr returns for it.
+	printed string
+	// rowType: the column's type is composite, or a domain over one.
+	rowType bool
+}
+
+// readAttachColumn reads the column. A column the table lacks, and a NOT
+// VALID not-null constraint, are refused.
+func readAttachColumn(ctx context.Context, tx briefTx, table attachTable, column string) (attachColumn, error) {
+	var c attachColumn
+	var found bool
 	err := tx.read(ctx, "read column "+column+" of "+table.qualified(), func(ctx context.Context, q querier) error {
-		err := q.QueryRow(ctx, attachColumnSQL, table.oid, column).Scan(&notNull, &notValid)
+		err := q.QueryRow(ctx, attachColumnSQL, table.oid, column).Scan(&c.notNull, &c.notValid, &c.printed, &c.rowType)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -182,21 +255,21 @@ func readAttachColumnNotNull(ctx context.Context, tx briefTx, table attachTable,
 		return err
 	})
 	if err != nil {
-		return false, err
+		return attachColumn{}, err
 	}
 	if !found {
-		return false, fmt.Errorf("%w: %s has no column %q", errAttachColumnMissing, table.qualified(), column)
+		return attachColumn{}, fmt.Errorf("%w: %s has no column %q", errAttachColumnMissing, table.qualified(), column)
 	}
-	if notValid {
-		return false, fmt.Errorf("%w: column %q of %s", errAttachNotNullNotValid, column, table.qualified())
+	if c.notValid {
+		return attachColumn{}, fmt.Errorf("%w: column %q of %s", errAttachNotNullNotValid, column, table.qualified())
 	}
-	return notNull, nil
+	return c, nil
 }
 
 // setAttachNotNull runs SET NOT NULL in one brief transaction. Under the
-// table's lock it proves the table and that the helper CHECK is still there
-// and validated, so the statement skips its scan; it reads back the column
-// NOT NULL before the commit.
+// table's lock it proves the table and that the helper CHECK is still there,
+// with the helper's expression, and validated, so the statement skips its
+// scan; it reads back the column NOT NULL before the commit.
 func setAttachNotNull(ctx context.Context, tx briefTx, helper attachProof, column, setSQL string) error {
 	return tx.run(ctx, "set column "+column+" of "+helper.qualified()+" NOT NULL", catalogReadPath(), true,
 		func(ctx context.Context, tx pgx.Tx) error {
@@ -219,11 +292,11 @@ func setAttachNotNull(ctx context.Context, tx briefTx, helper attachProof, colum
 			if _, err := tx.Exec(ctx, setSQL); err != nil {
 				return err
 			}
-			var notNull bool
-			if err := tx.QueryRow(ctx, attachColumnSQL, helper.tableOID, column).Scan(&notNull, new(bool)); err != nil {
+			var c attachColumn
+			if err := tx.QueryRow(ctx, attachColumnSQL, helper.tableOID, column).Scan(&c.notNull, &c.notValid, &c.printed, &c.rowType); err != nil {
 				return fmt.Errorf("read back column %q of %s: %w", column, helper.qualified(), err)
 			}
-			if !notNull {
+			if !c.notNull {
 				return fmt.Errorf("%w: column %q of %s allows NULL after SET NOT NULL", ErrInvariantViolation, column, helper.qualified())
 			}
 			return nil
@@ -246,16 +319,29 @@ func dropAttachHelper(ctx context.Context, pool *pgxpool.Pool, tx briefTx, helpe
 	return dropAttachProof(ctx, pool, helper, holderWait, tracker)
 }
 
-// attachColumnSQL reads whether a column refuses NULL, and whether its
-// not-null constraint is NOT VALID (only PostgreSQL 18 catalogs one). Every
-// relation and operator is pg_catalog-qualified (CO-9).
+// attachColumnSQL reads whether a column refuses NULL; whether its not-null
+// constraint is NOT VALID (only PostgreSQL 18 catalogs one); its name as
+// the server prints it; and whether its type is composite, following a
+// domain down to its base type. Every relation, operator, and function is
+// pg_catalog-qualified (CO-9).
 const attachColumnSQL = `SELECT a.attnotnull,
 	       EXISTS (
 	         SELECT 1 FROM pg_catalog.pg_constraint k
 	          WHERE k.conrelid OPERATOR(pg_catalog.=) a.attrelid
 	            AND k.contype::pg_catalog.text OPERATOR(pg_catalog.=) 'n'
 	            AND k.conkey[1] OPERATOR(pg_catalog.=) a.attnum
-	            AND NOT k.convalidated)
+	            AND NOT k.convalidated),
+	       pg_catalog.quote_ident(a.attname::pg_catalog.text),
+	       (WITH RECURSIVE chain AS (
+	          SELECT y.typtype, y.typbasetype
+	            FROM pg_catalog.pg_type y
+	           WHERE y.oid OPERATOR(pg_catalog.=) a.atttypid
+	          UNION ALL
+	          SELECT y.typtype, y.typbasetype
+	            FROM pg_catalog.pg_type y
+	            JOIN chain ON y.oid OPERATOR(pg_catalog.=) chain.typbasetype
+	           WHERE chain.typtype::pg_catalog.text OPERATOR(pg_catalog.=) 'd')
+	        SELECT pg_catalog.bool_or(typtype::pg_catalog.text OPERATOR(pg_catalog.=) 'c') FROM chain)
 	  FROM pg_catalog.pg_attribute a
 	 WHERE a.attrelid OPERATOR(pg_catalog.=) $1
 	   AND a.attname OPERATOR(pg_catalog.=) $2

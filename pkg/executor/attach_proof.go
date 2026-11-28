@@ -50,8 +50,10 @@ const (
 	attachProofNotNull attachProofKind = "notnull"
 )
 
-// attachProofNamePrefix starts the name of every proof CHECK the step adds,
-// so an operator can tell them from the table's own constraints.
+// attachProofNamePrefix starts the name of every proof CHECK whose name the
+// step derives, so an operator can tell them from the table's own
+// constraints. A parent's CHECK carries the parent's name instead, because
+// the attach matches it by name.
 const attachProofNamePrefix = "pgsprite_attach_"
 
 // attachProofDigestHexLen is how many hex characters of the expression's
@@ -60,9 +62,10 @@ const attachProofDigestHexLen = 16
 
 var (
 	// errAttachProofNameTaken is returned when the proof's name is held by
-	// a constraint that is not a CHECK, or, for a parent's CHECK, by a
-	// CHECK of another expression. The step drops and renames nothing it
-	// did not create.
+	// a constraint that is not a CHECK; for a parent's CHECK or a not-null
+	// helper, by a CHECK of another expression; or, for a parent's CHECK,
+	// by a NO INHERIT one, which the attach refuses to merge with the
+	// parent's. The step drops and renames nothing it did not create.
 	errAttachProofNameTaken = errors.New("the name the attach proof needs is held by a constraint that is not that CHECK")
 	// errAttachProofViolation is returned when the proof's validation finds
 	// rows that break it: rows of the attached table outside the bound, or
@@ -88,7 +91,7 @@ type attachProof struct {
 	table    string
 	// expr is the CHECK's expression: as attachBoundCheck rendered it, as
 	// the server printed the parent's (pg_get_expr), or a column's IS NOT
-	// NULL.
+	// NULL as the server prints it.
 	expr string
 	// constraint is the parent's constraint name, for attachProofParent
 	// only; every other kind derives its name.
@@ -362,9 +365,25 @@ func validateAttachProof(ctx context.Context, pool *pgxpool.Pool, proof attachPr
 		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == sqlstateCheckConstraintViolation {
 			return fmt.Errorf("%w: %w", errAttachProofViolation, err)
 		}
+		if validationStopped(err) {
+			return fmt.Errorf("validation of attach proof %s on %s stopped; the CHECK stays NOT VALID and refuses new rows that break it until a rerun validates it or it is dropped: %w",
+				proof.name(), proof.qualified(), err)
+		}
 		return fmt.Errorf("validate attach proof %s on %s: %w", proof.name(), proof.qualified(), err)
 	}
 	return nil
+}
+
+// validationStopped reports whether a VALIDATE ended on its budget or a
+// cancel rather than on the rows, which leaves its CHECK NOT VALID.
+func validationStopped(err error) bool {
+	if _, budget := errors.AsType[*BudgetError](err); budget {
+		return true
+	}
+	if errors.Is(err, ErrCancelledByCaller) {
+		return true
+	}
+	return errors.Is(err, ErrCancelledExternally)
 }
 
 // requireAttachProofState decides again and requires want on the CHECK with
@@ -420,40 +439,64 @@ const attachProofTableSQL = `SELECT c.oid, c.relkind::pg_catalog.text
 // readAttachProof reads what holds the proof's name on its table, and the
 // constraint's OID when one does.
 func readAttachProof(ctx context.Context, q querier, proof attachProof) (attachProofState, uint32, error) {
-	var oid uint32
-	var contype, expr string
-	var validated bool
-	err := q.QueryRow(ctx, attachProofConstraintSQL, proof.tableOID, proof.name()).Scan(&oid, &contype, &validated, &expr)
+	var c attachProofConstraint
+	err := q.QueryRow(ctx, attachProofConstraintSQL, proof.tableOID, proof.name()).Scan(&c.oid, &c.contype, &c.validated, &c.noInherit, &c.expr)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return attachProofAddNeeded, 0, nil
 	}
 	if err != nil {
 		return 0, 0, fmt.Errorf("read attach proof %s on %s: %w", proof.name(), proof.qualified(), err)
 	}
-	return decideAttachProof(proof, contype, expr, validated, oid)
+	return decideAttachProof(proof, c)
+}
+
+// attachProofConstraint is the constraint that holds a proof's name.
+type attachProofConstraint struct {
+	oid       uint32
+	contype   string
+	validated bool
+	noInherit bool
+	// expr is the expression as the server prints it (pg_get_expr).
+	expr string
 }
 
 // decideAttachProof decides from the constraint that holds the name. A
-// parent's CHECK must also carry the parent's expression: the server prints
-// both against tables whose columns the attach requires to match by name
-// and type, so the same expression prints the same.
-func decideAttachProof(proof attachProof, contype, expr string, validated bool, oid uint32) (attachProofState, uint32, error) {
-	if contype != "c" {
-		return 0, 0, fmt.Errorf("%w: %s on %s is a constraint of type %q", errAttachProofNameTaken, proof.name(), proof.qualified(), contype)
+// parent's CHECK and a not-null helper must also carry the proof's
+// expression as the server prints it: the parent's is printed against a
+// table whose columns the attach requires to match by name and type, and
+// the helper's is the server's own print of it, so the same expression
+// prints the same. A parent's CHECK must also be inheritable, or the attach
+// refuses to merge it with the parent's.
+func decideAttachProof(proof attachProof, c attachProofConstraint) (attachProofState, uint32, error) {
+	if c.contype != "c" {
+		return 0, 0, fmt.Errorf("%w: %s on %s is a constraint of type %q", errAttachProofNameTaken, proof.name(), proof.qualified(), c.contype)
 	}
-	if proof.kind == attachProofParent && expr != proof.expr {
-		return 0, 0, fmt.Errorf("%w: CHECK %s on %s is (%s), and the parent's is (%s)",
-			errAttachProofNameTaken, proof.name(), proof.qualified(), expr, proof.expr)
+	if proof.comparesExpression() && c.expr != proof.expr {
+		return 0, 0, fmt.Errorf("%w: CHECK %s on %s is (%s), and the proof is (%s)",
+			errAttachProofNameTaken, proof.name(), proof.qualified(), c.expr, proof.expr)
 	}
-	if validated {
-		return attachProofDone, oid, nil
+	if proof.kind == attachProofParent && c.noInherit {
+		return 0, 0, fmt.Errorf("%w: CHECK %s on %s is NO INHERIT, which the attach does not merge with the parent's",
+			errAttachProofNameTaken, proof.name(), proof.qualified())
 	}
-	return attachProofValidatePending, oid, nil
+	if c.validated {
+		return attachProofDone, c.oid, nil
+	}
+	return attachProofValidatePending, c.oid, nil
+}
+
+// comparesExpression reports whether a CHECK under the proof's name must
+// carry the proof's expression exactly. A bound or DEFAULT proof's
+// expression is rendered by the engine, which the server prints
+// differently, so the text cannot be compared; its derived name changes
+// with the expression.
+func (p attachProof) comparesExpression() bool {
+	return p.kind == attachProofParent || p.kind == attachProofNotNull
 }
 
 // attachProofConstraintSQL reads the constraint under a name on a table.
 // Every relation and operator is pg_catalog-qualified (CO-9).
-const attachProofConstraintSQL = `SELECT oid, contype::pg_catalog.text, convalidated,
+const attachProofConstraintSQL = `SELECT oid, contype::pg_catalog.text, convalidated, connoinherit,
 	       COALESCE(pg_catalog.pg_get_expr(conbin, conrelid), '')
 	FROM pg_catalog.pg_constraint
 	WHERE conrelid OPERATOR(pg_catalog.=) $1 AND conname OPERATOR(pg_catalog.=) $2`
