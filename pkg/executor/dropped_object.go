@@ -142,12 +142,65 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 		return fmt.Errorf("%w: dropping %s %s of %s would also remove %s, which the plan did not review; re-plan",
 			ErrDroppedObjectDrift, d.Kind, d.Name, target, strings.Join(extra, "; "))
 	}
+	if d.Kind == schemadiff.DroppedColumn {
+		if err := refusePublishedColumnDrift(ctx, tx, st, d, target); err != nil {
+			return err
+		}
+	}
 	if d.Replacement != nil {
 		if err := refuseReplacementIndexDrift(ctx, tx, st.Schema(), st.Table(), *d.Replacement); err != nil {
 			return err
 		}
 	}
 	return refuseDropBelow(ctx, tx, st, d, target)
+}
+
+// refusePublishedColumnDrift refuses a column drop while a publication's
+// column list or row filter names the column, on the table or on a
+// partition below it, read under the table's lock. The planner refuses
+// such a drop first, so a publication found here was created or changed
+// after planning. The server would refuse the drop too, with an untyped
+// error; this names the publication so the operator knows what to change.
+// A publication does not go with the column, so it is not one of the
+// dependents the plan lists.
+func refusePublishedColumnDrift(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
+	// INV: CO-9 — every catalog name is pg_catalog-qualified and the table
+	// is resolved by its quoted, schema-qualified name. pg_partition_tree
+	// lists nothing for a table that is not partitioned, so the table itself
+	// is matched on its own.
+	const q = `
+		SELECT DISTINCT p.pubname::pg_catalog.text
+		FROM pg_catalog.pg_depend d
+		JOIN pg_catalog.pg_publication_rel pr ON pr.oid OPERATOR(pg_catalog.=) d.objid
+		JOIN pg_catalog.pg_publication p ON p.oid OPERATOR(pg_catalog.=) pr.prpubid
+		JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) d.refobjid
+		     AND a.attnum OPERATOR(pg_catalog.=) d.refobjsubid
+		WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_publication_rel'::pg_catalog.regclass
+		  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		  AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+		  AND (d.refobjid OPERATOR(pg_catalog.=) $1::pg_catalog.regclass
+		       OR d.refobjid OPERATOR(pg_catalog.=) ANY (
+		          SELECT t.relid FROM pg_catalog.pg_partition_tree($1::pg_catalog.regclass) t))
+		  AND a.attname OPERATOR(pg_catalog.=) $2
+		ORDER BY 1`
+	rows, err := tx.Query(ctx, q, pgx.Identifier{st.Schema(), st.Table()}.Sanitize(), d.Name)
+	if err != nil {
+		return fmt.Errorf("read the publications that name column %s of %s before dropping it: %w", d.Name, target, err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return fmt.Errorf("read the publications that name column %s of %s before dropping it: %w", d.Name, target, err)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	quoted := make([]string, 0, len(names))
+	for _, name := range names {
+		quoted = append(quoted, pgx.Identifier{name}.Sanitize())
+	}
+	return fmt.Errorf("%w: publication %s now names column %s of %s in its column list or row filter, which the plan did not review, "+
+		"and the server refuses the drop while it does; take the column out of the publication, then re-plan",
+		ErrDroppedObjectDrift, strings.Join(quoted, ", "), d.Name, target)
 }
 
 // refuseDropBelow refuses a drop on a table with tables below it, read

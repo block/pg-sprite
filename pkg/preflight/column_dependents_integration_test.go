@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -605,7 +606,9 @@ func TestReadColumnDependentsPublications(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
-	defer pool.Close()
+	// Registered first, so it runs after the cleanups below that drop the
+	// publications and the schema.
+	t.Cleanup(pool.Close)
 
 	schema := testutil.NewSchema(t, pool)
 	listed, filtered, whole := schema+"_listed", schema+"_filtered", schema+"_whole"
@@ -649,6 +652,10 @@ func TestReadColumnDependentsPublications(t *testing.T) {
 	assert.Equal(t, named, deps.Publications.Drop)
 	assert.Equal(t, named, deps.Publications.Own)
 
+	// The server refuses to retype a column a column list alone names, the
+	// same refusal it gives for a row filter.
+	refusesRetype(t, pool, fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN email TYPE varchar(320)", schema))
+
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN note", schema))
 	require.NoError(t, err, "a column no publication names drops")
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN amt", schema))
@@ -665,4 +672,26 @@ func TestReadColumnDependentsPublications(t *testing.T) {
 	assert.NotContains(t, deps.Publications.Tree, "amt")
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN amt", schema))
 	require.NoError(t, err, "with no publication naming it the column drops")
+
+	// A column a row filter alone names is read as a dependent and the
+	// server refuses to retype it.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		ALTER TABLE %[1]s.orders ADD COLUMN region text;
+		ALTER PUBLICATION %[2]s SET TABLE %[1]s.orders WHERE (region <> '')`, schema, filtered))
+	require.NoError(t, err)
+	deps, err = preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	assert.Equal(t, []string{quoted(filtered)}, deps.Publications.Tree["region"])
+	refusesRetype(t, pool, fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN region TYPE varchar(10)", schema))
+}
+
+// refusesRetype runs an ALTER COLUMN TYPE that a publication's column list
+// or row filter stands in the way of and asserts the server refuses it.
+func refusesRetype(t *testing.T, pool *pgxpool.Pool, sql string) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), sql)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the server refuses to retype a column a publication names")
+	assert.Equal(t, "0A000", pgErr.Code)
+	assert.Equal(t, "cannot alter type of a column used by a publication WHERE clause", pgErr.Message)
 }

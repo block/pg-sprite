@@ -382,6 +382,11 @@ statement rolls back; the time and lock are spent regardless).
   A trigger whose function reads the column does not, because the server records no
   dependency on it. The planner refuses the change as `dependent-trigger`, naming the
   triggers, before the statement reaches the server.
+- **A publication whose column list or row filter names the column blocks the statement the
+  same way** — `cannot alter type of a column used by a publication WHERE clause`, which the
+  server says for a column list too. A publication without a column list or row filter does
+  not. The planner refuses the change as `dependent-publication`, naming the publications,
+  before the statement reaches the server.
 - **A partition key column cannot be retyped at all** — `cannot alter column "…" because it
   is part of the partition key of relation "…"` (`42P16`), on the partitioned table or on a
   sub-partition the change reaches. The planner refuses the change as `partition-key`,

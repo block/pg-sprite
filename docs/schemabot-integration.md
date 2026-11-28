@@ -1133,7 +1133,7 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the definition the plan carried. A column, constraint, or `NOT NULL` drop is held to the
   definition its plan carried the same way (`dropped-object-drift`), and a column drop is also
   refused when the column has an index, constraint, or sequence the plan did not list as
-  dropped with it; the fingerprint covers each of those definitions and dependents. On a
+  dropped with it, or when a publication's column list or row filter now names it; the fingerprint covers each of those definitions and dependents. On a
   partitioned table a column or constraint drop runs and removes it from every partition; a
   column drop fails with `dropped-column-partition-key` when the column is in a partition key
   at any level, a partitioned table with no partitions included, with
