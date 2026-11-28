@@ -271,6 +271,8 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
 		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeSlotLagExceeded), v.Code)
+		assert.Equal(t, verdict.CauseSlotLagWALRetained, v.Cause)
 		assert.Contains(t, v.Detail, "resumes from the row")
 		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
 	})
@@ -282,6 +284,8 @@ func TestCopySwapRunVerdict(t *testing.T) {
 			Retained: 4 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
 		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
 		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
+		assert.Equal(t, string(executor.CodeSlotLagExceeded), v.Code)
+		assert.Equal(t, verdict.CauseSlotLagWALRetainedHardLimit, v.Cause)
 		assert.Contains(t, v.Detail, "resumes from the row")
 		assert.Contains(t, v.Detail, "above the WAL the slot retained (--slot-lag-ceiling SIZE)")
 	})
@@ -291,6 +295,12 @@ func TestCopySwapRunVerdict(t *testing.T) {
 			Retained: 2 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
 		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
 		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
+		assert.Equal(t, string(executor.CodeSlotLagExceeded), v.Code)
+		assert.Equal(t, verdict.CauseSlotLagStreamBehind, v.Cause)
+		js, err := v.JSON()
+		require.NoError(t, err)
+		assert.Contains(t, js, `"code": "slot-lag-exceeded"`)
+		assert.Contains(t, js, `"cause": "stream-behind"`)
 		assert.Contains(t, v.Detail, "resumes from the row")
 		assert.Contains(t, v.Detail, "raise the slot-lag ceiling (--slot-lag-ceiling SIZE) with margin above the slot's unconfirmed WAL as pg_replication_slots reads it then")
 		assert.Contains(t, v.Detail, "the resume counts that ceiling against --free-disk beside the shadow")
@@ -328,6 +338,30 @@ func TestCopySwapRunVerdict(t *testing.T) {
 	t.Run("a cancelled run is coded as cancelled by the caller", func(t *testing.T) {
 		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("copy: %w", context.Canceled))
 		assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)
+	})
+
+	// The Runner joins a capture's stop with the fill's, and the catch-up
+	// carries a cycle's failure beside the caller's cancellation, so a slot
+	// lag stop can travel with an outcome that outranks it; the verdict
+	// then carries that outcome's code and no slot lag cause.
+	t.Run("a cancellation, a breach, or a data fault outranks a slot lag stop", func(t *testing.T) {
+		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagStreamBehind,
+			Retained: 2 << 30, Unconfirmed: 2 << 30, Ceiling: 1 << 30}
+		for _, tc := range []struct {
+			name string
+			with error
+			want executor.Code
+		}{
+			{"cancellation", fmt.Errorf("catch up: %w", context.Canceled), executor.CodeCancelledByCaller},
+			{"breach", fmt.Errorf("gate: %w", schemachange.ErrInvariantViolation), executor.CodeInvariantViolation},
+			{"data fault", fmt.Errorf("copy chunk: %w", &pgconn.PgError{Code: "22001"}), executor.CodeDataFault},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				v, _ := copySwapRunVerdict(st, holdSlot, errors.Join(lag, tc.with))
+				assert.Equal(t, string(tc.want), v.Code)
+				assert.Equal(t, verdict.CauseNone, v.Cause)
+			})
+		}
 	})
 
 	t.Run("a breach of the shadow's invariants is coded as an invariant violation", func(t *testing.T) {

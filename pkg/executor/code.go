@@ -23,6 +23,15 @@ const (
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
+	// CodeSlotLagExceeded: a live copy-and-swap run stopped because its
+	// replication slot crossed the slot lag ceiling; the checkpoint row and
+	// the slot stay for a resume. A failed verdict carrying it names the
+	// measure that crossed in its Cause. It is not permanent: a run stopped
+	// on retained WAL can resume under the same ceiling once the
+	// transaction holding the WAL ends or the write rate drops, and a run
+	// whose stream fell behind is refused at its resume rather than stopped
+	// here again, so no retry reproduces this code by itself.
+	CodeSlotLagExceeded Code = "slot-lag-exceeded"
 	// CodeRowSecurityPlanChanged requires a fresh preview and SQL review before retry.
 	CodeRowSecurityPlanChanged Code = "row-security-plan-changed"
 	// CodeRowSecurityRefused requires a declaration, target, or privilege change.
@@ -372,6 +381,7 @@ func Codes() []Code {
 	return []Code{
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
+		CodeSlotLagExceeded,
 		CodeBlockingOutcomeUnknown,
 		CodeCommitOutcomeUnknown,
 		CodeDropOutcomeUnknown,

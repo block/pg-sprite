@@ -467,9 +467,14 @@ func (v Verdict) refusalFieldsDivergeFromProof() bool {
 // ReasonBudgetExceeded, or which parent shape was refused under
 // ReasonUnsupportedPartitionedParent. The accepted-blocking registry keys
 // on it, so a cause is part of the refusal identity, not a rendering detail.
+// A failed verdict carries a cause only to narrow its Code the same way:
+// which measure crossed the slot lag ceiling under slot-lag-exceeded. It is
+// no refusal identity there; Refusal() rejects a failed verdict whatever
+// its cause.
 type Cause string
 
-// The causes a refusal can carry, grouped by the reason they narrow.
+// The causes a verdict can carry, grouped by the reason or code they
+// narrow.
 const (
 	// CauseNone is the zero cause for verdicts whose reason has no narrower
 	// discriminator.
@@ -505,6 +510,24 @@ const (
 	// statement again, or discarded by a copy-and-swap run started over
 	// under the restart acknowledgement.
 	CauseCopyAndSwapRunStopped Cause = "copy-and-swap-run-stopped"
+	// CauseSlotLagStreamBehind narrows a failed slot-lag-exceeded verdict:
+	// the WAL the run's stream had yet to confirm was over the ceiling, so
+	// the stream fell behind the source's writes. The slot keeps that WAL,
+	// so a resume under the same ceiling is refused as resume-slot-backlog.
+	// The token is decode.SlotLagStreamBehind's.
+	CauseSlotLagStreamBehind Cause = "stream-behind"
+	// CauseSlotLagWALRetained narrows a failed slot-lag-exceeded verdict:
+	// the slot kept more WAL than the ceiling for longer than the server
+	// takes to release it while the stream kept up — a transaction on the
+	// source holding the WAL, or a write rate the ceiling cannot hold. The
+	// token is decode.SlotLagWALRetained's.
+	CauseSlotLagWALRetained Cause = "wal-retained"
+	// CauseSlotLagWALRetainedHardLimit narrows a failed slot-lag-exceeded
+	// verdict: the slot kept more than the hard multiple of the ceiling
+	// before the grace ran out, while the stream kept up; the same family
+	// and remedy as CauseSlotLagWALRetained. The token is
+	// decode.SlotLagWALRetainedHardLimit's.
+	CauseSlotLagWALRetainedHardLimit Cause = "wal-retained-hard-limit"
 )
 
 // Verdict is the structured outcome of one migrate invocation.
@@ -527,6 +550,9 @@ type Verdict struct {
 	// Cause narrows the refusal reason to its typed discriminator: the
 	// budget that fired, or the partitioned-parent shape refused. Empty
 	// when the reason has none. Preserved on an accepted-blocking verdict.
+	// On a failed verdict it narrows Code instead: under slot-lag-exceeded,
+	// the measure that crossed the ceiling (stream-behind, wal-retained, or
+	// wal-retained-hard-limit). Empty on every other failed verdict.
 	Cause Cause `json:"cause,omitempty"`
 	// Code is the executor's stable outcome code (executor.OutcomeCode)
 	// carried by a failed verdict — flat kebab-case, part of the executor's

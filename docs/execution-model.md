@@ -371,6 +371,7 @@ concurrently is.
 | --- | --- | --- |
 | `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`; nothing executed |
 | `budget-statement-exceeded` | no | The statement ran past `statement_timeout` and was cancelled |
+| `slot-lag-exceeded` | no | A live copy-and-swap run stopped because its replication slot crossed the slot lag ceiling; the checkpoint row and the slot stay. The failed verdict's `cause` names the measure that crossed: `stream-behind`, `wal-retained`, or `wal-retained-hard-limit` ([replication-slots.md](replication-slots.md#the-slot-lag-ceiling)). Not permanent: a `wal-retained` stop can resume under the same ceiling once the transaction holding the WAL ends or the write rate drops, and a `stream-behind` stop is refused at its resume (`resume-slot-backlog`) rather than stopped here again |
 | `row-security-plan-changed` | yes | Preview again and review the new ordered SQL before retrying; no target RLS statements ran |
 | `row-security-refused` | yes | Change the declaration, unsupported target shape, or privileges before retrying |
 | `row-security-outcome-unknown` | no | The atomic RLS commit response is uncertain; inspect the catalog before retrying |
