@@ -809,7 +809,11 @@ whole build, confirms from the pool that the backend holding it is in the pool's
 (`ErrInvariantViolation` otherwise), runs every step under the session's `Bind` context, and
 reports a lost lock as `ErrInvariantViolation` wrapping `dbconn.ErrTableLockLost` whatever the
 cancelled step reported, so a build the loss cancelled never carries a retryable invalid-index
-code (`TestBuildPartitionedIndexReportsALostTableLockAsAnInvariantViolation`).
+code (`TestBuildPartitionedIndexReportsALostTableLockAsAnInvariantViolation`); `pkg/executor`
+`AttachPartitionOnline` (`pkg/executor/attach_partition_flow.go`) holds the parent's lock the
+same way, through the same `runUnderParentLock`, for every step from the proofs to the `ATTACH`,
+so a second run on the parent is refused with `TableLockHeldError` before it reads anything
+(`TestAttachPartitionOnlineRefusesASecondRunOnTheSameParent`).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -840,7 +844,9 @@ through the table leave it out, rows in its range are refused) and the executor 
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
 native and copy-and-swap executors; before a native step, a create step that adds a foreign key, a table drop,
 an attach proof's `ADD` or `DROP` of its CHECK, or the online `ATTACH PARTITION` itself
-(`pkg/executor/attach_proof.go`, `pkg/executor/attach_partition.go`) first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
+(`pkg/executor/attach_proof.go`, `pkg/executor/attach_partition.go`, and the flow that composes
+them, `pkg/executor/attach_partition_flow.go`, whose index step's `USING INDEX` and foreign key
+step's `ADD ... NOT VALID` request their locks under `lock_timeout` without this wait) first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
 lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
 `RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, then
 requests its lock under its lock budget once the holder is gone, and ends without requesting it, with

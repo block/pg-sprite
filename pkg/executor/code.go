@@ -153,6 +153,18 @@ const (
 	// after its first transaction committed, leaving the partition
 	// detach-pending; running the same statement again finishes it.
 	CodeDetachInterrupted Code = "partition-detach-interrupted"
+	// CodeAttachPartitionUnsupportedShape: the online attach's statement is
+	// not one ALTER TABLE schema.parent ATTACH PARTITION ... FOR VALUES;
+	// nothing was executed.
+	CodeAttachPartitionUnsupportedShape Code = "attach-partition-unsupported-shape"
+	// CodeAttachPartitionTable: the table the online attach attaches is not
+	// a standalone plain table with the parent's columns, or the parent's
+	// DEFAULT partition is not a plain table; nothing was added.
+	CodeAttachPartitionTable Code = "attach-partition-table"
+	// CodeAttachPartitionDefaultWindow: the parent has a DEFAULT partition
+	// and the caller did not accept the write window its proof opens;
+	// nothing was added.
+	CodeAttachPartitionDefaultWindow Code = "attach-partition-default-window"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
@@ -410,6 +422,9 @@ func Codes() []Code {
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
 		CodeDetachInterrupted,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
 		CodePartitionedKeyNameTaken,
@@ -493,6 +508,9 @@ func (c Code) Permanent() bool {
 		CodePartitionedForeignKeyNotValidSupported,
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedKeyNameTaken,
 		CodePartitionedKeyConflict,
@@ -653,6 +671,12 @@ func sentinelCode(err error) Code {
 		return CodeDetachDefaultPartition
 	case errors.Is(err, ErrDetachInterrupted):
 		return CodeDetachInterrupted
+	case errors.Is(err, ErrAttachPartitionUnsupportedShape):
+		return CodeAttachPartitionUnsupportedShape
+	case errors.Is(err, ErrAttachPartitionTable):
+		return CodeAttachPartitionTable
+	case errors.Is(err, ErrAttachPartitionDefaultWindow):
+		return CodeAttachPartitionDefaultWindow
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
