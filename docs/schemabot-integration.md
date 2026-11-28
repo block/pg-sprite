@@ -1230,7 +1230,7 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
   rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
-  `Replacement`, `DropsHelper`, and `RefusalCause` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  `Replacement`, `DropsHelper`, `RefusalCause`, and a column drop's typed `Drops.DependentObjects` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
   fingerprint, so a stored plan carries it. `RefusalCause` also reaches the `RunDesired`
   verdict: a `declarative-foreign-key` refusal carries `cause` `changed-foreign-key` (declare

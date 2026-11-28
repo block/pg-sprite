@@ -837,15 +837,16 @@ func TestDiffDropsNotNullsAfterColumnDropsAndBeforeAlters(t *testing.T) {
 
 // A dropped column's reviewed definition names its collation, and the plan
 // lists what the drop removes with it: the objects that depend on the column,
-// in the order the introspection returned them.
+// in the order the introspection returned them, rendered and as typed values.
 func TestDiffDropColumnCarriesCollationAndDependents(t *testing.T) {
+	dependents := []Dependent{
+		{Kind: "index", Name: "events_legacy_idx", Def: "CREATE INDEX events_legacy_idx ON public.events USING btree (legacy)"},
+		{Kind: "owned sequence", Name: "public.events_legacy_seq"},
+	}
 	live := base()
 	live.Columns = append(live.Columns, Column{
 		Name: "legacy", Type: "text", Collation: `"C"`, AttNum: 3,
-		Dependents: []Dependent{
-			{Kind: "index", Name: "events_legacy_idx", Def: "CREATE INDEX events_legacy_idx ON public.events USING btree (legacy)"},
-			{Kind: "owned sequence", Name: "public.events_legacy_seq"},
-		},
+		Dependents: dependents,
 	})
 
 	changes, err := Diff("public", live, base())
@@ -858,6 +859,10 @@ func TestDiffDropColumnCarriesCollationAndDependents(t *testing.T) {
 		"index events_legacy_idx: CREATE INDEX events_legacy_idx ON public.events USING btree (legacy)",
 		"owned sequence public.events_legacy_seq",
 	}, changes[0].Drops.Dependents)
+	assert.Equal(t, dependents, changes[0].Drops.DependentObjects)
+
+	live.Columns[len(live.Columns)-1].Dependents[0].Name = "changed"
+	assert.Equal(t, "events_legacy_idx", changes[0].Drops.DependentObjects[0].Name, "the plan keeps its own copy")
 }
 
 // A dependent the plan did not list is one the reviewer has not seen; one the
