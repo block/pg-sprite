@@ -52,6 +52,16 @@ type partitionedFKSpec struct {
 // DELETE SET NULL or SET DEFAULT column list.
 const deleteSetColumnsMajor = 15
 
+// refuseDeleteSetColumns refuses an ON DELETE column list on a server whose
+// major, major, has none.
+func (s partitionedFKSpec) refuseDeleteSetColumns(major int) error {
+	if major < deleteSetColumnsMajor && len(s.deleteSetColumns) > 0 {
+		return fmt.Errorf("%w: foreign key %s has an ON DELETE column list, which PostgreSQL %d does not have",
+			ErrPartitionedForeignKeyUnsupportedShape, s.name, major)
+	}
+	return nil
+}
+
 // deleteSetAttnums maps the ON DELETE column list onto a table whose
 // foreign key columns are attnums, in spec.columns order: the
 // confdelsetcols that table's foreign key records. It is nil when there is
