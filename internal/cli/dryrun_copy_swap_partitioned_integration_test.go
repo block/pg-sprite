@@ -17,7 +17,7 @@ import (
 )
 
 // requireDryRunRefusesLikeApply runs alter as migrate --dry-run and as an
-// apply that opens copy-and-swap and gives it free disk, so the table's
+// apply, both opening copy-and-swap, the apply giving it free disk, so the table's
 // shape is what refuses it, and requires both to end in the same refusal
 // verdict, exit code included. It returns the dry run's verdict.
 func requireDryRunRefusesLikeApply(t *testing.T, url, alter string) verdict.Verdict {
@@ -33,6 +33,7 @@ func requireDryRunRefusesLikeApply(t *testing.T, url, alter string) verdict.Verd
 	}
 	dry := newMigrateCmd(url, alter)
 	dry.DryRun = true
+	dry.CopyAndSwap = true
 	dryRun := run(dry)
 	apply := newMigrateCmd(url, alter)
 	apply.CopyAndSwap = true

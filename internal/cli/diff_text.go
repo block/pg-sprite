@@ -86,6 +86,10 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 		w.entry("apply:")
 		w.printf("  run each statement via pg-sprite migrate --alter '…', which refuses\n")
 		w.printf("  blocking forms and substitutes safer online sequences\n")
+		if routesCopySwap(report) {
+			w.printf("  a copy-and-swap statement also needs --copy-and-swap, which opens\n")
+			w.printf("  the preview route, and --free-disk SIZE\n")
+		}
 	}
 	return w.err
 }

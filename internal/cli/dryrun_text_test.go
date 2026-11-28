@@ -191,7 +191,8 @@ func TestDryRunTextPartitionedForeignKeyBuild(t *testing.T) {
 
 // A copy-and-swap route the engine carries renders as one step: no literal
 // SQL is listed, the note says what the run does, and the apply footer
-// invites the real run.
+// invites the real run with what the route's preflight needs on top of
+// the --copy-and-swap a dry run reaches this plan with.
 func TestDryRunTextCopyAndSwapExecutes(t *testing.T) {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
@@ -217,7 +218,11 @@ func TestDryRunTextCopyAndSwapExecutes(t *testing.T) {
 	assert.Contains(t, text, "is not part of this dry run", "the note says the route's preflight is read at the run, not here")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#type-rewrite\n")
 	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
-	assert.Contains(t, text, "apply:\n  re-run without --dry-run\n")
+	assert.Contains(t, text, "apply:\n"+
+		"  re-run without --dry-run, adding --free-disk SIZE, the free space on the\n"+
+		"  table's volume; the server needs logical decoding, or add --block-writes\n"+
+		"  public.users to block the table's writes instead\n",
+		"the apply footer names what the route's preflight asks of the run beyond --copy-and-swap, which the re-run keeps")
 	assert.NotContains(t, text, "error[")
 	assert.NotContains(t, text, "runs as written")
 }

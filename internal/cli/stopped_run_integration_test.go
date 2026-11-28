@@ -107,7 +107,9 @@ func requireStoppedRunRefusal(t *testing.T, err error, out string) {
 //
 // is refused over the stopped retype, so its dry run is too, rather than
 // print a plan the apply will not run. The dry run of the stopped retype
-// itself is not refused: its apply resumes the run.
+// itself is not refused over the stopped run: with --copy-and-swap its apply
+// resumes the run, and without it the apply refuses the closed route, and
+// so does the dry run.
 func TestMigrateDryRunRefusesAnotherStatementOverAStoppedCopySwapRun(t *testing.T) {
 	url, schema, _ := stoppedOrders(t)
 
@@ -120,10 +122,22 @@ func TestMigrateDryRunRefusesAnotherStatementOverAStoppedCopySwapRun(t *testing.
 	var out strings.Builder
 	requireStoppedRunRefusal(t, drop.run(t.Context(), &out), out.String())
 
-	retype := newMigrateCmd(url, fmt.Sprintf(`
+	retypeSQL := fmt.Sprintf(`
 		ALTER TABLE %s.orders
-			ALTER COLUMN qty TYPE bigint`, schema))
+			ALTER COLUMN qty TYPE bigint`, schema)
+	closed := newMigrateCmd(url, retypeSQL)
+	closed.DryRun = true
+	closed.JSON = true
+	var refusal strings.Builder
+	require.ErrorIs(t, closed.run(t.Context(), &refusal), verdict.ErrRefused, refusal.String())
+	var res stoppedRunResult
+	require.NoError(t, json.Unmarshal([]byte(refusal.String()), &res), refusal.String())
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, res.Reason)
+	assert.Equal(t, verdict.CauseCopyAndSwapNotEnabled, res.Cause, "the resume needs the route opened, as the apply does")
+
+	retype := newMigrateCmd(url, retypeSQL)
 	retype.DryRun = true
+	retype.CopyAndSwap = true
 	retype.JSON = true
 	var plan strings.Builder
 	require.NoError(t, retype.run(t.Context(), &plan), plan.String())

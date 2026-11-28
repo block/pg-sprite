@@ -630,7 +630,8 @@ func copySwapFailureCause(code executor.Code, err error) verdict.Cause {
 // CLI.
 const copySwapNotEnabledDetail = "copy-and-swap is in preview and not enabled for this run: " +
 	"the change needs a shadow-table copy and cutover, which runs only when the policy opts in " +
-	"(migrate --copy-and-swap on the CLI, Options.CopySwap.Enabled in the library); nothing was executed"
+	"(migrate --copy-and-swap on the CLI, with --free-disk SIZE naming the free space on the table's volume, which the route's preflight checks; " +
+	"Options.CopySwap.Enabled in the library); nothing was executed"
 
 // routesToClosedCopySwap reports whether a routed statement would run
 // through copy-and-swap under opts while the policy keeps the route closed:
@@ -644,6 +645,23 @@ func routesToClosedCopySwap(rs router.Statement, opts Options) bool {
 		return false
 	}
 	return !opts.CopySwap.Enabled
+}
+
+// refusesClosedCopySwap reports whether [Run] refuses a routed statement
+// because the copy-and-swap route it would take is closed under opts:
+// either the router sends it there (routesToClosedCopySwap), or it
+// resumes a copy-and-swap run stopped on its table, which goes back to the
+// route however it routes now, and the route is not enabled. It is the
+// one gate Run and the dry run's [AdmitCopySwapRoute] both ask, so the two
+// cannot disagree on whether a statement runs.
+func refusesClosedCopySwap(rs router.Statement, resumes bool, opts Options) bool {
+	if routesToClosedCopySwap(rs, opts) {
+		return true
+	}
+	if resumes {
+		return !opts.CopySwap.Enabled
+	}
+	return false
 }
 
 // copySwapNotEnabledVerdict is the refusal for a statement that routes to

@@ -54,6 +54,16 @@ func dryRunPlanOf(t *testing.T, cmd *MigrateCmd) plan.Report {
 	return report
 }
 
+// copySwapDryRunPlan is dryRunPlan with --copy-and-swap, which a dry run of
+// a statement routed to copy-and-swap needs to report the plan rather than
+// the closed route's refusal, as its run needs it to execute.
+func copySwapDryRunPlan(t *testing.T, url, alter string) plan.Report {
+	t.Helper()
+	cmd := newMigrateCmd(url, alter)
+	cmd.CopyAndSwap = true
+	return dryRunPlanOf(t, cmd)
+}
+
 // An index rename names no table, so its dry run reports the table that
 // owns the index and plans from the live fact of whether the index backs a
 // constraint: a plain index is executable, and the index behind a unique
@@ -96,8 +106,8 @@ func TestMigrateDryRunPlansAnIndexRenameFromTheConstraintItBacks(t *testing.T) {
 	assert.Equal(t, 2, names, "dry-run must not rename anything")
 }
 
-// A rewrite-requiring type change dry-runs to the copy-and-swap backend as
-// executable — the route the real run takes — and nothing executes: the
+// A rewrite-requiring type change dry-runs, with the route opened, to the
+// copy-and-swap backend as executable — the route the real run takes — and nothing executes: the
 // live column type is untouched.
 func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 	url := testutil.StartPostgres(t)
@@ -108,7 +118,7 @@ func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
 
-	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	report := copySwapDryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
@@ -196,7 +206,7 @@ func TestMigrateDryRunRoutesTimestamptzToTimestampAsRewrite(t *testing.T) {
 	)`, schema))
 	require.NoError(t, err)
 
-	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN ts TYPE timestamp(3)", schema))
+	report := copySwapDryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN ts TYPE timestamp(3)", schema))
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
@@ -226,7 +236,7 @@ func TestMigrateDryRunRoutesCollatedColumnRetypeAsRewrite(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE INDEX t_c ON %s.t (c)`, schema))
 	require.NoError(t, err)
 
-	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN c TYPE varchar(100)", schema))
+	report := copySwapDryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN c TYPE varchar(100)", schema))
 	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
 	assert.Equal(t, planner.RouteCopyAndSwap, st.Route)

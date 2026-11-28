@@ -198,8 +198,8 @@ func TestMigrateDesiredTableRefusesACopyWhileTheRouteIsClosed(t *testing.T) {
 // retype through copy-and-swap, whose preflight refuses a partitioned parent
 // at admission, before any statement runs. The dry run must end in that
 // same whole-plan refusal, plan included, instead of previewing a plan the
-// run turns down. The run opens the route and gives it free disk, so the
-// partition shape is what refuses it.
+// run turns down. Both open the route, and the run gives it free disk, so
+// the partition shape is what refuses it.
 func TestMigrateDesiredDryRunRefusesCopySwapOnPartitionedParentLikeApply(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -231,7 +231,7 @@ func TestMigrateDesiredDryRunRefusesCopySwapOnPartitionedParentLikeApply(t *test
 		require.NoError(t, json.Unmarshal([]byte(out.String()), &result))
 		return result
 	}
-	dryRun := run(desiredCommand(t, url, schema, desired, "--dry-run"))
+	dryRun := run(desiredCommand(t, url, schema, desired, "--dry-run", "--copy-and-swap"))
 	applied := run(desiredCommand(t, url, schema, desired, "--copy-and-swap", "--free-disk", "1TiB"))
 
 	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
@@ -279,7 +279,7 @@ func TestMigrateDesiredRLSDryRunRefusesCopySwapOnPartitionedParentLikeApply(t *t
 		require.NoError(t, json.Unmarshal([]byte(out.String()), &result))
 		return result
 	}
-	dryRun := run(desiredCommand(t, url, schema, desired, "--dry-run"))
+	dryRun := run(desiredCommand(t, url, schema, desired, "--dry-run", "--copy-and-swap"))
 	applied := run(desiredCommand(t, url, schema, desired, "--copy-and-swap", "--free-disk", "1TiB"))
 
 	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)

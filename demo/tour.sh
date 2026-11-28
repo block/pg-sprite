@@ -70,6 +70,11 @@ dry_run() {
     if [ -n "${6:-}" ]; then
         ack=(--allow-destructive "$6")
     fi
+    # A copy-and-swap row opens the preview route, as its run must;
+    # refused_closed_copy_swap covers the closed form.
+    if [ "$route" = copy-and-swap ]; then
+        ack+=(--copy-and-swap)
+    fi
     step "$sql"
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" migrate --url "$PG_DSN" --dry-run --json --alter "$sql" ${ack[@]+"${ack[@]}"}) || status=$?
@@ -113,6 +118,34 @@ refused_destructive() {
         assert_eq "destructive class of [$sql]" by-design "$(jq -r '.class' <<<"$out")"
     else
         "$PGS" migrate --url "$PG_DSN" --alter "$sql"             || echo "(refused, exit $? — expected: a destructive statement needs --allow-destructive naming its table)"
+    fi
+}
+
+# refused_closed_copy_swap sql
+#
+# A statement the planner routes to copy-and-swap runs only when
+# --copy-and-swap opens the preview route. Without it, the dry run and the
+# apply both end in the copy-and-swap-refused verdict with cause
+# copy-and-swap-not-enabled and the refusal exit code 2; the dry run prints
+# that verdict, not a plan report. Nothing runs either way, so the row can
+# rerun.
+refused_closed_copy_swap() {
+    local sql="$1" out status=0
+    step "refuse (copy-and-swap route closed): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --dry-run --json --alter "$sql") || status=$?
+        assert_eq "closed-route dry-run exit of [$sql]" 2 "$status"
+        assert_eq "closed-route dry-run outcome of [$sql]" refused "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "closed-route dry-run reason of [$sql]" copy-and-swap-refused "$(jq -r '.reason' <<<"$out")"
+        assert_eq "closed-route dry-run cause of [$sql]" copy-and-swap-not-enabled "$(jq -r '.cause' <<<"$out")"
+        status=0
+        out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql") || status=$?
+        assert_eq "closed-route exit of [$sql]" 2 "$status"
+        assert_eq "closed-route outcome of [$sql]" refused "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "closed-route reason of [$sql]" copy-and-swap-refused "$(jq -r '.reason' <<<"$out")"
+        assert_eq "closed-route cause of [$sql]" copy-and-swap-not-enabled "$(jq -r '.cause' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --dry-run --alter "$sql" || echo "(refused, exit $? — expected: copy-and-swap is in preview and needs --copy-and-swap)"
     fi
 }
 
@@ -445,6 +478,7 @@ run_dryrun() {
     dry_run copy-and-swap  relocation             false unavailable "ALTER TABLE users SET TABLESPACE pg_default"
     dry_run refuse         unsupported-operation  false refuse      "ALTER TABLE users ENABLE ROW LEVEL SECURITY"
     refused_destructive "ALTER TABLE users DROP COLUMN status"
+    refused_closed_copy_swap "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
 }
 
 review_rls() {

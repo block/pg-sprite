@@ -296,7 +296,7 @@ to copy-and-swap: it copies the rows into a shadow table while streaming live
 writes, verifies the copy, and swaps the tables under a brief lock.
 
 ```console
-$ pg-sprite migrate --dry-run --alter "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+$ pg-sprite migrate --dry-run --copy-and-swap --alter "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
 statement 1:
   ALTER TABLE orders ALTER COLUMN user_id TYPE bigint;
 
@@ -312,10 +312,19 @@ note:
   open the preview route, --free-disk, and logical decoding on the server;
   --block-writes instead blocks the table's writes until the swap (offline
   mode))
+…
+apply:
+  re-run without --dry-run, adding --free-disk SIZE, the free space on the
+  table's volume; the server needs logical decoding, or add --block-writes
+  public.orders to block the table's writes instead
 ```
 
 The route is in preview, so the run must open it with `--copy-and-swap`, and
-must say how much disk is free so the preflight can check the shadow fits:
+must say how much disk is free so the preflight can check the shadow fits.
+The dry run takes `--copy-and-swap` as the run does: without it, the dry run
+ends in the run's own `copy-and-swap-refused` verdict, cause
+`copy-and-swap-not-enabled`, and exits 2, so a pipeline that gates on the dry
+run does not pass a change the run refuses.
 
 ```console
 $ pg-sprite migrate --copy-and-swap --free-disk 10GiB --alter "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
