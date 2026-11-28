@@ -983,7 +983,7 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
 	const (
 		changed      = "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
-		columnFirst  = "desired-state apply does not drop this foreign key: the plan also retypes a column, or drops one beside an added column that may rewrite the table, so it drops the key before the new one is added, which would leave writes checked against no key in between, so apply the column change on its own first, then the foreign key change"
+		columnFirst  = "desired-state apply does not drop this foreign key: the plan changes a column too, so it would drop this key before adding the new one, and writes in between would be checked against no key. Apply the column change on its own first, then the foreign key change"
 		undeclarable = "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"
 	)
 	for _, tt := range []struct {

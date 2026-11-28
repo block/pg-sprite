@@ -457,16 +457,16 @@ func verdictText(r verdict.Reason) string {
 }
 
 // foreignKeyRefusalText names the one remedy for a refused foreign-key drop
-// when the refusal's cause says which kind of drop it is, and every remedy when it
-// does not, as for a report decoded from JSON, which carries no cause.
+// when the refusal's cause says which kind of drop it is, and every remedy when
+// it does not, as for a report from an older version that carries no cause.
 func foreignKeyRefusalText(cause verdict.Cause) string {
 	switch cause {
 	case verdict.CauseChangedForeignKey:
 		return "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table, " +
 			"which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
 	case verdict.CauseColumnFirstForeignKey:
-		return "desired-state apply does not drop this foreign key: the plan also retypes a column, or drops one beside an added column that may rewrite the table, so it drops the key before the new one is added, " +
-			"which would leave writes checked against no key in between, so apply the column change on its own first, then the foreign key change"
+		return "desired-state apply does not drop this foreign key: the plan changes a column too, so it would drop this key before adding the new one, " +
+			"and writes in between would be checked against no key. Apply the column change on its own first, then the foreign key change"
 	case verdict.CauseUndeclarableForeignKey:
 		return "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, " +
 			"so to remove it, run the statement with pg-sprite migrate --alter"

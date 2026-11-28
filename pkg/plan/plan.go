@@ -85,7 +85,10 @@ import (
 // fields.
 // Version 34 added the column-limit planner reason and the column_limit
 // decision field.
-const FormatVersion = 34
+// Version 35 added the statement-level refusal_cause field, the narrower
+// cause of a refusal whose reason spans more than one meaning, such as which
+// kind of foreign-key drop a declarative-foreign-key refusal is.
+const FormatVersion = 35
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -228,9 +231,10 @@ type Statement struct {
 	// declarative-foreign-key refusal is, say. A host branches on it to name
 	// the one remedy that applies. Set once, by the refusal that first
 	// refused the statement, and empty for a refusal with no narrower cause.
-	// In-process only, like Adopts: the JSON report carries no field for it,
-	// and it is not part of the fingerprint.
-	RefusalCause verdict.Cause `json:"-"`
+	// The JSON report carries it as refusal_cause, so a consumer of the
+	// report can name the remedy too. Explanatory, so it is not part of the
+	// fingerprint.
+	RefusalCause verdict.Cause `json:"refusal_cause,omitempty"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`
 	// ExecSQL is the ordered SQL the native backend would run — the safer
