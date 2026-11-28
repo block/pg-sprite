@@ -358,17 +358,19 @@ type Decision struct {
 	// whenever one blocks the change, whatever the decision's reason.
 	DependentViews []string `json:"dependent_views,omitempty"`
 	// DependentMaterializedViews names the materialized views among
-	// DependentViews and DependentViewReaders, rendered the same way, so
+	// DependentViews and DependentViewDropOrder, rendered the same way, so
 	// the help can call each by its kind; recreating one runs its query to
 	// fill it again. Like DependentFix, it is not part of the plan-report
 	// contract.
 	DependentMaterializedViews []string `json:"-"`
-	// DependentViewReaders names the views that read DependentViews,
-	// directly or through other views, in an order to drop them in: the
-	// deepest first. PostgreSQL refuses to drop a view another view reads,
-	// so the manual path drops these first and recreates them last. Like
+	// DependentViewDropOrder names every view the manual path drops to
+	// change DependentViews: those views and the views that read them,
+	// directly or through other views, deepest first, so each comes before
+	// every view it reads. PostgreSQL refuses to drop a view another view
+	// reads, so they are dropped in this order and recreated in reverse.
+	// It is nil when no view reads another, where any order works. Like
 	// DependentFix, it is not part of the plan-report contract.
-	DependentViewReaders []string `json:"-"`
+	DependentViewDropOrder []string `json:"-"`
 	// DependentPolicies names the row-level security policies that read
 	// the column, each rendered "policy" ON "schema"."table" with every
 	// identifier quoted, present whenever one blocks the change, whatever
@@ -504,10 +506,11 @@ func (d Decision) ViewsNoun() string {
 // ViewsHelp is the manual path for the views that block the change,
 // phrased to follow a sentence that names them: the dependent fix every
 // recreatable dependent shares, or, on a decision that carries none,
-// redefining the views before planning again. The views that read them
-// are dropped first and recreated last, and what a dropped view takes
-// with it, its grants and a materialized view's indexes, is named so the
-// reader recreates it too.
+// redefining the views before planning again. PostgreSQL changes a view's
+// columns only by dropping and recreating it, so the help says when that
+// happens, gives the order to drop the views in when one reads another,
+// and names what a dropped view takes with it so the reader recreates it
+// too.
 func (d Decision) ViewsHelp() string {
 	noun := d.ViewsNoun()
 	help := "drop or redefine those " + noun + " first, then re-plan"
@@ -517,22 +520,42 @@ func (d Decision) ViewsHelp() string {
 	if d.DependentFix == DependentFixRecreateAroundChange && len(d.DependentMaterializedViews) > 0 {
 		help += "; recreating a materialized view runs its query to fill it again while the transaction blocks the table"
 	}
-	if len(d.DependentViewReaders) > 0 {
-		help = "first drop " + d.viewReadersPhrase() + ", which " + pluralize(len(d.DependentViewReaders), "reads", "read") +
-			" them, and recreate " + pluralize(len(d.DependentViewReaders), "it", "them") + " last; " + help
+	if swap := d.viewSwap(); swap != "" {
+		help += "; " + swap
 	}
-	help += "; a view dropped and recreated loses its grants"
+	help += "; a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults"
 	if len(d.DependentMaterializedViews) > 0 {
 		help += ", and a materialized view its indexes too"
 	}
 	return help + ", so recreate those with each view"
 }
 
-// viewReadersPhrase names DependentViewReaders in the order to drop them,
-// each by its kind: view "a"."top", then materialized view "a"."sum".
-func (d Decision) viewReadersPhrase() string {
-	names := make([]string, len(d.DependentViewReaders))
-	for i, name := range d.DependentViewReaders {
+// viewSwap says how the views change: by dropping and recreating them, in
+// one transaction at the step that changes them, and in the order
+// DependentViewDropOrder gives when one view reads another. A fix that
+// already drops and recreates the views around the change needs only the
+// order.
+func (d Decision) viewSwap() string {
+	const inPlace = "since CREATE OR REPLACE VIEW cannot remove or retype a column"
+	var parts []string
+	switch d.DependentFix {
+	case DependentFixRecreateAroundChange:
+	case DependentFixExpandContract:
+		parts = append(parts, "pointing a view at the new column means dropping and recreating it, "+inPlace+", so do that in one transaction at that step")
+	default:
+		parts = append(parts, "changing a view means dropping and recreating it in one transaction, "+inPlace)
+	}
+	if len(d.DependentViewDropOrder) > 0 {
+		parts = append(parts, "drop the views in this order: "+d.viewDropOrderPhrase()+", and recreate them in reverse")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// viewDropOrderPhrase names DependentViewDropOrder in order, each by its
+// kind: view "a"."top", then materialized view "a"."sum".
+func (d Decision) viewDropOrderPhrase() string {
+	names := make([]string, len(d.DependentViewDropOrder))
+	for i, name := range d.DependentViewDropOrder {
 		names[i] = "view " + name
 		if slices.Contains(d.DependentMaterializedViews, name) {
 			names[i] = "materialized view " + name
@@ -541,28 +564,25 @@ func (d Decision) viewReadersPhrase() string {
 	return strings.Join(names, ", then ")
 }
 
-// pluralize is singular for one and plural otherwise.
-func pluralize(n int, singular, plural string) string {
-	if n == 1 {
-		return singular
-	}
-	return plural
-}
-
-// viewReaders names the views that read views, directly or through other
-// views, leaving out views itself names, deepest first and then by name.
-// Each reader's depth is its longest chain from any of views, so a reader
-// always sorts ahead of every view it reads.
-func viewReaders(views []string, readers map[string]map[string]int) []string {
+// viewDropOrder orders views and the views that read them, directly or
+// through other views, deepest first and then by name, or returns nil when
+// no view reads another. Each view's depth is its longest chain from any
+// of views, and a view in views that nothing among them reaches has depth
+// zero, so a view always sorts ahead of every view it reads, including
+// when one view in views reads another.
+func viewDropOrder(views []string, readers map[string]map[string]int) []string {
 	depths := map[string]int{}
 	for _, view := range views {
+		depths[view] = 0
+	}
+	ordered := false
+	for _, view := range views {
 		for reader, depth := range readers[view] {
-			if !slices.Contains(views, reader) {
-				depths[reader] = max(depths[reader], depth)
-			}
+			depths[reader] = max(depths[reader], depth)
+			ordered = true
 		}
 	}
-	if len(depths) == 0 {
+	if !ordered {
 		return nil
 	}
 	return slices.SortedFunc(maps.Keys(depths), func(a, b string) int {
@@ -1107,10 +1127,12 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	// Every kind of dependent that blocks the change is named, so the
 	// manual path clears all of them; the reason is the first kind.
 	d.DependentViews = viewsReadingColumn(op, facts)
-	d.DependentViewReaders = viewReaders(d.DependentViews, facts.ViewReaders)
-	d.DependentMaterializedViews = slices.DeleteFunc(slices.Concat(d.DependentViews, d.DependentViewReaders), func(name string) bool {
-		return !slices.Contains(facts.MaterializedViews, name)
-	})
+	d.DependentViewDropOrder = viewDropOrder(d.DependentViews, facts.ViewReaders)
+	for _, name := range slices.Concat(d.DependentViews, d.DependentViewDropOrder) {
+		if slices.Contains(facts.MaterializedViews, name) && !slices.Contains(d.DependentMaterializedViews, name) {
+			d.DependentMaterializedViews = append(d.DependentMaterializedViews, name)
+		}
+	}
 	if len(d.DependentMaterializedViews) == 0 {
 		d.DependentMaterializedViews = nil
 	}

@@ -532,11 +532,12 @@ func TestDryRunTextDependentViewRefusalNamesMaterializedViews(t *testing.T) {
 		"a materialized view on an in-place type change": {
 			fix:     planner.DependentFixRecreateAroundChange,
 			views:   []string{`"app"."mail"`},
-			readers: []string{`"app"."mail_top"`},
+			readers: []string{`"app"."mail_top"`, `"app"."mail"`},
 			refusal: `ALTER COLUMN email TYPE varchar(100) changes a column read by materialized view "app"."mail", and PostgreSQL refuses`,
-			help: `help: first drop view "app"."mail_top", which reads them, and recreate it last; this type change runs in place, without rewriting the table, so in one transaction drop those materialized views, run the change, and recreate them; ` +
+			help: "help: this type change runs in place, without rewriting the table, so in one transaction drop those materialized views, run the change, and recreate them; " +
 				"recreating a materialized view runs its query to fill it again while the transaction blocks the table; " +
-				"a view dropped and recreated loses its grants, and a materialized view its indexes too, so recreate those with each view",
+				`drop the views in this order: view "app"."mail_top", then materialized view "app"."mail", and recreate them in reverse; ` +
+				"a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults, and a materialized view its indexes too, so recreate those with each view",
 		},
 		"a view and a materialized view on a type change that rewrites the table": {
 			fix:        planner.DependentFixExpandContract,
@@ -562,7 +563,7 @@ func TestDryRunTextDependentViewRefusalNamesMaterializedViews(t *testing.T) {
 					Reason:                     planner.ReasonDependentView,
 					DependentViews:             tc.views,
 					DependentMaterializedViews: []string{`"app"."mail"`},
-					DependentViewReaders:       tc.readers,
+					DependentViewDropOrder:     tc.readers,
 					DependentFix:               tc.fix,
 				}},
 			})

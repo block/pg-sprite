@@ -108,8 +108,9 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 	})
 
 	// A view that reads one of the blocking views has to be dropped
-	// before it, so the refusal names it to drop first and recreate last,
-	// and warns that recreating drops the views' grants and indexes.
+	// before it, so the refusal gives the order to drop every view in and
+	// warns what recreating a view loses, a materialized view's indexes
+	// included.
 	t.Run("the refusal names the views that read the views", func(t *testing.T) {
 		schema := seed(t)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE VIEW %[1]s.mail_top AS SELECT email FROM %[1]s."Mail Report"`, schema))
@@ -117,8 +118,8 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)", schema)), runOptions())
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-		assert.Contains(t, v.Detail, fmt.Sprintf(`first drop view "%s"."mail_top", which reads them, and recreate it last; this type change runs in place`, schema))
-		assert.Contains(t, v.Detail, "a view dropped and recreated loses its grants, and a materialized view its indexes too")
+		assert.Contains(t, v.Detail, fmt.Sprintf(`drop the views in this order: view "%[1]s"."mail_top", then materialized view "%[1]s"."Mail Report", then view "%[1]s"."active_users", and recreate them in reverse`, schema))
+		assert.Contains(t, v.Detail, "a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults, and a materialized view its indexes too")
 	})
 
 	for _, tc := range []struct {

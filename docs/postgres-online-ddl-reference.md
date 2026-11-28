@@ -691,10 +691,14 @@ gives the manual path the change takes, chosen as for
 column before a drop, recreate them around a type change PostgreSQL runs in place in
 one transaction, or point them at a new column for a type change that rewrites the
 table. Recreating a materialized view runs its query to fill it again while that
-transaction blocks the table. PostgreSQL refuses to drop a view another view reads, so
-the help names the views that read the blocking ones, directly or through another
-view, deepest first, to drop first and recreate last. A dropped view loses its grants,
-and a materialized view its indexes too, so the help says to recreate them. A rename is not
+transaction blocks the table. `CREATE OR REPLACE VIEW` cannot remove or retype a
+column, so changing a view, or pointing it at a new column, means dropping and recreating
+it in one transaction, and the help says so. PostgreSQL refuses to drop a view another
+view reads, so when one view reads another the help gives the order to drop every view
+in, the blocking views and the views that read them, deepest first, and says to
+recreate them in reverse. A dropped view loses its grants, comment, owner, options such
+as `security_barrier`, rules, `INSTEAD OF` triggers and column defaults, and a
+materialized view its indexes too, so the help says to recreate them. A rename is not
 refused, because a view follows the column. `DROP COLUMN … CASCADE`, which the
 server runs by dropping the views with the column, is refused as `cascading-drop`
 instead.
