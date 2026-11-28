@@ -7,6 +7,7 @@ import (
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // OpKind names one operation shape the classifier distinguishes. A single
@@ -240,6 +241,10 @@ type Op struct {
 	// the column, so a consumer comparing NewType to a live type must not
 	// read a collated target as a relabel.
 	NewTypeCollation string
+	// NewTypeCollationName is the same collation as a name and its schema,
+	// as the grammar reads them, so a consumer can compare it with a live
+	// collation without splitting the spelled form on its dots.
+	NewTypeCollationName QualifiedName
 	// HasUsing is true for ALTER COLUMN TYPE ... USING <expr>, which always
 	// means a conversion, never a binary-coercible relabel.
 	HasUsing bool
@@ -477,13 +482,14 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 		name, mods := typeRef(def.GetTypeName())
 		schema, array := typeQualifiers(def.GetTypeName())
 		return Op{
-			Kind:             OpAlterColumnType,
-			Column:           cmd.GetName(),
-			NewType:          name,
-			NewTypeMods:      mods,
-			NewTypeSchema:    schema,
-			NewTypeArray:     array,
-			NewTypeCollation: collationName(def.GetCollClause()),
+			Kind:                 OpAlterColumnType,
+			Column:               cmd.GetName(),
+			NewType:              name,
+			NewTypeMods:          mods,
+			NewTypeSchema:        schema,
+			NewTypeArray:         array,
+			NewTypeCollation:     collationName(def.GetCollClause()),
+			NewTypeCollationName: collationQualifiedName(def.GetCollClause()),
 			// For ALTER COLUMN TYPE the grammar carries the USING
 			// expression in the column definition's raw default slot.
 			HasUsing: def.GetRawDefault() != nil,
@@ -749,6 +755,39 @@ func collationName(coll *pganalyze.CollateClause) string {
 		parts = append(parts, part.GetString_().GetSval())
 	}
 	return strings.Join(parts, ".")
+}
+
+// collationQualifiedName is a COLLATE clause's name and schema, the zero
+// value when there is no clause. A name of more than two parts (database,
+// schema, collation) is the zero value too: joining its first parts would
+// read it as one dotted schema, the same as a schema whose name holds a
+// dot, so it names no collation a consumer could match.
+func collationQualifiedName(coll *pganalyze.CollateClause) QualifiedName {
+	if coll == nil || len(coll.GetCollname()) > 2 {
+		return QualifiedName{}
+	}
+	return qualifiedName(coll.GetCollname())
+}
+
+// ParseCollationName reads a collation name as a COLLATE clause spells it,
+// such as a live column's collation rendered schema-qualified and
+// quote_ident-quoted (pg_catalog."C"), into its name and schema.
+func ParseCollationName(collation string) (QualifiedName, error) {
+	node, err := parseSingle(selectPrefix + "NULL COLLATE " + collation)
+	if err != nil {
+		return QualifiedName{}, fmt.Errorf("parse collation %q: %w", collation, err)
+	}
+	var names []QualifiedName
+	walkMessages(node.ProtoReflect(), func(msg protoreflect.Message) bool {
+		if m, ok := msg.Interface().(*pganalyze.CollateClause); ok {
+			names = append(names, qualifiedName(m.GetCollname()))
+		}
+		return true
+	})
+	if len(names) != 1 {
+		return QualifiedName{}, fmt.Errorf("parse collation %q: found %d COLLATE clauses, want 1", collation, len(names))
+	}
+	return names[0], nil
 }
 
 // isSerialType reports whether the grammar type name is one of the serial

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,7 @@ import (
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -842,4 +844,63 @@ func TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt(t *testing.T) {
 	require.Len(t, res.Verdicts, 1)
 	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
 	assert.True(t, hasColumn(t, pool, schema, "v"), "the planned statement stays committed")
+}
+
+// A pulled column with an explicit collation, widened in the file with its
+// COLLATE clause kept, keeps that collation once the retype runs: the plan's
+// ALTER COLUMN ... TYPE carries the clause, where PostgreSQL would otherwise
+// give the column the new type's default. The collation does not change, so
+// the widen runs natively, as it would on a column with the default
+// collation: the server rewrites neither the table nor the column's index.
+// A second run plans nothing.
+func TestRunDesiredRetypeKeepsAPulledCollation(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.words (id int PRIMARY KEY, tag varchar(20) COLLATE "C");
+		CREATE INDEX words_tag_idx ON %[1]s.words (tag);
+		INSERT INTO %[1]s.words SELECT g, 't' || g FROM generate_series(1, 50) AS g`, schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "words")
+	require.NoError(t, err)
+	pulled, err := schemadiff.Render(live)
+	require.NoError(t, err)
+	require.Equal(t, 1, strings.Count(pulled, "character varying(20) COLLATE"), pulled)
+	widened := strings.Replace(pulled, "character varying(20) COLLATE", "character varying(40) COLLATE", 1)
+	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, widened)}
+
+	storage := func() (table, index uint32) {
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT pg_catalog.pg_relation_filenode($1::regclass), pg_catalog.pg_relation_filenode($2::regclass)`,
+			schema+".words", schema+".words_tag_idx").Scan(&table, &index))
+		return table, index
+	}
+	tableBefore, indexBefore := storage()
+
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	require.Len(t, res.Plan.Statements, 1)
+	require.Len(t, res.Plan.Statements[0].Decisions, 1)
+	assert.Equal(t, planner.RouteNative, res.Plan.Statements[0].Decisions[0].Route)
+	assert.Equal(t, planner.ReasonBinaryCoercible, res.Plan.Statements[0].Decisions[0].Reason)
+	tableAfter, indexAfter := storage()
+	assert.Equal(t, tableBefore, tableAfter, "the server did not rewrite the table")
+	assert.Equal(t, indexBefore, indexAfter, "the server kept the column's index")
+
+	var typ, collation string
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT pg_catalog.format_type(a.atttypid, a.atttypmod), c.collname
+		FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_collation c ON c.oid = a.attcollation
+		WHERE a.attrelid = $1::regclass AND a.attname = 'tag'`, schema+".words").Scan(&typ, &collation))
+	assert.Equal(t, "character varying(40)", typ)
+	assert.Equal(t, "C", collation, "the retyped column keeps its collation")
+
+	res, err = migrate.RunDesired(t.Context(), pool, req, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+	assert.Empty(t, res.Plan.Statements, "the converged table plans no statements")
 }
