@@ -81,9 +81,11 @@ import (
 // whose replacement a constraint takes over.
 // Version 32 added the dependent-publication planner reason and the
 // dependent_publications decision field.
-// Version 33 added the column-limit planner reason and the column_limit
+// Version 33 added the not_null_from_type and constrained_type decision
+// fields.
+// Version 34 added the column-limit planner reason and the column_limit
 // decision field.
-const FormatVersion = 33
+const FormatVersion = 34
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -469,7 +471,7 @@ func RoutePartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
 // the build is one the run executes as the build. A foreign key a desired
 // file adds is planned with a qualified referenced table and an explicit
 // referenced column list, which the build needs; one with a clause the build
-// cannot carry, such as an ON DELETE column list, keeps the planner's NOT
+// cannot carry, such as an unnamed foreign key, keeps the planner's NOT
 // VALID then VALIDATE steps and meets RoutePartitionedParent's refusal.
 func RouteDesiredPartitionedForeignKeyBuilds(report *Report, serverMajor int) error {
 	return routePartitionedForeignKeyBuilds(report, serverMajor, true)

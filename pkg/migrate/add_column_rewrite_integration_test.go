@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,6 +48,7 @@ func TestRunAddColumnFollowsTheProvenRewrite(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
+		assert.Equal(t, pgx.Identifier{schema, "positive_int"}.Sanitize(), v.ConstrainedType, "the refusal names the domain")
 		assert.Equal(t, before, filenode(t, pool, schema+".t"))
 		assert.False(t, hasColumn(t, pool, schema, "score"), "the refused change must not touch the schema")
 	})

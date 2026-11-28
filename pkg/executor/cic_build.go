@@ -383,6 +383,7 @@ func catalogVerdict(ctx context.Context, q querier, build concurrentIndexBuild, 
 		currentOID *uint32
 		indexOID   *uint32
 		indexValid *bool
+		indexReady *bool
 		indexTable *uint32
 		tableName  *string
 		droppable  *bool
@@ -398,11 +399,11 @@ func catalogVerdict(ctx context.Context, q querier, build concurrentIndexBuild, 
 		           JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		          WHERE n.nspname OPERATOR(pg_catalog.=) $1
 		            AND c.relname OPERATOR(pg_catalog.=) $2),
-		        idx.oid, idx.indisvalid, idx.indrelid, idx.table_name, idx.droppable, idx.builder_pid,
+		        idx.oid, idx.indisvalid, idx.indisready, idx.indrelid, idx.table_name, idx.droppable, idx.builder_pid,
 		        `+builderVisibilityColumns+`
 		   FROM (SELECT 1) AS one
 		   LEFT JOIN LATERAL (
-		        SELECT c.oid, i.indisvalid, i.indrelid, t.relname AS table_name,
+		        SELECT c.oid, i.indisvalid, i.indisready, i.indrelid, t.relname AS table_name,
 		               `+droppableColumn+` AS droppable,
 		               `+builderPIDSubquery+` AS builder_pid
 		          FROM pg_catalog.pg_index i
@@ -411,7 +412,7 @@ func catalogVerdict(ctx context.Context, q querier, build concurrentIndexBuild, 
 		          JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		         WHERE n.nspname OPERATOR(pg_catalog.=) $1
 		           AND c.relname OPERATOR(pg_catalog.=) $3) AS idx ON true`,
-		target.schema, build.table, build.index).Scan(&currentOID, &indexOID, &indexValid, &indexTable, &tableName, &droppable, &builderPID, &hiddenRows, &tracking)
+		target.schema, build.table, build.index).Scan(&currentOID, &indexOID, &indexValid, &indexReady, &indexTable, &tableName, &droppable, &builderPID, &hiddenRows, &tracking)
 	if err != nil {
 		return fail(fmt.Errorf("inspect index %s.%s: %w", target.schema, build.index, err))
 	}
@@ -423,13 +424,13 @@ func catalogVerdict(ctx context.Context, q querier, build concurrentIndexBuild, 
 	if indexValid == nil || *indexValid {
 		return buildErr
 	}
-	if indexOID == nil || indexTable == nil || tableName == nil || droppable == nil {
+	if indexOID == nil || indexReady == nil || indexTable == nil || tableName == nil || droppable == nil {
 		// The entry's row was read, so every one of its columns is
 		// non-null by the catalog's own definition; a NULL is a catalog
 		// this verdict does not understand, and indeterminate fails closed.
 		return fail(fmt.Errorf("inspect index %s.%s: entry row carries NULL identity facts: %w", target.schema, build.index, ErrAbandonmentUnproven))
 	}
-	existing := invalidIndex{oid: *indexOID, tableOID: *indexTable, table: *tableName, droppable: *droppable,
+	existing := invalidIndex{oid: *indexOID, tableOID: *indexTable, table: *tableName, droppable: *droppable, ready: readinessOf(*indexReady),
 		builder: newBuilderFacts(builderPID, hiddenRows, tracking)}
 	owned := classifyInvalidIndex(existing, target, build.index, ErrBuildLeftInvalidIndex)
 	owned.Build = buildErr

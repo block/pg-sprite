@@ -303,13 +303,13 @@ func TestRoutePartitionedForeignKeyBuildsRoutesAForeignKeyThatWouldBeRefused(t *
 	// refuses meets the build's own refusal, which names the clause, instead
 	// of the partitioned-parent refusal, which says to upgrade the server.
 	t.Run("a shape the build refuses is still routed", func(t *testing.T) {
-		const onDeleteColumns = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region) ON DELETE SET NULL (account_id)`
+		const unnamed = `ALTER TABLE app.events ADD FOREIGN KEY (account_id) REFERENCES app.accounts (id)`
 		r := fkReport()
-		r.Statements[0].SQL = onDeleteColumns
+		r.Statements[0].SQL = unnamed
 		require.NoError(t, plan.RoutePartitionedForeignKeyBuilds(&r, 16))
 		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
 		assert.Equal(t, router.DispositionExecute, r.Disposition)
-		assert.Equal(t, []string{onDeleteColumns}, r.Statements[0].ExecSQL)
+		assert.Equal(t, []string{unnamed}, r.Statements[0].ExecSQL)
 		assert.Equal(t, planner.ExecutionPartitionedForeignKeyBuild, r.Statements[0].Execution)
 	})
 
@@ -341,8 +341,8 @@ func TestRoutePartitionedForeignKeyBuildsRoutesAForeignKeyThatWouldBeRefused(t *
 // table to the same build before PostgreSQL 18, but only when the build's
 // own admission takes its shape, because a desired run has no admission
 // between the plan and the run: a plan that shows the build must be one the
-// run executes as the build. A shape the build refuses, such as an ON DELETE
-// column list, keeps the planner's NOT VALID step and stays refused.
+// run executes as the build. A shape the build refuses, such as an unnamed
+// foreign key, keeps the planner's NOT VALID step and stays refused.
 func TestRouteDesiredPartitionedForeignKeyBuildsRoutesOnlyAnAdmittedShape(t *testing.T) {
 	fkReport := func(sql string) plan.Report {
 		steps := []string{sql + ` NOT VALID`, `ALTER TABLE app.events VALIDATE CONSTRAINT events_account_fk`}
@@ -371,7 +371,7 @@ func TestRouteDesiredPartitionedForeignKeyBuildsRoutesOnlyAnAdmittedShape(t *tes
 	})
 
 	t.Run("a shape the build refuses stays refused", func(t *testing.T) {
-		const sql = `ALTER TABLE app.events ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts(id, region) ON DELETE SET NULL (account_id)`
+		const sql = `ALTER TABLE app.events ADD FOREIGN KEY (account_id) REFERENCES app.accounts(id)`
 		r := fkReport(sql)
 		require.NoError(t, plan.RouteDesiredPartitionedForeignKeyBuilds(&r, 16))
 		require.NoError(t, plan.RoutePartitionedParent(&r, 16))
@@ -892,7 +892,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 33 against this test.
+// omissions. A consumer pins format_version 34 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -948,7 +948,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 33,
+		"format_version": 34,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -1006,7 +1006,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 33,
+		"format_version": 34,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -1031,7 +1031,7 @@ func TestReportJSONAdvisoriesShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 33,
+		"format_version": 34,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -1262,7 +1262,7 @@ func TestFingerprintCoversExtensionSchemas(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 33.
+// pinned to format_version 34.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

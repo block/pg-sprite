@@ -32,23 +32,26 @@ one is validated, and nothing is added twice.
 | No matching foreign key, derived name held by another constraint | refused, `partitioned-foreign-key-name-taken` |
 | Two or more matching foreign keys | refused, `partitioned-foreign-key-conflict` |
 | A matching foreign key already attached to a parent's | refused, `partitioned-foreign-key-conflict` |
-| A validated foreign key, attached to nothing, that matches but for an `ON DELETE` column list | refused, `partitioned-foreign-key-conflict` |
+| A validated foreign key, attached to nothing, that matches but for its `ON DELETE` column list | refused, `partitioned-foreign-key-conflict` |
 
 "Matching" is the comparison the server makes before it adopts: the same referenced table, the
-same referencing and referenced columns in order, the same `MATCH`, `ON UPDATE`, `ON DELETE`, and
-deferrability, and no `ON DELETE` column list. Foreign keys of another definition are left alone,
-except one the parent's statement could adopt: on PostgreSQL 14 to 17 the server adopts a
-validated foreign key attached to nothing without comparing its `ON DELETE` column list, so it
-could take a column-list foreign key in place of the step's, and with it a delete rule the parent
-does not have. Remove that foreign key, or recreate it without its column list, and rerun. A
-column-list foreign key that is `NOT VALID` or already attached to a parent's is not one the
-server adopts, and is left alone. The build decides every partition before its first leaf step,
-so a refusal on a late partition leaves the earlier ones as they were.
+same referencing and referenced columns in order, the same `MATCH`, `ON UPDATE`, `ON DELETE`,
+enforcement, and deferrability, plus the same `ON DELETE SET NULL` or `SET DEFAULT` column list
+(PostgreSQL 15 and later), compared as the set of columns it names. On PostgreSQL 14 to 17 the
+server adopts a validated foreign key attached to nothing without comparing that list, and takes
+the first such key by name, so one that differs only in its list could be adopted in place of the
+step's, and with it a delete rule the parent does not have. That key is refused: recreate it with
+the requested list, or drop it, and rerun. A foreign key of another list that is `NOT VALID` or
+already attached to a parent's is not one the server adopts, and is left alone, as are foreign
+keys of another definition. PostgreSQL 14 has no column list, and the dry run and the build refuse one
+there (`partitioned-foreign-key-unsupported-shape`). The build decides every
+partition before its first leaf step, so a refusal on a late partition leaves the earlier ones as
+they were.
 
 ## Verified against PostgreSQL
 
 Checked on PostgreSQL 14, 16, 17, and 18 in `psql` (three partitions, one million rows each), and
-by the integration tests in `pkg/executor`:
+by the integration tests in `pkg/executor`, which CI runs on 14 to 18:
 
 - Leaf `ADD FOREIGN KEY ... NOT VALID` holds `ShareRowExclusiveLock` on the leaf and on the
   referenced table, and scans nothing.
@@ -72,6 +75,10 @@ by the integration tests in `pkg/executor`:
   only in its `ON DELETE SET NULL` or `SET DEFAULT` column list is one the parent can adopt, so
   the build refuses it before any leaf step, and the parent's step refuses one that appears after
   the leaf steps. A `NOT VALID` one, or one already attached to a parent's, is not adopted.
+- On 15 to 17, a partition's foreign key that carries the requested `ON DELETE SET NULL` column
+  list is adopted, including on a partition whose columns are numbered differently from the
+  parent's, and the parent's foreign key carries the same list
+  (`TestAddPartitionedForeignKeyWithAnOnDeleteColumnList`).
 - PostgreSQL 18 accepts `ADD FOREIGN KEY ... NOT VALID` on the parent (the same locks as the plain
   form, and no scan), and `VALIDATE CONSTRAINT` on the parent holds `ShareUpdateExclusiveLock`.
   The ordinary online route, `NOT VALID` then `VALIDATE`, therefore works there, and
@@ -97,8 +104,8 @@ the execution `partitioned-foreign-key-build`, the same one `migrate --alter` pl
 statement through `migrate.Run`'s routing below and ends in the same verdicts; its admission
 checks `migrate.Options.Connection` before any statement runs, as for a partitioned index build.
 A desired run has no admission between the plan and the run, so the plan routes only a foreign
-key the build's static admission takes; one it does not, such as an `ON DELETE` column list,
-keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, class
+key the build's static admission takes; one it does not, such as a foreign key that names a
+column twice, keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, class
 `environmental`, before anything runs. On 18 nothing is routed.
 
 The plan's routing reads the statement, not the catalog, so the refusals the build makes from the

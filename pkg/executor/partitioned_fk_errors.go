@@ -16,9 +16,9 @@ var (
 	// adopting the one the step proved: two or more of the requested
 	// definition, so which one the parent adopts would be left to the
 	// server; one of the requested definition already attached to a parent
-	// table's foreign key; or one the parent's statement could adopt that
-	// has an ON DELETE column list, which the server does not compare when
-	// it chooses what to adopt.
+	// table's foreign key; or one the parent's statement could adopt whose
+	// ON DELETE column list is not the requested one, which the server does
+	// not compare when it chooses what to adopt.
 	ErrPartitionedForeignKeyConflict = errors.New("the partition already has a foreign key that keeps the parent's from adopting the requested one as the only one")
 	// ErrPartitionedForeignKeyReferencedTable is returned when the foreign
 	// key references a table the build does not take: anything but a plain

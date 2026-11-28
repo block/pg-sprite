@@ -856,7 +856,15 @@ refuses the statement (`column "…" of relation "…" contains null values`, SQ
 lock and checked the rows. The statement could only fail. Give the column a constant
 default instead, which PostgreSQL stores in the catalog without rewriting the table
 (`fast-default`), or add the column without `NOT NULL`, backfill it, and set `NOT
-NULL` afterwards, which the planner runs as its safer sequence (`safer-idiom`). An
+NULL` afterwards, which the planner runs as its safer sequence (`safer-idiom`). When
+the `NOT NULL` comes from the column's domain, neither path exists: a domain with a
+constraint rewrites the table whatever the default, and the column cannot shed the
+domain's `NOT NULL`. The decision's `not_null_from_type` names the domain, and the
+help says to add the column with the type the domain chain ends in, carrying the
+chain's constraints on the column instead. The same column given a default is a
+`type-rewrite`, not a refusal for `NULL`s, and its decision's `constrained_type`
+names the domain for the same path. A `migrate` refusal's verdict carries both
+fields too. An
 empty table has no rows to fill, so the same statement is `metadata-only` there, and
 a column the table already has is not refused, since `ADD COLUMN IF NOT EXISTS`
 skips it, unless the same statement drops the column first. The planner asks the

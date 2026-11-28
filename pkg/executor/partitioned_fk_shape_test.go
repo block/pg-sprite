@@ -13,7 +13,8 @@ import (
 // every shape refusal the partitioned foreign key build would return before
 // anything runs. It admits one named FOREIGN KEY on a schema-qualified table,
 // referencing a schema-qualified table's listed columns, with any MATCH
-// SIMPLE or FULL, referential actions, and deferrability: the build renders
+// SIMPLE or FULL, referential actions, ON DELETE column list, and
+// deferrability: the build renders
 // each partition's statement and the parent's from those fields, so every
 // partition's foreign key has the parent's definition.
 func TestAdmitPartitionedForeignKeyShape(t *testing.T) {
@@ -22,6 +23,9 @@ func TestAdmitPartitionedForeignKeyShape(t *testing.T) {
 		`ALTER TABLE app.events
 		     ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region)
 		     MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED`,
+		`ALTER TABLE app.events
+		     ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region)
+		     ON DELETE SET DEFAULT (account_id)`,
 	} {
 		assert.NoError(t, executor.AdmitPartitionedForeignKeyShape(sql), sql)
 	}
@@ -90,10 +94,19 @@ func TestAdmitPartitionedForeignKeyShapeRefusals(t *testing.T) {
 			want: executor.ErrPartitionedForeignKeyUnsupportedShape,
 		},
 		{
-			name: "an ON DELETE column list",
+			// The server refuses it too: only the foreign key's own columns
+			// can be set on delete.
+			name: "an ON DELETE column outside the foreign key",
 			sql: `ALTER TABLE app.events
 			          ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region)
-			          ON DELETE SET NULL (account_id)`,
+			          ON DELETE SET NULL (note)`,
+			want: executor.ErrPartitionedForeignKeyUnsupportedShape,
+		},
+		{
+			name: "an ON DELETE column named twice",
+			sql: `ALTER TABLE app.events
+			          ADD CONSTRAINT events_account_fk FOREIGN KEY (account_id, region) REFERENCES app.accounts (id, region)
+			          ON DELETE SET NULL (account_id, account_id)`,
 			want: executor.ErrPartitionedForeignKeyUnsupportedShape,
 		},
 		{

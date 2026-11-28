@@ -734,6 +734,19 @@ type Verdict struct {
 	// the plan report's partition-key decision carries. Empty for every
 	// other verdict.
 	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
+	// NotNullFromType is the added column's type, as the statement spells
+	// it with every identifier quoted, when a not-null-without-default
+	// refusal's column is NOT NULL only because that type, a domain, makes
+	// it so. The same value the plan report's refused decision carries.
+	// Empty for every other verdict.
+	NotNullFromType string `json:"not_null_from_type,omitempty"`
+	// ConstrainedType is the added column's type, as the statement spells
+	// it with every identifier quoted, when a backend-unavailable refusal
+	// is forced by adding a column of a domain with constraints, which
+	// PostgreSQL checks against every row by rewriting the table. The same
+	// value the plan report's type-rewrite decision carries. Empty for
+	// every other verdict.
+	ConstrainedType string `json:"constrained_type,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what

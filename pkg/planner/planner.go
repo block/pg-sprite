@@ -418,6 +418,20 @@ type Decision struct {
 	// change, and which of it and its partitions or inheritance children
 	// have used the most, present exactly for column-limit decisions.
 	ColumnLimit *preflight.ColumnNumbers `json:"column_limit,omitempty"`
+	// NotNullFromType is the added column's type, as the statement spells
+	// it with every identifier quoted, when that type is what makes the column NOT NULL: a domain that
+	// declares NOT NULL, on a column that spells neither NOT NULL nor
+	// PRIMARY KEY. Present only for not-null-without-default decisions.
+	// Adding a nullable column of that type is impossible, so the manual
+	// path is the type's base type instead (see NotNullFromTypeHelp).
+	NotNullFromType string `json:"not_null_from_type,omitempty"`
+	// ConstrainedType is the added column's type, as the statement spells
+	// it with every identifier quoted, when that type is a domain with constraints, which PostgreSQL
+	// checks against every row by rewriting the table whatever default the
+	// column is given. Present only for type-rewrite decisions. The manual
+	// path is the domain's base type with its constraints on the column
+	// instead (see ConstrainedTypeHelp).
+	ConstrainedType string `json:"constrained_type,omitempty"`
 	// DependentFix is the manual path for the views, policies, and
 	// triggers that block the change, which depends on what the change
 	// would do with those dependents out of the way. Like Kind, it is not part
@@ -1061,6 +1075,60 @@ func ColumnsPastLimit(ops []statement.Op, columns map[string]string, left int) (
 	return past, left
 }
 
+// NotNullFromTypeHelp is the operator-facing manual path for a
+// not-null-without-default decision whose NOT NULL comes from the column's
+// type, typeName, a domain. Neither manual path of NotNullWithoutDefaultHelp
+// exists for it: the column cannot be added without NOT NULL, and
+// PostgreSQL rewrites the table to check every row against a domain with
+// constraints, whatever default the column is given. The NOT NULL may be
+// declared by a domain the named one is defined over rather than by the
+// named one itself.
+func NotNullFromTypeHelp(typeName string) string {
+	return "the column's type, " + typeName + ", is a domain that makes it NOT NULL, so the column needs a default, " +
+		"and with one PostgreSQL rewrites the table to check every row against the domain; " + domainBaseTypePath
+}
+
+// ConstrainedTypeHelp is the operator-facing manual path for adding a
+// column whose type, typeName, is a domain with constraints: PostgreSQL
+// rewrites the table to check every row against them, whatever default the
+// column is given.
+func ConstrainedTypeHelp(typeName string) string {
+	return "the column's type, " + typeName + ", is a domain with constraints, and PostgreSQL rewrites the table " +
+		"to check every row against them whatever default the column is given; " + domainBaseTypePath
+}
+
+// domainBaseTypePath is the manual path for adding a column of a domain
+// with constraints: the column takes the type the domain chain ends in and
+// carries the chain's constraints itself, in forms PostgreSQL adds without
+// a rewrite. A domain can be defined over another domain, whose
+// constraints it inherits, so the type to use is the first one in the
+// chain that is not a domain, and the constraints are those of every
+// domain in it.
+const domainBaseTypePath = "add the column with the type the domain is defined over instead " +
+	"(for a domain over another domain, the first type in the chain that is not a domain), " +
+	"with NOT NULL and a constant DEFAULT if a domain in the chain declares NOT NULL, " +
+	"and add each CHECK the chain declares as NOT VALID, then VALIDATE CONSTRAINT"
+
+// notNullFromType returns the type op spells for its column when that type
+// is what makes the added column NOT NULL: the column spells neither NOT
+// NULL nor PRIMARY KEY, so only its type can. It returns "" otherwise.
+func notNullFromType(op statement.Op) string {
+	if op.DeclaresNotNull || slices.Contains(op.InlineConstraints, statement.ConstraintPrimaryKey) {
+		return ""
+	}
+	return spelledType(op)
+}
+
+// spelledType is the added column's type as op spells it, schema-qualified
+// when the statement qualifies it, with every identifier quoted so a name
+// holding a dot or capitals reads unambiguously.
+func spelledType(op statement.Op) string {
+	if op.NewTypeSchema != "" {
+		return pgx.Identifier{op.NewTypeSchema, op.NewType}.Sanitize()
+	}
+	return pgx.Identifier{op.NewType}.Sanitize()
+}
+
 // NullFillCandidates names the columns the operations of one ALTER TABLE
 // add with no DEFAULT of their own, the ones whose existing rows may be
 // left NULL: a front door reads Facts.NullFilledColumns only for these.
@@ -1364,13 +1432,13 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			numbers := facts.ColumnNumbers
 			d.Route, d.Reason, d.ColumnLimit = RouteRefuse, ReasonColumnLimit, &numbers
 		case fillsNotNullWithNull(op, facts):
-			d.Route, d.Reason = RouteRefuse, ReasonNotNullWithoutDefault
+			d.Route, d.Reason, d.NotNullFromType = RouteRefuse, ReasonNotNullWithoutDefault, notNullFromType(op)
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
 		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
 		case addColumnProof(op, facts) == statement.AddColumnTypeRewrites:
-			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
+			d.Route, d.Reason, d.ConstrainedType = RouteCopyAndSwap, ReasonTypeRewrite, spelledType(op)
 		case addColumnProof(op, facts) == statement.AddColumnUnproven:
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
 		case op.Default == statement.DefaultExpression && !addsInPlace(addColumnProof(op, facts)):

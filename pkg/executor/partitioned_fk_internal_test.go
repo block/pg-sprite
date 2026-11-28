@@ -172,6 +172,103 @@ func TestAddPartitionedForeignKeyOnline(t *testing.T) {
 	})
 }
 
+// ON DELETE SET NULL (account_id) clears only account_id when an account is
+// deleted, and keeps region. Every partition's foreign key carries the same
+// list, so the parent's adopts them, including the partition whose columns
+// are numbered differently because it was created on its own and attached,
+// and already has its listed foreign key when the run starts.
+// PostgreSQL 14 has no column list, so the build refuses there before it
+// adds anything.
+func TestAddPartitionedForeignKeyWithAnOnDeleteColumnList(t *testing.T) {
+	withPartitionedFKServer(t, func(t *testing.T, newFixture func(t *testing.T) partitionedFKFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.accounts (
+			    id     bigint NOT NULL,
+			    region text   NOT NULL,
+			    PRIMARY KEY (id, region)
+			);
+			INSERT INTO %[1]s.accounts VALUES (1, 'eu'), (2, 'us');
+			CREATE TABLE %[1]s.events (
+			    id         bigint      NOT NULL,
+			    account_id bigint,
+			    region     text,
+			    created_at timestamptz NOT NULL
+			) PARTITION BY RANGE (created_at);
+			CREATE TABLE %[1]s.events_2026_01 PARTITION OF %[1]s.events
+			    FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
+			CREATE TABLE %[1]s.events_2026_02 (
+			    created_at timestamptz NOT NULL,
+			    dropped    int,
+			    region     text,
+			    id         bigint      NOT NULL,
+			    account_id bigint
+			);
+			ALTER TABLE %[1]s.events_2026_02 DROP COLUMN dropped;
+			ALTER TABLE %[1]s.events ATTACH PARTITION %[1]s.events_2026_02
+			    FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
+			INSERT INTO %[1]s.events (id, account_id, region, created_at) VALUES
+			    (1, 1, 'eu', '2026-01-10'),
+			    (2, 1, 'eu', '2026-02-10'),
+			    (3, 2, 'us', '2026-02-11')`)
+		const addWithList = `
+			ALTER TABLE %[1]s.events
+			    ADD CONSTRAINT events_account_fk
+			    FOREIGN KEY (account_id, region) REFERENCES %[1]s.accounts (id, region)
+			    ON DELETE SET NULL (account_id)`
+		major, err := dbconn.ServerMajor(t.Context(), f.pool)
+		require.NoError(t, err)
+		if major < deleteSetColumnsMajor {
+			_, err := f.add(t, addWithList)
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyUnsupportedShape)
+			for _, table := range []string{"events", "events_2026_01", "events_2026_02"} {
+				assert.Empty(t, f.foreignKeys(t, table), "table %s", table)
+			}
+			return
+		}
+
+		// The differently numbered partition already has the listed foreign
+		// key, as a run interrupted after that partition leaves it, written
+		// on the partition by its own column names. The run finds it and the
+		// parent adopts it.
+		f.exec(t, `
+			ALTER TABLE %[1]s.events_2026_02
+			    ADD CONSTRAINT feb_account_fk
+			    FOREIGN KEY (account_id, region) REFERENCES %[1]s.accounts (id, region)
+			    ON DELETE SET NULL (account_id)`)
+
+		rep, err := f.add(t, addWithList)
+		require.NoError(t, err)
+		parent := f.foreignKeys(t, "events")["events_account_fk"]
+		require.Len(t, rep.Leaves, 2)
+		assert.Equal(t, map[string]PartitionForeignKeyAction{
+			"events_2026_01": PartitionForeignKeyAdded,
+			"events_2026_02": PartitionForeignKeyFound,
+		}, partitionFKActions(rep))
+		assert.Equal(t, "feb_account_fk", rep.Leaves[1].Constraint)
+		want := fmt.Sprintf("FOREIGN KEY (account_id, region) REFERENCES %s.accounts(id, region) ON DELETE SET NULL (account_id)", f.schema)
+		assert.Equal(t, want, parent.def)
+		for _, leaf := range rep.Leaves {
+			assert.Equal(t, fkRow{oid: leaf.ConstraintOID, def: want, validated: true, parentOID: parent.oid},
+				f.foreignKeys(t, leaf.Table)[leaf.Constraint], "partition %s", leaf.Table)
+		}
+
+		f.exec(t, `DELETE FROM %[1]s.accounts WHERE id = 1`)
+		rows, err := f.pool.Query(t.Context(), fmt.Sprintf(`SELECT id, account_id, region FROM %s.events ORDER BY id`, f.schema))
+		require.NoError(t, err)
+		type event struct {
+			ID        int64
+			AccountID *int64
+			Region    string
+		}
+		got, err := pgx.CollectRows(rows, pgx.RowToStructByPos[event])
+		require.NoError(t, err)
+		two := int64(2)
+		assert.Equal(t, []event{{1, nil, "eu"}, {2, nil, "eu"}, {3, &two, "us"}}, got,
+			"deleting account 1 cleared account_id on both partitions and kept region")
+	})
+}
+
 // A rerun after the parent's foreign key was added, the state a run that
 // stopped after its last COMMIT leaves, finds it and reports it done. It
 // changes nothing and does not mistake the adopted leaf foreign keys for

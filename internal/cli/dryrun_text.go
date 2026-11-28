@@ -100,7 +100,8 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 	codes := writeRefusal(w, ps)
 	refused = len(codes) // at most one refusal code per statement
 	// Every not-null-without-default column of a statement shares one
-	// manual path, printed once after the first of them.
+	// manual path, printed once after the first of them, except a column
+	// whose type makes it NOT NULL, whose path names that type.
 	notNullHelped := false
 	columnLimitHelped := false
 	for _, d := range ps.Decisions {
@@ -114,7 +115,14 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		if len(d.PartitionKeyTables) > 0 {
 			w.diag("help", "", planner.PartitionKeyHelp)
 		}
-		if d.Reason == planner.ReasonNotNullWithoutDefault && !notNullHelped {
+		if d.ConstrainedType != "" {
+			w.diag("help", "", planner.ConstrainedTypeHelp(d.ConstrainedType))
+		}
+		switch {
+		case d.Reason != planner.ReasonNotNullWithoutDefault:
+		case d.NotNullFromType != "":
+			w.diag("help", "", planner.NotNullFromTypeHelp(d.NotNullFromType))
+		case !notNullHelped:
 			notNullHelped = true
 			w.diag("help", "", planner.NotNullWithoutDefaultHelp)
 		}

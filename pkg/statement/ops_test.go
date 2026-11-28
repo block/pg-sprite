@@ -99,7 +99,12 @@ func TestParseOpsShapes(t *testing.T) {
 			name: "add column not null carries no inline constraint",
 			sql:  "ALTER TABLE t ADD COLUMN c int NOT NULL DEFAULT 0",
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
-				Default: statement.DefaultConstant},
+				Default: statement.DefaultConstant, DeclaresNotNull: true},
+		},
+		{
+			name: "add column of a domain declares no not null",
+			sql:  "ALTER TABLE t ADD COLUMN c app.positive_qty",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "positive_qty", NewTypeSchema: "app"},
 		},
 		{
 			name: "drop column",
