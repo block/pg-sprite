@@ -31,12 +31,13 @@ var ErrDroppedIndexDrift = errors.New("the index the plan drops changed after pl
 // permanent.
 var ErrDroppedIndexReplaced = errors.New("the drop removed an index the plan did not review")
 
-// ErrReplacementIndexDrift means the index that replaces the one a reviewed
-// plan drops is no longer the valid index of the plan's table with the
+// ErrReplacementIndexDrift means the index that replaces the index or
+// unique constraint a reviewed plan drops is no longer the valid index of the plan's table with the
 // definition the plan built it with: it is gone, invalid, belongs to another
 // table, or was rebuilt with another definition, as can happen while an
 // apply is stopped between the build and the drop. It is returned only from
-// the read before the drop, so the old index is still in place. The outcome
+// the read before the drop, so the old index or constraint is still in
+// place. The outcome
 // is permanent: re-plan, which builds the replacement again.
 var ErrReplacementIndexDrift = errors.New("the index that replaces the dropped one changed after planning")
 
@@ -268,12 +269,12 @@ func refuseReplacementIndexDrift(ctx context.Context, q querier, schema, table s
 		schema, r.Index, table).Scan(&def, &valid)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return fmt.Errorf("%w: %s has no index %s on %s any more, so dropping the old index would leave the table without its new definition; re-plan",
+		return fmt.Errorf("%w: %s has no index %s on %s any more, so dropping the index or constraint it replaces would leave the table without its new definition; re-plan",
 			ErrReplacementIndexDrift, schema, ref.Sanitize(), tableRef.Sanitize())
 	case err != nil:
 		return fmt.Errorf("read replacement index %s before dropping the index it replaces: %w", ref.Sanitize(), err)
 	case !valid:
-		return fmt.Errorf("%w: replacement index %s is invalid, so dropping the old index would leave the table without its new definition; re-plan",
+		return fmt.Errorf("%w: replacement index %s is invalid, so dropping the index or constraint it replaces would leave the table without its new definition; re-plan",
 			ErrReplacementIndexDrift, ref.Sanitize())
 	}
 	unqualified, err := statement.Qualify(def, "")
