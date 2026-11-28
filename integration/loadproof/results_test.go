@@ -36,6 +36,10 @@ type results struct {
 	Binary *binaryInfo `json:"binary,omitempty"`
 	Load   loadInfo    `json:"load"`
 	Phases []phaseInfo `json:"phases"`
+	// PhaseSequence is every phase the checkpoint poll saw, in the order
+	// it saw them, a phase seen at consecutive polls listed once; across
+	// the kill proof's runs it shows whether a row went back to a phase.
+	PhaseSequence []string `json:"phase_sequence,omitempty"`
 	// Attempts are the library proof's calls to migrate.Run, in order:
 	// each one a host cancelled, and the one that ran to its verdict. The
 	// binary's proof makes one call and records none.
@@ -131,6 +135,10 @@ func newResults(c config) *results {
 func (r *results) recordWatch(w watched, started time.Time) {
 	r.SlotName = w.SlotName
 	r.PeakSlotLagBytes = w.PeakSlotLagBytes
+	r.PhaseSequence = nil
+	for _, p := range w.Sequence {
+		r.PhaseSequence = append(r.PhaseSequence, p.String())
+	}
 	phases := make([]checkpoint.Phase, 0, len(w.FirstSeen))
 	for p := range w.FirstSeen {
 		phases = append(phases, p)

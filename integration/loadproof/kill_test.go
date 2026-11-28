@@ -20,6 +20,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -56,9 +57,15 @@ type killRun struct {
 	ExitCode   int    `json:"exit_code"`
 	// RowPhase is the checkpoint row's phase after the run, and
 	// WatermarkAtKill the key the row's watermark had landed through when
-	// a copy was killed, absent when no periodic save had recorded one.
-	RowPhase        string `json:"row_phase"`
-	WatermarkAtKill *int64 `json:"watermark_at_kill,omitempty"`
+	// the run was killed: the save the next run resumes from.
+	// FirstSavedWatermark is the first watermark the kill poll saw the run
+	// save in copying, the complete watermark's key when the copy had
+	// ended before the poll saw a partial one, and absent when the poll
+	// saw no copying save; for the killed copy's rerun it is what
+	// checkResumedFrom judges.
+	RowPhase            string `json:"row_phase"`
+	WatermarkAtKill     *int64 `json:"watermark_at_kill,omitempty"`
+	FirstSavedWatermark *int64 `json:"first_saved_watermark,omitempty"`
 	// ShadowOID is the relation the run left the change's new table in:
 	// after a kill, the shadow's; after the swap, the live table's. A run
 	// that resumed keeps it; one that started over built another.
@@ -168,6 +175,7 @@ func TestLoadProofKill(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, shadow, final.ShadowOID, "the live table is the shadow the first killed run built, so every rerun resumed it rather than starting over")
 	require.NoError(t, w.Err, "the checkpoint poll failed")
+	require.NoError(t, checkNoCopyAfterVerify(w.Sequence), "the run resumed from the verifying row verifies again without copying again")
 	require.True(t, w.MarkSet, "the poll never saw the row before the cutover, so no write is known to have committed before the swap")
 	requireMarkSpansTheStream(t, w, atStart)
 
@@ -188,7 +196,8 @@ func TestLoadProofKill(t *testing.T) {
 
 // killAndRerun runs the binary once per kill point, killing it there with
 // SIGKILL, and holds each kill to the phase it was aimed at
-// (checkKilledAt) and each rerun to the shadow the first run built. Before
+// (checkKilledAt), each rerun to the shadow the first run built, and the
+// rerun of the killed copy to the save it left (checkResumedFrom). Before
 // every next run it waits, for at most release, for the server to let go
 // of the dead run's slot — a rerun that met it held would be refused as
 // resume-slot-held — and for the load to commit a few writes per worker,
@@ -203,9 +212,13 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 	var (
 		shadow uint32
 		waited time.Duration
+		// began is the watermark the row carried when the run started, and
+		// copyKilledAt the save a killed copy left for the run to resume.
+		began        copier.Watermark
+		copyKilledAt *int64
 	)
 	for _, point := range killPoints() {
-		k, err := runUntilKilled(t, ctx, runCtx, c, pool, store, table, point)
+		k, err := runUntilKilled(t, ctx, runCtx, c, pool, store, table, point, began)
 		res.Runs = append(res.Runs, killRun{
 			Run:                   len(res.Runs) + 1,
 			StartedMillis:         k.started.Sub(started).Milliseconds(),
@@ -222,8 +235,18 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 		if k.signal != 0 {
 			run.ExitSignal = k.signal.String()
 		}
+		if k.firstSaved.Valid() {
+			saved := k.firstSaved.Value()
+			run.FirstSavedWatermark = &saved
+		}
 		if err != nil {
 			return 0, 0, fmt.Errorf("run %d: %w", run.Run, err)
+		}
+		if copyKilledAt != nil {
+			if err := checkResumedFrom(*copyKilledAt, k.firstSaved); err != nil {
+				return 0, 0, fmt.Errorf("run %d: %w", run.Run, err)
+			}
+			copyKilledAt = nil
 		}
 		committedAtKill := load.Progress().Committed()
 		cp, err := store.Inspect(runCtx, table.Schema, table.Table)
@@ -237,6 +260,10 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 		}
 		if err := checkKilledAt(point, cp, k.signal, k.code, k.stdout); err != nil {
 			return 0, 0, fmt.Errorf("run %d: %w; stderr: %s", run.Run, err, k.stderr)
+		}
+		began = cp.Watermark
+		if point == killMidCopy {
+			copyKilledAt = run.WatermarkAtKill
 		}
 		if run.ShadowOID, err = relationOID(runCtx, pool, table.Schema, cp.ShadowTable); err != nil {
 			return 0, 0, fmt.Errorf("run %d: read the shadow the killed run left: %w", run.Run, err)
@@ -265,6 +292,10 @@ type killed struct {
 	// read when it did.
 	sent bool
 	fill copyFill
+	// firstSaved is the first watermark the poll saw the row carry in
+	// copying other than the one it carried when the run started: the
+	// run's first copying save the poll saw, invalid when it saw none.
+	firstSaved copier.Watermark
 	// signal and code are how the binary ended: SIGKILL and -1 when the
 	// kill landed, zero and its exit code when it exited on its own first.
 	signal syscall.Signal
@@ -276,11 +307,13 @@ type killed struct {
 
 // runUntilKilled runs the binary with the proof's command line and kills
 // it with SIGKILL from a poll of the checkpoint row once the row shows the
-// run at point. It returns how the run ended; its error is the harness's:
-// a binary that could not start or a poll that failed. When ctx ends — the
-// operator interrupted the proof — the binary is killed and waited for,
-// and the test fails so its cleanups run.
-func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint) (killed, error) {
+// run at point, noting the first copying save the poll sees move off
+// began, the watermark the row carried before the run. It returns how the
+// run ended; its error is the harness's: a binary that could not start or
+// a poll that failed. When ctx ends — the operator interrupted the proof —
+// the binary is killed and waited for, and the test fails so its cleanups
+// run.
+func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, began copier.Watermark) (killed, error) {
 	t.Helper()
 	cmd := exec.CommandContext(runCtx, c.Binary, migrateArgs(c, table)...)
 	cmd.Env = append(os.Environ(), "PGSPRITE_URL="+c.DSN)
@@ -297,8 +330,17 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 		wg      sync.WaitGroup
 		pollErr error
 	)
+	// The poll's goroutine alone writes firstSaved until it is waited for.
+	seen := func(cp checkpoint.Checkpoint) {
+		if k.firstSaved.Valid() || cp.Phase != checkpoint.PhaseCopying {
+			return
+		}
+		if cp.Watermark.Valid() && cp.Watermark != began {
+			k.firstSaved = cp.Watermark
+		}
+	}
 	wg.Go(func() {
-		k.sent, k.fill, pollErr = killWhenReached(pollCtx, pool, store, table, point, cmd.Process)
+		k.sent, k.fill, pollErr = killWhenReached(pollCtx, pool, store, table, point, cmd.Process, seen)
 	})
 	waitErr := cmd.Wait()
 	k.exited = time.Now()
@@ -319,11 +361,12 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 
 // killWhenReached polls the checkpoint row and the two relations' heap
 // sizes every killPollInterval until a reading shows the run at point,
-// then sends proc SIGKILL. It reports whether it sent the signal to a
-// process still running, and the sizes it read then. It ends without
-// sending when ctx ends — the binary exited first — and returns any read
-// error other than the row or its table not existing yet.
-func killWhenReached(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, proc *os.Process) (bool, copyFill, error) {
+// then sends proc SIGKILL, handing seen every row it reads. It reports
+// whether it sent the signal to a process still running, and the sizes it
+// read then. It ends without sending when ctx ends — the binary exited
+// first — and returns any read error other than the row or its table not
+// existing yet.
+func killWhenReached(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, proc *os.Process, seen func(checkpoint.Checkpoint)) (bool, copyFill, error) {
 	ticker := time.NewTicker(killPollInterval)
 	defer ticker.Stop()
 	for {
@@ -342,6 +385,7 @@ func killWhenReached(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.
 		if err != nil {
 			return false, copyFill{}, fmt.Errorf("inspect the checkpoint row: %w", err)
 		}
+		seen(cp)
 		fill, err := readCopyFill(ctx, pool, table.Schema, table.Table, cp.ShadowTable)
 		if ctx.Err() != nil {
 			return false, copyFill{}, nil
