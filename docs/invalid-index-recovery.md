@@ -221,7 +221,15 @@ limit (SQLSTATE class `53`): a full disk, no memory left, or a limit such as
 files. The outcome code is `resource-exhausted`, and `Recoverable()` is false: until the
 resource is freed or the limit raised, `RebuildAbandonedIndex` meets the same limit and
 leaves a new invalid index behind. The error names the server's message, which says which
-resource ran out:
+resource ran out.
+
+A full disk (`53100`) or out of memory (`53200`) can come from other sessions' load, so it
+may clear without an operator, for example once space frees up. The executor stops rather
+than retry, since each retry can fill the disk again. Check the resource first: free disk
+space (`df`, or the platform's storage metric) and memory against what the build needs. If
+it has recovered, skip to step 2 and the build can succeed; if the build alone exhausts it,
+or the limit is a configured one such as `temp_file_limit`, it fails the same way until you
+act:
 
 1. Free the resource or raise the limit. For `temp_file_limit`, raise it for the role the
    build runs as, or raise `maintenance_work_mem` so the sort spills less.
