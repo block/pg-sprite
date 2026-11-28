@@ -32,6 +32,9 @@ type UniqueKey struct {
 	// Deferrable reports a key the server may check at commit instead of
 	// at each statement.
 	Deferrable bool
+	// InitiallyDeferred reports a deferrable key the server checks at
+	// commit unless a transaction sets it to IMMEDIATE.
+	InitiallyDeferred bool
 }
 
 // UniqueKeyColumn is one element of a unique key.
@@ -100,10 +103,11 @@ func ParseUniqueConstraint(def string) (UniqueKey, error) {
 		return UniqueKey{}, fmt.Errorf("%w: %q", ErrNotUniqueKey, def)
 	}
 	key := UniqueKey{
-		Method:           "btree",
-		NullsNotDistinct: con.GetNullsNotDistinct(),
-		Primary:          con.GetContype() == pganalyze.ConstrType_CONSTR_PRIMARY,
-		Deferrable:       con.GetDeferrable(),
+		Method:            "btree",
+		NullsNotDistinct:  con.GetNullsNotDistinct(),
+		Primary:           con.GetContype() == pganalyze.ConstrType_CONSTR_PRIMARY,
+		Deferrable:        con.GetDeferrable(),
+		InitiallyDeferred: con.GetInitdeferred(),
 	}
 	for _, k := range con.GetKeys() {
 		key.Columns = append(key.Columns, UniqueKeyColumn{Column: k.GetString_().GetSval()})
@@ -132,7 +136,10 @@ func (k UniqueKey) Enforces(dropped UniqueKey) bool {
 	if dropped.NullsNotDistinct && !k.NullsNotDistinct && !k.Primary {
 		return false
 	}
-	return !k.Deferrable || dropped.Deferrable
+	if k.Deferrable && !dropped.Deferrable {
+		return false
+	}
+	return !k.InitiallyDeferred || dropped.InitiallyDeferred
 }
 
 // comparesColumn reports whether k's key has col as a plain element with

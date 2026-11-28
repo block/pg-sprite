@@ -496,6 +496,19 @@ func changesColumnsFirst(live Model, desired []Column) bool {
 	return dropsColumn(live, desiredCols) && addsColumnThatMayRewrite(liveCols, desired)
 }
 
+// retypedColumns names the live columns the desired table declares with
+// another type.
+func retypedColumns(live Model, desired []Column) map[string]bool {
+	desiredCols := columnsByName(desired)
+	retyped := map[string]bool{}
+	for _, col := range live.Columns {
+		if want, ok := desiredCols[col.Name]; ok && want.Type != col.Type {
+			retyped[col.Name] = true
+		}
+	}
+	return retyped
+}
+
 // dropsColumn reports whether the diff drops a live column.
 func dropsColumn(live Model, desiredCols map[string]Column) bool {
 	for _, col := range live.Columns {

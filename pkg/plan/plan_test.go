@@ -917,8 +917,10 @@ func TestReportJSONShape(t *testing.T) {
 					Route:       planner.RouteNative,
 					Reason:      planner.ReasonSaferIdiom,
 				}},
-				ExecSQL:   []string{"DROP INDEX CONCURRENTLY t_c_idx"},
-				Execution: planner.ExecutionAutocommit,
+				ExecSQL:          []string{"DROP INDEX CONCURRENTLY t_c_idx"},
+				Execution:        planner.ExecutionAutocommit,
+				ReplacedBy:       "t_c_idx1",
+				UniquenessKeptBy: "t_c_key",
 			},
 			{
 				SQL:         "ALTER TABLE t ADD COLUMN nickname text UNIQUE",
@@ -968,7 +970,9 @@ func TestReportJSONShape(t *testing.T) {
 					{"operation": "drop index", "destructive": true, "route": "native", "reason": "safer-idiom"}
 				],
 				"exec_sql": ["DROP INDEX CONCURRENTLY t_c_idx"],
-				"execution": "autocommit-each-step"
+				"execution": "autocommit-each-step",
+				"replaced_by": "t_c_idx1",
+				"uniqueness_kept_by": "t_c_key"
 			},
 			{
 				"sql": "ALTER TABLE t ADD COLUMN nickname text UNIQUE",

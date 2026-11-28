@@ -102,4 +102,48 @@ func TestDiffNamesNothingForAWeakerOrLaterRule(t *testing.T) {
 		require.Equal(t, 0, at, "a plan that may rewrite the table drops first: %q", sqls(changes))
 		assert.Empty(t, drop.UniquenessKeptBy, "the index is built after the constraint is gone")
 	})
+
+	t.Run("a rule on a column the plan retypes", func(t *testing.T) {
+		model := func(emailType string, constraints int) Model {
+			m := keyed()
+			m.Columns[len(m.Columns)-1].Type = emailType
+			m.Constraints = m.Constraints[:constraints]
+			m.Indexes = append(m.Indexes, Index{Name: "events_email_uidx", Def: keptEmailIndexDef})
+			return m
+		}
+		changes, err := Diff("public", model("citext", 2), model("citext", 1))
+		require.NoError(t, err)
+		drop, _ := dropOf(t, changes, "events_email_key")
+		require.Equal(t, "events_email_uidx", drop.UniquenessKeptBy, "with no retype the standing index keeps the rule")
+
+		changes, err = Diff("public", model("citext", 2), model("text", 1))
+		require.NoError(t, err)
+		drop, _ = dropOf(t, changes, "events_email_key")
+		assert.Empty(t, drop.UniquenessKeptBy, "under text, the index lets in two emails that differ only in case, which citext kept unique")
+	})
+}
+
+// A dropped key or a keeper pg-sprite cannot read, such as a temporal key the
+// parser's grammar does not know, names no keeper and fails nothing: the drop
+// plans as it would without the field.
+func TestDiffNamesNothingForAnUnreadableKey(t *testing.T) {
+	const temporal = "UNIQUE (id, email WITHOUT OVERLAPS)"
+	t.Run("the dropped key", func(t *testing.T) {
+		live := keyed()
+		live.Constraints = append(live.Constraints, Constraint{Name: "events_period_key", Def: temporal})
+		changes, err := Diff("public", live, keyed())
+		require.NoError(t, err)
+		drop, _ := dropOf(t, changes, "events_period_key")
+		assert.Empty(t, drop.UniquenessKeptBy)
+	})
+	t.Run("a keeper", func(t *testing.T) {
+		live := keyed()
+		live.Constraints = append(live.Constraints, Constraint{Name: "events_a_period_key", Def: temporal})
+		desired := withoutEmailKey()
+		desired.Constraints = append(desired.Constraints, Constraint{Name: "events_a_period_key", Def: temporal})
+		changes, err := Diff("public", live, desired)
+		require.NoError(t, err)
+		drop, _ := dropOf(t, changes, "events_email_key")
+		assert.Empty(t, drop.UniquenessKeptBy)
+	})
 }

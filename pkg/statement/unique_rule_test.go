@@ -173,10 +173,40 @@ func TestUniqueKeyEnforces(t *testing.T) {
 			func(t *testing.T) statement.UniqueKey { return constraint(t, "UNIQUE (sku) DEFERRABLE") },
 			true,
 		},
+		{
+			"an initially deferred key over an initially immediate one",
+			func(t *testing.T) statement.UniqueKey {
+				return constraint(t, "UNIQUE (sku) DEFERRABLE INITIALLY DEFERRED")
+			},
+			func(t *testing.T) statement.UniqueKey { return constraint(t, "UNIQUE (sku) DEFERRABLE") },
+			false,
+		},
+		{
+			"an initially immediate key over an initially deferred one",
+			func(t *testing.T) statement.UniqueKey { return constraint(t, "UNIQUE (sku) DEFERRABLE") },
+			func(t *testing.T) statement.UniqueKey {
+				return constraint(t, "UNIQUE (sku) DEFERRABLE INITIALLY DEFERRED")
+			},
+			true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, tt.keeper(t).Enforces(tt.drops(t)))
 		})
+	}
+}
+
+// The parser's grammar has no temporal key, so a WITHOUT OVERLAPS key is
+// not read as a unique key, and no plain btree key is ever credited with
+// keeping its overlap rule. A grammar that learns the clause fails this test,
+// so the key's method and columns are modeled before it is read.
+func TestParseUniqueConstraintRefusesATemporalKey(t *testing.T) {
+	for _, def := range []string{
+		"UNIQUE (id, valid_at WITHOUT OVERLAPS)",
+		"PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)",
+	} {
+		_, err := statement.ParseUniqueConstraint(def)
+		assert.Error(t, err, def)
 	}
 }

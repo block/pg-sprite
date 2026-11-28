@@ -1,7 +1,6 @@
 package schemadiff
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 
@@ -15,10 +14,15 @@ import (
 // has it as the desired table declares it, or when ch waits for the plan's
 // adds, which build every desired object the live table lacks. An object
 // under the dropped name is never one: the drop clears that name first.
-func (h heldDrops) uniquenessKeeper(ch Change, waits, partitioned bool, desired Model) (string, error) {
-	dropped, ok, err := h.droppedUniqueKey(ch)
-	if err != nil || !ok {
-		return "", err
+//
+// The answer only names a keeper, so whatever it cannot prove gives no
+// keeper rather than an error: a key on a column the plan retypes, whose
+// equality the new type decides, and a key it cannot read, such as a
+// temporal key the parser's grammar does not know.
+func (h heldDrops) uniquenessKeeper(ch Change, waits, partitioned bool, desired Model) string {
+	dropped, ok := h.droppedUniqueKey(ch)
+	if !ok {
+		return ""
 	}
 	type candidate struct {
 		name string
@@ -54,43 +58,55 @@ func (h heldDrops) uniquenessKeeper(ch Change, waits, partitioned bool, desired 
 			continue
 		}
 		key, err := c.key()
-		if err != nil {
-			return "", fmt.Errorf("read the unique key of %s: %w", c.name, err)
+		if err != nil || h.retypesAny(key) {
+			continue
 		}
 		if key.Enforces(dropped) {
-			return c.name, nil
+			return c.name
 		}
 	}
-	return "", nil
+	return ""
+}
+
+// retypesAny reports whether the plan changes the type of a column key
+// compares. The key's collation and operator class print empty when they
+// are the type's default, so the same printed key compares values
+// differently under the new type.
+func (h heldDrops) retypesAny(key statement.UniqueKey) bool {
+	for _, col := range key.Columns {
+		if h.retyped[col.Column] {
+			return true
+		}
+	}
+	return false
 }
 
 // droppedUniqueKey returns the unique key ch drops when ch drops a live
-// unique index or unique constraint.
-func (h heldDrops) droppedUniqueKey(ch Change) (statement.UniqueKey, bool, error) {
+// unique index or unique constraint whose key it can read.
+func (h heldDrops) droppedUniqueKey(ch Change) (statement.UniqueKey, bool) {
 	if ch.Drops == nil {
-		return statement.UniqueKey{}, false, nil
+		return statement.UniqueKey{}, false
 	}
+	var key statement.UniqueKey
+	var err error
 	switch ch.Drops.Kind {
 	case DroppedIndex:
 		ix, ok := h.liveIdx[ch.Drops.Name]
 		if !ok || !isUniqueIndex(ix) {
-			return statement.UniqueKey{}, false, nil
+			return statement.UniqueKey{}, false
 		}
-		key, err := statement.ParseUniqueIndex(ix.Def)
-		if err != nil {
-			return statement.UniqueKey{}, false, fmt.Errorf("read the unique key of %s: %w", ix.Name, err)
-		}
-		return key, true, nil
+		key, err = statement.ParseUniqueIndex(ix.Def)
 	case DroppedConstraint:
 		con, ok := h.liveCons[ch.Drops.Name]
 		if !ok || !isUniqueConstraint(con) {
-			return statement.UniqueKey{}, false, nil
+			return statement.UniqueKey{}, false
 		}
-		key, err := statement.ParseUniqueConstraint(con.Def)
-		if err != nil {
-			return statement.UniqueKey{}, false, fmt.Errorf("read the unique key of %s: %w", con.Name, err)
-		}
-		return key, true, nil
+		key, err = statement.ParseUniqueConstraint(con.Def)
+	default:
+		return statement.UniqueKey{}, false
 	}
-	return statement.UniqueKey{}, false, nil
+	if err != nil {
+		return statement.UniqueKey{}, false
+	}
+	return key, true
 }

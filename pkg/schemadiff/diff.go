@@ -515,18 +515,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		renamedRules: renamedConstraintDefs(desired, liveCons),
 		foreignKeys:  installsForeignKey(desired, liveCons, desiredCons),
 		checks:       addsCheck(desired, liveCons),
+		retyped:      retypedColumns(live, desired.Columns),
 	}
 	// A held foreign key waits for the foreign keys the plan adds or
 	// validates, which come last; every other held drop goes before them, so a foreign key
 	// the plan adds cannot bind to a key the plan is about to drop.
 	var heldChanges, heldForeignKeys []Change
 	waits := func(ch Change) bool { return !columnsFirst && held.holds(ch) }
-	appendDrop := func(ch Change) error {
-		keeper, err := held.uniquenessKeeper(ch, waits(ch), partitioned, desired)
-		if err != nil {
-			return err
-		}
-		ch.UniquenessKeptBy = keeper
+	appendDrop := func(ch Change) {
+		ch.UniquenessKeptBy = held.uniquenessKeeper(ch, waits(ch), partitioned, desired)
 		switch {
 		case !waits(ch):
 			changes = append(changes, ch)
@@ -535,7 +532,6 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		default:
 			heldChanges = append(heldChanges, ch)
 		}
-		return nil
 	}
 
 	// Foreign keys to drop go first. A key a self-referencing foreign key
@@ -557,9 +553,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if !waits(drop) {
 			droppedForeignKeys[con.Name] = true
 		}
-		if err := appendDrop(drop); err != nil {
-			return nil, err
-		}
+		appendDrop(drop)
 	}
 
 	// Indexes to drop: gone from desired, or changed (dropped here,
@@ -587,14 +581,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if err := refuseReferencedIndexDrop(schema, live.Table, ix, changed, droppedForeignKeys); err != nil {
 				return nil, err
 			}
-			if err := appendDrop(Change{
+			appendDrop(Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
 				Kind:        ChangeDropIndex,
 				Destructive: true,
 				Drops:       &DroppedObject{Kind: DroppedIndex, Name: ix.Name, Definition: ix.Def},
-			}); err != nil {
-				return nil, err
-			}
+			})
 		}
 	}
 
@@ -616,9 +608,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
 			return nil, err
 		}
-		if err := appendDrop(dropConstraintChange(table, con)); err != nil {
-			return nil, err
-		}
+		appendDrop(dropConstraintChange(table, con))
 	}
 
 	// Columns to drop. A rename is indistinguishable from drop+add at the
