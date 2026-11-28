@@ -127,8 +127,13 @@ const (
 	// occupant's shape.
 	ReasonCreateCollision Reason = "create-collision"
 	// ReasonDeclarativeForeignKey: the desired-state plan drops a foreign
-	// key, and desired-state execution does not drop foreign keys yet. The
-	// plan still shows the change; the imperative front door runs the drop.
+	// key it changes under the same name before the new one is added, on a
+	// partitioned table or beside a dropped or retyped column, which would
+	// leave writes checked against no key until the new one is added, or a
+	// key a desired file cannot declare, one into another schema or one from
+	// a table to itself through a standalone unique index, which the plan
+	// drops whatever the file says. The plan still shows the change; the
+	// imperative front door runs the drop.
 	ReasonDeclarativeForeignKey Reason = "declarative-foreign-key"
 	// ReasonCopyAndSwapRefused: the change routes to copy-and-swap and the
 	// route's own gates declined it — the preflight found a table shape or
@@ -500,6 +505,19 @@ const (
 	// statement again, or discarded by a copy-and-swap run started over
 	// under the restart acknowledgement.
 	CauseCopyAndSwapRunStopped Cause = "copy-and-swap-run-stopped"
+	// CauseChangedForeignKey: under ReasonDeclarativeForeignKey, the plan
+	// drops a foreign key it changes under the same name before the new key
+	// is added, because the two cannot share one statement: the table is
+	// partitioned, or the plan also retypes a column or drops one beside an
+	// added column that may rewrite the table. Declaring the
+	// changed key under a new name adds it before the old one is dropped.
+	CauseChangedForeignKey Cause = "changed-foreign-key"
+	// CauseUndeclarableForeignKey: under ReasonDeclarativeForeignKey, the
+	// plan drops a live foreign key a desired file cannot declare, one into
+	// another schema or one from a table to itself through a standalone
+	// unique index, so the diff plans its drop whatever the file says. The
+	// imperative front door removes it.
+	CauseUndeclarableForeignKey Cause = "undeclarable-foreign-key"
 )
 
 // Verdict is the structured outcome of one migrate invocation.

@@ -18,7 +18,10 @@ import (
 // written under ACCESS EXCLUSIVE, so the verdict is only safe if the server
 // agrees that nothing is rewritten. Each case classifies the change from
 // facts introspected off a real column, runs it, and reads the table's
-// filenode before and after: a changed filenode is a rewrite. A native
+// filenode before and after: a changed filenode is a rewrite. The column
+// carries an index, and a native verdict must leave its filenode alone too,
+// since an index rebuilt under ACCESS EXCLUSIVE blocks the table as long as
+// the build takes. A native
 // verdict on a change the server rewrites would run a blocking full-table
 // rewrite natively. The reverse, a rewrite route for a change the server
 // relabels, is only slower, and the rule set stays narrow on purpose; the
@@ -213,6 +216,121 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 			route:  planner.RouteNative,
 		},
 		{
+			name:   "raise timestamp precision",
+			create: "CREATE TABLE %[1]s (c timestamp(3))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(6)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "drop timestamp precision",
+			create: "CREATE TABLE %[1]s (c timestamp(3))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "timestamp to the maximum precision",
+			create: "CREATE TABLE %[1]s (c timestamp)",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(6)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:     "lower timestamp precision",
+			create:   "CREATE TABLE %[1]s (c timestamp(6))",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(3)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "give timestamp a lower precision",
+			create:   "CREATE TABLE %[1]s (c timestamp)",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(3)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:   "raise timestamptz precision",
+			create: "CREATE TABLE %[1]s (c timestamptz(3))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamptz(6)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "drop timestamptz precision",
+			create: "CREATE TABLE %[1]s (c timestamptz(6))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamptz",
+			route:  planner.RouteNative,
+		},
+		{
+			name:     "lower timestamptz precision",
+			create:   "CREATE TABLE %[1]s (c timestamptz(6))",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamptz(3)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:   "raise time precision",
+			create: "CREATE TABLE %[1]s (c time(2))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE time(5)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "drop timetz precision",
+			create: "CREATE TABLE %[1]s (c timetz(2))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timetz",
+			route:  planner.RouteNative,
+		},
+		{
+			name:     "lower time precision",
+			create:   "CREATE TABLE %[1]s (c time(5))",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE time(2)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "raise a timestamp array's precision",
+			create:   "CREATE TABLE %[1]s (c timestamp(3)[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(6)[]",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:   "widen varbit",
+			create: "CREATE TABLE %[1]s (c varbit(8))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varbit(16)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "widen bit varying",
+			create: "CREATE TABLE %[1]s (c bit varying(8))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE bit varying(16)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "drop varbit length",
+			create: "CREATE TABLE %[1]s (c varbit(8))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varbit",
+			route:  planner.RouteNative,
+		},
+		{
+			name:     "narrow varbit",
+			create:   "CREATE TABLE %[1]s (c varbit(16))",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE varbit(8)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:   "cidr to inet",
+			create: "CREATE TABLE %[1]s (c cidr)",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE inet",
+			route:  planner.RouteNative,
+		},
+		{
+			name:     "inet to cidr",
+			create:   "CREATE TABLE %[1]s (c inet)",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE cidr",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
 			// The server relabels this one; the planner has no array rule
 			// beyond an unchanged element and takes the slower safe route.
 			name:   "drop a varchar array's element bound",
@@ -228,8 +346,11 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 			quotedSchema := pgx.Identifier{schema}.Sanitize()
 			_, err := conn.Exec(t.Context(), fmt.Sprintf(tc.create, qualified, quotedSchema))
 			require.NoError(t, err)
+			_, err = conn.Exec(t.Context(), fmt.Sprintf("CREATE INDEX %s ON %s (c)", pgx.Identifier{table + "_c_idx"}.Sanitize(), qualified))
+			require.NoError(t, err)
 			_, err = conn.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", qualified))
 			require.NoError(t, err)
+			index := pgx.Identifier{schema, table + "_c_idx"}.Sanitize()
 
 			live, err := schemadiff.Introspect(t.Context(), pool, schema, table)
 			require.NoError(t, err)
@@ -239,19 +360,19 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 			require.Len(t, plan.Decisions, 1)
 			decision := plan.Decisions[0]
 
-			var before, after int64
-			require.NoError(t, conn.QueryRow(t.Context(),
-				"SELECT pg_relation_filenode($1::regclass)::int8", qualified).Scan(&before))
+			const filenodes = "SELECT pg_relation_filenode($1::regclass)::int8, pg_relation_filenode($2::regclass)::int8"
+			var before, after, indexBefore, indexAfter int64
+			require.NoError(t, conn.QueryRow(t.Context(), filenodes, qualified, index).Scan(&before, &indexBefore))
 			_, err = conn.Exec(t.Context(), alter)
 			require.NoError(t, err)
-			require.NoError(t, conn.QueryRow(t.Context(),
-				"SELECT pg_relation_filenode($1::regclass)::int8", qualified).Scan(&after))
+			require.NoError(t, conn.QueryRow(t.Context(), filenodes, qualified, index).Scan(&after, &indexAfter))
 
 			assert.Equal(t, tc.rewrites, before != after, "server rewrite for %s", alter)
 			assert.Equal(t, tc.route, decision.Route, "route for %s (reason %s)", alter, decision.Reason)
 			if decision.Route == planner.RouteNative {
 				assert.Equal(t, planner.ReasonBinaryCoercible, decision.Reason)
 				assert.False(t, before != after, "a native verdict must never rewrite the table")
+				assert.Equal(t, indexBefore, indexAfter, "a native verdict must never rebuild the column's index")
 			}
 		})
 	}

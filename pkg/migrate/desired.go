@@ -124,8 +124,10 @@ type DesiredResult struct {
 	Owner verdict.Owner `json:"owner,omitempty"`
 	// Cause narrows the refusal reason to its typed discriminator, the
 	// same token the statement verdict would carry: the copy-and-swap
-	// gate or preflight cause of a whole-plan refusal at admission, or the
-	// cause of the statement verdict that stopped execution. Empty when
+	// gate or preflight cause of a whole-plan refusal at admission, the
+	// changed-foreign-key or undeclarable-foreign-key cause of a
+	// declarative-foreign-key refusal at admission, or the cause of the
+	// statement verdict that stopped execution. Empty when
 	// the reason has none or Outcome is not refused.
 	Cause verdict.Cause `json:"cause,omitempty"`
 	// Detail is the human explanation: why refused, what committed, or
@@ -319,15 +321,15 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// matches only because a stopped copy-and-swap run swapped its shape in
 	// is not converged: the run's row and what it still holds stand with
 	// nothing planned to finish them. A non-empty plan meets a stopped run
-	// in Run, statement by statement.
+	// in Run, statement by statement, and in the index drop that runs
+	// outside it.
 	if len(report.Statements) == 0 {
-		stopped, err := findStoppedRun(ctx, pool, report.Schema, report.Table)
+		refused, held, err := refuseEmptyPlanOverStoppedRun(ctx, pool, report)
 		if err != nil {
 			return DesiredResult{}, err
 		}
-		if stopped.standing() {
-			return DesiredResult{Plan: report}.refused(copySwapRunStoppedRefusal(),
-				desiredRunStoppedDetail(report.Schema, report.Table, stopped)), nil
+		if held {
+			return refused, nil
 		}
 		return DesiredResult{
 			Plan:    report,
@@ -419,6 +421,15 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 			return result, fmt.Errorf("%w: planned statement %d is destructive but carries no definition of what it drops",
 				executor.ErrInvariantViolation, i+1)
 		}
+		if ps.Kind == schemadiff.ChangeRenameIndex && ps.Renames == nil {
+			// The reviewed plan binds a rename to the definition of the
+			// index it renames; one that carries none cannot be re-checked
+			// before it runs, so it does not.
+			result.Outcome = verdict.OutcomeFailed
+			result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+			return result, fmt.Errorf("%w: planned statement %d renames an index but carries no definition of the index it renames",
+				executor.ErrInvariantViolation, i+1)
+		}
 		var (
 			v      verdict.Verdict
 			runErr error
@@ -431,9 +442,15 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 		case ps.Destructive:
 			stmtOpts := opts
 			stmtOpts.AllowDestructive = allowDestructive
-			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+			dropped, err := droppedWithReplacement(ps)
+			if err != nil {
+				result.Outcome = verdict.OutcomeFailed
+				result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+				return result, fmt.Errorf("planned statement %d: %w", i+1, err)
+			}
+			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, dropped, ps.Renames)
 		default:
-			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
 		}
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
@@ -894,8 +911,7 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		}
 		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
 		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
-			return r, detail("drops a foreign key, which desired-state execution does not run yet — " +
-				"to apply it, run the statement through the imperative front door (migrate --alter)")
+			return r.WithCause(ps.RefusalCause), detail(foreignKeyDropRefusalDetail(ps.RefusalCause))
 		}
 		if err == nil {
 			return r, detail("has no safe path")
@@ -908,6 +924,23 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		return planIncoherentRefusal(), detail("is refused but carries no refusal class")
 	default:
 		return planIncoherentRefusal(), detail("carries a disposition this build does not know")
+	}
+}
+
+// foreignKeyDropRefusalDetail says why desired-state apply does not run a
+// planned foreign-key drop, and what to do instead, by the kind of drop
+// the plan refused.
+func foreignKeyDropRefusalDetail(cause verdict.Cause) string {
+	switch cause {
+	case verdict.CauseChangedForeignKey:
+		return "drops a foreign key the file changes under the same name where the new key cannot be added in the same statement, " +
+			"which would leave writes checked against no key until the new one is added — declare the changed key under a new name"
+	case verdict.CauseUndeclarableForeignKey:
+		return "drops a foreign key a desired file cannot declare, one into another schema or one onto its own table through a standalone unique index — " +
+			"to remove it, run the statement through the imperative front door (migrate --alter)"
+	default:
+		return "drops a foreign key: either the file changes it under the same name where the new key cannot be added in the same statement, so declare the changed key under a new name, " +
+			"or a desired file cannot declare it, so remove it through the imperative front door (migrate --alter)"
 	}
 }
 

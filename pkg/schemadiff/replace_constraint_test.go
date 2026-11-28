@@ -82,46 +82,99 @@ func TestDiffReplacesADeferrableKeyInPlace(t *testing.T) {
 		changes[1].SQL)
 }
 
-// A CHECK or FOREIGN KEY whose definition changes is swapped in one
-// statement that adds the new rule NOT VALID, so new writes are checked by
-// one rule or the other at every moment. The existing rows are scanned
-// afterwards by a VALIDATE that blocks no writes.
-func TestDiffReplacesARuleInPlace(t *testing.T) {
-	t.Run("a check", func(t *testing.T) {
-		live := base()
-		live.Constraints = append(live.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"})
-		desired := base()
-		desired.Constraints = append(desired.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 2))"})
-		changes, err := Diff("public", live, desired)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check", ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 2)) NOT VALID`,
-			`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`,
-		}, sqls(changes))
-		assert.True(t, changes[0].Destructive)
-		assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: "events_name_check", Definition: "CHECK ((length((name)::text) > 0))"}, changes[0].Drops)
-		assert.False(t, changes[1].Destructive)
-		require.NotNil(t, changes[1].Validates, "the VALIDATE names the rule it settles")
-	})
+// A CHECK whose definition changes is swapped in one statement that adds the
+// new rule NOT VALID, so new writes are checked by one rule or the other at
+// every moment. The existing rows are scanned afterwards by a VALIDATE that
+// blocks no writes. A partitioned parent is no exception.
+func TestDiffReplacesACheckInPlace(t *testing.T) {
+	live := base()
+	live.Constraints = append(live.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"})
+	desired := base()
+	desired.Constraints = append(desired.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 2))"})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check", ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 2)) NOT VALID`,
+		`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`,
+	}, sqls(changes))
+	assert.True(t, changes[0].Destructive)
+	assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: "events_name_check", Definition: "CHECK ((length((name)::text) > 0))"}, changes[0].Drops)
+	assert.False(t, changes[1].Destructive)
+	require.NotNil(t, changes[1].Validates, "the VALIDATE names the rule it settles")
 
-	t.Run("a foreign key", func(t *testing.T) {
-		live := base()
-		live.Constraints = append(live.Constraints, Constraint{
-			Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true,
-		})
-		desired := base()
-		desired.Constraints = append(desired.Constraints, Constraint{
-			Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id) ON DELETE CASCADE", ForeignKey: true,
-		})
-		changes, err := Diff("public", live, desired)
-		require.NoError(t, err)
-		require.Equal(t, []string{
-			`ALTER TABLE public.events DROP CONSTRAINT events_owner_fkey, ADD CONSTRAINT events_owner_fkey FOREIGN KEY (id) REFERENCES public.owners (id) ON DELETE CASCADE NOT VALID`,
-			`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`,
-		}, sqls(changes))
-		assert.True(t, changes[0].Destructive)
-		assert.NotNil(t, changes[0].Drops)
+	live.PartitionKey = "RANGE (id)"
+	desired.PartitionKey = "RANGE (id)"
+	changes, err = Diff("public", live, desired)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check", ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 2)) NOT VALID`,
+		`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`,
+	}, sqls(changes), "a partitioned parent takes a NOT VALID CHECK, so it swaps the rule the same way")
+}
+
+// A FOREIGN KEY whose definition changes under the same name is replaced in
+// one statement that drops the old key and adds the new one NOT VALID, then
+// validated: every write is checked by one key or the other throughout. The
+// statement is destructive and names the key it drops. A partitioned parent,
+// which cannot take a NOT VALID foreign key, keeps the drop and re-add.
+func TestDiffReplacesAChangedForeignKeyInOneStatement(t *testing.T) {
+	live := base()
+	live.Constraints = append(live.Constraints, Constraint{
+		Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true,
 	})
+	desired := base()
+	desired.Constraints = append(desired.Constraints, Constraint{
+		Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id) ON DELETE CASCADE", ForeignKey: true,
+	})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE public.events DROP CONSTRAINT events_owner_fkey, ADD CONSTRAINT events_owner_fkey FOREIGN KEY (id) REFERENCES public.owners (id) ON DELETE CASCADE NOT VALID`,
+		`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`,
+	}, sqls(changes))
+	assert.Equal(t, ChangeAddForeignKey, changes[0].Kind)
+	assert.True(t, changes[0].Destructive)
+	assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: "events_owner_fkey", Definition: "FOREIGN KEY (id) REFERENCES owners(id)"}, changes[0].Drops)
+	assert.Equal(t, ChangeValidateForeignKey, changes[1].Kind)
+	require.NotNil(t, changes[1].Validates, "the VALIDATE names the key it settles")
+
+	live.PartitionKey = "RANGE (id)"
+	desired.PartitionKey = "RANGE (id)"
+	changes, err = Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Len(t, changes, 2)
+	assert.Equal(t, ChangeDropForeignKey, changes[0].Kind, "a partitioned parent drops the old key on its own")
+	assert.Equal(t, ChangeAddForeignKey, changes[1].Kind)
+}
+
+// A primary key narrowed to fewer columns, on a table whose file also lets a
+// column it drops be NULL, is replaced in place like any other key. The old
+// key owns that column's NOT NULL until the swap drops it, so the DROP NOT
+// NULL comes after the swap: the new key is built while the old one keeps
+// rejecting duplicates, and a build that fails leaves the old key and the
+// NOT NULL in place.
+func TestDiffDropsANarrowedPrimaryKeysNotNullAfterTheSwap(t *testing.T) {
+	live := keyed()
+	live.Constraints[0] = Constraint{Name: "events_pkey", Def: "PRIMARY KEY (id, name)", Primary: true}
+	desired := keyed()
+	desired.Constraints[0] = Constraint{
+		Name: "events_pkey", Def: "PRIMARY KEY (id)", Primary: true,
+		IndexDef: "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)",
+	}
+	for i := range desired.Columns {
+		if desired.Columns[i].Name == "name" {
+			desired.Columns[i].NotNull = false
+		}
+	}
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	got := sqls(changes)
+	require.Len(t, got, 3, "%v", got)
+	assert.Contains(t, got[0], "CREATE UNIQUE INDEX events_pkey_new")
+	assert.Contains(t, got[1], `DROP CONSTRAINT "events_pkey"`)
+	assert.Contains(t, got[1], "USING INDEX")
+	assert.Equal(t, `ALTER TABLE "public"."events" ALTER COLUMN "name" DROP NOT NULL`, got[2],
+		"the NOT NULL the old key owned is dropped once the key is swapped")
 }
 
 // A replaced key's new index is built under the constraint's name with a
@@ -168,26 +221,10 @@ func TestDiffRefusesAReplacementIndexNameInUse(t *testing.T) {
 	}
 }
 
-// A diff that drops or retypes a column keeps the drop and re-add: the
-// column change itself removes or re-checks the constraints that read the
-// column, so a constraint swapped in before it would be checked twice.
-func TestDiffKeepsDropAndReaddWhenAColumnChanges(t *testing.T) {
-	t.Run("a dropped column", func(t *testing.T) {
-		live := keyed()
-		live.Columns = append(live.Columns, Column{Name: "legacy", Type: "integer"})
-		desired := keyed()
-		desired.Constraints[1] = Constraint{
-			Name: "events_email_key", Def: "UNIQUE (email, name)",
-			IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
-		}
-		changes, err := Diff("public", live, desired)
-		require.NoError(t, err)
-		for _, c := range changes {
-			assert.NotContains(t, c.SQL, "events_email_key_new")
-		}
-		assert.Contains(t, sqls(changes), `ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key"`)
-	})
-
+// A diff that retypes a column keeps the drop and re-add: the retype
+// re-checks the constraints that read the column, so a constraint swapped in
+// before it would be checked twice.
+func TestDiffKeepsDropAndReaddWhenAColumnIsRetyped(t *testing.T) {
 	t.Run("a retyped column", func(t *testing.T) {
 		live := base()
 		live.Constraints = append(live.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"})
@@ -251,4 +288,115 @@ func TestDiffRefusesAnEarlierAttemptsUnfinishedReplacementIndex(t *testing.T) {
 	assert.Equal(t, CauseReplacementIndexName, refusal.Cause)
 	assert.Contains(t, err.Error(), `DROP INDEX CONCURRENTLY "public"."events_email_key_new"`)
 	assert.Contains(t, err.Error(), "pg_stat_progress_create_index", "the reader checks no build is running before the drop")
+}
+
+// A unique constraint whose new index an earlier run built and left valid
+// under its temporary name is swapped in without a second build, and the
+// built index is not dropped as one the desired table does not declare.
+func TestDiffResumesAUniqueConstraintReplacementAfterItsBuild(t *testing.T) {
+	live, desired := keyed(), keyed()
+	desired.Constraints[1] = Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email, name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
+	}
+	live.Indexes = append(live.Indexes, Index{
+		Name: "events_email_key_new",
+		Def:  "CREATE UNIQUE INDEX events_email_key_new ON events USING btree (email, name)",
+	})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key", ADD CONSTRAINT "events_email_key" UNIQUE USING INDEX "events_email_key_new"`,
+	}, sqls(changes))
+	assert.Equal(t, "events_email_key_new", changes[0].Adopts.Index)
+
+	t.Run("a build of another definition is refused", func(t *testing.T) {
+		other := keyed()
+		other.Indexes = append(other.Indexes, Index{
+			Name: "events_email_key_new",
+			Def:  "CREATE UNIQUE INDEX events_email_key_new ON events USING btree (email)",
+		})
+		_, err := Diff("public", other, desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReplacementIndexName, refusal.Cause)
+	})
+}
+
+// A key a foreign key references cannot be dropped, so replacing it is
+// refused before anything is built, naming the foreign key.
+func TestDiffRefusesReplacingAKeyAForeignKeyReferences(t *testing.T) {
+	live, desired := keyed(), keyed()
+	live.Constraints[1].ReferencedBy = []IncomingForeignKey{{Schema: "public", Table: "orders", Constraint: "orders_email_fkey"}}
+	desired.Constraints[1] = Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email, name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (email, name)",
+	}
+	_, err := Diff("public", live, desired)
+	var refusal *UnsupportedChangeError
+	require.True(t, errors.As(err, &refusal), "%v", err)
+	assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+	assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "orders_email_fkey" on table "public"."orders"`)
+}
+
+// A key the file removes is refused while a foreign key still in place
+// references it, since PostgreSQL does not drop it and the plan would fail
+// after its earlier statements committed. A foreign key on the same table
+// that the plan drops ahead of the key no longer holds it.
+func TestDiffRefusesDroppingAKeyAForeignKeyStillReferences(t *testing.T) {
+	selfKey := Constraint{Name: "events_a_email_fkey", Def: "FOREIGN KEY (email) REFERENCES events(email)", ForeignKey: true}
+	referenced := func(fk IncomingForeignKey, withSelfKey bool) Model {
+		m := keyed()
+		m.Constraints[1].ReferencedBy = []IncomingForeignKey{fk}
+		if withSelfKey {
+			m.Constraints = []Constraint{m.Constraints[0], selfKey, m.Constraints[1]}
+		}
+		return m
+	}
+	withoutKey := keyed()
+	withoutKey.Constraints = withoutKey.Constraints[:1]
+
+	t.Run("referenced from another table", func(t *testing.T) {
+		_, err := Diff("public", referenced(IncomingForeignKey{Schema: "public", Table: "orders", Constraint: "orders_email_fkey"}, false), withoutKey)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+		assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "orders_email_fkey" on table "public"."orders"`)
+	})
+
+	self := IncomingForeignKey{Schema: "public", Table: "events", Constraint: selfKey.Name}
+	t.Run("referenced by a foreign key on the table that stays", func(t *testing.T) {
+		desired := keyed()
+		desired.Constraints = []Constraint{desired.Constraints[0], selfKey}
+		_, err := Diff("public", referenced(self, true), desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+	})
+
+	t.Run("referenced by a foreign key on the table the plan drops first", func(t *testing.T) {
+		changes, err := Diff("public", referenced(self, true), withoutKey)
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_a_email_fkey"`,
+			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key"`,
+		}, sqls(changes))
+	})
+
+	// The file renames the foreign key and the key it references. Each
+	// drop waits for the adds, and the foreign key's drop comes last, so it
+	// still holds the key when the key's drop runs.
+	t.Run("referenced by a foreign key on the table whose drop waits", func(t *testing.T) {
+		desired := keyed()
+		desired.Constraints = []Constraint{
+			desired.Constraints[0],
+			{Name: "events_email_uq", Def: "UNIQUE (email)"},
+			{Name: "events_email_self_fkey", Def: selfKey.Def, ForeignKey: true},
+		}
+		_, err := Diff("public", referenced(self, true), desired)
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%v", err)
+		assert.Equal(t, CauseReferencedIndex, refusal.Cause)
+		assert.Contains(t, err.Error(), `constraint "events_email_key" is referenced by foreign key "events_a_email_fkey"`)
+	})
 }

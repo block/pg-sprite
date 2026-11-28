@@ -413,7 +413,7 @@ database, or a reaper in one database would push another's in-flight change into
 
 **Alternative considered → deferred.** Best-effort cleanup alone cannot cover process death.
 
-**Where enforced.** `pkg/decode` (`CreateSlot` creates the publication and then the slot under the derived name, on a replication connection proven to be on the pool's own cluster and database; `DropSlot` drops only a logical slot of the pool's own database, over a connection proven the same way, and only a publication of the shape `CreateSlot` makes, treating any other slot or publication of the name as foreign; `InspectSlot` reads `wal_status` and two measures of WAL — retained, what the slot keeps on the volume, and unconfirmed, what its consumer has yet to confirm — both unknown rather than zero on a server in recovery, with the server's own account of a lost slot — `invalidation_reason`, `conflicting`, `inactive_since` — where the server version carries it; `SlotStatus.LostState` is the one reading of a status as lost and the `SlotLostError` it returns names the server's cause or says none was reported; `SlotLagWatch` judges successive readings of a slot against the ceiling — lost before any measure, unknown never read as nothing retained, unconfirmed WAL over the ceiling a typed `SlotLagExceededError` on one reading, retained WAL over it the same error once it has stayed there for a grace of the server's release interval plus the consumer's cycle, since the server releases confirmed WAL only at the running-transactions records it logs on that interval, or at once, grace or not, past three times the ceiling), `pkg/checkpoint` (`Store.ReapOrphanSlots` is the reaper: it lists the logical, engine-prefixed slots of `current_database()` and then reads the non-terminal checkpoint rows that name them, and re-reads each slot's row right before dropping it, under the engine's lock on the slot's name, which is the read that decides; a slot no live row names is dropped through `DropIdleSlot`, which refuses a held slot rather than wait for its holder, so whether a slot is held is judged at the drop; a slot a live row names, a slot a process holds, and a name wearing the prefix without the engine's shape are reported and left, and a database without the checkpoint table is refused rather than read as all orphans), `pkg/applier` (`Catchup` ends every cycle by inspecting the stream's slot and judging it against `CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot be set below one byte; a vanished slot is `SlotLostError`), `pkg/schemachange` (`InspectResume` reads a checkpoint row against the catalog and answers clean or reconcile; `Reconciler.Reconcile` is the ST-4 reconcile mode — row to `reconciling`, drop whatever bears the derived name, fresh slot, repair pass, row back to the phase the watermark says, the row and the slot under `WithSlotLock`; `Runner.Run` on a decoding target creates the slot and the row that names it under `WithSlotLock`, leaves a stopped run's slot under its row for the next `Run` to reopen the stream from — a lag-ceiling abort included — and drops the slot once the swap has committed), and `pkg/preflight` (`CopySwapDecodingName` derives the name; `CheckCopySwapEnvironment` refuses the collision); ST-3, ST-4, ST-6.
+**Where enforced.** `pkg/decode` (`CreateSlot` creates the publication and then the slot under the derived name, on a replication connection proven to be on the pool's own cluster and database; `DropSlot` drops only a logical slot of the pool's own database, over a connection proven the same way, and only a publication of the shape `CreateSlot` makes, treating any other slot or publication of the name as foreign; `InspectSlot` reads `wal_status` and two measures of WAL — retained, what the slot keeps on the volume, and unconfirmed, what its consumer has yet to confirm — both unknown rather than zero on a server in recovery, with the server's own account of a lost slot — `invalidation_reason`, `conflicting`, `inactive_since` — where the server version carries it; `SlotStatus.LostState` is the one reading of a status as lost and the `SlotLostError` it returns names the server's cause or says none was reported; `SlotLagWatch` judges successive readings of a slot against the ceiling — lost before any measure, unknown never read as nothing retained, unconfirmed WAL over the ceiling a typed `SlotLagExceededError` on one reading, retained WAL over it the same error once it has stayed there for a grace of the server's release interval plus the consumer's cycle, since the server releases confirmed WAL only at the running-transactions records it logs on that interval, or at once, grace or not, past three times the ceiling), `pkg/checkpoint` (`Store.ReapOrphanSlots` is the reaper: it lists the logical, engine-prefixed slots of `current_database()` and then reads the non-terminal checkpoint rows that name them, and re-reads each slot's row right before dropping it, under the engine's lock on the slot's name, which is the read that decides; a slot no live row names is dropped through `DropIdleSlot`, which refuses a held slot rather than wait for its holder, so whether a slot is held is judged at the drop; a slot a live row names, a slot a process holds, and a name wearing the prefix without the engine's shape are reported and left, and a database without the checkpoint table is refused rather than read as all orphans), `pkg/applier` (`Catchup` ends every cycle by inspecting the stream's slot and judging it against `CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot be set below one byte; a vanished slot is `SlotLostError`), `pkg/schemachange` (`InspectResume` reads a checkpoint row against the catalog and answers clean or reconcile; `Reconciler.Reconcile` is the ST-4 reconcile mode — row to `reconciling`, drop whatever bears the derived name, fresh slot, repair pass, row back to the phase the watermark says, the row and the slot under `WithSlotLock`; `Runner.Run` on a decoding target creates the slot and the row that names it under `WithSlotLock`, leaves a stopped run's slot under its row for the next `Run` to reopen the stream from — a lag-ceiling abort included, though a slot that already holds more unconfirmed WAL than the resume's ceiling is refused as `resume-slot-backlog` before the stream opens, since the first cycle's reading is expected to stop it — and drops the slot once the swap has committed), and `pkg/preflight` (`CopySwapDecodingName` derives the name; `CheckCopySwapEnvironment` refuses the collision); ST-3, ST-4, ST-6.
 
 ### D12 — Throttle by chunk time and slot lag
 
@@ -882,3 +882,282 @@ imports `pkg/schemachange`.
 | Deferred cutover | Adds a long-lived waiting state and extends slot/disk exposure. |
 | Replica-lag throttle | Replica discovery and acceptable-lag policy are topology-specific. |
 | Trigger-based capture | Adds synchronous write amplification and availability coupling; logical decoding is the v1 path. |
+| Resume drains an inherited slot backlog | Proposed, not built: it relaxes the one-reading `stream-behind` rule while a resumed copy reads through its slot's backlog, and holds the copy until the server's next release. A resume whose slot holds more unconfirmed WAL than the ceiling is refused (`resume-slot-backlog`) instead; see [below](#resume-drains-an-inherited-slot-backlog). |
+
+### Resume drains an inherited slot backlog
+
+**Status.** Proposed, not built. This note records what letting a resumed copy read through
+its slot's backlog would take, and what it would change in the `resume-slot-backlog` refusal
+that answers such a resume today.
+
+**Today.** A clean live resume reads its slot once, through `InspectResume` in the Runner's
+`liveReady`, and `checkResumeBacklog` refuses it as `resume-slot-backlog` when that reading
+shows more unconfirmed WAL than the run's slot lag ceiling. The check:
+
+- reads the unconfirmed measure alone, not the WAL the slot retains, and judges it against one
+  ceiling, whatever phase the row resumes in;
+- runs before the stream opens or the copy restarts, so a refused resume clears and copies no
+  shadow row and its slot confirms nothing; a `cutover` row whose swap rolled back has already
+  been written back to `catching_up`, the phase the resume would write anyway;
+- passes an unconfirmed measure the server could not take, on a server in recovery, which the
+  first cycle's reading then fails closed on, and never checks a reconcile's fresh slot, which
+  holds none;
+- judges the slot as it stands at the resume, not the first cycle: the cluster's writes during
+  that cycle add to the measure, so a resume admitted just under the ceiling still clears the
+  shadow, starts its copy, and can stop `stream-behind`.
+
+The refusal is class `environmental` under ST-3, wraps a `*SlotBacklogError` with the slot,
+its `Unconfirmed` WAL, and the `Ceiling` ([refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause)),
+and its remedy is a higher ceiling or a restart.
+
+**Problem.** A live run killed mid-copy before its first watermark save leaves its slot holding
+a large backlog of unconfirmed WAL, most of it the stopped copy's own inserts into the shadow.
+The shadow is not in the single-table publication, so the stream has nothing to apply from it,
+but it still has to read past it. The refusal hands that backlog to the operator, who raises the
+ceiling or starts over, for WAL the stream reads past in under a second. The refusal is there
+because a resume opened over the backlog under the same ceiling stops again at once, as measured
+with the check bypassed on PostgreSQL 14, 16, and 18:
+
+- The first catch-up cycle gathers for one `Interval` (250 ms) and then judges the slot.
+  `SlotLagWatch` stops on one reading of unconfirmed WAL over the ceiling, as `stream-behind`.
+- The stream confirms past WAL it has nothing to apply only through the position a keepalive
+  carries when the walsender reaches the end of WAL. The stream answers every wait that runs
+  out, so the server never needs a timed keepalive. Unconfirmed WAL stays flat while the
+  walsender reads, then the catch-up's `Delivered` position jumps by 211 MB in one step at
+  about 450–480 ms, after the first judgement.
+- The copy's pace (D12) reads zero until the capture's first cycle, so the resume clears the
+  shadow and recopies unpaced, adding WAL on top of the backlog. That holds today for every
+  resume the refusal admits.
+- A read-through that succeeds still leaves the WAL retained until the server's next
+  running-transactions record, about 15 s, so a recopy that starts at once can push retained
+  WAL past three times the ceiling. Two prototypes at a 128 MiB ceiling — one that skipped
+  `stream-behind` until the stream passed the WAL end read at open, one that read through the
+  backlog before the copy restarted but did not wait for a release — both read through and then
+  stopped `wal-retained-hard-limit` once the recopy's WAL stacked on the unreleased backlog, at
+  397 MiB and at 410 MiB of retained WAL with nothing unconfirmed, against a 384 MiB limit.
+
+**Proposal.** For a resumed row in `copying`:
+
+1. *Admission.* The reading the refusal already takes, `InspectResume`'s in `liveReady`, is the
+   reading "at open" means throughout: the resume goes ahead when that reading shows at most
+   twice the ceiling of unconfirmed WAL and at most twice the ceiling of retained WAL.
+2. *Read-through.* When the stream opens, the run reads the server's WAL end. Until the
+   catch-up has delivered past that position, the stream's unconfirmed WAL is judged against an
+   allowance of the unconfirmed WAL read at admission plus one ceiling, instead of against the
+   ceiling.
+3. *Hold.* The copy, and the clear of the shadow above the watermark that is its first step,
+   wait until the stream has delivered past that position and a reading shows the slot
+   retaining no more than the ceiling, which is a wait for the server's next release. After
+   that the run is judged and paced exactly as today.
+
+A row past its copy, in `catching_up` or `verifying`, keeps today's refusal over one ceiling:
+it has no copy for the hold to gate, and its backlog is changes to the source table the applier
+must flush, not WAL the stream reads past. A copying row's backlog can hold such changes too,
+written while the run was stopped; the applier handles them as today, discarding changes for
+keys above the cut frontier (every key, with an empty watermark) and flushing the rest.
+
+**Bounds.** Every bound falls back to a refusal or a stop. The refusal ships today with a bound
+of one ceiling on unconfirmed WAL; this change widens that bound for a copying row and adds the
+retained reading to it. The stops ship today, with one cause added:
+
+- *Bytes at open.* At most twice the ceiling of unconfirmed and of retained WAL, read once at
+  admission. Anything larger, and a backlog over one ceiling under a row past its copy, is
+  refused as `resume-slot-backlog` with nothing written. Two ceilings of retained WAL leave one
+  below the hard limit for the cluster's writes while the run waits on a release, the same
+  headroom D11 sizes for.
+- *Bytes while reading through.* Unconfirmed WAL over the allowance on any reading stops the run
+  as `backlog-unread` (below). The allowance is at most three ceilings, and retained WAL past
+  three ceilings is `wal-retained-hard-limit` on any reading, as today. The allowance counts from
+  the admission reading, so the cluster's writes between that reading and the stream opening
+  count against its extra ceiling, and a backlog admitted at the edge of the bound still has a
+  ceiling of room on its first reading.
+- *Time.* No bound of its own, like the catch-up's wait for its marker today: a read-through
+  that cannot stay ahead of the source's writes is ended by the bytes bound, and one against a
+  quiet source costs time only, bounded by the caller's context. The hold that follows is bounded
+  by the existing `wal-retained` grace: retained WAL still over the ceiling after the release
+  interval plus one cycle stops the run as today.
+
+**A stop that names its own remedy.** A read-through that crosses its allowance stops with a new
+`decode.SlotLagCause`, `backlog-unread`, whose `RetainsWAL` is false. It is not `stream-behind`,
+whose remedy, a resume with a higher ceiling, does not help here: the stream did not read
+through the backlog before the cluster's writes filled a ceiling, and a resume would start the
+same read again. Its remedy is to drop only the slot, which keeps the shadow and the row so the
+next run reconciles with a fresh slot (recopying nothing when the watermark is empty), or to
+restart. Hosts already switch on `SlotLagCause` with a default branch, since the set can grow.
+
+**Interaction with D12.** The pace reads only unconfirmed WAL, and only once the capture has run
+a cycle. The hold covers both gaps for a resumed copy: the copy does not start before the capture
+has read through the backlog, so the zero reading never lets it recopy unpaced, and it does not
+start before a release, so the recopy's WAL lands on a slot retaining at most one ceiling. That
+last figure is derived, not measured: the prototype that read through and recopied at once
+stopped at 410 MiB, which is about the 211 MB backlog the server had not yet released plus the
+recopy's own WAL, and the hold removes the first term. The hold itself was not prototyped. It is
+a gate checked once before the copy starts, not a second pace measure. Once the copy starts, D12
+is unchanged, and retained WAL is still guarded by the ceiling alone.
+
+**Interaction with CO-4, ST-3, ST-4, and LK-1.**
+
+- [CO-4](invariants.md#co-4--the-copyapply-ordering-invariants): the order is unchanged, only
+  delayed. The hold is a gate in `pkg/copier`'s options beside `Pace`, which `Copier.Run` waits
+  on before it clears above the watermark, so the Runner still starts the copier beside the
+  capture and the clear still comes before the first chunk is cut. The stale shadow rows above
+  the watermark stay in place through the hold, and the applier keeps discarding changes for
+  keys above the cut frontier until the clear and the copy run.
+- [ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash): the hard
+  limit of three ceilings is judged on every reading throughout, so the volume headroom ST-3
+  states does not change, nor does the margin to a server `max_slot_wal_keep_size` set above the
+  run's hard limit ([replication-slots.md](replication-slots.md#your-controls)). The resumed run
+  spends more of that margin, for longer, than a run that never stopped.
+- [ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash): the stream
+  confirms only through the catch-up's own confirmation. A slot the server invalidates during
+  the read-through or the hold is `SlotLostError` at the end of the catch-up's cycle, as today,
+  and the next resume reconciles with a fresh slot; with nothing written during the hold, that
+  is the cheaper outcome.
+- [LK-1](invariants.md#lk-1--at-most-one-schema-change-runs-per-table): a resume racing a live
+  driver needs no new rule. The table lock and `resume-slot-held` exclude it, and the run holds
+  its lock session throughout the hold.
+
+**What a host sees.** Through the read-through and the hold the run reports the `catch-up`
+progress operation (`progress.OperationCatchUp`) with its catch-up as the work source, as it
+does while catching up to its marker, and starts the `copy` operation when the hold lifts, so a
+host that renders progress sees the catch-up move rather than a copy standing at zero rows.
+There is no option to refuse instead of waiting: the wait is the price of not handing every
+inherited backlog to the operator. A host with a deadline bounds `Run` with its context; a host
+that wants to know in advance reads the slot's two measures with `decode.InspectSlot` and
+compares them with the admission bound. The refusal's `*SlotBacklogError` gains the retained
+measure and names which measure was over its bound, so a host still builds its remedy with
+`errors.As`.
+
+**Why the refusal stays.** It is the answer for every backlog past the admission bound and for
+every row past its copy. Refusing before anything is written is cheaper than a stop after a
+recopy, and its advice, raise `--slot-lag-ceiling` or use `--restart`, is still right for those
+cases.
+
+**Cost.** Every resumed copy waits for the stream to deliver past the WAL end read at open and
+for a reading that shows the slot retaining no more than the ceiling. When the slot retains more
+than the ceiling at open, that is at least one release interval, about 15 s, plus the time the
+walsender takes to read the backlog (about half a second for 211 MB in the runs above; a backlog
+read cold from disk takes longer). A resumed copy whose slot holds little and retains no more
+than the ceiling passes the hold on its first cycle. A copy resumed after a `wal-retained` stop
+waits for the release before it recopies, where today it starts at once under the same grace.
+
+**Still not covered.**
+
+- A slot that retains more than twice the ceiling at open. Today the refusal does not read
+  retained WAL, so such a resume is admitted when its unconfirmed WAL is within one ceiling, and
+  its first reading either stops it `wal-retained-hard-limit` or leaves it to the `wal-retained`
+  grace, with the clear and the copy already under way. Reading through would confirm that WAL,
+  but the server frees it only at its next release, and the writes in between can carry it past
+  three times the ceiling. This proposal refuses it at admission, which is new work in the
+  refusal.
+- A source that writes more than the ceiling holds per release interval. The read-through ends,
+  but retained WAL never comes back under the ceiling, and the run stops `wal-retained` as
+  today. So does a long transaction that pins the slot.
+- A backlog over one ceiling under a row past its copy, refused as today.
+
+**Wording that would change.**
+
+- ST-3, now: "The ceiling is hard for the WAL the stream has yet to confirm, judged on one
+  reading;". Proposed: "The ceiling is hard for the WAL the stream has yet to confirm, judged
+  on one reading, except while a resumed copy's stream reads through the backlog its slot held
+  at the resume: until the stream has delivered past the WAL end it read on opening, that
+  measure is judged against the backlog plus one ceiling, at most three ceilings;".
+- ST-3, now: "the next `Run` reopens the stream from the row's position — a retained-WAL ceiling
+  abort included, whose backlog a resume drains, while after a `stream-behind` abort a resume
+  under the same ceiling is refused as `resume-slot-backlog` before it opens the stream, judged
+  on the slot as it stands at the resume, so it needs a ceiling above the slot's unconfirmed WAL
+  —". Proposed: "the next `Run` reopens the stream from the row's position — a ceiling abort
+  included: a resumed copy whose slot holds at most twice the ceiling of unconfirmed and of
+  retained WAL reads through that backlog before its copy continues, while a larger backlog, or
+  more unconfirmed WAL than the ceiling under a row past its copy, is refused as
+  `resume-slot-backlog` before the stream opens, judged on the slot as it stands at the resume
+  —".
+- D11, now: "It is hard for the WAL the stream has yet to confirm; the WAL the slot retains may
+  stand over it for the server's release interval plus one cycle". Proposed: "It is hard for
+  the WAL the stream has yet to confirm, except that a resumed copy may read through an
+  inherited backlog of up to twice the ceiling, judged against that backlog plus one ceiling
+  until it has, before the ceiling applies; the WAL the slot retains may stand over it for the
+  server's release interval plus one cycle".
+- D12, now: "A live run's copier also waits before each chunk while the stream has more WAL
+  unconfirmed than a quarter of D11's slot lag ceiling, for at most a minute a chunk; the
+  ceiling itself still ends a run that crosses it." Proposed, appended: "A resumed live run's
+  copier, and the clear of the shadow that precedes it, start only once the capture has read
+  through the backlog the slot held at open and a reading shows the slot retaining no more than
+  the ceiling."
+- The same behavior is stated in more places, each of which changes with it:
+  - ST-3's *Enforced:* text for `SlotLagWatch` ("unconfirmed WAL over the ceiling a typed
+    `SlotLagExceededError` on one reading"), for `Catchup` ("the stream's unconfirmed WAL over
+    the ceiling ends `Run` at once"), and for the Runner's `resume-slot-backlog` clause; D11's
+    *Where enforced* paragraph, which carries the same three clauses; and this document's
+    module table rows for `pkg/applier` ("ends it at once") and `pkg/schemachange`.
+  - The refusal's own text, which names a bound of one ceiling on unconfirmed WAL alone:
+    `CauseResumeSlotBacklog`'s doc comment and `checkResumeBacklog` in `pkg/schemachange`, the
+    `resume-slot-backlog` row in
+    [refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause),
+    and the same row in [schemabot-integration.md](schemabot-integration.md).
+  - schemabot-integration.md's `*decode.SlotLagExceededError` row (the new cause and its
+    remedy) and its resume row.
+  - [replication-slots.md](replication-slots.md#the-run-stopped-at-the-ceiling): the cause
+    table, the controls row for running the same command again, the `stream-behind` resume
+    advice, and the library-host bullets; and copy-and-swap.md's resume paragraph.
+  - The CLI help for `--slot-lag-ceiling`, and the stop and refusal details `pkg/migrate`
+    writes for `stream-behind` and `resume-slot-backlog`.
+  - The resume's disk check, which discounts the WAL the slot already holds, re-read against a
+    slot admitted with up to twice the ceiling retained.
+
+**Alternatives considered → not now.**
+
+- *Refuse up front.* Taken: it ships today and stays the answer past the admission bound. On
+  its own it hands every inherited backlog to the operator, who raises the ceiling or starts
+  over.
+- *Let the read-through run, but do not hold the copy.* Judging `stream-behind` only once the
+  stream has passed the open-time WAL end lets the read-through finish, but the recopy that
+  starts at once stacks its WAL on the retained backlog before the server's next release.
+  Prototyped at a 128 MiB ceiling, it read through and then stopped `wal-retained-hard-limit`
+  at 397 MiB against a 384 MiB limit; holding the copy is what this proposal adds.
+- *Replace the slot when the watermark is empty, as reconcile does.* Nothing landed is worth
+  keeping, so a fresh slot drops the backlog and the retained WAL at once. It would make
+  reconcile, which ST-4 keeps for a lost slot, also answer a healthy one, and it covers only an
+  empty watermark, while a stop after the first watermark save leaves the same backlog under a
+  watermark worth keeping.
+- *Give `stream-behind` a time grace on every reading, as `wal-retained` has.* It would weaken
+  the one-reading bound for a stream that is really falling behind, on every run, to fix a case
+  that only a resume meets, and it does nothing for the retained WAL a recopy stacks before the
+  next release.
+
+**Test obligations.** An implementation lands with:
+
+- Unit tests on an injected clock for the watch: unconfirmed WAL judged against the allowance
+  only until the stream passes the open-time WAL end, against the ceiling after it;
+  `backlog-unread` when a reading crosses the allowance; retained WAL past three ceilings
+  `wal-retained-hard-limit` throughout.
+- Unit tests for admission: a copying row within twice the ceiling on both measures admitted;
+  either measure over it refused, naming the measure; a `catching_up` or `verifying` row refused
+  over one ceiling; an unknown measure not refused.
+- Real-PostgreSQL tests on every major from 14 to 18, at a ceiling the backlog lies between one
+  and two of (the 400,000-row table at a 128 MiB ceiling leaves about 201 MiB unconfirmed; the
+  default 1 GiB ceiling would hold that backlog and prove nothing): a run killed mid-copy before
+  its first watermark save resumes under the same ceiling and finishes and verifies with no
+  operator step, where today's code refuses it as `resume-slot-backlog`; nothing is written to
+  the shadow before the read-through and the release (its row count and size are unchanged
+  through the hold); the run reports `catch-up` through the hold and `copy` after it; the peak
+  retained WAL after the hold is recorded against the hard limit; a backlog past the admission
+  bound, on either measure, is refused with nothing written; a read-through that crosses its
+  allowance stops `backlog-unread`; and a source that keeps retained WAL over the ceiling stops
+  `wal-retained` after the grace.
+
+**Where it would be enforced.** `pkg/decode` (`SlotLagWatch` takes the allowance and the
+position it ends at, and the `backlog-unread` cause), `pkg/applier` (`Catchup` reports when the
+stream has delivered past the WAL end read at open), `pkg/copier` (a gate beside `Pace` that
+`Copier.Run` waits on before it clears above the watermark), and `pkg/schemachange`
+(`checkResumeBacklog` judges the row's phase and both measures, `*SlotBacklogError` carries the
+retained measure, and the Runner sets the allowance, the gate, and the progress operation);
+ST-3, CO-4, D11, D12.
+
+**Open questions, left to the implementation.**
+
+- The admission bound of twice the ceiling and the claim that the recopy lands on at most one
+  ceiling are derived from the prototypes, not measured with the hold. If the measured peak
+  after the hold leaves less than a ceiling below the hard limit, the admission bound tightens.
+- Whether the WAL end is read on the stream's own connection or on the pool, so long as it is
+  read after the admission reading and before the first cycle's judgement.

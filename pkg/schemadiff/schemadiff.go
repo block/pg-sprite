@@ -48,6 +48,16 @@ type Column struct {
 	// Type is the canonical type text (format_type), e.g. "character
 	// varying(50)" — never an alias like varchar(50).
 	Type string
+	// BuiltInType reports that introspection read the column's type as one
+	// of PostgreSQL's own base types, not a domain and not a type a user
+	// defined. Adding a column of such a type with no default runs on the
+	// catalog alone; adding one of any other type may check a domain's rules
+	// against every row. The rule is deliberately broader than domains: an
+	// enum, an extension's type, or a composite added with no default is
+	// also safe, but the plan takes the cautious answer for every type that
+	// is not PostgreSQL's own and keeps its drops first. False when unread,
+	// which is the cautious answer. It never reaches a digest.
+	BuiltInType bool `json:"-"`
 	// NotNull reports the NOT NULL attribute.
 	NotNull bool
 	// Default is the canonical default expression (pg_get_expr), empty when
@@ -68,11 +78,10 @@ type Column struct {
 	SequenceOwned bool
 	// Collation is the column's explicit collation as a schema-qualified,
 	// quote_ident-quoted name, empty when the column uses its type's
-	// default collation. The declarative model does not manage collations yet, so
-	// the model carries it only to refuse: dropping a COLLATE clause from
-	// a rendered baseline would silently change sort order and index
-	// semantics, and a collation delta cannot be converged without a
-	// table rewrite.
+	// default collation. Rendering writes it as the column's COLLATE
+	// clause and a type change carries it, since dropping the clause would
+	// silently change sort order and index semantics. A collation delta is
+	// refused: it cannot be converged without a table rewrite.
 	Collation string
 	// Identity is the identity kind, IdentityNone for plain columns.
 	Identity Identity
@@ -212,6 +221,11 @@ type Constraint struct {
 	// privilege on them for a key the plan adds. Nil for every other
 	// constraint.
 	References *ForeignKeyReference `json:"-"`
+	// ReferencedBy are the foreign keys that reference a primary key or
+	// unique constraint's index, in a stable order. A key a foreign key
+	// depends on cannot be dropped, so a plan that replaces it is refused.
+	// A live fact, read only from a live table.
+	ReferencedBy []IncomingForeignKey `json:"-"`
 	// IndexInvalid reports a primary key, unique, or exclusion constraint
 	// whose index the server has not validated (pg_index.indisvalid is
 	// false). On a partitioned parent that is a key added with ALTER TABLE

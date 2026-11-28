@@ -18,7 +18,9 @@ type Code string
 // The codes an executor outcome can carry.
 const (
 	// CodeBudgetLockExceeded: the lock was not granted within
-	// lock_timeout; nothing was executed.
+	// lock_timeout, or a transaction held a lock that reads or writes take
+	// on the table for the whole wait outside the lock queue, so the lock
+	// was never requested (*LingeringHolderError); nothing was executed.
 	CodeBudgetLockExceeded Code = "budget-lock-exceeded"
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
@@ -151,6 +153,18 @@ const (
 	// after its first transaction committed, leaving the partition
 	// detach-pending; running the same statement again finishes it.
 	CodeDetachInterrupted Code = "partition-detach-interrupted"
+	// CodeAttachPartitionUnsupportedShape: the online attach's statement is
+	// not one ALTER TABLE schema.parent ATTACH PARTITION ... FOR VALUES;
+	// nothing was executed.
+	CodeAttachPartitionUnsupportedShape Code = "attach-partition-unsupported-shape"
+	// CodeAttachPartitionTable: the table the online attach attaches is not
+	// a standalone plain table with the parent's columns, or the parent's
+	// DEFAULT partition is not a plain table; nothing was added.
+	CodeAttachPartitionTable Code = "attach-partition-table"
+	// CodeAttachPartitionDefaultWindow: the parent has a DEFAULT partition
+	// and the caller did not accept the write window its proof opens;
+	// nothing was added.
+	CodeAttachPartitionDefaultWindow Code = "attach-partition-default-window"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
@@ -265,6 +279,11 @@ const (
 	// again on the session that drops it; nothing was dropped. Re-plan
 	// against the catalog as it stands and review the new plan.
 	CodeDroppedIndexDrift Code = "dropped-index-drift"
+	// CodeReplacementIndexDrift: the index a plan built to replace the one
+	// it drops is gone, invalid, or rebuilt with another definition, read
+	// again on the session that drops the old index; nothing was dropped.
+	// Re-plan, which builds the replacement again.
+	CodeReplacementIndexDrift Code = "replacement-index-drift"
 	// CodeDroppedIndexReplaced: a drop that passed its pre-drop read removed
 	// an index the plan did not review, because another session gave the
 	// name to a different index in the round trip between the read and the
@@ -403,6 +422,9 @@ func Codes() []Code {
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
 		CodeDetachInterrupted,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
 		CodePartitionedKeyNameTaken,
@@ -432,6 +454,7 @@ func Codes() []Code {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeDroppedIndexDrift,
+		CodeReplacementIndexDrift,
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
@@ -485,6 +508,9 @@ func (c Code) Permanent() bool {
 		CodePartitionedForeignKeyNotValidSupported,
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedKeyNameTaken,
 		CodePartitionedKeyConflict,
@@ -510,6 +536,7 @@ func (c Code) Permanent() bool {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeDroppedIndexDrift,
+		CodeReplacementIndexDrift,
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
@@ -558,6 +585,9 @@ func OutcomeCode(err error) Code {
 	}
 	if budgetErr, ok := errors.AsType[*BudgetError](err); ok {
 		return budgetErr.Code()
+	}
+	if holderErr, ok := errors.AsType[*LingeringHolderError](err); ok {
+		return holderErr.Code()
 	}
 	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return CodeRowSecurityOutcomeUnknown
@@ -641,6 +671,12 @@ func sentinelCode(err error) Code {
 		return CodeDetachDefaultPartition
 	case errors.Is(err, ErrDetachInterrupted):
 		return CodeDetachInterrupted
+	case errors.Is(err, ErrAttachPartitionUnsupportedShape):
+		return CodeAttachPartitionUnsupportedShape
+	case errors.Is(err, ErrAttachPartitionTable):
+		return CodeAttachPartitionTable
+	case errors.Is(err, ErrAttachPartitionDefaultWindow):
+		return CodeAttachPartitionDefaultWindow
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
@@ -699,6 +735,8 @@ func sentinelCode(err error) Code {
 		return CodeAdoptedIndexDrift
 	case errors.Is(err, ErrDroppedIndexDrift):
 		return CodeDroppedIndexDrift
+	case errors.Is(err, ErrReplacementIndexDrift):
+		return CodeReplacementIndexDrift
 	case errors.Is(err, ErrDroppedIndexReplaced):
 		return CodeDroppedIndexReplaced
 	case errors.Is(err, ErrDroppedObjectDrift):

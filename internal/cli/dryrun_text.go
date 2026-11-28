@@ -409,10 +409,26 @@ func verdictText(r verdict.Reason) string {
 	case verdict.ReasonUnsupportedPartitionedParent:
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
 	case verdict.ReasonDeclarativeForeignKey:
-		return "dropping a foreign key is not supported for desired-state apply yet; this change is shown for review only — " +
-			"to apply it, run the statement with pg-sprite migrate --alter"
+		return "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
+			"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"
 	default:
 		return string(r)
+	}
+}
+
+// foreignKeyRefusalText names the one remedy for a refused foreign-key drop
+// when the refusal's cause says which kind of drop it is, and both when it
+// does not, as for a report decoded from JSON, which carries no cause.
+func foreignKeyRefusalText(cause verdict.Cause) string {
+	switch cause {
+	case verdict.CauseChangedForeignKey:
+		return "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, " +
+			"which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
+	case verdict.CauseUndeclarableForeignKey:
+		return "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, " +
+			"so to remove it, run the statement with pg-sprite migrate --alter"
+	default:
+		return verdictText(verdict.ReasonDeclarativeForeignKey)
 	}
 }
 
@@ -432,6 +448,9 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 		return "PostgreSQL has no concurrent drop for an index of a partitioned table; the drop is this plain DROP INDEX, " +
 			"which takes ACCESS EXCLUSIVE on the parent, every partition, and every partition's index — run it with " +
 			"pg-sprite migrate --alter, --accept-blocking, and --allow-destructive naming the table"
+	}
+	if r == verdict.ReasonDeclarativeForeignKey {
+		return foreignKeyRefusalText(ps.RefusalCause)
 	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)

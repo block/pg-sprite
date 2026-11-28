@@ -505,29 +505,41 @@ func TestRefusesVirtualGeneratedLiveColumn(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 }
 
-// A column with an explicit collation refuses to render, and a collation
-// delta between live and desired is a typed diff refusal — never a
-// baseline that silently drops the COLLATE clause or a silent zero diff.
-func TestRenderRefusesCollatedLiveColumn(t *testing.T) {
+// A column with an explicit collation renders with its COLLATE clause, and
+// the rendered file materializes back to the identical model with an empty
+// diff, for a built-in collation and for one defined in the table's own
+// schema. A collation delta between live and desired is still a typed diff
+// refusal, never a silent zero diff.
+func TestRenderRoundTripsCollatedColumns(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
 	defer pool.Close()
 	schema := testutil.NewSchema(t, pool)
 
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.words (id bigint NOT NULL, word text COLLATE "C")`, schema))
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE COLLATION %[1]s.bytewise FROM "C";
+		CREATE TABLE %[1]s.words (
+			id bigint NOT NULL,
+			word text COLLATE "C" NOT NULL DEFAULT '',
+			tag varchar(20) COLLATE %[1]s.bytewise
+		);
+		CREATE INDEX words_word_idx ON %[1]s.words (word)`, schema))
 	require.NoError(t, err)
 
-	live, err := schemadiff.Introspect(t.Context(), pool, schema, "words")
-	require.NoError(t, err)
+	live, desired, changes := roundTrip(t, pool, schema, "words")
 	assert.Equal(t, `pg_catalog."C"`, live.Columns[1].Collation)
-	_, err = schemadiff.Render(live)
-	require.ErrorIs(t, err, schemadiff.ErrUnrenderableCollation)
+	assert.Equal(t, modeltest.Comparable(live), modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Empty(t, changes)
+	rendered, err := schemadiff.Render(live)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, `"word" text COLLATE pg_catalog."C" DEFAULT ''::text NOT NULL`)
+	assert.Contains(t, rendered, `"tag" character varying(20) COLLATE `+live.Columns[2].Collation)
 
-	ds, err := statement.ParseDesired(`CREATE TABLE words (id bigint NOT NULL, word text)`)
+	ds, err := statement.ParseDesired(`CREATE TABLE words (id bigint NOT NULL, word text NOT NULL DEFAULT '', tag varchar(20) COLLATE bytewise)`)
 	require.NoError(t, err)
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	uncollated, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
-	_, err = schemadiff.Diff(schema, live, desired)
+	_, err = schemadiff.Diff(schema, live, uncollated)
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 }
 

@@ -837,26 +837,47 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	assert.NotContains(t, out.String(), "Debian")
 }
 
-// A foreign-key drop in a desired-state plan says in words that it is not
-// applied declaratively, so the reader of the diff knows the change is shown
-// for review only.
+// A refused foreign-key drop says in words why it is not applied
+// declaratively and names the one remedy its cause calls for, so the reader
+// of the diff knows what to change. A report with no cause, such as one
+// decoded from JSON, names both.
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
-	report := plan.NewReport(plan.SourceDiff)
-	report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
-	report.Disposition = router.DispositionRefuse
-	report.Statements = append(report.Statements, plan.Statement{
-		SQL:         "ALTER TABLE public.orders DROP CONSTRAINT orders_user_id_fkey",
-		Kind:        schemadiff.ChangeDropForeignKey,
-		Route:       planner.RouteNative,
-		Disposition: router.DispositionRefuse,
-		Reason:      verdict.ReasonDeclarativeForeignKey,
-		Class:       verdict.ClassCapabilityBoundary,
-	})
+	const (
+		changed      = "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
+		undeclarable = "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"
+	)
+	for _, tt := range []struct {
+		name  string
+		cause verdict.Cause
+		want  string
+	}{
+		{"a key changed under the same name", verdict.CauseChangedForeignKey, changed},
+		{"a key a desired file cannot declare", verdict.CauseUndeclarableForeignKey, undeclarable},
+		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
+			"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			report := plan.NewReport(plan.SourceDiff)
+			report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
+			report.Disposition = router.DispositionRefuse
+			report.Statements = append(report.Statements, plan.Statement{
+				SQL:          "ALTER TABLE public.orders DROP CONSTRAINT orders_user_id_fkey",
+				Kind:         schemadiff.ChangeDropForeignKey,
+				Route:        planner.RouteNative,
+				Disposition:  router.DispositionRefuse,
+				Reason:       verdict.ReasonDeclarativeForeignKey,
+				Class:        verdict.ClassCapabilityBoundary,
+				RefusalCause: tt.cause,
+			})
 
-	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, palette{}, report))
-	// The renderer wraps prose; compare with whitespace collapsed.
-	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — dropping a foreign key is not supported for desired-state apply yet; "+
-		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
+			var out strings.Builder
+			require.NoError(t, writeDryRunText(&out, palette{}, report))
+			// The renderer wraps prose; compare with whitespace collapsed.
+			flat := strings.Join(strings.Fields(out.String()), " ")
+			assert.Contains(t, flat, "error[declarative-foreign-key]: refused — "+tt.want)
+			if tt.cause != "" {
+				assert.NotContains(t, flat, "either the file", "only the remedy the cause calls for is named")
+			}
+		})
+	}
 }
