@@ -882,3 +882,144 @@ imports `pkg/schemachange`.
 | Deferred cutover | Adds a long-lived waiting state and extends slot/disk exposure. |
 | Replica-lag throttle | Replica discovery and acceptable-lag policy are topology-specific. |
 | Trigger-based capture | Adds synchronous write amplification and availability coupling; logical decoding is the v1 path. |
+| Resume drains an inherited slot backlog | Proposed, not built: it relaxes the one-reading `stream-behind` rule for a resume and costs every such resume a release interval. The resume refuses the backlog instead; see [below](#resume-drains-an-inherited-slot-backlog). |
+
+### Resume drains an inherited slot backlog
+
+**Status.** Proposed, not built. A resume whose slot holds more unconfirmed WAL than the
+ceiling is refused instead (`resume-slot-backlog`), and this note records what letting it
+drain would take.
+
+**Problem.** A live run killed mid-copy before its first save leaves its slot holding a large
+backlog of unconfirmed WAL, most of it the stopped copy's own inserts into the shadow. The
+shadow is not in the single-table publication, so the stream has nothing to apply from it, but
+it still has to read past it. Measured on PostgreSQL 14, 16, and 18, a rerun under the same
+ceiling stops again at once:
+
+- The first catch-up cycle gathers for one `Interval` (250 ms) and then judges the slot.
+  `SlotLagWatch` stops on one reading of unconfirmed WAL over the ceiling, as `stream-behind`.
+- The stream confirms past WAL it has nothing to apply only through the position a keepalive
+  carries when the walsender reaches the end of WAL. The stream answers every wait that runs
+  out, so the server never needs a timed keepalive. Unconfirmed WAL stays flat while the
+  walsender reads, then `Delivered` jumps by 211 MB in one step at about 450–480 ms, after the
+  first judgement.
+- The copy's pace (D12) reads zero until the capture's first cycle, so each rerun clears the
+  shadow and recopies unpaced, adding WAL on top of the backlog.
+- A drain that succeeds still leaves the WAL retained until the server's next
+  running-transactions record, about 15 s, so a recopy that starts at once can push retained
+  WAL past three times the ceiling. Two prototypes at a 128 MiB ceiling — one that skipped
+  `stream-behind` until the stream passed the WAL end read at open, one that drained before the
+  copy restarted — both drained and then stopped `wal-retained-hard-limit`, at 397 MiB and at
+  410 MiB with nothing unconfirmed, against a 384 MiB limit.
+
+**Proposal.** A resumed live run reads the server's WAL end when its stream opens and treats
+everything below it as the backlog it inherited. Until the stream has delivered past that
+position, it judges unconfirmed WAL against a drain allowance instead of the ceiling. The copy,
+and the clear of the shadow above the watermark that comes before it, wait until the stream
+has passed that position and a reading shows the slot retaining no more than the ceiling,
+which is a wait for the server's next release. After that the run is judged and paced exactly
+as today.
+
+**Bounds.** Every bound falls back to a stop or a refusal that exists today:
+
+- *Bytes at open.* The resume drains only when the slot's unconfirmed WAL is at most twice the
+  ceiling and its retained WAL at most twice the ceiling. That leaves one ceiling below the
+  hard limit for the cluster's writes while the run waits on a release, the same headroom D11
+  sizes for. Anything larger is refused as `resume-slot-backlog` before anything is written.
+- *Bytes while draining.* Unconfirmed WAL over twice the ceiling on any reading is
+  `stream-behind`, and retained WAL past three times the ceiling is `wal-retained-hard-limit`,
+  as today.
+- *Time.* The stream must pass the WAL end read at open within one `RestartReleaseInterval`.
+  A drain that has not is `stream-behind`. The wait for the release that follows is the
+  existing `wal-retained` grace: retained WAL still over the ceiling after the release
+  interval plus one cycle stops the run as today.
+
+**Interaction with D12.** The pace reads only unconfirmed WAL, and only once the capture has
+run a cycle. The hold covers both gaps for a resume: the copy does not start before the
+capture has drained, so the zero reading never lets a resume recopy unpaced, and it does not
+start before a release, so the recopy's WAL lands on a slot retaining at most one ceiling. The
+hold is a gate checked once before the copy starts, not a second pace measure. Once the copy
+starts, D12 is unchanged, and retained WAL is still guarded by the ceiling alone.
+
+**Why the refusal stays.** It is the fallback for every backlog past the drain allowance and
+for a host that would rather fail fast than wait. Refusing before anything is written is
+cheaper than a stop after a recopy, and its advice — raise `--slot-lag-ceiling` or use
+`--restart` — is still right for those cases.
+
+**Cost.** Every resume whose slot holds a backlog at open waits at least one release
+interval, about 15 s, plus the time to read the backlog (about half a second for 211 MB in the
+runs above). A resume whose slot is within the ceiling at open passes the hold on its first
+cycle.
+
+**Still not covered.**
+
+- A slot that already retains more than twice the ceiling at open. Draining confirms that WAL,
+  but the server frees it only at its next release, and the writes in between can carry it
+  past three times the ceiling. It stays a refusal, as the 410 MiB prototype run at a 128 MiB
+  ceiling would be.
+- A source that writes more than the ceiling holds per release interval. The drain ends, but
+  retained WAL never comes back under the ceiling, and the run stops `wal-retained` as today.
+  So does a long transaction that pins the slot.
+
+**Wording that would change.**
+
+- ST-3, now: "The ceiling is hard for the WAL the stream has yet to confirm, judged on one
+  reading;". Proposed: "The ceiling is hard for the WAL the stream has yet to confirm, judged
+  on one reading, except while a resumed stream reads through the backlog its slot held when
+  it opened: until it has delivered past the WAL end it read then, for at most one release
+  interval, that measure is judged against twice the ceiling;".
+- ST-3, now: "the next `Run` reopens the stream from the row's position — a ceiling abort
+  included, so the backlog is drained by resuming —". Proposed: "the next `Run` reopens the
+  stream from the row's position — a ceiling abort included, so a backlog within twice the
+  ceiling is drained by resuming before the copy continues, and a larger one is refused as
+  `resume-slot-backlog` —".
+- D11, now: "It is hard for the WAL the stream has yet to confirm; the WAL the slot retains may
+  stand over it for the server's release interval plus one cycle". Proposed: "It is hard for
+  the WAL the stream has yet to confirm, except that a resume may read through an inherited
+  backlog of up to twice the ceiling, for at most one release interval, before the ceiling
+  applies; the WAL the slot retains may stand over it for the server's release interval plus
+  one cycle".
+- D12, now: "A live run's copier also waits before each chunk while the stream has more WAL
+  unconfirmed than a quarter of D11's slot lag ceiling, for at most a minute a chunk; the
+  ceiling itself still ends a run that crosses it." Proposed, appended: "A resumed live run's
+  copier, and the clear of the shadow that precedes it, start only once the capture has read
+  through the backlog the slot held at open and a reading shows the slot retaining no more than
+  the ceiling."
+
+**Alternatives considered → not now.**
+
+- *Refuse up front.* Taken: it is the fallback above. On its own it hands every
+  inherited backlog to the operator, who raises the ceiling or starts over.
+- *Let the drain run, but do not hold the copy.* Judging `stream-behind` only once the stream
+  has passed the open-time WAL end lets the drain finish, but the recopy that starts at once
+  stacks its WAL on the retained backlog before the server's next release. Prototyped at a
+  128 MiB ceiling, it drained and then stopped `wal-retained-hard-limit` at 397 MiB against a
+  384 MiB limit; holding the copy is what this proposal adds.
+- *Replace the slot when the watermark is empty, as reconcile does.* Nothing landed
+  is worth keeping, so a fresh slot drops the backlog and the retained WAL at once. It would
+  make reconcile, which ST-4 keeps for a lost slot, also answer a healthy one, and it covers
+  only an empty watermark, which saving the watermark once the first chunk lands makes rare.
+- *Give `stream-behind` a time grace on every reading, as `wal-retained` has.* It
+  would weaken the one-reading bound for a stream that is really falling behind, on every
+  run, to fix a case that only a resume meets, and it does nothing for the retained WAL a
+  recopy stacks before the next release.
+
+**Test obligations.** An implementation lands with:
+
+- Unit tests on an injected clock for the watch: unconfirmed WAL judged against the drain
+  allowance only until the stream passes the open-time WAL end, against the ceiling after it,
+  and `stream-behind` once the drain outlasts the release interval.
+- Real-PostgreSQL tests on every major from 14 to 18: a run killed mid-copy before its first
+  save resumes under the same ceiling and finishes; nothing is written to the shadow before
+  the drain and the release (its row count and size are unchanged through the hold); a
+  backlog past the allowance is refused as `resume-slot-backlog` with nothing written; a drain
+  past its time is `stream-behind`; and a source that keeps retained WAL over the ceiling
+  stops `wal-retained` after the grace.
+- The kill proof at 400,000 rows with the default ceiling: kill mid-copy before the first
+  save, run the same command again, and the change finishes and verifies with no operator
+  step.
+
+**Where it would be enforced.** `pkg/decode` (`SlotLagWatch` takes the drain allowance and the
+position it ends at), `pkg/applier` (`Catchup` reads the WAL end at open and reports when the
+stream has passed it), and `pkg/schemachange` (`Runner` admits or refuses the backlog at open
+and holds the clear and the copy until the drain and a release); ST-3, D11, D12.
