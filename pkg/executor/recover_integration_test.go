@@ -712,11 +712,8 @@ func TestRebuildAbandonedIndexReportsItsCallerCancellingTheDrop(t *testing.T) {
 		done <- sweepErr
 	}()
 	require.Eventually(t, func() bool {
-		var waiting int
-		err := pool.QueryRow(t.Context(), `
-			SELECT count(*) FROM pg_catalog.pg_stat_activity
-			 WHERE wait_event_type = 'Lock' AND query LIKE 'DROP INDEX CONCURRENTLY %'`).Scan(&waiting)
-		return err == nil && waiting == 1
+		waiting, err := testutil.BlockedBy(t.Context(), pool, holder.Conn().PgConn().PID())
+		return err == nil && waiting
 	}, 10*time.Second, 20*time.Millisecond, "the drop must be waiting on the held table lock")
 	cancel()
 

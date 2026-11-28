@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/progress"
 )
 
@@ -149,12 +150,8 @@ func TestEnsureLeafForeignKeyTakesTheLeafBeforeTheReferencedTable(t *testing.T) 
 					stepDone <- err
 				}()
 				require.Eventually(t, func() bool {
-					var waiting int
-					err := f.pool.QueryRow(t.Context(), `
-						SELECT count(*) FROM pg_stat_activity
-						 WHERE datname = current_database() AND wait_event_type = 'Lock'
-						   AND query LIKE 'ALTER TABLE%ADD CONSTRAINT%'`).Scan(&waiting)
-					return err == nil && waiting > 0
+					waiting, err := testutil.BlockedBy(t.Context(), f.pool, writer.Conn().PgConn().PID())
+					return err == nil && waiting
 				}, 10*time.Second, 20*time.Millisecond, "the ADD waits for the writer's leaf lock")
 				time.Sleep(delay)
 
