@@ -443,19 +443,33 @@ cleanup runs, nothing more is saved, and the server drops the binary's connectio
 operator then runs the same command again. It takes the load proof's variables and database,
 and writes its record to `results-kill.json` (`LOAD_PROOF_RESULTS` moves it). It is
 operator-run, not a CI gate; it is skipped unless `LOAD_PROOF_KILL=1`, which the target sets.
+A run takes up to three runs' worth of copying (less when each rerun resumes from a save),
+plus up to a few minutes of waits for the server to let go of the dead binary's backends and
+slot, which scale with the server's `wal_sender_timeout`; run as `go test` directly, it
+needs a `-timeout` above the two-hour run budget plus the cleanup, as the target's
+`-timeout 3h` is.
 
 The harness polls the checkpoint row, the same read a status command makes, every 50
 milliseconds, and kills the binary from that poll; nothing is timed:
 
-1. The first run is killed in `copying` once the row carries a saved watermark short of the
-   key space and the shadow's heap is at least half the source's, so the rerun has a save to
-   resume from and rows above it to clear. The binary saves the copy's watermark as soon as
-   its first chunk lands and every ten seconds after, so even at a smoke size, where the copy
-   lasts about a second, the kill lands after a save.
+1. The first run is killed in `copying` at the first poll that sees the row carry a saved
+   watermark short of the key space, so the rerun has a save to resume from and the rows
+   landed above it to clear. The binary saves the copy's watermark as soon as its first
+   chunk lands and every ten seconds after, so even at a smoke size, where the copy lasts
+   about a second, the kill lands after a save. Only while the row carries no watermark
+   does the poll fall back to the heap sizes, killing once the shadow's heap is at least
+   half the source's.
 2. The second run resumes from that row and is killed at the first poll that sees the row
    in `verifying`. The poll also notes the first watermark it sees this run save in
    `copying`.
-3. The third run resumes from the `verifying` row and runs to its verdict.
+3. The third run resumes from the `verifying` row and runs to its verdict, under the same
+   poll, which sends nothing.
+
+After each kill the harness waits, for at most the server's `wal_sender_timeout` plus 30
+seconds (and never less than the binary's default `statement_timeout` plus 30 seconds),
+for every backend carrying the binary's `application_name` to leave the server, and only
+then reads the row the dead run left: a backend still in a statement when its process died
+runs on until the statement ends, and a save it was making can still commit.
 
 Before each rerun the harness waits, for at most the server's `wal_sender_timeout` plus 30
 seconds, for the server to let go of the slot the dead binary held, since a rerun that meets
@@ -469,14 +483,20 @@ the binary reports it nowhere a harness outside the process can read.
 
 A pass proves, beyond what the load proof's oracles prove of the result:
 
-- each kill landed inside its phase: the binary died of SIGKILL, not of its own accord, and
-  the row it left stands in the phase the poll saw, a killed copy's saved watermark still
-  short of the key space;
+- each kill landed inside its phase: the binary died of the SIGKILL the harness sent, not
+  of its own accord or of a SIGKILL from elsewhere (the run budget's deadline, the
+  out-of-memory killer), and the row it left stands in the phase the poll saw, a killed
+  copy's watermark still short of the key space;
 - the killed copy's rerun resumed from its save: the first watermark the poll saw the rerun
   save is at or above the one the killed run left, where a copy started over would save one
-  below it first;
-- the run resumed from the `verifying` row did not copy again: no poll saw the row in
-  `copying` after it had seen it in `verifying`;
+  below it first, and the run's `resumed_from_save` is `true`. At a size where the kill
+  lands before the copy's first save, the row carries no watermark (`watermark_at_kill` is
+  absent), the rerun copies again from the first key into the same shadow, and the proof
+  asserts only what the next bullets do; `resumed_from_save` is then `false` on every run,
+  so such a pass is not read as a proof of resuming from a save;
+- the run resumed from the `verifying` row did not copy again: the first row the poll saw
+  while it ran stood in `verifying` or a later phase, and no poll saw the row in `copying`
+  after it had seen it in `verifying`;
 - each rerun resumed the killed run rather than starting over: the shadow every killed run
   leaves, and in the end the swapped-in table, is the relation the first run built (by OID);
 - the last run exits 0 with `executed-via-copy-and-swap` and the swap's WAL position, the row
@@ -489,10 +509,12 @@ A pass proves, beyond what the load proof's oracles prove of the result:
 
 The record has the load proof's shape plus `runs`: per run, when it started and how long it
 ran, how long the harness waited for the slot before it, the phase it was killed in with the
-two heap sizes the poll read then, the signal that ended it and its exit code, the row's
-phase and watermark after it (`watermark_at_kill`), for the killed copy's rerun the first
-watermark the poll saw it save (`first_saved_watermark`), the shadow's OID, the writes the
-load committed before the next run, and, for the last run, the verdict's outcome and code.
+two heap sizes the poll read then, the signal that ended it and its exit code, how long the
+dead binary's backends took to leave (`backends_exit_wait_ms`), the row's phase and
+watermark after it (`watermark_at_kill`), for the killed copy's rerun the first watermark
+the poll saw it save (`first_saved_watermark`) and whether that was held to the killed
+run's save (`resumed_from_save`), the shadow's OID, the writes the load committed before
+the next run, and, for the last run, the verdict's outcome and code.
 The phase list the checkpoint poll records spans all three runs, `phase_sequence` lists the
 phases in the order the poll saw them, and `verdict` is the last run's stdout.
 
