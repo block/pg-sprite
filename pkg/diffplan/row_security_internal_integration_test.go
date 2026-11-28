@@ -13,6 +13,8 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -98,4 +100,56 @@ ALTER TABLE %[1]s.t ENABLE ROW LEVEL SECURITY;
 CREATE POLICY readers ON %[1]s.t FOR SELECT USING (owner_id = 7);`, schema))
 	require.NoError(t, err)
 	return pool, schema
+}
+
+// A file that retypes a column its policy reads and keeps the policy's text
+// does not change the row security, though PostgreSQL prints the policy on
+// the new type with a cast the live one lacks. The plan is the table change
+// on its own, which refuses the retype for the policy that reads the column. A file that also changes
+// the policy, or retypes the column to a type the policy's expression does
+// not accept, changes the row security.
+func TestPlanWithRowSecurityKeepsAPolicyWhoseTextTheFileKeepsAcrossARetype(t *testing.T) {
+	for _, tc := range []struct {
+		name, column, using string
+		rowSecurityDiffers  bool
+		reason              string
+	}{
+		{name: "the policy text is kept", column: "varchar(100)", using: "owner_name = current_user"},
+		{name: "the policy changes too", column: "varchar(100)", using: "owner_name = session_user", rowSecurityDiffers: true},
+		{name: "the live policy does not accept the new type", column: "integer", using: "owner_name = 7", rowSecurityDiffers: true,
+			reason: "could not be created on the file's table definition"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+			require.NoError(t, err)
+			t.Cleanup(pool.Close)
+			schema := testutil.NewSchema(t, pool)
+			_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t (id int PRIMARY KEY, owner_name text NOT NULL);
+ALTER TABLE %[1]s.t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY owners ON %[1]s.t USING (owner_name = current_user);`, schema))
+			require.NoError(t, err)
+			desired, err := statement.ParseDesiredWithRowSecurity(fmt.Sprintf(`CREATE TABLE t (id int PRIMARY KEY, owner_name %s NOT NULL);
+ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY owners ON t USING (%s);`, tc.column, tc.using))
+			require.NoError(t, err)
+
+			report, err := PlanWithRowSecurity(t.Context(), pool, schema, desired)
+			if tc.rowSecurityDiffers {
+				var review *RowSecurityReviewRequired
+				require.True(t, errors.As(err, &review), "the row security differs: %v", err)
+				if tc.reason != "" {
+					assert.ErrorContains(t, err, tc.reason)
+				}
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, report.Statements, 1)
+			retype := report.Statements[0]
+			assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN owner_name TYPE varchar(100)", schema), retype.SQL)
+			assert.Equal(t, router.DispositionRefuse, retype.Disposition)
+			require.Len(t, retype.Decisions, 1)
+			assert.Equal(t, planner.ReasonDependentPolicy, retype.Decisions[0].Reason)
+			assert.Equal(t, []string{fmt.Sprintf(`"owners" ON "%s"."t"`, schema)}, retype.Decisions[0].DependentPolicies)
+		})
+	}
 }
