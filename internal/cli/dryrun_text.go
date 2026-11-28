@@ -447,9 +447,9 @@ func verdictText(r verdict.Reason) string {
 	case verdict.ReasonUnsupportedPartitionedParent:
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
 	case verdict.ReasonDeclarativeForeignKey:
-		return "desired-state apply does not drop this foreign key: it would leave writes checked against no key until the new one is added. " +
-			"If the file changes it under the same name on a partitioned table, declare the changed key under a new name; " +
-			"if the plan also retypes a column, or drops one beside an added column that may rewrite the table, apply the column change on its own first, then the foreign key change; " +
+		return "desired-state apply does not drop this foreign key. " +
+			"If the file changes it under the same name on a partitioned table, the drop would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
+			"if the plan also retypes a column, or drops one beside an added column that may rewrite the table, it would drop this key before adding the new one, so apply the column change on its own first, then the foreign key change; " +
 			"if a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, run the statement with pg-sprite migrate --alter to remove it"
 	default:
 		return string(r)

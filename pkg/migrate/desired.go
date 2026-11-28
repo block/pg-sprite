@@ -125,8 +125,9 @@ type DesiredResult struct {
 	// Cause narrows the refusal reason to its typed discriminator, the
 	// same token the statement verdict would carry: the copy-and-swap
 	// gate or preflight cause of a whole-plan refusal at admission, the
-	// changed-foreign-key or undeclarable-foreign-key cause of a
-	// declarative-foreign-key refusal at admission, or the cause of the
+	// changed-foreign-key, column-first-foreign-key, or
+	// undeclarable-foreign-key cause of a declarative-foreign-key refusal at
+	// admission, or the cause of the
 	// statement verdict that stopped execution. Empty when
 	// the reason has none or Outcome is not refused.
 	Cause verdict.Cause `json:"cause,omitempty"`

@@ -994,9 +994,9 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 		{"a key changed under the same name", verdict.CauseChangedForeignKey, changed},
 		{"a key a column change drops first", verdict.CauseColumnFirstForeignKey, columnFirst},
 		{"a key a desired file cannot declare", verdict.CauseUndeclarableForeignKey, undeclarable},
-		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key: it would leave writes checked against no key until the new one is added. " +
-			"If the file changes it under the same name on a partitioned table, declare the changed key under a new name; " +
-			"if the plan also retypes a column, or drops one beside an added column that may rewrite the table, apply the column change on its own first, then the foreign key change; " +
+		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key. " +
+			"If the file changes it under the same name on a partitioned table, the drop would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
+			"if the plan also retypes a column, or drops one beside an added column that may rewrite the table, it would drop this key before adding the new one, so apply the column change on its own first, then the foreign key change; " +
 			"if a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, run the statement with pg-sprite migrate --alter to remove it"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
