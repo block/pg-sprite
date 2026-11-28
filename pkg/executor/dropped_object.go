@@ -92,18 +92,30 @@ func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, err
 // check runs beside the drop's on the same statement (an adoption's
 // index, or the later VALIDATE's definition), so nothing in it goes
 // unchecked, and the table is never without one rule or the other.
+//
+// A primary key added USING INDEX may take another name: a table has only
+// one primary key, so a key the file renames is swapped in by the same one
+// statement, and the adoption's index is checked the same way.
 func replacesConstraint(ops []statement.Op, d *schemadiff.DroppedObject) bool {
 	if d.Kind != schemadiff.DroppedConstraint || len(ops) != 2 || !opDrops(ops[0], d) {
 		return false
 	}
 	add := ops[1]
-	return add.Kind == statement.OpAddConstraint && add.Name == d.Name && (add.NotValid || add.UsingIndex)
+	if add.Kind != statement.OpAddConstraint {
+		return false
+	}
+	if add.Name == d.Name {
+		return add.NotValid || add.UsingIndex
+	}
+	return add.Constraint == statement.ConstraintPrimaryKey && add.UsingIndex
 }
 
 // refuseDroppedObjectDrift locks st's table in ACCESS EXCLUSIVE, the lock
 // every drop it checks takes anyway, then reads the object the statement
 // drops and refuses unless it still has the definition d carries and
-// dropping it takes along nothing that d does not list. Holding
+// dropping it takes along nothing that d does not list. A constraint d
+// names a replacement for is dropped only while that index is valid with the
+// definition the plan built. Holding
 // the lock until the drop commits means the object cannot change between
 // this read and the drop. The read runs under the attempt's search_path,
 // the one the plan's definitions were read under, so the two print alike.
@@ -129,6 +141,11 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 	if extra := schemadiff.UnlistedDependents(d.Dependents, live.Dependents); len(extra) > 0 {
 		return fmt.Errorf("%w: dropping %s %s of %s would also remove %s, which the plan did not review; re-plan",
 			ErrDroppedObjectDrift, d.Kind, d.Name, target, strings.Join(extra, "; "))
+	}
+	if d.Replacement != nil {
+		if err := refuseReplacementIndexDrift(ctx, tx, st.Schema(), st.Table(), *d.Replacement); err != nil {
+			return err
+		}
 	}
 	return refuseDropBelow(ctx, tx, st, d, target)
 }
@@ -183,7 +200,7 @@ func refuseEmptyPartitionedColumnDrop(ctx context.Context, tx pgx.Tx, st stateme
 // PostgreSQL versions. A drop with ONLY is refused too, as on any table
 // with tables below it.
 func refusePartitionedDrop(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
-	only, err := dropSaysOnly(st)
+	only, err := dropSaysOnly(st, &d)
 	if err != nil {
 		return err
 	}

@@ -18,8 +18,12 @@ import (
 func NewTablespace(t *testing.T, pool *pgxpool.Pool, schema string) string {
 	t.Helper()
 	tablespace := schema + "_ts"
-	// The program reads its stdin, so the server's write of the copied row
-	// cannot meet a closed pipe after mkdir has exited. && is deliberate:
+	// CREATE TABLESPACE needs an existing directory on the server, and COPY TO
+	// PROGRAM is how a test runs a shell command there. COPY must copy some
+	// query's output, so it copies SELECT 1, which nothing uses. The server
+	// still writes that row to the program's stdin, and mkdir exits without
+	// reading it, so the write can hit a closed pipe and fail the statement.
+	// cat reads the row, so the write always has a reader. && is deliberate:
 	// a failed mkdir must fail the statement, which ; would hide.
 	_, err := pool.Exec(t.Context(), `COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/`+tablespace+` && cat > /dev/null'`)
 	require.NoError(t, err, "make the tablespace directory")

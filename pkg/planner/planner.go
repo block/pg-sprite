@@ -508,7 +508,7 @@ type Facts struct {
 	// absent from the map has the default collation. Retyping a column
 	// without a COLLATE clause resets it to the new type's default, so a
 	// column present here loses its collation and every index on it is
-	// rebuilt: never a relabel.
+	// rebuilt: never a relabel, unless the clause names this collation.
 	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// the tables below it key on; the zero value when none has one to
@@ -1246,11 +1246,17 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
-	if _, collated := facts.ColumnCollations[op.Column]; collated {
-		// The live column has a collation of its own, which the new type
-		// either resets to its default or (with a COLLATE clause) replaces;
-		// either way every index on the column is rebuilt.
-		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	collationKept := false
+	if live, collated := facts.ColumnCollations[op.Column]; collated {
+		// The live column has a collation of its own. A type change with
+		// no COLLATE clause resets it to the new type's default, and one
+		// naming another collation replaces it; either way every index on
+		// the column is rebuilt. A clause naming the live collation keeps
+		// it, and the type rules decide.
+		if !keepsCollation(live, op.NewTypeCollationName) {
+			return RouteCopyAndSwap, ReasonTypeRewrite, false
+		}
+		collationKept = true
 	}
 	oldType, ok := facts.ColumnTypes[op.Column]
 	if !ok {
@@ -1259,7 +1265,7 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op)) {
+	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op, collationKept)) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
@@ -1274,17 +1280,39 @@ type typeShape struct {
 	array bool
 }
 
+// keepsCollation reports whether a type change's COLLATE clause names the
+// live column's collation, rendered schema-qualified as schemadiff reads
+// it. An unqualified name keeps a pg_catalog collation of that name, since
+// the engine's sessions search pg_catalog first; a collation in any other
+// schema is kept only by a clause qualified with that schema, since an
+// unqualified name resolves through the search path. No clause, or a live
+// collation that does not parse, keeps nothing.
+func keepsCollation(live string, stated statement.QualifiedName) bool {
+	if stated.Name == "" {
+		return false
+	}
+	liveName, err := statement.ParseCollationName(live)
+	if err != nil {
+		return false
+	}
+	if stated.Schema == "" {
+		return liveName.Schema == "pg_catalog" && liveName.Name == stated.Name
+	}
+	return liveName == stated
+}
+
 // targetTypeShape reads the statement's target type into the shape
 // parseTypeText gives the live one. A type qualified with a schema other
 // than pg_catalog is a user type that only shares a built-in's name, and a
-// COLLATE clause changes the collation every index on the column is built
-// with, so neither gets a shape and neither matches a rule. The name is
+// COLLATE clause that changes the collation changes the one every index on
+// the column is built with, so neither gets a shape and neither matches a
+// rule. collationKept says the clause names the live collation. The name is
 // taken as the parser left it: the grammar already spells every built-in
 // the rules know by its catalog name (varchar, numeric, timestamptz), so a
 // target named "decimal" or "character varying" was quoted and names a
 // user type.
-func targetTypeShape(op statement.Op) typeShape {
-	if op.NewTypeSchema != "" || op.NewTypeCollation != "" {
+func targetTypeShape(op statement.Op, collationKept bool) typeShape {
+	if op.NewTypeSchema != "" || (op.NewTypeCollation != "" && !collationKept) {
 		return typeShape{}
 	}
 	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
@@ -1293,8 +1321,10 @@ func targetTypeShape(op statement.Op) typeShape {
 // binaryCoercible reports whether changing old to new is a relabel
 // PostgreSQL performs without a rewrite or scan. The rules are the
 // reference table's rows, deliberately narrow: widening varchar, varchar to
-// text, and widening numeric precision at the same scale. Anything not
-// provably on this list is not coercible.
+// text, widening numeric precision at the same scale, widening or removing
+// the precision of timestamp, timestamptz, time, and timetz, widening or
+// removing a varbit length, and cidr to inet. Anything not provably on this
+// list is not coercible.
 //
 // The widening rules hold for scalar columns only. An array column's
 // elements are converted one by one, and PostgreSQL rewrites the table for
@@ -1334,9 +1364,46 @@ func binaryCoercible(old, next typeShape) bool {
 		}
 		return len(old.mods) == 2 && len(next.mods) == 2 &&
 			next.mods[1] == old.mods[1] && next.mods[0] >= old.mods[0]
+	case "timestamp", "timestamptz", "time", "timetz":
+		return next.name == old.name && keepsTemporalPrecision(old.mods, next.mods)
+	case "varbit":
+		if next.name != "varbit" {
+			return false
+		}
+		if len(next.mods) == 0 {
+			return true // dropping the length bound
+		}
+		return len(old.mods) == 1 && len(next.mods) == 1 && next.mods[0] >= old.mods[0]
+	case "cidr":
+		// A cidr value is an inet value with no host bits set, stored the
+		// same way, so the cast is a relabel. The reverse masks host bits
+		// and rewrites.
+		return next.name == "inet" && len(next.mods) == 0
 	default:
 		return false
 	}
+}
+
+// maxTemporalPrecision is the largest fractional-seconds precision
+// PostgreSQL stores for timestamp, timestamptz, time, and timetz; an
+// unspecified precision means the same.
+const maxTemporalPrecision = 6
+
+// keepsTemporalPrecision reports whether a temporal type's new precision
+// keeps every stored value as it is: unspecified, the maximum, or at least
+// the old precision. PostgreSQL relabels those without a rewrite, and
+// rounds every value, rewriting the table, for a lower one.
+func keepsTemporalPrecision(old, next []int32) bool {
+	if len(next) == 0 {
+		return true
+	}
+	if len(next) != 1 {
+		return false
+	}
+	if next[0] >= maxTemporalPrecision {
+		return true
+	}
+	return len(old) == 1 && next[0] >= old[0]
 }
 
 // int32sEqual reports element-wise equality.
@@ -1373,6 +1440,8 @@ func catalogTypeName(name string) string {
 		return "time"
 	case "time with time zone":
 		return "timetz"
+	case "bit varying":
+		return "varbit"
 	default:
 		return name
 	}

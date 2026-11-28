@@ -28,6 +28,16 @@ type partitionNode struct {
 	// a partition out when it attaches an index, so no index can be attached
 	// for it.
 	detachPending bool
+	// standalone marks a plain table that is not a partition yet: the table
+	// an ATTACH PARTITION will attach, given its indexes and key constraints
+	// first. Its proof is that it is still that table, under its name, a
+	// partition of nothing, and parentOID is unset.
+	standalone bool
+}
+
+// standaloneTable is the node for a plain table that is not a partition.
+func standaloneTable(oid uint32, schema, name string) partitionNode {
+	return partitionNode{oid: oid, schema: schema, name: name, relkind: "r", standalone: true}
 }
 
 func (n partitionNode) subPartitioned() bool { return n.relkind == "p" }
@@ -115,7 +125,36 @@ const proveNodeSQL = `SELECT EXISTS (
 		      AND h.inhparent OPERATOR(pg_catalog.=) $4
 		      AND NOT h.inhdetachpending)`
 
+// standaloneNodeSQL proves a standalone node: the same relation, under the
+// same schema and name, a plain table, and a partition or inheritance child
+// of nothing. Every relation and operator is pg_catalog-qualified (CO-9).
+const standaloneNodeSQL = `SELECT EXISTS (
+		   SELECT 1
+		     FROM pg_catalog.pg_class c
+		     JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		    WHERE c.oid OPERATOR(pg_catalog.=) $1
+		      AND n.nspname OPERATOR(pg_catalog.=) $2
+		      AND c.relname OPERATOR(pg_catalog.=) $3
+		      AND c.relkind OPERATOR(pg_catalog.=) 'r'
+		      AND NOT c.relispartition
+		      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h
+		                       WHERE h.inhrelid OPERATOR(pg_catalog.=) c.oid))`
+
+// proveNodeIn proves the node is still what it was listed as: a partition
+// under its parent, or, for a standalone node, a table that is a partition
+// of nothing.
 func proveNodeIn(ctx context.Context, q querier, node partitionNode) error {
+	if node.standalone {
+		var present bool
+		if err := q.QueryRow(ctx, standaloneNodeSQL, node.oid, node.schema, node.name).Scan(&present); err != nil {
+			return fmt.Errorf("prove table %s: %w", node.qualified(), err)
+		}
+		if !present {
+			return fmt.Errorf("%w: ST-7: %s (table %d) is no longer that table under that name, a partition of nothing; it changed since it was resolved",
+				ErrInvariantViolation, node.qualified(), node.oid)
+		}
+		return nil
+	}
 	present, err := nodeInTree(ctx, q, node)
 	if err != nil {
 		return err

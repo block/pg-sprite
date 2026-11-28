@@ -49,6 +49,7 @@ func TestRefuseUndeclarableForeignKeyDropsRefusesOnlyUndeclarableKeys(t *testing
 	assert.Equal(t, router.DispositionRefuse, drop.Disposition)
 	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, drop.Reason)
 	assert.Equal(t, verdict.ClassCapabilityBoundary, drop.Class)
+	assert.Equal(t, verdict.CauseUndeclarableForeignKey, drop.RefusalCause)
 	assert.Empty(t, drop.Backend)
 	assert.Empty(t, drop.ExecSQL)
 	require.NotNil(t, drop.BlockingPassthroughEligible)

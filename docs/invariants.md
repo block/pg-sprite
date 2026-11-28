@@ -563,7 +563,12 @@ fence function's `format` in the writer's session — are qualified too, pinned 
 `TestCutoverBackendReadsResolveToTheRealCatalog` and
 `TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`; the resume's shadow size read in
 `MeasureResumeHeld`, which runs on the caller's pool, qualifies every function, relation, and
-operator, the `pg_total_relation_size(oid)` call included), `pkg/migrate`
+operator, the `pg_total_relation_size(oid)` call included — a planted
+`pg_total_relation_size(oid)` and a lookalike `name = name` on a shadowing
+`<schema>, pg_catalog` path do not change the size it reads,
+`TestMeasureResumeHeldReadsTheRealShadowSizeUnderAPlantedSizeFunction` and
+`TestMeasureResumeHeldSizesTheShadowAloneUnderALookalikeNameEquals`, and every name in the
+query is checked qualified by `TestShadowBytesSQLQualifiesEveryName`), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
@@ -804,7 +809,11 @@ whole build, confirms from the pool that the backend holding it is in the pool's
 (`ErrInvariantViolation` otherwise), runs every step under the session's `Bind` context, and
 reports a lost lock as `ErrInvariantViolation` wrapping `dbconn.ErrTableLockLost` whatever the
 cancelled step reported, so a build the loss cancelled never carries a retryable invalid-index
-code (`TestBuildPartitionedIndexReportsALostTableLockAsAnInvariantViolation`).
+code (`TestBuildPartitionedIndexReportsALostTableLockAsAnInvariantViolation`); `pkg/executor`
+`AttachPartitionOnline` (`pkg/executor/attach_partition_flow.go`) holds the parent's lock the
+same way, through the same `runUnderParentLock`, for every step from the proofs to the `ATTACH`,
+so a second run on the parent is refused with `TableLockHeldError` before it reads anything
+(`TestAttachPartitionOnlineRefusesASecondRunOnTheSameParent`).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -833,13 +842,18 @@ cancelled wait leaves is a detach-pending partition, which the server keeps cons
 through the table leave it out, rows in its range are refused) and the executor detects from
 `pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors; before a native step, a create step that adds a foreign key, or a table drop
-first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
+native and copy-and-swap executors; before a native step, a create step that adds a foreign key, a table drop,
+an attach proof's `ADD` or `DROP` of its CHECK, or the online `ATTACH PARTITION` itself
+(`pkg/executor/attach_proof.go`, `pkg/executor/attach_partition.go`, and the flow that composes
+them, `pkg/executor/attach_partition_flow.go`, whose index step's `USING INDEX` and foreign key
+step's `ADD ... NOT VALID` request their locks under `lock_timeout` without this wait) first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
 lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
-`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, and then
-requests its lock under its lock budget either way, so the wait adds at most `HolderWait` to the bound and never
-fails a step (`pkg/executor/lock_holder_wait.go`; `TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
-`TestExecuteNativeRequestsItsLockOnceTheWaitRunsOut`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+`RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, then
+requests its lock under its lock budget once the holder is gone, and ends without requesting it, with
+`executor.LingeringHolderError`, when the holder is still there, so the wait adds at most `HolderWait` to the bound
+and never queues a step behind a holder it outlasted (`pkg/executor/lock_holder_wait.go`;
+`TestExecuteNativeWaitsOutsideTheLockQueueWhileAReaderHoldsTheTable`,
+`TestExecuteNativeEndsWithoutQueueingWhenAReaderOutlastsTheWait`); `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
 source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then
@@ -873,7 +887,8 @@ statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
 same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
-The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported)
+The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported,
+also reached through the attach index step in `pkg/executor/attach_index.go` for a table to attach)
 takes `ACCESS EXCLUSIVE` on one leaf only for `ADD CONSTRAINT ... USING INDEX` on an index already
 built concurrently, in a brief transaction under both bounds. A primary key over a column the leaf
 allows to be NULL, or whose not-null constraint is `NOT VALID` on PostgreSQL 18, would make that
@@ -1323,10 +1338,10 @@ before its row; a first save whose row does not land drops the slot and the shad
 a slot of the derived name the run did not make is reported as the `*decode.SlotExistsError`
 it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
-row's position — a ceiling abort included, whose backlog a resume drains, though after a
-`stream-behind` abort a resume under the same ceiling stops again unless the stream reads
-through that backlog within the first catch-up cycle, which judges the slot, so it needs a
-ceiling above the slot's unconfirmed WAL — or the
+row's position — a retained-WAL ceiling abort included, whose backlog a resume drains, while
+after a `stream-behind` abort a resume under the same ceiling is refused as
+`resume-slot-backlog` before it opens the stream, judged on the slot as it stands at the
+resume, so it needs a ceiling above the slot's unconfirmed WAL — or the
 operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`, or has a
 restart (`RunOptions.Restart`) do the same sequence under the run's own lock, or a discard
 (`Runner.Discard`) do it under a lock of its own without running the change — a data fault
@@ -1532,7 +1547,16 @@ did not commit is measured as any resume, pinned by
 admission mints reports `FinishesCommittedSwap`, and a `Runner` that finds a row asking for
 more under its lock refuses it as `finish-admission-stale` before it writes, pinned by
 `TestRunRefusesAFinishOnlyTargetOnceTheRowIsDone` and
-`TestRunRefusesAFinishOnlyTargetOnARowWhoseSwapDidNotCommit`), chained by type —
+`TestRunRefusesAFinishOnlyTargetOnARowWhoseSwapDidNotCommit`; the figure for each
+row state — no row, a `done` or incompatible row, a missing shadow, a materialized view under
+the shadow's name, a quiesced run or a row naming no slot beside the route's slot, and a
+committed swap, with or without the row naming the route's slot — is pinned by
+`TestMeasureResumeHeldOverTheRowStates`, a zero shape refused before any read by
+`TestMeasureResumeHeldRefusesAZeroShapeWithoutReadingAnything`, another database's
+relation by `TestMeasureResumeHeldCountsNoTableOfAnotherDatabase`, a failed shadow read
+returned rather than counted as nothing by `TestMeasureResumeHeldReturnsAShadowReadThatFails`,
+and desired-state admission's discount by
+`TestRunDesiredCopySwapResumeIsAskedOnlyForTheDiskLeftToGrow`), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
 require is minted by the last; `pkg/schemachange` `CheckCopySwap` runs the chain with the
 resume measure as one call, which `pkg/migrate` calls; and before them `pkg/schemachange` `CheckPool`, which
@@ -1605,7 +1629,11 @@ and its attach); the leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE
 detach pending, before it builds, and in the constraint's transaction locks the leaf
 `SHARE UPDATE EXCLUSIVE`, which excludes a detach, before it proves the leaf and the index by
 identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-pending cases,
-`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`). `AddPartitionedKey` admits only a named
+`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`); the attach index step
+(`pkg/executor/attach_index.go`, unexported) proves, before its builds and again after, that the
+parent is still a partitioned table and the table to attach still that plain table, a partition or
+inheritance child of nothing (`standaloneNodeSQL` through `proveNodeIn`;
+`TestEnsureAttachIndexesRefusesATableOrParentItDoesNotTake`). `AddPartitionedKey` admits only a named
 `ADD PRIMARY KEY` or `ADD UNIQUE` on the preflighted partitioned table and renders the parent's
 statement from the admitted kind, name, and columns alone; it refuses a tree holding a partition
 with its detach pending before any leaf step, since a key given to a partition leaving the tree

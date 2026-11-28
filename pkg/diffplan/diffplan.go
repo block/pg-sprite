@@ -411,6 +411,15 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 				ps.Validates = ch.AddsNotValid
 			}
 		}
+		if ch.AddsKey != nil {
+			adopts, err := adoptsInSequence(ps.ExecSQL, ch.AddsKey.Index)
+			if err != nil {
+				return nil, "", fmt.Errorf("plan derived statement %q: %w", routed.Statements[i].Statement, err)
+			}
+			if adopts {
+				ps.Adopts = ch.AddsKey
+			}
+		}
 		ps.Drops = ch.Drops
 		ps.ReplacedBy = ch.ReplacedBy
 		ps.Replacement = ch.Replacement
@@ -418,6 +427,22 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil
+}
+
+// adoptsInSequence reports whether a step of execSQL takes over the named
+// index: an add of a primary key or unique constraint the planner runs as a
+// concurrent build and then ADD CONSTRAINT ... USING INDEX.
+func adoptsInSequence(execSQL []string, index string) (bool, error) {
+	for _, sql := range execSQL {
+		ops, err := statement.ParseOps(sql)
+		if err != nil {
+			return false, fmt.Errorf("read the operations of %q: %w", sql, err)
+		}
+		if len(ops) == 1 && ops[0].Kind == statement.OpAddConstraint && ops[0].UsingIndex && slices.Equal(ops[0].Indexes, []string{index}) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // validatesInSequence reports whether a step of execSQL validates the named
