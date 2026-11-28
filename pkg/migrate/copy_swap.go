@@ -474,9 +474,11 @@ func runAbandoned(err error) bool {
 // slot-lag ceiling stopped because its slot retained too much WAL also
 // names the ceiling to raise, since a resume under the same ceiling meets
 // the same write rate; one it stopped because the stream fell behind names
-// the ceiling to raise and the restart, since the slot keeps the
-// unconfirmed WAL over the ceiling and a resume's first catch-up cycle
-// reads it before the stream has read through it. In each case the detail
+// the ceiling to raise, the hand drop of the slot, and the restart, since
+// the slot keeps the unconfirmed WAL over the ceiling and a resume's first
+// catch-up cycle reads it before the stream has read through it; the error
+// text already gives that account, so this detail carries only the flags
+// and the slot to drop. In each case the detail
 // names the hold the run keeps or kept on the source, since that is what
 // the operator is paying for in the meantime: the write fence of a run that
 // blocked writes, or the replication slot of a live run, which pins WAL on
@@ -515,10 +517,11 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); " + countedAgainstDisk
 	}
 	if ok && lag.Cause == decode.SlotLagStreamBehind {
-		return resume + "; the WAL the stream had not confirmed, more than the ceiling, stays in the slot, so a resume under the same ceiling stops again on its first catch-up cycle " +
-			"unless the stream reads through that WAL within the cycle: once the write rate has dropped, resume with a slot-lag ceiling above the unconfirmed WAL (--slot-lag-ceiling SIZE); " +
-			countedAgainstDisk + "; or start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release +
-			", deletes the checkpoint row, and runs the change from the start"
+		return resume + "; to resume, raise the slot-lag ceiling (--slot-lag-ceiling SIZE) with margin above the slot's unconfirmed WAL as pg_replication_slots reads it then, " +
+			"since the stopped slot keeps adding to it; " + countedAgainstDisk +
+			"; or drop the slot by hand (pg_drop_replication_slot), which keeps the shadow and the checkpoint row, so the next run reconciles with a fresh slot instead of copying everything again" +
+			"; or start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release +
+			", deletes the checkpoint row, and runs the change from the start, checked against --free-disk as a fresh run"
 	}
 	return resume
 }
