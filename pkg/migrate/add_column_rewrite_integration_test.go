@@ -11,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -47,6 +48,7 @@ func TestRunAddColumnFollowsTheProvenRewrite(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
+		assert.Contains(t, v.Detail, planner.ConstrainedTypeHelp(schema+".positive_int"), "the refusal names the domain and the base-type path")
 		assert.Equal(t, before, filenode(t, pool, schema+".t"))
 		assert.False(t, hasColumn(t, pool, schema, "score"), "the refused change must not touch the schema")
 	})

@@ -114,6 +114,9 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		if len(d.PartitionKeyTables) > 0 {
 			w.diag("help", "", planner.PartitionKeyHelp)
 		}
+		if d.ConstrainedType != "" {
+			w.diag("help", "", planner.ConstrainedTypeHelp(d.ConstrainedType))
+		}
 		switch {
 		case d.Reason != planner.ReasonNotNullWithoutDefault:
 		case d.NotNullFromType != "":

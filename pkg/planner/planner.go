@@ -414,6 +414,13 @@ type Decision struct {
 	// Adding a nullable column of that type is impossible, so the manual
 	// path is the type's base type instead (see NotNullFromTypeHelp).
 	NotNullFromType string `json:"not_null_from_type,omitempty"`
+	// ConstrainedType is the added column's type, as the statement spells
+	// it, when that type is a domain with constraints, which PostgreSQL
+	// checks against every row by rewriting the table whatever default the
+	// column is given. Present only for type-rewrite decisions. The manual
+	// path is the domain's base type with its constraints on the column
+	// instead (see ConstrainedTypeHelp).
+	ConstrainedType string `json:"constrained_type,omitempty"`
 	// DependentFix is the manual path for the views, policies, and
 	// triggers that block the change, which depends on what the change
 	// would do with those dependents out of the way. Like Kind, it is not part
@@ -938,6 +945,17 @@ func NotNullFromTypeHelp(typeName string) string {
 		"to check every row against it whatever default the column is given; add the column with the type's base type instead"
 }
 
+// ConstrainedTypeHelp is the operator-facing manual path for adding a
+// column whose type, typeName, is a domain with constraints: PostgreSQL
+// rewrites the table to check every row against them, whatever default the
+// column is given, so the column takes the domain's base type and carries
+// the constraints itself, in forms PostgreSQL adds without a rewrite.
+func ConstrainedTypeHelp(typeName string) string {
+	return "the column's type, " + typeName + ", is a domain with constraints, and PostgreSQL rewrites the table " +
+		"to check every row against them whatever default the column is given; add the column with the domain's base type instead, " +
+		"with NOT NULL and a constant DEFAULT if the domain declares NOT NULL, and add a CHECK it declares as NOT VALID, then VALIDATE CONSTRAINT"
+}
+
 // notNullFromType returns the type op spells for its column when that type
 // is what makes the added column NOT NULL: the column spells neither NOT
 // NULL nor PRIMARY KEY, so only its type can. It returns "" otherwise.
@@ -945,6 +963,12 @@ func notNullFromType(op statement.Op) string {
 	if op.DeclaresNotNull || slices.Contains(op.InlineConstraints, statement.ConstraintPrimaryKey) {
 		return ""
 	}
+	return spelledType(op)
+}
+
+// spelledType is the added column's type as op spells it, schema-qualified
+// when the statement qualifies it.
+func spelledType(op statement.Op) string {
 	if op.NewTypeSchema != "" {
 		return op.NewTypeSchema + "." + op.NewType
 	}
@@ -1257,7 +1281,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
 		case addColumnProof(op, facts) == statement.AddColumnTypeRewrites:
-			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
+			d.Route, d.Reason, d.ConstrainedType = RouteCopyAndSwap, ReasonTypeRewrite, spelledType(op)
 		case addColumnProof(op, facts) == statement.AddColumnUnproven:
 			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
 		case op.Default == statement.DefaultExpression && !addsInPlace(addColumnProof(op, facts)):

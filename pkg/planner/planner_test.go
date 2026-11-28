@@ -1323,6 +1323,29 @@ func TestClassifyNamesTheTypeANotNullColumnTakesItsNotNullFrom(t *testing.T) {
 		planner.NotNullFromTypeHelp("billing.tier_required"))
 }
 
+// An added column of a domain with constraints rewrites the table whatever
+// its default, and the decision names the domain so the help can point at
+// its base type.
+func TestClassifyNamesTheConstrainedTypeAnAddedColumnRewritesFor(t *testing.T) {
+	for sql, want := range map[string]string{
+		"ALTER TABLE customers ADD COLUMN qty positive_qty DEFAULT 1":         "positive_qty",
+		"ALTER TABLE customers ADD COLUMN qty billing.positive_qty DEFAULT 1": "billing.positive_qty",
+	} {
+		facts := planner.Facts{
+			ColumnTypes:     map[string]string{"id": "bigint", "email": "text"},
+			AddColumnProofs: map[string]statement.AddColumnProof{"qty": statement.AddColumnTypeRewrites},
+		}
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, planner.ReasonTypeRewrite, d.Reason, sql)
+		assert.Equal(t, want, d.ConstrainedType, sql)
+	}
+	d := classifyWithFacts(t, "ALTER TABLE customers ADD COLUMN qty int DEFAULT 1", planner.Facts{
+		ColumnTypes:     map[string]string{"id": "bigint", "email": "text"},
+		AddColumnProofs: map[string]statement.AddColumnProof{"qty": statement.AddColumnInPlace},
+	})
+	assert.Empty(t, d.ConstrainedType, "a column added in place names no constrained type")
+}
+
 // The columns whose rows may be left NULL are the ones added with no
 // DEFAULT of their own that the table does not already have, NOT NULL or
 // not, since a domain or an inline PRIMARY KEY can make a column NOT NULL

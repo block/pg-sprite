@@ -171,12 +171,27 @@ func manualPath(g suggest.Guidance) string {
 // backendUnavailableVerdict is the refusal for a change whose backend has no
 // carrying path for it in this build.
 func backendUnavailableVerdict(st statement.Statement, rs router.Statement) verdict.Verdict {
+	detail := fmt.Sprintf("the change requires the %s strategy, which does not carry this operation yet: "+
+		"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend)
+	if help, ok := constrainedTypeHelp(rs.Decisions); ok {
+		detail = detail + "; " + help
+	}
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: fmt.Sprintf("the change requires the %s strategy, which does not carry this operation yet: "+
-			"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend),
+		Detail:    detail,
 	}.WithRefusal(backendUnavailableRefusal())
+}
+
+// constrainedTypeHelp is the manual path for the first decision that adds a
+// column of a domain with constraints, which is what forces the rewrite.
+func constrainedTypeHelp(decisions []planner.Decision) (string, bool) {
+	for _, d := range decisions {
+		if d.ConstrainedType != "" {
+			return planner.ConstrainedTypeHelp(d.ConstrainedType), true
+		}
+	}
+	return "", false
 }
 
 // routeRefusalVerdict is the refusal for a statement the planner refused:
