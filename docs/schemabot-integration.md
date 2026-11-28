@@ -1264,16 +1264,24 @@ change already has a shadow and a native attempt would leave it behind. Any othe
 on the table, an index rename and a blocking index statement under `--accept-blocking`
 included, is refused with
 `copy-and-swap-refused`, class `environmental`, cause `copy-and-swap-run-stopped`, and
-nothing executes; the `detail` names the stopped statement and its phase. A host finishes the
+nothing executes; the `detail` names the stopped statement and its phase. The desired-state
+changes that run outside `Run` are refused the same way before they touch the table: a
+reviewed plan's `DROP INDEX CONCURRENTLY`, and a row security file's change, which
+`executor.ExecuteDesiredRowSecurity` runs in one transaction (`migrate --desired` checks with
+`migrate.AdmitRowSecurityStoppedRun` before it calls the executor; a library caller that calls
+the executor directly makes the same check first, since the executor reads no checkpoint row). Either would change the source under the run: a
+dropped index or an added policy makes the source differ from the shape the run recorded, and
+the resume or the cutover gate then refuses it. A host finishes the
 stopped run by running its statement again, then runs the new one. Before the swap, a new
 statement that itself routes to copy-and-swap can start over instead under `--restart
 SCHEMA.TABLE`, which discards the stopped run; a statement that routes anywhere else cannot
 take `--restart`, so the stopped run has to be finished, or discarded by hand as for
-`resume-shadow-gone`. `migrate.RunDesired` refuses the same way, with the same cause, when the
-plan for the table is empty while such a row stands — the table matches the desired schema
-only because the stopped run swapped it in, and the retained source and the row would
-otherwise stay with nothing to finish them; a non-empty plan meets the row statement by
-statement through `Run`. A read of the row that fails stops `Run` before a verdict, with
+`resume-shadow-gone`. `migrate.RunDesired` and `migrate.RunDesiredWithRowSecurity` refuse the
+same way, with the same cause, when the plan for the table is empty while such a row stands —
+the table matches the desired schema only because the stopped run has not changed it yet or
+has already swapped it in, and the run's row and what it holds would otherwise stay with
+nothing to finish them; a non-empty plan meets the row statement by statement through `Run`
+and in its index drops. A read of the row that fails stops `Run` before a verdict, with
 nothing executed. A row that is `done` holds nothing. A row this engine cannot judge — in
 another format or an unknown phase (a rolling upgrade), in a checkpoint store an older engine
 created that no copy-and-swap run has evolved yet, or in a store the connecting role has no
@@ -1282,8 +1290,17 @@ retained source (the `pgsprite_…_new` or `pgsprite_…_old` relation the engin
 table's name): the same refusal, whose `detail` names the relation and why the row cannot be
 judged; `--restart` lifts it only for a statement that routes to copy-and-swap, whose route
 then judges the row itself under the table's lock. With neither relation standing, statements route
-as they would with no row. `--dry-run` does not read the row, so a preview can show a route the
-apply then refuses or resumes.
+as they would with no row. `--dry-run` reads the row the same way, imperative and desired-state
+alike (`migrate.AdmitStoppedRun`, `migrate.AdmitPlanStoppedRun`, and
+`migrate.AdmitRowSecurityStoppedRun` are the checks it makes), and ends in the refusal the
+apply would give, at the point the apply gives it; the dry run of the stopped statement itself
+is not refused and shows the route against the table's current shape, while the apply resumes
+it through copy-and-swap. Two paths make no check, deliberately: `ALTER TYPE ... ADD VALUE`
+names a type and locks no table, and an enum label is not part of a table's shape, so it
+cannot change what a stopped run holds — the label is added and the stopped run still resumes
+and finishes; and a reviewed plan's blocking drop of a partitioned table's index (under
+`--accept-blocking`) can never meet a stopped run, since copy-and-swap refuses a partitioned
+table before it builds anything.
 
 **What `--restart` excludes.** It is a copy-and-swap acknowledgement, so it is an error —
 before any verdict, with nothing executed or discarded — on a statement the router sends

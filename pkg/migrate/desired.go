@@ -319,15 +319,15 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// matches only because a stopped copy-and-swap run swapped its shape in
 	// is not converged: the run's row and what it still holds stand with
 	// nothing planned to finish them. A non-empty plan meets a stopped run
-	// in Run, statement by statement.
+	// in Run, statement by statement, and in the index drop that runs
+	// outside it.
 	if len(report.Statements) == 0 {
-		stopped, err := findStoppedRun(ctx, pool, report.Schema, report.Table)
+		refused, held, err := refuseEmptyPlanOverStoppedRun(ctx, pool, report)
 		if err != nil {
 			return DesiredResult{}, err
 		}
-		if stopped.standing() {
-			return DesiredResult{Plan: report}.refused(copySwapRunStoppedRefusal(),
-				desiredRunStoppedDetail(report.Schema, report.Table, stopped)), nil
+		if held {
+			return refused, nil
 		}
 		return DesiredResult{
 			Plan:    report,
@@ -419,6 +419,15 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 			return result, fmt.Errorf("%w: planned statement %d is destructive but carries no definition of what it drops",
 				executor.ErrInvariantViolation, i+1)
 		}
+		if ps.Kind == schemadiff.ChangeRenameIndex && ps.Renames == nil {
+			// The reviewed plan binds a rename to the definition of the
+			// index it renames; one that carries none cannot be re-checked
+			// before it runs, so it does not.
+			result.Outcome = verdict.OutcomeFailed
+			result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+			return result, fmt.Errorf("%w: planned statement %d renames an index but carries no definition of the index it renames",
+				executor.ErrInvariantViolation, i+1)
+		}
 		var (
 			v      verdict.Verdict
 			runErr error
@@ -431,9 +440,9 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 		case ps.Destructive:
 			stmtOpts := opts
 			stmtOpts.AllowDestructive = allowDestructive
-			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
 		default:
-			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
 		}
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
