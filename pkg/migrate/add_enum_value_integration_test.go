@@ -199,8 +199,9 @@ func enumRole(t *testing.T, pool *pgxpool.Pool, schema, serverURL string, usage 
 }
 
 // ALTER TYPE needs membership in the type's owning role. A role without it
-// is refused before the statement runs, with the grant that fixes it and a
-// hint that transfers the type instead.
+// is refused before the statement runs. When the owner is a superuser, the
+// refusal names transferring the type to an ordinary role rather than a
+// membership grant that would hand the engine role superuser power.
 func TestAddEnumValueRefusesARoleThatDoesNotOwnTheType(t *testing.T) {
 	pool, schema, serverURL := enumFixture(t)
 	engine, role := enumRole(t, pool, schema, serverURL, true)
@@ -210,7 +211,9 @@ func TestAddEnumValueRefusesARoleThatDoesNotOwnTheType(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
 	assert.Contains(t, v.Detail, "pg_has_role("+role+", ")
-	assert.Contains(t, v.Detail, fmt.Sprintf("transfer the type instead: ALTER TYPE %q.\"mood\" OWNER TO <role>", schema))
+	assert.Contains(t, v.Detail, fmt.Sprintf("provision with: ALTER TYPE %q.\"mood\" OWNER TO <role>", schema))
+	assert.Contains(t, v.Detail, "superuser or holds administrative power")
+	assert.NotContains(t, v.Detail, "GRANT")
 	assert.Equal(t, []string{"happy", "sad"}, enumLabels(t, pool, schema), "nothing was added")
 }
 
