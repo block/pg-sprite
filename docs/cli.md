@@ -331,8 +331,22 @@ Without `--copy-and-swap` the same command is refused with
 until the swap. A stopped run resumes when you run the same command again,
 `--restart SCHEMA.TABLE` starts it over, and
 [`discard SCHEMA.TABLE`](#abandon-a-stopped-copy-and-swap-run) abandons it
-without running the change. Choosing between live and
-offline, what a run needs, and how to stop one are in
+without running the change. A run whose table you changed by hand since it
+started — a column or an index added, say — cannot resume: its cutover stops
+with `cutover-schema-drift`, or running the same command again is refused with
+`resume-source-changed` (exit 2), and the detail names the shadow, the slot or
+fence, and the checkpoint row the run leaves, and both ways past them:
+
+```console
+$ pg-sprite migrate --copy-and-swap --free-disk 10GiB --alter "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+refused (copy-and-swap-refused)
+  table:     public.orders
+  class:     environmental
+  statement: ALTER TABLE public.orders ALTER COLUMN user_id TYPE bigint
+  detail:    public.orders changed since this run built its shadow (for example a column or index added by hand); the stopped run cannot resume, and it leaves shadow table public._pgsprite_c74da4a21f58f903_new, replication slot pgsprite_a725d037, which retains WAL on the server until it is dropped, publication pgsprite_a725d037, and the checkpoint row in phase verifying; start over by running the same pg-sprite migrate command with --restart public.orders, or abandon the run without running the change with pg-sprite discard public.orders
+```
+
+Choosing between live and offline, what a run needs, and how to stop one are in
 [copy-and-swap.md](copy-and-swap.md).
 
 ## Manage tables from schema files

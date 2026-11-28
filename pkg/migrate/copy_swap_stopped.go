@@ -156,8 +156,14 @@ func copySwapRunStoppedVerdict(st statement.Statement, table string, s stoppedRu
 	return v
 }
 
-// stoppedRunDetail names the stopped run on table and the way past it,
-// offering the restart only when restartable.
+// stoppedRunDetail names the stopped run on table and the ways past it,
+// offering the restart only when restartable, and the restart and the
+// discard only before the run's cutover, whose swap may have committed.
+// The detail is written for the CLI operator and names CLI flags and
+// commands, as copySwapStoppedRemedy's does; a library host routes on the
+// verdict's cause, and its restart acknowledgement is
+// CopySwapOptions.Restart with CopySwapOptions.Enabled, its discard
+// schemachange.Runner.Discard.
 func stoppedRunDetail(table string, s stoppedRun, restartable bool) string {
 	if s.unjudged != "" {
 		return fmt.Sprintf("a copy-and-swap run on %s left %s standing, and this pg-sprite cannot judge it: %s; "+
@@ -167,12 +173,14 @@ func stoppedRunDetail(table string, s stoppedRun, restartable bool) string {
 	detail := fmt.Sprintf("a copy-and-swap run of %q on %s stopped in phase %s, and this statement is not the one it records; "+
 		"run the stopped statement again to finish it, then run this one",
 		s.cp.Statement, table, s.cp.Phase)
-	if restartable && s.cp.Phase != checkpoint.PhaseCutover {
-		detail += ", or, when this statement routes to copy-and-swap, start it over with the restart acknowledgement " +
-			"and the route opened (--restart SCHEMA.TABLE with --copy-and-swap; CopySwapOptions.Restart with Enabled), " +
-			"which discards the stopped run first"
+	if s.cp.Phase == checkpoint.PhaseCutover {
+		return detail
 	}
-	return detail
+	if restartable {
+		detail += fmt.Sprintf(", or, when this statement routes to copy-and-swap, run it with --copy-and-swap --restart %s, "+
+			"which discards the stopped run first", table)
+	}
+	return detail + fmt.Sprintf(", or abandon the stopped run without running its change with pg-sprite discard %s, then run this one", table)
 }
 
 // AdmitStoppedRun is the dry run's forecast of the check [Run] makes once

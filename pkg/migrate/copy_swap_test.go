@@ -335,6 +335,59 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.ErrorIs(t, err, executor.ErrInvariantViolation)
 	})
 
+	// A resume refused because the table changed under the stopped run is
+	// an environmental refusal whose detail names what the run leaves and
+	// the two commands past it, and none of the library's option names.
+	liveStanding := &schemachange.StandingRunError{Schema: "public", Table: "c200", Shadow: "_pgsprite_c200_new",
+		Slot: "pgsprite_c200", Publication: "pgsprite_c200", Phase: checkpoint.PhaseVerifying}
+	t.Run("a resume refused for a changed source names the leftovers and the restart and discard commands", func(t *testing.T) {
+		refused := &schemachange.RefusalError{Cause: schemachange.CauseResumeSourceChanged, Detail: "the library's account, with a RunOptions.Restart remedy"}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("run: %w: %w", refused, liveStanding))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
+		assert.Equal(t, verdict.Cause(schemachange.CauseResumeSourceChanged), v.Cause)
+		assert.Equal(t, "public.c200 changed since this run built its shadow (for example a column or index added by hand); "+
+			"the stopped run cannot resume, and it leaves shadow table public._pgsprite_c200_new, "+
+			"replication slot pgsprite_c200, which retains WAL on the server until it is dropped, publication pgsprite_c200, "+
+			"and the checkpoint row in phase verifying; "+
+			"start over by running the same pg-sprite migrate command with --restart public.c200, "+
+			"or abandon the run without running the change with pg-sprite discard public.c200", v.Detail)
+	})
+
+	t.Run("a changed-source refusal without what the run leaves is an invariant violation", func(t *testing.T) {
+		refused := &schemachange.RefusalError{Cause: schemachange.CauseResumeSourceChanged, Detail: "nothing named"}
+		_, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("run: %w", refused))
+		assert.ErrorIs(t, err, executor.ErrInvariantViolation)
+	})
+
+	// A run the cutover gate stopped on drift keeps the gate's account
+	// and adds what the run leaves and the two commands past it.
+	t.Run("a cutover stopped on schema drift names the leftovers and the restart and discard commands", func(t *testing.T) {
+		refused := &schemachange.RefusalError{Cause: schemachange.CauseSchemaDrift, Detail: "source public.c200 changed shape since the shadow was built"}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("run: %w; %w", refused, liveStanding))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
+		assert.Equal(t, verdict.Cause(schemachange.CauseSchemaDrift), v.Cause)
+		assert.Equal(t, refused.Error()+"; the run stopped and leaves shadow table public._pgsprite_c200_new, "+
+			"replication slot pgsprite_c200, which retains WAL on the server until it is dropped, publication pgsprite_c200, "+
+			"and the checkpoint row in phase verifying; "+
+			"start over by running the same pg-sprite migrate command with --restart public.c200, "+
+			"or abandon the run without running the change with pg-sprite discard public.c200", v.Detail)
+	})
+
+	t.Run("a cutover stopped on drift by a run that blocked writes names the fence it leaves", func(t *testing.T) {
+		refused := &schemachange.RefusalError{Cause: schemachange.CauseFidelityDrift, Detail: "source public.c200 metadata changed since the shadow was built: grants"}
+		fenced := &schemachange.StandingRunError{Schema: "public", Table: "c200", Shadow: "_pgsprite_c200_new", Phase: checkpoint.PhaseVerifying}
+		v, err := copySwapRunVerdict(st, holdFence, fmt.Errorf("run: %w; %w", refused, fenced))
+		require.NoError(t, err)
+		assert.True(t, v.WritesBlocked)
+		assert.Contains(t, v.Detail, "leaves shadow table public._pgsprite_c200_new, the write fence on public.c200, and the checkpoint row in phase verifying")
+		assert.Contains(t, v.Detail, "--restart public.c200")
+		assert.Contains(t, v.Detail, "pg-sprite discard public.c200")
+		assert.NotContains(t, v.Detail, "RunOptions")
+	})
+
 	t.Run("a cancelled run is coded as cancelled by the caller", func(t *testing.T) {
 		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("copy: %w", context.Canceled))
 		assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)

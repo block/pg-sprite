@@ -137,12 +137,16 @@ const (
 	// CauseSchemaDrift means the source's or the shadow's introspected model
 	// no longer matches the fingerprint the build recorded (ST-5): a
 	// column, constraint, index, storage parameter, or column-owned
-	// sequence declaration was added, dropped, or changed since.
+	// sequence declaration was added, dropped, or changed since. From
+	// Runner.Run the error also carries a *StandingRunError (errors.As)
+	// naming what the stopped run leaves.
 	CauseSchemaDrift RefusalCause = "cutover-schema-drift"
 	// CauseFidelityDrift means the source's or the shadow's metadata — owner,
 	// grants, policies, comment, replica identity, statistics targets,
 	// unvalidated checks, or identity columns and their sequences —
-	// no longer matches the snapshot the build recorded (ST-5).
+	// no longer matches the snapshot the build recorded (ST-5). From
+	// Runner.Run the error also carries a *StandingRunError (errors.As)
+	// naming what the stopped run leaves.
 	CauseFidelityDrift RefusalCause = "cutover-fidelity-drift"
 	// CauseIndexInvalid means a shadow index has pg_index.indisvalid false
 	// (ST-5): swapping it in would put an index the planner never uses
@@ -195,8 +199,21 @@ const (
 	// CauseResumeRowMismatch means the checkpoint row handed to a resume
 	// does not describe the proven target and built shadow (ST-2): it is
 	// keyed on another table, names another shadow or slot, or carries the
-	// fingerprints of another statement.
+	// fingerprints of another statement than the shadow embodies.
 	CauseResumeRowMismatch RefusalCause = "resume-row-mismatch"
+	// CauseResumeSourceChanged means the checkpoint row handed to a
+	// resume still describes the shadow under its name, but the source no
+	// longer matches what the row recorded of it (ST-2): its introspected
+	// model differs from the source fingerprint — a column, constraint,
+	// index, storage parameter, or column-owned sequence declaration was
+	// added, dropped, or changed — or its metadata differs from the
+	// source's fidelity snapshot in the row's proof, since the build, by
+	// something other than the engine. The
+	// shadow no longer embodies the statement against this source, so the
+	// run cannot resume; it is started over (RunOptions.Restart) or
+	// discarded (Runner.Discard). Nothing is written, and the refusal
+	// wraps a *StandingRunError naming what the stopped run leaves.
+	CauseResumeSourceChanged RefusalCause = "resume-source-changed"
 	// CauseResumeRowDecoding means the checkpoint row handed to a resume
 	// was written by the other kind of run (ST-3): the quiesced runner was
 	// handed a row that names a slot or publication, or is in a phase only
@@ -316,6 +333,7 @@ func RefusalCauses() []RefusalCause {
 		CauseRestartSwapCommitted,
 		CauseFinishAdmissionStale,
 		CauseResumeRowMismatch,
+		CauseResumeSourceChanged,
 		CauseResumeRowDecoding,
 		CauseShadowUnrecorded,
 		CauseResumeShadowGone,
@@ -360,7 +378,7 @@ func (c RefusalCause) Invariant() string {
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
-	case CauseResumeRowMismatch, CauseShadowUnrecorded, CauseResumeShadowGone:
+	case CauseResumeRowMismatch, CauseResumeSourceChanged, CauseShadowUnrecorded, CauseResumeShadowGone:
 		return "ST-2"
 	case CauseResumeSlotForeign, CauseResumeRowDecoding, CauseResumeSlotBacklog:
 		return "ST-3"
@@ -392,7 +410,7 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
 		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
-		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld, CauseResumeSlotBacklog,
+		CauseResumeShadowGone, CauseResumeSourceChanged, CauseResumeSlotForeign, CauseResumeSlotHeld, CauseResumeSlotBacklog,
 		CauseRestartSwapCommitted, CauseCopyConversionDrift, CauseFinishAdmissionStale:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewColumn, CauseStatementNewSequence:

@@ -429,7 +429,8 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 				executor.ErrInvariantViolation, cause)
 		}
 		v := refusedVerdict(st, r, err.Error())
-		if cause == schemachange.CauseResumeSlotBacklog {
+		switch cause {
+		case schemachange.CauseResumeSlotBacklog:
 			// The CLI operator acts on the flags, so the detail is built
 			// from the slot's figures rather than the library's text.
 			backlog, ok := errors.AsType[*schemachange.SlotBacklogError](err)
@@ -437,6 +438,17 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 				return verdict.Verdict{}, fmt.Errorf("%w: %s refusal carries no slot reading", executor.ErrInvariantViolation, cause)
 			}
 			v.Detail = slotBacklogRefusalDetail(backlog)
+		case schemachange.CauseResumeSourceChanged:
+			// The CLI operator acts on the commands, so the detail is
+			// built from what the run leaves rather than the library's
+			// text, which names the library's options.
+			standing, ok := errors.AsType[*schemachange.StandingRunError](err)
+			if !ok {
+				return verdict.Verdict{}, fmt.Errorf("%w: %s refusal names nothing the run leaves", executor.ErrInvariantViolation, cause)
+			}
+			v.Detail = sourceChangedDetail(standing)
+		case schemachange.CauseSchemaDrift, schemachange.CauseFidelityDrift:
+			v.Detail = cutoverDriftDetail(err)
 		}
 		if hold == holdFence {
 			// A refusal raised after the row was saved leaves the run's
