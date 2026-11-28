@@ -534,12 +534,50 @@ func TestBuildIndexConcurrentlyUniqueBuildOverDuplicatesIsDataFault(t *testing.T
 	assert.Equal(t, "accounts_email_key", invalidErr.Index)
 	assert.Equal(t, "accounts", invalidErr.Table)
 	assert.False(t, invalidErr.Recoverable(), "a rebuild would meet the same duplicate rows")
+	// Rows already in the table fail the build's first scan, before the
+	// server marks the entry ready, so no write maintains the leftover.
+	assert.False(t, invalidErr.Ready, "a build that fails its first scan leaves an entry no write maintains")
+	assert.False(t, indexReady(t, pool, schema, "accounts_email_key"))
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr, "the server error stays in the chain")
 	assert.Equal(t, sqlstateUniqueViolation, pgErr.Code)
 	exists, valid := indexState(t, pool, schema, "accounts_email_key")
 	assert.True(t, exists, "the executor must not have dropped the leftover")
 	assert.False(t, valid, "the leftover must be invalid")
+}
+
+// indexReady reads pg_index.indisready for schema.index.
+func indexReady(t *testing.T, pool *pgxpool.Pool, schema, index string) bool {
+	t.Helper()
+	var ready bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT i.indisready FROM pg_catalog.pg_index i WHERE i.indexrelid = ($1 || '.' || $2)::regclass`,
+		schema, index).Scan(&ready))
+	return ready
+}
+
+// An invalid index the server still maintains on every write is reported
+// ready, so a caller can say that a unique one goes on rejecting writes that
+// duplicate its key. The entry here is a built unique index marked invalid
+// in the catalog: ready, and invalid.
+func TestBuildIndexConcurrentlyReportsAReadyInvalidIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id int PRIMARY KEY, c int);
+		CREATE UNIQUE INDEX idx_ready ON %[1]s.t (c);
+		UPDATE pg_catalog.pg_index SET indisvalid = false WHERE indexrelid = '%[1]s.idx_ready'::regclass`, schema))
+	require.NoError(t, err)
+
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_ready ON %s.t (c)", schema), buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrAbandonedInvalidIndex)
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, err, &invalidErr)
+	assert.Equal(t, "idx_ready", invalidErr.Index)
+	assert.True(t, invalidErr.Ready, "the server maintains the entry on every write")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %[1]s.t VALUES (1, 7); INSERT INTO %[1]s.t VALUES (2, 7)", schema))
+	require.Error(t, err, "the ready invalid unique index still rejects a duplicate key")
 }
 
 func TestBuildIndexConcurrentlyFailsClosedOnAbandonedInvalidLeftover(t *testing.T) {

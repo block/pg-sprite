@@ -28,6 +28,13 @@ type InvalidIndexError struct {
 	// this exact index (pg_stat_progress_create_index), when the entry is
 	// in flight; zero otherwise.
 	BuilderPID uint32
+	// Ready reports pg_index.indisready for the entry the inspection saw.
+	// The server maintains a ready index on every write, so a ready unique
+	// index rejects writes that duplicate its key even while it is invalid.
+	// A concurrent build that failed before its entry became ready leaves
+	// an index no write touches. False when the state could not be
+	// inspected.
+	Ready bool
 	// Build is the build failure that left the index invalid; nil when
 	// there is no build failure to carry.
 	Build error
@@ -159,7 +166,10 @@ type invalidIndex struct {
 	// entry (droppableColumn). An entry it cannot remove is not the debris
 	// of a failed concurrent build, whatever its validity flag says.
 	droppable bool
-	builder   builderFacts
+	// ready is pg_index.indisready: whether the server maintains the entry
+	// on every write.
+	ready   bool
+	builder builderFacts
 }
 
 // droppableColumn is the boolean that says whether DROP INDEX CONCURRENTLY
@@ -250,8 +260,8 @@ func newBuilderFacts(pid *int32, hiddenRows int64, tracking bool) builderFacts {
 // schema-wide rather than pinned to one table: debris carries the
 // requested name in the table's schema whatever table it ended up on, and
 // an invalid index under this name on any table makes a later failure
-// verdict undecidable. The identity, table, and builder facts come from
-// one statement, so they describe the same entry.
+// verdict undecidable. The identity, table, readiness, and builder facts
+// come from one statement, so they describe the same entry.
 func inspectInvalidIndex(ctx context.Context, q querier, schema, index string) (invalidIndex, bool, error) {
 	var (
 		found      invalidIndex
@@ -261,13 +271,13 @@ func inspectInvalidIndex(ctx context.Context, q querier, schema, index string) (
 		tracking   bool
 	)
 	err := q.QueryRow(ctx,
-		`SELECT c.oid, i.indisvalid, i.indrelid, t.relname, `+droppableColumn+`, `+builderPIDSubquery+`, `+builderVisibilityColumns+`
+		`SELECT c.oid, i.indisvalid, i.indisready, i.indrelid, t.relname, `+droppableColumn+`, `+builderPIDSubquery+`, `+builderVisibilityColumns+`
 		   FROM pg_catalog.pg_index i
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
 		   JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`,
-		schema, index).Scan(&found.oid, &valid, &found.tableOID, &found.table, &found.droppable, &builderPID, &hiddenRows, &tracking)
+		schema, index).Scan(&found.oid, &valid, &found.ready, &found.tableOID, &found.table, &found.droppable, &builderPID, &hiddenRows, &tracking)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return invalidIndex{}, false, nil
 	}
@@ -304,7 +314,7 @@ func pidValue(pid *int32) uint32 {
 // abandoned debris (ErrAbandonedInvalidIndex); after this build's own
 // failure it is this build's leftover (ErrBuildLeftInvalidIndex).
 func classifyInvalidIndex(existing invalidIndex, target indexTarget, index string, silence error) *InvalidIndexError {
-	e := &InvalidIndexError{Schema: target.schema, Index: index, Table: existing.table, BuilderPID: existing.builder.pid}
+	e := &InvalidIndexError{Schema: target.schema, Index: index, Table: existing.table, BuilderPID: existing.builder.pid, Ready: existing.ready}
 	switch {
 	case existing.builder.pid != 0:
 		e.Cleanup = ErrInvalidIndexBuildInFlight
