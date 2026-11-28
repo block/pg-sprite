@@ -31,6 +31,9 @@ type DesiredStatementError struct {
 }
 
 func (e *DesiredStatementError) Error() string {
+	if e.Err == nil {
+		return fmt.Sprintf("%s, in: %s", ErrDesiredStatementRejected, statementExcerpt(e.Statement, 0))
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %s (SQLSTATE %s)", ErrDesiredStatementRejected, e.Err.Message, e.Err.Code)
 	if e.Err.Hint != "" {

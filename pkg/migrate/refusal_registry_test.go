@@ -504,3 +504,20 @@ func TestDesiredShapeRefusalClasses(t *testing.T) {
 		})
 	}
 }
+
+// A statement the server rejected on the scratch schema is the one the
+// verdict names, not the file's CREATE TABLE the caller passes as the
+// fallback, so a caller keying on the statement points the author at the
+// line to fix.
+func TestDesiredFileRefusalNamesTheRejectedStatement(t *testing.T) {
+	const rejected = "CREATE INDEX t_legacy_idx ON t (legacy)"
+	err := fmt.Errorf("plan desired schema: %w", &schemadiff.DesiredStatementError{
+		Statement: rejected,
+		Err:       &pgconn.PgError{Code: "42703", Message: `column "legacy" does not exist`},
+	})
+
+	v, ok := DesiredFileRefusal(err, "CREATE TABLE t (id int PRIMARY KEY)")
+	require.True(t, ok)
+	assert.Equal(t, rejected, v.Statement)
+	assert.Contains(t, v.Detail, `column "legacy" does not exist (SQLSTATE 42703)`)
+}

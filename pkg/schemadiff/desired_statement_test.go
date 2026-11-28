@@ -86,3 +86,11 @@ func TestStatementExcerpt(t *testing.T) {
 	assert.False(t, strings.HasSuffix(around, "…"), around)
 	assert.LessOrEqual(t, len([]rune(around)), statementExcerptRunes+2)
 }
+
+// A DesiredStatementError built without the server's error, as a caller of
+// the exported type can, still reads as a rejection of its statement.
+func TestDesiredStatementErrorWithoutTheServersError(t *testing.T) {
+	err := &DesiredStatementError{Statement: "CREATE INDEX t_idx ON t (gone)"}
+	assert.Equal(t, "the server rejected a statement of the desired file, in: CREATE INDEX t_idx ON t (gone)", err.Error())
+	assert.ErrorIs(t, err, ErrDesiredStatementRejected)
+}
