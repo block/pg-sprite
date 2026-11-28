@@ -132,6 +132,8 @@ type heldDrops struct {
 	liveCons    map[string]Constraint
 	desiredIdx  map[string]Index
 	desiredCons map[string]Constraint
+	// retyped names the columns the plan changes the type of.
+	retyped map[string]bool
 }
 
 // holds reports whether ch is a drop that waits: a unique index or unique
