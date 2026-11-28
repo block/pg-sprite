@@ -13,9 +13,16 @@
 #             skipped proof proved nothing that week, so it is reported too,
 #             and it never closes the issue.
 #
-# The open issue is the one carrying the slot-release-proof label, so a
-# failure that lasts several weeks is one issue with a comment per run. The
-# label is created when it is missing.
+# The open issue is one this job opened: it carries the slot-release-proof
+# label and the job's own title, so a failure that lasts several weeks is one
+# issue with a comment per run, and a hand-written issue that only shares the
+# label is never commented on or closed. The label is created, when it is
+# missing, only as the job opens an issue, so a passing run writes nothing.
+#
+# Only the newest scheduled run speaks for the proof. A re-run of an older
+# scheduled run, once a newer one exists, changes nothing: its pass must not
+# close the issue a newer failure opened, nor its failure reopen one a newer
+# pass closed.
 #
 # Usage: scripts/slot-release-proof-issue.sh RESULT
 #
@@ -44,11 +51,20 @@ title="Scheduled slot release proof failed"
 run_url="${GITHUB_SERVER_URL:-https://github.com}/$GH_REPO/actions/runs/$RUN_ID"
 today=$(date -u +%Y-%m-%d)
 
-gh label create "$label" --force --color B60205 \
-	--description "The scheduled Slot Release Proof workflow did not pass"
+# The newest scheduled run of this workflow; run IDs only grow. The current
+# run is listed while it runs, so a later ID means this is a re-run of an
+# older Monday.
+latest=$(gh api "repos/$GH_REPO/actions/workflows/slot-release-proof.yml/runs?event=schedule&per_page=1" \
+	--jq '.workflow_runs[0].id // empty')
+if [ -n "$latest" ] && [ "$latest" -gt "$RUN_ID" ]; then
+	echo "scheduled run $latest is newer than this run ($RUN_ID); the issue follows that run, so nothing changes"
+	exit 0
+fi
 
-# The oldest open issue with the label, if any.
-open=$(gh issue list --label "$label" --state open --json number --jq 'map(.number) | min // empty')
+# The oldest open issue this job opened, if any. A label that does not exist
+# yet lists no issues.
+open=$(gh issue list --label "$label" --state open --json number,title \
+	--jq "map(select(.title == \"$title\") | .number) | min // empty")
 
 if [ "$result" = "success" ]; then
 	if [ -z "$open" ]; then
@@ -84,5 +100,7 @@ that passes on every major closes this issue."
 if [ -n "$open" ]; then
 	gh issue comment "$open" --body "$body"
 else
+	gh label create "$label" --force --color B60205 \
+		--description "The scheduled Slot Release Proof workflow did not pass"
 	gh issue create --title "$title" --label "$label" --body "$body"
 fi

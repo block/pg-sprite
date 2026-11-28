@@ -32,6 +32,7 @@ run() {
 	current="$name"
 	case_failed=0
 	: >"$FAKE_DIR/calls"
+	: >"$FAKE_DIR/lines"
 	local got=0
 	PATH="$standin:$PATH" "$script" "$@" >"$work/out" 2>&1 || got=$?
 	if [ "$got" -ne "$want" ]; then
@@ -42,6 +43,10 @@ run() {
 # has LINE / lacks LINE: whether some gh argument line is exactly LINE.
 has() { grep -Fxq -- "$1" "$FAKE_DIR/calls" || fail "no gh argument line: $1"; }
 lacks() { if grep -Fxq -- "$1" "$FAKE_DIR/calls"; then fail "unexpected gh argument line: $1"; fi; }
+# has_call TEXT / lacks_call TEXT: whether some single gh call's space-joined
+# arguments contain TEXT, so flags that must travel together are pinned so.
+has_call() { grep -Fq -- "$1" "$FAKE_DIR/lines" || fail "no gh call containing: $1"; }
+lacks_call() { if grep -Fq -- "$1" "$FAKE_DIR/lines"; then fail "unexpected gh call containing: $1"; fi; }
 report() {
 	if [ "$case_failed" -ne 0 ]; then
 		echo "FAIL $current" >&2
@@ -60,9 +65,20 @@ jobs() {
 	done
 	printf '{"total_count":7,"jobs":[%s{"name":"keepalive","conclusion":"success"},{"name":"report","conclusion":null}]}\n' "$entries" >"$FAKE_DIR/jobs.json"
 }
+# issues NUMBER...: the open labelled issues the job opened, with its title.
+issues() {
+	local entries="" n
+	for n in "$@"; do
+		entries+="{\"number\":$n,\"title\":\"Scheduled slot release proof failed\"},"
+	done
+	printf '[%s]\n' "${entries%,}" >"$FAKE_DIR/issues.json"
+}
+# latest ID: the newest scheduled run of the workflow.
+latest() { printf '{"total_count":1,"workflow_runs":[{"id":%s}]}\n' "$1" >"$FAKE_DIR/runs.json"; }
 reset() {
 	rm -f "$FAKE_DIR/api.err"
 	echo '[]' >"$FAKE_DIR/issues.json"
+	latest 123
 	jobs success success success success success
 }
 
@@ -75,12 +91,51 @@ has "--title"
 has "Scheduled slot release proof failed"
 has "- Run: $run_url"
 has "- Majors that did not pass: 15"
+has_call "issue list --label slot-release-proof --state open"
+has_call "label create slot-release-proof"
+has_call "issue create --title Scheduled slot release proof failed --label slot-release-proof --body"
 lacks "comment"
 lacks "close"
 report
 
 reset
-echo '[{"number":9},{"number":7}]' >"$FAKE_DIR/issues.json"
+run "a failure with every per-major job green says so" 0 failure
+has "- Majors that did not pass: none of the per-major jobs failed (result: failure)"
+report
+
+reset
+echo '[{"number":5,"title":"Track slot release cadence on PostgreSQL 18"}]' >"$FAKE_DIR/issues.json"
+run "a pass leaves a hand-written issue that only shares the label open" 0 success
+lacks "close"
+lacks "5"
+report
+
+reset
+echo '[{"number":5,"title":"Track slot release cadence on PostgreSQL 18"}]' >"$FAKE_DIR/issues.json"
+jobs success failure success success success
+run "a failure opens its own issue beside a hand-written one with the label" 0 failure
+has "--title"
+lacks "comment"
+report
+
+reset
+issues 7
+latest 130
+run "a re-run of an older Monday that passes does not close a newer failure's issue" 0 success
+lacks "close"
+lacks_call "label create"
+report
+
+reset
+latest 130
+jobs success failure success success success
+run "a re-run of an older Monday that fails opens nothing" 0 failure
+lacks "--title"
+lacks "comment"
+report
+
+reset
+issues 9 7
 jobs failure success success failure success
 run "a failure with an open issue comments on the oldest one" 0 failure
 has "comment"
@@ -91,23 +146,25 @@ lacks "--title"
 report
 
 reset
-echo '[{"number":7}]' >"$FAKE_DIR/issues.json"
+issues 7
 run "a pass with an open issue closes it with the passing run" 0 success
 has "close"
 has "7"
 has "The scheduled run on $(date -u +%Y-%m-%d) passed on every major: $run_url"
 lacks "--title"
+lacks_call "label create"
 report
 
 reset
-run "a pass with no open issue opens, comments on, and closes nothing" 0 success
+run "a pass with no open issue writes nothing" 0 success
 lacks "--title"
 lacks "comment"
 lacks "close"
+lacks_call "label create"
 report
 
 reset
-echo '[{"number":7}]' >"$FAKE_DIR/issues.json"
+issues 7
 jobs cancelled cancelled cancelled cancelled cancelled
 run "a cancelled proof is reported and does not close the issue" 0 cancelled
 has "comment"
