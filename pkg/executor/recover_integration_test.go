@@ -711,11 +711,15 @@ func TestRebuildAbandonedIndexReportsItsCallerCancellingTheDrop(t *testing.T) {
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
 		done <- sweepErr
 	}()
+	// pg_stat_activity spans the server, which CI shares between packages,
+	// so the probe matches this sweep's own drop by its exact statement; a
+	// drop another test leaves waiting must not release the cancel early.
+	drop := "DROP INDEX CONCURRENTLY " + pgx.Identifier{schema, quarantinedName(debris)}.Sanitize()
 	require.Eventually(t, func() bool {
 		var waiting int
 		err := pool.QueryRow(t.Context(), `
 			SELECT count(*) FROM pg_catalog.pg_stat_activity
-			 WHERE wait_event_type = 'Lock' AND query LIKE 'DROP INDEX CONCURRENTLY %'`).Scan(&waiting)
+			 WHERE wait_event_type = 'Lock' AND query = $1`, drop).Scan(&waiting)
 		return err == nil && waiting == 1
 	}, 10*time.Second, 20*time.Millisecond, "the drop must be waiting on the held table lock")
 	cancel()
