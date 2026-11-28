@@ -18,7 +18,9 @@ type Code string
 // The codes an executor outcome can carry.
 const (
 	// CodeBudgetLockExceeded: the lock was not granted within
-	// lock_timeout; nothing was executed.
+	// lock_timeout, or a transaction held a lock that reads or writes take
+	// on the table for the whole wait outside the lock queue, so the lock
+	// was never requested (*LingeringHolderError); nothing was executed.
 	CodeBudgetLockExceeded Code = "budget-lock-exceeded"
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
@@ -565,6 +567,9 @@ func OutcomeCode(err error) Code {
 	}
 	if budgetErr, ok := errors.AsType[*BudgetError](err); ok {
 		return budgetErr.Code()
+	}
+	if holderErr, ok := errors.AsType[*LingeringHolderError](err); ok {
+		return holderErr.Code()
 	}
 	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return CodeRowSecurityOutcomeUnknown
