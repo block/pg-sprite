@@ -351,6 +351,15 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 			return refuseDroppedObjectDrift(ctx, tx, st, *dropped)
 		})
 	}
+	swaps, err := timeZoneSwapCandidates(st)
+	if err != nil {
+		return err
+	}
+	if len(swaps) > 0 {
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refuseTimeZoneSwapOutsideUTC(ctx, tx, st, swaps)
+		})
+	}
 	var before func(context.Context, pgx.Tx) error
 	if len(checks) > 0 {
 		before = func(ctx context.Context, tx pgx.Tx) error {
