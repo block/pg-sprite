@@ -276,13 +276,19 @@ already proves it is unnecessary:
 | Scan the `DEFAULT` partition, to prove none of its rows belongs in the new bound | The parent has no `DEFAULT` partition, or a validated `CHECK` on it excludes the bound | ACCESS EXCLUSIVE on the `DEFAULT` partition |
 | Build each of the parent's indexes on the attached table | The attached table already has an index equivalent to the parent's (see below). For the parent's primary key or unique constraint, the matching index must also back a constraint (`ADD CONSTRAINT … USING INDEX`): a bare unique index is left alone and a new one is built | ACCESS EXCLUSIVE on the attached table |
 
+The attach also refuses, outright, a table that lacks one of the parent's `CHECK` constraints
+under the same name and validated, or that allows NULL in a column the parent declares
+`NOT NULL`. `LIKE` copies `NOT NULL` but copies the `CHECK`s only with `INCLUDING CONSTRAINTS`;
+on a table that already holds rows, add each `CHECK` `NOT VALID` and `VALIDATE` it, as in step 3.
+
 Do all three ahead of time, online, and the attach changes only the catalog. For a parent
 `events`, range-partitioned on `created_at`, with primary key `(id, created_at)`, an index on
 `kind`, and a `DEFAULT` partition `events_default`:
 
 ```sql
--- 1. Build and load the new table while it is not yet a partition.
-CREATE TABLE events_2027_01 (LIKE events INCLUDING DEFAULTS);
+-- 1. Build and load the new table while it is not yet a partition. It carries the
+--    parent's CHECKs, under their names, and its NOT NULLs from the start.
+CREATE TABLE events_2027_01 (LIKE events INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
 
 -- 2. The parent's indexes, built online. The unique one backs a constraint.
 CREATE UNIQUE INDEX CONCURRENTLY events_2027_01_pkey ON events_2027_01 (id, created_at);
