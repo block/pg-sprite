@@ -319,15 +319,15 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// matches only because a stopped copy-and-swap run swapped its shape in
 	// is not converged: the run's row and what it still holds stand with
 	// nothing planned to finish them. A non-empty plan meets a stopped run
-	// in Run, statement by statement.
+	// in Run, statement by statement, and in the index drop that runs
+	// outside it.
 	if len(report.Statements) == 0 {
-		stopped, err := findStoppedRun(ctx, pool, report.Schema, report.Table)
+		refused, held, err := refuseEmptyPlanOverStoppedRun(ctx, pool, report)
 		if err != nil {
 			return DesiredResult{}, err
 		}
-		if stopped.standing() {
-			return DesiredResult{Plan: report}.refused(copySwapRunStoppedRefusal(),
-				desiredRunStoppedDetail(report.Schema, report.Table, stopped)), nil
+		if held {
+			return refused, nil
 		}
 		return DesiredResult{
 			Plan:    report,

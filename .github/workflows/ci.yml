@@ -95,6 +95,9 @@ jobs:
       # PR that edits only the guide skips the Supabase job, so the offline
       # half of check-image-pins runs here too; the registry half stays there.
       - run: make check-guide-versions
+      # The Slot Release Proof workflow's report job runs this script only on
+      # its weekly schedule, so its test runs here, on every PR.
+      - run: make test-slot-release-proof-issue
       - run: make test-unit
 
   lint:

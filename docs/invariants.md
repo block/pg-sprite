@@ -1191,7 +1191,15 @@ front door, where a native route reads no row: before routing any statement on a
 `findStoppedRun` reads the table's row, and a statement other than the stopped run's own,
 compared as parsed, is refused (`copy-and-swap-run-stopped`); a row it cannot judge — another
 format or phase, a store an older engine created, a store the role may not read — holds the
-table while the catalog shows the run's shadow or retained source. `pkg/schemachange` applies the
+table while the catalog shows the run's shadow or retained source. Every other door that acts
+on the table reads the row the same way before it does: `refuseOverStoppedRun` for an index
+rename, the accepted blocking passthrough, and a reviewed plan's index drop;
+`refuseEmptyPlanOverStoppedRun` for an empty plan in `RunDesired` and
+`RunDesiredWithRowSecurity`; `AdmitRowSecurityStoppedRun` before a row security file's atomic
+change; and `AdmitStoppedRun` and `AdmitPlanStoppedRun` in the dry runs, which end in the
+refusal the apply gives. `ALTER TYPE ... ADD VALUE` is exempt: it locks no table and changes
+nothing in a table's model; so is a reviewed plan's blocking drop of a partitioned table's
+index, since no copy-and-swap run can stop on a partitioned table. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
 `checkResumeRow` — the row must name this table and the derived slot (`resume-row-mismatch`),
 be non-terminal (`resume-row-terminal`), and not be a row whose cutover already began

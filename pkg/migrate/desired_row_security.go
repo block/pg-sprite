@@ -59,6 +59,11 @@ type RowSecurityRequest struct {
 // before it plans, it is refused, so it is never created without its row
 // security.
 //
+// A copy-and-swap run stopped on the table holds it here as it does in
+// RunDesired: a file that plans nothing is refused with cause
+// copy-and-swap-run-stopped rather than reported converged, and a plan
+// meets the stopped run in the delegated run.
+//
 // The result-and-error contract is RunDesired's, and so is the progress
 // Options.Progress receives; the tracker finishes once the row security
 // has been compared again.
@@ -91,6 +96,15 @@ func RunDesiredWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, req RowS
 		return DesiredResult{}, err
 	}
 	if len(report.Statements) == 0 {
+		// A table that matches while a copy-and-swap run on it is stopped
+		// is not converged, as RunDesired decides for an empty plan.
+		refused, held, err := refuseEmptyPlanOverStoppedRun(ctx, pool, report)
+		if err != nil {
+			return DesiredResult{}, err
+		}
+		if held {
+			return refused, nil
+		}
 		return DesiredResult{
 			Plan:    report,
 			Outcome: verdict.OutcomeExecuted,
@@ -148,7 +162,7 @@ func rowSecurityPlanRefusal(err error) (DesiredResult, bool) {
 		return DesiredResult{}, false
 	case errors.As(err, &review):
 		return DesiredResult{}.refused(plan.RowSecurityReviewRefusal(),
-			fmt.Sprintf("%v; the row security differs from the file, and this path changes only the table: converge the row security first with executor.ExecuteDesiredRowSecurity; nothing was executed", err)), true
+			fmt.Sprintf("%v; the row security differs from the file, and this path changes only the table: converge the row security first with executor.ExecuteDesiredRowSecurity, once AdmitRowSecurityStoppedRun finds no copy-and-swap run stopped on the table; nothing was executed", err)), true
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		return DesiredResult{}.refused(plan.RowSecurityMissingTableRefusal(),
 			fmt.Sprintf("%v; create the table with its row security through executor.ExecuteDesiredRowSecurity; nothing was executed", err)), true
