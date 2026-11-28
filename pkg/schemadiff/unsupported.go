@@ -63,6 +63,17 @@ const (
 	// be replaced: the foreign key depends on it, so PostgreSQL refuses the
 	// drop.
 	CauseReferencedIndex UnsupportedCause = "referenced-index"
+	// CauseRenamedIndexName refuses when the desired table gives a new
+	// constraint the name of a live index it renames: the index keeps its
+	// rule only by being renamed, and the constraint cannot take the name
+	// until it is.
+	CauseRenamedIndexName UnsupportedCause = "renamed-index-name"
+	// CauseMovedUniqueRule refuses when the desired table gives a new
+	// constraint the name of a live unique index while another unique index
+	// it builds takes over that index's key: the live index would be
+	// dropped before the new one is built, leaving the key without a
+	// unique rule while it builds.
+	CauseMovedUniqueRule UnsupportedCause = "moved-unique-rule"
 )
 
 // UnsupportedCauses is the closed set of causes [Diff], [IntrospectEnumType],
@@ -87,6 +98,8 @@ func UnsupportedCauses() []UnsupportedCause {
 		CauseEnumValueReordered,
 		CauseReplacementIndexName,
 		CauseReferencedIndex,
+		CauseRenamedIndexName,
+		CauseMovedUniqueRule,
 	}
 }
 
