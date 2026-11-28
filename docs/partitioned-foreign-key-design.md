@@ -32,10 +32,18 @@ one is validated, and nothing is added twice.
 | No matching foreign key, derived name held by another constraint | refused, `partitioned-foreign-key-name-taken` |
 | Two or more matching foreign keys | refused, `partitioned-foreign-key-conflict` |
 | A matching foreign key already attached to a parent's | refused, `partitioned-foreign-key-conflict` |
+| A validated foreign key, attached to nothing, that matches but for an `ON DELETE` column list | refused, `partitioned-foreign-key-conflict` |
 
 "Matching" is the comparison the server makes before it adopts: the same referenced table, the
 same referencing and referenced columns in order, the same `MATCH`, `ON UPDATE`, `ON DELETE`, and
-deferrability, and no `ON DELETE` column list. Foreign keys of another definition are left alone.
+deferrability, and no `ON DELETE` column list. Foreign keys of another definition are left alone,
+except one the parent's statement could adopt: on PostgreSQL 14 to 17 the server adopts a
+validated foreign key attached to nothing without comparing its `ON DELETE` column list, so it
+could take a column-list foreign key in place of the step's, and with it a delete rule the parent
+does not have. Remove that foreign key, or recreate it without its column list, and rerun. A
+column-list foreign key that is `NOT VALID` or already attached to a parent's is not one the
+server adopts, and is left alone. The build decides every partition before its first leaf step,
+so a refusal on a late partition leaves the earlier ones as they were.
 
 ## Verified against PostgreSQL
 
@@ -60,6 +68,10 @@ by the integration tests in `pkg/executor`:
   read-back catches each case: the adopted foreign key's OID is not the recorded one.
 - With two matching leaf foreign keys, the parent adopts one and leaves the other, so the leaf
   step refuses that state before the parent's statement can choose.
+- On 15 to 17, a validated leaf foreign key attached to nothing that differs from the parent's
+  only in its `ON DELETE SET NULL` or `SET DEFAULT` column list is one the parent can adopt, so
+  the build refuses it before any leaf step, and the parent's step refuses one that appears after
+  the leaf steps. A `NOT VALID` one, or one already attached to a parent's, is not adopted.
 - PostgreSQL 18 accepts `ADD FOREIGN KEY ... NOT VALID` on the parent (the same locks as the plain
   form, and no scan), and `VALIDATE CONSTRAINT` on the parent holds `ShareUpdateExclusiveLock`.
   The ordinary online route, `NOT VALID` then `VALIDATE`, therefore works there, and

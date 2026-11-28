@@ -1626,9 +1626,11 @@ referenced table by OID; it refuses a referenced table that is a partition of th
 (`TestAddPartitionedForeignKeyRefusals/a_referenced_table_that_is_a_partition_of_the_target`);
 under the tree's lock, before the parent's statement, it proves the parent's
 and the referenced table's names still resolve to the tables it resolved and that every leaf has
-exactly one foreign key of the requested definition, validated and attached to nothing, which is
-the one its leaf step recorded, refusing a leaf changed since its leaf step as
-`partitioned-foreign-key-leaf-changed`, which a rerun gets past
+exactly one foreign key the parent's statement could adopt — validated, attached to nothing, and
+of the requested definition apart from any `ON DELETE` column list, the rule PostgreSQL 14 to 17
+adopt by — which is the one its leaf step recorded, refusing a leaf changed since its leaf step as
+`partitioned-foreign-key-leaf-changed`, which a rerun gets past; when the change is a column-list
+foreign key, the rerun refuses it as `partitioned-foreign-key-conflict` before any leaf step
 (`TestAddPartitionedForeignKeyParentStepFailsClosed`); a rerun reports the parent's foreign key
 done only when every partition carries one it adopted
 (`TestRequireAdoptedFKEverywhereRefusesAPartitionTheParentsDidNotAdopt`).

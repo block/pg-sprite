@@ -88,6 +88,27 @@ func TestDecideLeafForeignKey(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+
+	// PostgreSQL 14 to 17 adopt only a validated foreign key attached to no
+	// parent's, so for a requested ON DELETE SET NULL a column-list foreign
+	// key that is a parent's clone, or NOT VALID, is not one the parent's
+	// statement could take in place of the step's, and is left alone.
+	setNull := fk
+	setNull.spec.onDelete = "n"
+	clone := requestedFK(43, "a_jan_account_fk", true)
+	clone.onDelete, clone.deleteSetColumns, clone.parentOID = "n", true, 900
+	notValid := requestedFK(44, "a_jan_account_fk", false)
+	notValid.onDelete, notValid.deleteSetColumns = "n", true
+	for name, k := range map[string]catalogFK{
+		"a parent's clone": clone,
+		"NOT VALID":        notValid,
+	} {
+		t.Run("a column-list foreign key that is "+name+" is left alone", func(t *testing.T) {
+			got, err := decideLeafForeignKey(node, derived, setNull, leafFKFacts{attnums: []int16{2}, foreignKeys: []catalogFK{k}})
+			require.NoError(t, err)
+			assert.Equal(t, leafFKPlan{state: leafFKAddNeeded}, got)
+		})
+	}
 }
 
 // Each refusal is typed, and none of them depends on the order the catalog
@@ -130,10 +151,11 @@ func TestDecideLeafForeignKeyRefusals(t *testing.T) {
 		})
 	}
 
-	// The server compares everything but the ON DELETE column list when it
-	// adopts, so for a requested ON DELETE SET NULL a foreign key with a
-	// column list could be adopted in place of the step's, and is refused
-	// whether or not the requested one is there too.
+	// Among validated foreign keys attached to no parent's, the server
+	// compares everything but the ON DELETE column list when it adopts, so
+	// for a requested ON DELETE SET NULL such a foreign key with a column
+	// list could be adopted in place of the step's, and is refused whether
+	// or not the requested one is there too.
 	setNull := fk
 	setNull.spec.onDelete = "n"
 	exact := requestedFK(40, derived, true)

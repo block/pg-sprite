@@ -493,6 +493,22 @@ func TestAddPartitionedForeignKeyRefusals(t *testing.T) {
 				    ON DELETE SET NULL (account_id)`)
 			refuse(t, f, addEventsAccountFK+` ON DELETE SET NULL`, ErrPartitionedForeignKeyConflict, CodePartitionedForeignKeyConflict)
 		})
+
+		// The same foreign key on the last leaf in the tree: every leaf is
+		// decided before the first leaf step, so the refusal comes before
+		// January and February are given the foreign key.
+		t.Run("a column-list foreign key on the last leaf", func(t *testing.T) {
+			f := newFixture(t)
+			if major, err := dbconn.ServerMajor(t.Context(), f.pool); assert.NoError(t, err) && major < 15 {
+				t.Skipf("PostgreSQL %d has no ON DELETE column list", major)
+			}
+			f.events(t)
+			f.exec(t, `
+				ALTER TABLE %[1]s.events_2026_03
+				    ADD CONSTRAINT a_mar_account_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
+				    ON DELETE SET NULL (account_id)`)
+			refuse(t, f, addEventsAccountFK+` ON DELETE SET NULL`, ErrPartitionedForeignKeyConflict, CodePartitionedForeignKeyConflict)
+		})
 	})
 }
 
@@ -647,7 +663,9 @@ func TestAddPartitionedForeignKeyParentStepFailsClosed(t *testing.T) {
 		// A foreign key that differs from the recorded one only in its ON
 		// DELETE column list, added between the leaf steps and the parent's,
 		// sorts first by name, so the parent's ADD would adopt it. The proof
-		// refuses before the ADD. A column list exists from PostgreSQL 15.
+		// refuses before the ADD. The rerun finds it before any leaf step and
+		// refuses it as a conflict, which an operator resolves. A column list
+		// exists from PostgreSQL 15.
 		t.Run("a build given a column-list foreign key before the parent's step", func(t *testing.T) {
 			f := newFixture(t)
 			if major, err := dbconn.ServerMajor(t.Context(), f.pool); assert.NoError(t, err) && major < 15 {
@@ -665,6 +683,12 @@ func TestAddPartitionedForeignKeyParentStepFailsClosed(t *testing.T) {
 
 			require.ErrorIs(t, err, ErrPartitionedForeignKeyLeafChanged)
 			assert.Empty(t, f.foreignKeys(t, "events"), "the parent has no foreign key")
+
+			_, err = f.add(t, addEventsAccountFK+` ON DELETE SET NULL`)
+
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyConflict)
+			assert.Equal(t, CodePartitionedForeignKeyConflict, OutcomeCode(err))
+			assert.Empty(t, f.foreignKeys(t, "events"), "the parent still has no foreign key")
 		})
 
 		// A leaf whose recorded foreign key is gone makes the parent's ADD
