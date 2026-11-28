@@ -394,13 +394,15 @@ func (f shadowFixture) terminateBackend(t *testing.T, pid uint32) {
 }
 
 // backendWaitingOnLock reports whether some backend is parked on a heavyweight
-// lock while running a statement matching pattern.
+// lock while running a statement matching pattern that names the fixture's
+// schema, so another test's wait on a shared server never satisfies it.
 func (f shadowFixture) backendWaitingOnLock(t *testing.T, pattern string) bool {
 	t.Helper()
 	var waiting bool
 	require.NoError(t, f.pool.QueryRow(t.Context(), `
 		SELECT EXISTS (
 			SELECT 1 FROM pg_stat_activity
-			WHERE wait_event_type = 'Lock' AND query LIKE $1)`, pattern).Scan(&waiting))
+			WHERE wait_event_type = 'Lock' AND query LIKE $1
+			  AND strpos(query, $2) > 0)`, pattern, f.schema).Scan(&waiting))
 	return waiting
 }

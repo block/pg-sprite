@@ -41,7 +41,7 @@ func TestDropIndexConcurrentlyReportsAnIndexReplacedBeforeTheDrop(t *testing.T) 
 			CREATE INDEX t_a_idx ON %[1]s.t (b)`, schema))
 		require.NoError(t, err)
 	})
-	_, err = executeDropIndexConcurrently(t.Context(), pool, schema, "t", "t_a_idx", reviewed.Definition,
+	_, err = executeDropIndexConcurrently(t.Context(), pool, schema, "t", "t_a_idx", reviewed.Definition, nil,
 		ConcurrentBudget{Overall: time.Minute}, swap)
 	require.ErrorIs(t, err, ErrDroppedIndexReplaced)
 	assert.Equal(t, CodeDroppedIndexReplaced, OutcomeCode(err))
@@ -94,7 +94,7 @@ func TestDropIndexConcurrentlyReportsAnUnconfirmedDropAsOutcomeUnknown(t *testin
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	_, err = executeDropIndexConcurrently(ctx, pool, schema, "t", "t_a_idx", reviewed.Definition,
+	_, err = executeDropIndexConcurrently(ctx, pool, schema, "t", "t_a_idx", reviewed.Definition, nil,
 		ConcurrentBudget{Overall: time.Minute}, &afterDropClock{cancel: cancel})
 	unknown, ok := errors.AsType[*DropOutcomeUnknownError](err)
 	require.True(t, ok, "got %v", err)

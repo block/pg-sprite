@@ -265,6 +265,11 @@ const (
 	// again on the session that drops it; nothing was dropped. Re-plan
 	// against the catalog as it stands and review the new plan.
 	CodeDroppedIndexDrift Code = "dropped-index-drift"
+	// CodeReplacementIndexDrift: the index a plan built to replace the one
+	// it drops is gone, invalid, or rebuilt with another definition, read
+	// again on the session that drops the old index; nothing was dropped.
+	// Re-plan, which builds the replacement again.
+	CodeReplacementIndexDrift Code = "replacement-index-drift"
 	// CodeDroppedIndexReplaced: a drop that passed its pre-drop read removed
 	// an index the plan did not review, because another session gave the
 	// name to a different index in the round trip between the read and the
@@ -432,6 +437,7 @@ func Codes() []Code {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeDroppedIndexDrift,
+		CodeReplacementIndexDrift,
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
@@ -510,6 +516,7 @@ func (c Code) Permanent() bool {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeDroppedIndexDrift,
+		CodeReplacementIndexDrift,
 		CodeDroppedIndexReplaced,
 		CodeDroppedObjectDrift,
 		CodeDroppedObjectHasDescendants,
@@ -699,6 +706,8 @@ func sentinelCode(err error) Code {
 		return CodeAdoptedIndexDrift
 	case errors.Is(err, ErrDroppedIndexDrift):
 		return CodeDroppedIndexDrift
+	case errors.Is(err, ErrReplacementIndexDrift):
+		return CodeReplacementIndexDrift
 	case errors.Is(err, ErrDroppedIndexReplaced):
 		return CodeDroppedIndexReplaced
 	case errors.Is(err, ErrDroppedObjectDrift):
