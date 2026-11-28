@@ -31,6 +31,9 @@ type EnumTypeFileError struct {
 	// names it: the canonical form, or the source text when the canonical
 	// form would classify as a different kind.
 	SQL string
+	// Object is the object the statement declares, which belongs in a
+	// desired file of its own.
+	Object DeclaredObject
 }
 
 func (e *EnumTypeFileError) Error() string {
@@ -90,7 +93,7 @@ func parseDesiredEnumTree(source *desiredSource, tree *pganalyze.ParseResult) (D
 		node := raw.GetStmt()
 		create := node.GetCreateEnumStmt()
 		if create == nil || declared {
-			if err := refused.refuse(i, raw, enumTypeAloneRefusal(source, raw)); err != nil {
+			if err := refused.refuse(i, raw, enumFileExtraRefusal(source, raw)); err != nil {
 				return DesiredEnumType{}, err
 			}
 			continue
@@ -126,14 +129,64 @@ func parseDesiredEnumTree(source *desiredSource, tree *pganalyze.ParseResult) (D
 	return desired, nil
 }
 
+// enumFileExtraRefusal returns the refusal for raw, a statement of an enum
+// type file other than its one CREATE TYPE ... AS ENUM. A statement another
+// desired file holds is told which file it belongs in. A statement no desired
+// file holds is refused as a table file refuses it, naming its object, so the
+// author is never sent to a file that refuses it again.
+func enumFileExtraRefusal(source *desiredSource, raw *pganalyze.RawStmt) error {
+	if heldByADesiredFile(raw.GetStmt()) {
+		return enumTypeAloneRefusal(source, raw)
+	}
+	return disallowedStatement(source, raw)
+}
+
+// heldByADesiredFile reports whether some desired file admits node: an enum
+// type, a table, an index, a policy or its comment, or a change to the
+// table's row security.
+func heldByADesiredFile(node *pganalyze.Node) bool {
+	switch {
+	case node.GetCreateEnumStmt() != nil, node.GetCreateStmt() != nil,
+		node.GetIndexStmt() != nil, node.GetCreatePolicyStmt() != nil:
+		return true
+	case node.GetCommentStmt() != nil:
+		return node.GetCommentStmt().GetObjtype() == pganalyze.ObjectType_OBJECT_POLICY
+	case node.GetAlterTableStmt() != nil:
+		return changesOnlyRowSecurity(node.GetAlterTableStmt())
+	default:
+		return false
+	}
+}
+
+// changesOnlyRowSecurity reports whether alter is a row security change a
+// table's desired file admits: a plain ALTER TABLE, without IF EXISTS, whose
+// every command enables, disables, forces, or stops forcing row security.
+func changesOnlyRowSecurity(alter *pganalyze.AlterTableStmt) bool {
+	if alter.GetMissingOk() || alter.GetObjtype() != pganalyze.ObjectType_OBJECT_TABLE {
+		return false
+	}
+	if len(alter.GetCmds()) == 0 {
+		return false
+	}
+	for _, cmd := range alter.GetCmds() {
+		switch cmd.GetAlterTableCmd().GetSubtype() {
+		case pganalyze.AlterTableType_AT_EnableRowSecurity, pganalyze.AlterTableType_AT_DisableRowSecurity,
+			pganalyze.AlterTableType_AT_ForceRowSecurity, pganalyze.AlterTableType_AT_NoForceRowSecurity:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // enumTypeAloneRefusal returns the refusal for raw, a statement of an enum
-// type file other than its one CREATE TYPE ... AS ENUM.
+// type file that another desired file holds.
 func enumTypeAloneRefusal(source *desiredSource, raw *pganalyze.RawStmt) error {
 	sql, _, err := refusedStatement(source, raw)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrEnumTypeAlone, err)
 	}
-	return &EnumTypeFileError{SQL: sql}
+	return &EnumTypeFileError{SQL: sql, Object: declaredObject(raw.GetStmt())}
 }
 
 // enumTypeName returns the unqualified type name a CREATE TYPE ... AS ENUM

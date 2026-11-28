@@ -159,25 +159,50 @@ func readForeignKeys(ctx context.Context, q querier, relOID uint32, relName stri
 
 // isRequested reports whether the foreign key has the requested
 // definition on a table whose foreign key columns are attnums: the same
-// referenced table and columns, in order, the same MATCH, actions, and
-// deferrability, no ON DELETE column list, and enforced. These are what the
-// parent's statement compares before it adopts a partition's foreign key
-// instead of creating and validating one. Whether it is validated or adopted
-// is judged apart.
+// definition apart from any ON DELETE column list (sameDefinition), and no
+// such list. Whether it is validated or adopted is judged apart.
 func (k catalogFK) isRequested(spec partitionedFKSpec, attnums []int16, ref fkReference) bool {
+	return k.sameDefinition(spec, attnums, ref) && !k.deleteSetColumns
+}
+
+// isAdoptable reports whether the parent's statement would adopt the
+// foreign key for the requested one instead of creating and validating its
+// own, by the rule PostgreSQL 14 to 17 apply, the majors the build runs on:
+// a validated foreign key attached to no parent's foreign key, with the
+// same definition apart from any ON DELETE column list (sameDefinition).
+// That rule does not compare the column list, so it adopts a foreign key
+// whose list differs from the parent's, and with it a delete rule the
+// parent does not have. PostgreSQL 18 applies another rule, adopting a NOT
+// VALID foreign key and erroring on one whose enforcement differs; the
+// build refuses 18 and later.
+func (k catalogFK) isAdoptable(spec partitionedFKSpec, attnums []int16, ref fkReference) bool {
+	return k.sameDefinition(spec, attnums, ref) && k.adoptionCandidate()
+}
+
+// adoptionCandidate reports whether the foreign key is one PostgreSQL 14 to
+// 17 consider adopting at all: validated, and attached to no parent's
+// foreign key.
+func (k catalogFK) adoptionCandidate() bool {
+	return k.validated && k.parentOID == 0
+}
+
+// sameDefinition reports whether the foreign key has the same referenced
+// table and columns, in order, and the same MATCH, actions, deferrability,
+// and enforcement as the requested one. It does not look at the ON DELETE
+// column list.
+func (k catalogFK) sameDefinition(spec partitionedFKSpec, attnums []int16, ref fkReference) bool {
 	return k.refOID == ref.oid &&
 		slices.Equal(k.key, attnums) &&
 		slices.Equal(k.refKey, ref.attnums) &&
 		k.sameRules(spec)
 }
 
-// sameRules reports whether the foreign key's MATCH, actions, and
-// deferrability are the requested ones.
+// sameRules reports whether the foreign key's MATCH, actions,
+// enforcement, and deferrability are the requested ones.
 func (k catalogFK) sameRules(spec partitionedFKSpec) bool {
 	return k.match == spec.match &&
 		k.onUpdate == spec.onUpdate &&
 		k.onDelete == spec.onDelete &&
-		!k.deleteSetColumns &&
 		!k.notEnforced &&
 		k.deferrable == spec.deferrable &&
 		k.initiallyDeferred == spec.initiallyDeferred
@@ -189,6 +214,18 @@ func requestedForeignKeys(fks []catalogFK, spec partitionedFKSpec, attnums []int
 	var out []catalogFK
 	for _, k := range fks {
 		if k.isRequested(spec, attnums, ref) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// adoptableForeignKeys returns the foreign keys the parent's statement
+// could adopt for the requested one (isAdoptable).
+func adoptableForeignKeys(fks []catalogFK, spec partitionedFKSpec, attnums []int16, ref fkReference) []catalogFK {
+	var out []catalogFK
+	for _, k := range fks {
+		if k.isAdoptable(spec, attnums, ref) {
 			out = append(out, k)
 		}
 	}
@@ -260,8 +297,17 @@ type leafFKPlan struct {
 // definition is reused whatever its name, so an earlier run's and an
 // operator's own are both found; the derived name is judged only when there
 // is none. Foreign keys of another definition are left alone: the parent's
-// statement does not adopt them.
+// statement does not adopt them. One it would adopt (isAdoptable) that
+// differs only in its ON DELETE column list is refused, because the server
+// picks among the adoptable ones by name, so it could take that one in place
+// of the step's.
 func decideLeafForeignKey(node partitionNode, name string, fk resolvedFK, facts leafFKFacts) (leafFKPlan, error) {
+	for _, k := range adoptableForeignKeys(facts.foreignKeys, fk.spec, facts.attnums, fk.ref) {
+		if !k.isRequested(fk.spec, facts.attnums, fk.ref) {
+			return leafFKPlan{}, fmt.Errorf("%w: foreign key %s on partition %s has an ON DELETE column list, which the server does not compare when it chooses the foreign key the parent's statement adopts, so the parent's could adopt it in place of the requested one",
+				ErrPartitionedForeignKeyConflict, k.name, node.qualified())
+		}
+	}
 	matches := requestedForeignKeys(facts.foreignKeys, fk.spec, facts.attnums, fk.ref)
 	for _, k := range matches {
 		if k.parentOID != 0 {

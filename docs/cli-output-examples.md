@@ -1059,7 +1059,7 @@ $ pg-sprite diff --desired /tmp/account_email.sql --json
   "class": "no-online-safety-problem",
   "owner": "direct-operator",
   "statement": "CREATE DOMAIN account_email AS text",
-  "detail": "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this statement is not allowed in it; nothing was planned or executed"
+  "detail": "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, so this domain is not allowed in it; nothing was planned or executed"
 }
 ```
 

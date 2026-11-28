@@ -291,14 +291,24 @@ func scratchSearchPath(scratch, target string) []string {
 	return append([]string{scratch}, searchPathFor(target)...)
 }
 
+// ScratchSchemaPrefix starts the name of every schema the scratch build
+// creates while it plans a desired file; a random suffix follows it. Code on
+// the target that guards DDL, such as an event trigger, sees the scratch
+// build's CREATE SCHEMA and the DDL inside it, and can exempt both by this
+// prefix. The prefix names the scratch build's objects but does not
+// authenticate them: any role that can create a schema can pick a name with
+// it. A guard that exempts by prefix also scopes the exemption, for example
+// to the role pg-sprite connects as. The prefix avoids "pg_", which
+// PostgreSQL reserves for system schemas.
+const ScratchSchemaPrefix = "pgsprite_scratch_"
+
 // scratchSchemaName returns a collision-resistant scratch schema name. The
 // name only has to be unique among concurrent scratch transactions on the
-// same database; the schema itself never outlives its transaction. The
-// prefix avoids "pg_", which PostgreSQL reserves for system schemas.
+// same database; the schema itself never outlives its transaction.
 func scratchSchemaName() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate scratch schema name: %w", err)
 	}
-	return "pgsprite_scratch_" + hex.EncodeToString(b[:]), nil
+	return ScratchSchemaPrefix + hex.EncodeToString(b[:]), nil
 }

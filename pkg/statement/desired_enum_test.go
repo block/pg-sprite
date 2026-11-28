@@ -43,36 +43,63 @@ func TestParseDesiredFileAdmitsAnEnumTypeWithNoLabels(t *testing.T) {
 	assert.Empty(t, enumType.Labels())
 }
 
-// An enum type file holds its CREATE TYPE and nothing else. Anything beside
-// it, a table, row security, or a second type, is refused with the
-// statement it names, as is a qualified name or a label the plan could not
-// name.
+// An enum type file holds its CREATE TYPE and nothing else. A statement
+// another desired file holds, such as row security or a second type, is
+// refused as belonging in a file of its own. A statement no desired file
+// holds is refused as a table file refuses it, naming the object it
+// declares, so moving it to a file of its own never meets a second refusal.
+// A qualified name or a label the plan could not name is refused too.
 func TestParseDesiredFileRefusesAnEnumTypeFileThatHoldsMore(t *testing.T) {
 	cases := []struct {
-		name string
-		sql  string
-		err  error
-		stmt string
+		name   string
+		sql    string
+		err    error
+		stmt   string
+		object DeclaredObject
 	}{
 		{
-			name: "a second type",
-			sql:  "CREATE TYPE a AS ENUM ('x'); CREATE TYPE b AS ENUM ('y')",
-			err:  ErrEnumTypeAlone,
-			stmt: "CREATE TYPE b AS ENUM ('y')",
+			name:   "a second type",
+			sql:    "CREATE TYPE a AS ENUM ('x'); CREATE TYPE b AS ENUM ('y')",
+			err:    ErrEnumTypeAlone,
+			stmt:   "CREATE TYPE b AS ENUM ('y')",
+			object: DeclaredEnumType,
 		},
 		{
-			name: "row security",
-			sql:  "CREATE TYPE status AS ENUM ('a'); ALTER TABLE t ENABLE ROW LEVEL SECURITY",
-			err:  ErrEnumTypeAlone,
-			stmt: "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+			name:   "row security",
+			sql:    "CREATE TYPE status AS ENUM ('a'); ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+			err:    ErrEnumTypeAlone,
+			stmt:   "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+			object: DeclaredRowSecurity,
+		},
+		{
+			name:   "a label rename",
+			sql:    "CREATE TYPE mood AS ENUM ('a'); ALTER TYPE mood RENAME VALUE 'a' TO 'c'",
+			err:    ErrDisallowedStatement,
+			stmt:   "ALTER TYPE mood RENAME VALUE 'a' TO 'c'",
+			object: DeclaredEnumLabel,
 		},
 		{
 			// The parse tree spells the empty old label as no label, so
 			// the canonical text would name an ADD VALUE.
-			name: "a rename from the empty label",
-			sql:  "CREATE TYPE mood AS ENUM ('a');\nALTER TYPE mood RENAME VALUE '' TO 'blue';\n",
-			err:  ErrEnumTypeAlone,
-			stmt: "ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+			name:   "a rename from the empty label",
+			sql:    "CREATE TYPE mood AS ENUM ('a');\nALTER TYPE mood RENAME VALUE '' TO 'blue';\n",
+			err:    ErrDisallowedStatement,
+			stmt:   "ALTER TYPE mood RENAME VALUE '' TO 'blue'",
+			object: DeclaredEnumLabel,
+		},
+		{
+			name:   "a comment on the type",
+			sql:    "CREATE TYPE mood AS ENUM ('a'); COMMENT ON TYPE mood IS 'how it went'",
+			err:    ErrDisallowedStatement,
+			stmt:   "COMMENT ON TYPE mood IS 'how it went'",
+			object: DeclaredComment,
+		},
+		{
+			name:   "a view",
+			sql:    "CREATE TYPE mood AS ENUM ('a'); CREATE VIEW moods AS SELECT 1",
+			err:    ErrDisallowedStatement,
+			stmt:   "CREATE VIEW moods AS SELECT 1",
+			object: DeclaredView,
 		},
 		{name: "a qualified name", sql: "CREATE TYPE app.status AS ENUM ('a')", err: ErrQualifiedName},
 		{name: "a label listed twice", sql: "CREATE TYPE status AS ENUM ('a', 'b', 'a')", err: ErrEnumLabel},
@@ -87,9 +114,18 @@ func TestParseDesiredFileRefusesAnEnumTypeFileThatHoldsMore(t *testing.T) {
 			if tc.stmt == "" {
 				return
 			}
+			if errors.Is(tc.err, ErrDisallowedStatement) {
+				disallowed, ok := errors.AsType[*DisallowedStatementError](err)
+				require.True(t, ok, err.Error())
+				assert.Equal(t, tc.stmt, disallowed.SQL)
+				assert.Equal(t, tc.object, disallowed.Object)
+				assert.NotErrorIs(t, err, ErrEnumTypeAlone)
+				return
+			}
 			extra, ok := errors.AsType[*EnumTypeFileError](err)
 			require.True(t, ok, err.Error())
 			assert.Equal(t, tc.stmt, extra.SQL)
+			assert.Equal(t, tc.object, extra.Object)
 		})
 	}
 }

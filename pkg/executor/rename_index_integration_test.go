@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -124,7 +125,7 @@ func TestExecuteIndexRenameRefusesANameMovedToAnotherIndexMidRename(t *testing.T
 	go func() {
 		done <- executor.ExecuteIndexRename(t.Context(), pool, pt, st, waitBudget, oneAttempt)
 	}()
-	waitForRenameLockWait(t, pool, "users_contact_email_idx")
+	waitForRenameLockWait(t, pool, mover)
 	_, err = mover.Exec(t.Context(), fmt.Sprintf("ALTER INDEX %s.orders_pkey RENAME TO users_email_idx", schema))
 	require.NoError(t, err)
 	require.NoError(t, mover.Commit(t.Context()))
@@ -198,7 +199,7 @@ func TestExecuteIndexRenameResolvesAnUnqualifiedNameInTheProofsSchemaOnly(t *tes
 	go func() {
 		done <- executor.ExecuteIndexRename(t.Context(), pool, pt, st, waitBudget, oneAttempt)
 	}()
-	waitForRenameLockWait(t, pool, newName)
+	waitForRenameLockWait(t, pool, mover)
 	require.NoError(t, mover.Commit(t.Context()))
 
 	select {
@@ -412,15 +413,14 @@ func relationNames(t *testing.T, pool *pgxpool.Pool, schema string) []string {
 	return names
 }
 
-// waitForRenameLockWait waits until a session running an ALTER INDEX whose
-// text ends in renamedTo is waiting on a lock.
-func waitForRenameLockWait(t *testing.T, pool *pgxpool.Pool, renamedTo string) {
+// waitForRenameLockWait waits until a session is waiting on a lock the
+// holder's transaction holds: the rename under test, since nothing else
+// touches this test's index. Naming the holder keeps another test's rename
+// on the shared server from satisfying the wait.
+func waitForRenameLockWait(t *testing.T, pool *pgxpool.Pool, holder pgx.Tx) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		var waiting bool
-		err := pool.QueryRow(t.Context(),
-			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			  WHERE query LIKE 'ALTER INDEX %' || $1 AND wait_event_type = 'Lock')`, renamedTo).Scan(&waiting)
+		waiting, err := testutil.BlockedBy(t.Context(), pool, holder.Conn().PgConn().PID())
 		return err == nil && waiting
 	}, 30*time.Second, 25*time.Millisecond, "the rename must be waiting on the index's lock")
 }

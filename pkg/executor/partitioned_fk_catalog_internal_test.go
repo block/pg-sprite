@@ -74,8 +74,8 @@ func TestDecideLeafForeignKey(t *testing.T) {
 			want:  leafFKPlan{state: leafFKDone, fk: requestedFK(40, "jan_account_fk", true)},
 		},
 		{
-			// The parent's statement would not adopt either: a different
-			// ON DELETE, or an ON DELETE SET NULL with a column list.
+			// The parent's statement would adopt neither: each has an ON
+			// DELETE other than the requested NO ACTION.
 			name:  "foreign keys of another definition are left alone",
 			facts: leafFKFacts{attnums: []int16{2}, foreignKeys: []catalogFK{onDeleteCascade, withSetColumns}},
 			want:  leafFKPlan{state: leafFKAddNeeded},
@@ -86,6 +86,27 @@ func TestDecideLeafForeignKey(t *testing.T) {
 			got, err := decideLeafForeignKey(node, derived, fk, tt.facts)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	// PostgreSQL 14 to 17 adopt only a validated foreign key attached to no
+	// parent's, so for a requested ON DELETE SET NULL a column-list foreign
+	// key that is a parent's clone, or NOT VALID, is not one the parent's
+	// statement could take in place of the step's, and is left alone.
+	setNull := fk
+	setNull.spec.onDelete = "n"
+	clone := requestedFK(43, "a_jan_account_fk", true)
+	clone.onDelete, clone.deleteSetColumns, clone.parentOID = "n", true, 900
+	notValid := requestedFK(44, "a_jan_account_fk", false)
+	notValid.onDelete, notValid.deleteSetColumns = "n", true
+	for name, k := range map[string]catalogFK{
+		"a parent's clone": clone,
+		"NOT VALID":        notValid,
+	} {
+		t.Run("a column-list foreign key that is "+name+" is left alone", func(t *testing.T) {
+			got, err := decideLeafForeignKey(node, derived, setNull, leafFKFacts{attnums: []int16{2}, foreignKeys: []catalogFK{k}})
+			require.NoError(t, err)
+			assert.Equal(t, leafFKPlan{state: leafFKAddNeeded}, got)
 		})
 	}
 }
@@ -127,6 +148,27 @@ func TestDecideLeafForeignKeyRefusals(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := decideLeafForeignKey(node, derived, fk, tt.facts)
 			require.ErrorIs(t, err, tt.want)
+		})
+	}
+
+	// Among validated foreign keys attached to no parent's, the server
+	// compares everything but the ON DELETE column list when it adopts, so
+	// for a requested ON DELETE SET NULL such a foreign key with a column
+	// list could be adopted in place of the step's, and is refused whether
+	// or not the requested one is there too.
+	setNull := fk
+	setNull.spec.onDelete = "n"
+	exact := requestedFK(40, derived, true)
+	exact.onDelete = "n"
+	listed := requestedFK(41, "a_jan_account_fk", true)
+	listed.onDelete, listed.deleteSetColumns = "n", true
+	for name, fks := range map[string][]catalogFK{
+		"alone":                    {listed},
+		"beside the requested one": {exact, listed},
+	} {
+		t.Run("a column-list foreign key "+name, func(t *testing.T) {
+			_, err := decideLeafForeignKey(node, derived, setNull, leafFKFacts{attnums: []int16{2}, foreignKeys: fks, nameHeld: true})
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyConflict)
 		})
 	}
 }
