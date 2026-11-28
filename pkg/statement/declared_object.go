@@ -112,7 +112,7 @@ func (o DeclaredObject) String() string {
 	case DeclaredExtension:
 		return "extension"
 	case DeclaredGrant:
-		return "privilege grant"
+		return "privilege change"
 	case DeclaredSchema:
 		return "schema"
 	case DeclaredRule:

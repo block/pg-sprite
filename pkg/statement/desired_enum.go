@@ -131,9 +131,9 @@ func parseDesiredEnumTree(source *desiredSource, tree *pganalyze.ParseResult) (D
 
 // enumFileExtraRefusal returns the refusal for raw, a statement of an enum
 // type file other than its one CREATE TYPE ... AS ENUM. A statement another
-// desired file holds belongs in a file of its own; any other statement no
-// desired file holds, and is refused as a table file refuses it, naming its
-// object, so moving it to a file of its own never meets a second refusal.
+// desired file holds is told which file it belongs in. A statement no desired
+// file holds is refused as a table file refuses it, naming its object, so the
+// author is never sent to a file that refuses it again.
 func enumFileExtraRefusal(source *desiredSource, raw *pganalyze.RawStmt) error {
 	if heldByADesiredFile(raw.GetStmt()) {
 		return enumTypeAloneRefusal(source, raw)
@@ -158,9 +158,13 @@ func heldByADesiredFile(node *pganalyze.Node) bool {
 	}
 }
 
-// changesOnlyRowSecurity reports whether every command of alter enables,
-// disables, forces, or stops forcing row security.
+// changesOnlyRowSecurity reports whether alter is a row security change a
+// table's desired file admits: a plain ALTER TABLE, without IF EXISTS, whose
+// every command enables, disables, forces, or stops forcing row security.
 func changesOnlyRowSecurity(alter *pganalyze.AlterTableStmt) bool {
+	if alter.GetMissingOk() || alter.GetObjtype() != pganalyze.ObjectType_OBJECT_TABLE {
+		return false
+	}
 	if len(alter.GetCmds()) == 0 {
 		return false
 	}
