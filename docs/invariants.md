@@ -873,7 +873,8 @@ statements, from the attach through its read-back and commit
 (`TestAttachPartitionLocksThePartitionsIndex` pins the modes it holds on each supported major).
 The step first locks the partition `SHARE UPDATE EXCLUSIVE`, which `lock_timeout` bounds the
 same way and which also waits behind `VACUUM`, `ANALYZE`, and index builds on that partition.
-The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported)
+The leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE` (`ensureLeafKey`, unexported,
+also reached through the attach index step in `pkg/executor/attach_index.go` for a table to attach)
 takes `ACCESS EXCLUSIVE` on one leaf only for `ADD CONSTRAINT ... USING INDEX` on an index already
 built concurrently, in a brief transaction under both bounds. A primary key over a column the leaf
 allows to be NULL, or whose not-null constraint is `NOT VALID` on PostgreSQL 18, would make that
@@ -1594,7 +1595,11 @@ and its attach); the leaf step of an online partitioned `PRIMARY KEY` or `UNIQUE
 detach pending, before it builds, and in the constraint's transaction locks the leaf
 `SHARE UPDATE EXCLUSIVE`, which excludes a detach, before it proves the leaf and the index by
 identity and names them (`TestEnsureLeafKeyRefusals`'s detach, drop, and detach-pending cases,
-`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`). `AddPartitionedKey` admits only a named
+`TestEnsureLeafKeyConstraintStepHoldsTheLeafInTheTree`); the attach index step
+(`pkg/executor/attach_index.go`, unexported) proves, before its builds and again after, that the
+parent is still a partitioned table and the table to attach still that plain table, a partition or
+inheritance child of nothing (`standaloneNodeSQL` through `proveNodeIn`;
+`TestEnsureAttachIndexesRefusesATableOrParentItDoesNotTake`). `AddPartitionedKey` admits only a named
 `ADD PRIMARY KEY` or `ADD UNIQUE` on the preflighted partitioned table and renders the parent's
 statement from the admitted kind, name, and columns alone; it refuses a tree holding a partition
 with its detach pending before any leaf step, since a key given to a partition leaving the tree

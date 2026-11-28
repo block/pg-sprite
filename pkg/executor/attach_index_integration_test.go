@@ -294,3 +294,281 @@ func TestEnsureAttachIndexesRefusesATakenNameAndAMovedTable(t *testing.T) {
 		})
 	})
 }
+
+// attachKeepsTheIndexes asserts the results name a distinct table index for
+// each parent index, runs the ATTACH, and asserts it attached exactly the
+// table's indexes, by OID, and created none.
+func (f attachProofFixture) attachKeepsTheIndexes(t *testing.T, table string, results []attachIndexResult, attachSQL string) {
+	t.Helper()
+	distinct := map[uint32]string{}
+	for _, r := range results {
+		other, dup := distinct[r.indexOID]
+		require.False(t, dup, "%s and %s both report table index %d", other, r.parentIndex, r.indexOID)
+		distinct[r.indexOID] = r.parentIndex
+	}
+	before := f.tableIndexes(t, table)
+	f.attach(t, attachSQL)
+	after := f.tableIndexes(t, table)
+	require.Len(t, after, len(before), "the attach created no index of its own")
+	for name, idx := range after {
+		assert.Equal(t, before[name].oid, idx.oid, "%s is the index the table had", name)
+		assert.True(t, idx.attached, "%s is attached to the parent's index", name)
+	}
+	for oid, parentIndex := range distinct {
+		var attached bool
+		require.NoError(t, f.pool.QueryRow(t.Context(),
+			`SELECT relispartition FROM pg_catalog.pg_class WHERE oid = $1`, oid).Scan(&attached))
+		assert.True(t, attached, "the index reported for %s is attached", parentIndex)
+	}
+}
+
+const attachEvents2027 = `ALTER TABLE %[1]s.events ATTACH PARTITION %[1]s.events_2027
+	FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')`
+
+// Two parent indexes of one definition each need a table index of their
+// own: the attach gives a table index to one parent index only. From a
+// table with none, the step builds two.
+func TestEnsureAttachIndexesBuildsAnIndexForEachOfTwoIdenticalParentIndexes(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				day date NOT NULL
+			) PARTITION BY RANGE (day);
+			CREATE INDEX events_id_a ON %[1]s.events (id);
+			CREATE INDEX events_id_b ON %[1]s.events (id);
+			CREATE TABLE %[1]s.events_2027 (
+				id bigint NOT NULL,
+				day date NOT NULL
+			)`)
+		parent, table := f.parentOID(t, "events"), f.standalone(t, "events_2027")
+
+		results, err := ensureAttachIndexes(t.Context(), f.pool, parent, table, attachIndexBudget)
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+		assert.Equal(t, attachIndexBuilt, results[0].action)
+		assert.Equal(t, attachIndexBuilt, results[1].action)
+		f.attachKeepsTheIndexes(t, "events_2027", results, attachEvents2027)
+	})
+}
+
+// The table index under the second parent index's derived name is the one
+// the attach gives the first, which comes first in OID order, so it cannot
+// count for the second, and the second's index cannot be built under that
+// name. The step refuses rather than report one index for both.
+func TestEnsureAttachIndexesRefusesTheSecondsNameHeldByTheFirstsIndex(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				day date NOT NULL
+			) PARTITION BY RANGE (day);
+			CREATE INDEX events_id_a ON %[1]s.events (id);
+			CREATE INDEX events_id_b ON %[1]s.events (id);
+			CREATE TABLE %[1]s.events_2027 (
+				id bigint NOT NULL,
+				day date NOT NULL
+			)`)
+		parent, table := f.parentOID(t, "events"), f.standalone(t, "events_2027")
+		f.exec(t, `CREATE INDEX `+pgx.Identifier{derivedPartitionIndexName("events_id_b", table.oid)}.Sanitize()+
+			` ON %[1]s.events_2027 (id)`)
+		before := f.tableIndexes(t, "events_2027")
+
+		_, err := ensureAttachIndexes(t.Context(), f.pool, parent, table, attachIndexBudget)
+		require.ErrorIs(t, err, ErrPartitionedIndexNameTaken)
+		assert.Equal(t, before, f.tableIndexes(t, "events_2027"), "nothing was built")
+	})
+}
+
+// A parent's plain unique index and its UNIQUE constraint on the same
+// columns each need a table index: the constraint one backed by a UNIQUE
+// constraint of the table. The key step does not adopt the plain index the
+// step built for the first.
+func TestEnsureAttachIndexesGivesAPlainUniqueIndexAndAUniqueConstraintAnIndexEach(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				day date NOT NULL
+			) PARTITION BY RANGE (day);
+			CREATE UNIQUE INDEX events_id_day_idx ON %[1]s.events (id, day);
+			ALTER TABLE %[1]s.events ADD CONSTRAINT events_id_day_key UNIQUE (id, day);
+			CREATE TABLE %[1]s.events_2027 (
+				id bigint NOT NULL,
+				day date NOT NULL
+			)`)
+		parent, table := f.parentOID(t, "events"), f.standalone(t, "events_2027")
+
+		results, err := ensureAttachIndexes(t.Context(), f.pool, parent, table, attachIndexBudget)
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+		assert.Equal(t, "events_id_day_idx", results[0].parentIndex)
+		assert.Equal(t, attachIndexBuilt, results[0].action)
+		assert.Equal(t, "events_id_day_key", results[1].parentIndex)
+		assert.Equal(t, attachIndexKeyed, results[1].action)
+		f.attachKeepsTheIndexes(t, "events_2027", results, attachEvents2027)
+	})
+}
+
+// The attach gives a plain parent index a table index that backs a
+// constraint, when it is the first match, so the step takes the table's
+// UNIQUE constraint's index rather than build a second unique index the
+// attach would leave unattached.
+func TestEnsureAttachIndexesTakesAConstraintsIndexForAPlainParentIndex(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				day date NOT NULL
+			) PARTITION BY RANGE (day);
+			CREATE UNIQUE INDEX events_id_day_idx ON %[1]s.events (id, day);
+			CREATE TABLE %[1]s.events_2027 (
+				id bigint NOT NULL,
+				day date NOT NULL,
+				CONSTRAINT events_2027_id_day_key UNIQUE (id, day)
+			)`)
+		parent, table := f.parentOID(t, "events"), f.standalone(t, "events_2027")
+		own := f.tableIndexes(t, "events_2027")["events_2027_id_day_key"].oid
+
+		results, err := ensureAttachIndexes(t.Context(), f.pool, parent, table, attachIndexBudget)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, attachIndexFound, results[0].action)
+		assert.Equal(t, own, results[0].indexOID)
+		f.attachKeepsTheIndexes(t, "events_2027", results, attachEvents2027)
+	})
+}
+
+// A foreign key of the parent to itself names the primary key's index as
+// the one it references, and is not a constraint that index backs: the
+// step gives the table the primary key and refuses nothing.
+func TestEnsureAttachIndexesGivesAKeyASelfReferenceDoesNotRefuse(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.nodes (
+				id bigint NOT NULL,
+				day date NOT NULL,
+				parent bigint,
+				CONSTRAINT nodes_pkey PRIMARY KEY (id, day)
+			) PARTITION BY RANGE (day);
+			ALTER TABLE %[1]s.nodes ADD CONSTRAINT nodes_parent_fk
+				FOREIGN KEY (parent, day) REFERENCES %[1]s.nodes (id, day);
+			CREATE TABLE %[1]s.nodes_2027 (
+				id bigint NOT NULL,
+				day date NOT NULL,
+				parent bigint
+			)`)
+		parent, table := f.parentOID(t, "nodes"), f.standalone(t, "nodes_2027")
+
+		results, err := ensureAttachIndexes(t.Context(), f.pool, parent, table, attachIndexBudget)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "nodes_pkey", results[0].parentIndex)
+		assert.Equal(t, attachIndexKeyed, results[0].action)
+		f.attachKeepsTheIndexes(t, "nodes_2027", results, `ALTER TABLE %[1]s.nodes ATTACH PARTITION %[1]s.nodes_2027
+			FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')`)
+	})
+}
+
+// A DEFERRABLE key checks uniqueness only at commit; the leaf key step
+// gives the table an immediate one, so the step refuses it before it
+// builds anything.
+func TestEnsureAttachIndexesRefusesADeferrableKey(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.events (
+				id bigint NOT NULL,
+				day date NOT NULL,
+				CONSTRAINT events_id_key UNIQUE (id, day) DEFERRABLE
+			) PARTITION BY RANGE (day);
+			CREATE TABLE %[1]s.events_2027 (
+				id bigint NOT NULL,
+				day date NOT NULL
+			)`)
+
+		_, err := ensureAttachIndexes(t.Context(), f.pool, f.parentOID(t, "events"), f.standalone(t, "events_2027"), attachIndexBudget)
+		require.ErrorIs(t, err, errAttachIndexUnsupported)
+		assert.Empty(t, f.tableIndexes(t, "events_2027"))
+	})
+}
+
+// The step takes a standalone plain table and a partitioned parent and
+// nothing else: a partition already in the tree and a parent that is not
+// partitioned are caller bugs, refused fail-closed; an inheritance child is
+// not a partition of nothing; and a partitioned table to attach is a shape
+// the step does not handle.
+func TestEnsureAttachIndexesRefusesATableOrParentItDoesNotTake(t *testing.T) {
+	const events = `
+		CREATE TABLE %[1]s.events (
+			id bigint NOT NULL,
+			day date NOT NULL
+		) PARTITION BY RANGE (day);
+		CREATE INDEX events_id_idx ON %[1]s.events (id);`
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		t.Run("a partition, not a standalone table", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, events+`
+				CREATE TABLE %[1]s.events_2026 PARTITION OF %[1]s.events
+					FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')`)
+			parent := f.parentOID(t, "events")
+			leaf := f.standalone(t, "events_2026")
+			leaf.standalone, leaf.parentOID = false, parent
+			before := f.tableIndexes(t, "events_2026")
+
+			_, err := ensureAttachIndexes(t.Context(), f.pool, parent, leaf, attachIndexBudget)
+			require.ErrorIs(t, err, ErrInvariantViolation)
+			assert.Equal(t, before, f.tableIndexes(t, "events_2026"))
+		})
+
+		t.Run("an inheritance child", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, events+`
+				CREATE TABLE %[1]s.base (
+					id bigint NOT NULL,
+					day date NOT NULL
+				);
+				CREATE TABLE %[1]s.events_2027 () INHERITS (%[1]s.base)`)
+
+			_, err := ensureAttachIndexes(t.Context(), f.pool, f.parentOID(t, "events"), f.standalone(t, "events_2027"), attachIndexBudget)
+			require.ErrorIs(t, err, ErrInvariantViolation)
+			assert.Empty(t, f.tableIndexes(t, "events_2027"))
+		})
+
+		t.Run("a parent that is a plain table", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, `
+				CREATE TABLE %[1]s.events (
+					id bigint NOT NULL,
+					day date NOT NULL
+				);
+				CREATE TABLE %[1]s.events_2027 (
+					id bigint NOT NULL,
+					day date NOT NULL
+				)`)
+
+			_, err := ensureAttachIndexes(t.Context(), f.pool, f.parentOID(t, "events"), f.standalone(t, "events_2027"), attachIndexBudget)
+			require.ErrorIs(t, err, ErrInvariantViolation)
+		})
+
+		t.Run("a partitioned table to attach", func(t *testing.T) {
+			f := newFixture(t)
+			f.exec(t, events+`
+				CREATE TABLE %[1]s.events_2027 (
+					id bigint NOT NULL,
+					day date NOT NULL
+				) PARTITION BY RANGE (day)`)
+			table := f.standalone(t, "events_2027")
+			table.relkind = "p"
+
+			_, err := ensureAttachIndexes(t.Context(), f.pool, f.parentOID(t, "events"), table, attachIndexBudget)
+			require.ErrorIs(t, err, errAttachIndexUnsupported)
+			assert.Empty(t, f.tableIndexes(t, "events_2027"))
+		})
+	})
+}
