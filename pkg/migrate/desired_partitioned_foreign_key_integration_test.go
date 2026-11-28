@@ -162,6 +162,33 @@ CREATE TABLE events (
 	assert.False(t, eventsHasNote(t, pool, schema), "the ADD COLUMN planned ahead of the foreign key did not run")
 }
 
+// A partition whose DETACH PARTITION ... CONCURRENTLY did not finish is left
+// out when the server attaches the parent's foreign key, so the build fails
+// on the tree, as it does on a foreign table. With events_2026_02 left
+// detach-pending, admission stops the run whole before any statement: a
+// failed result carrying the plan and no verdict, its error the build's, and
+// the column planned ahead of the foreign key is not added.
+func TestRunDesiredStopsBeforeAnyStatementOnADetachPendingPartition(t *testing.T) {
+	pool, url, schema := partitionedEvents(t)
+	leaveDetachPending(t, pool, schema, "events_2026_02")
+
+	res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, `
+CREATE TABLE events (
+    id         bigint NOT NULL,
+    created_at date NOT NULL,
+    account_id bigint,
+    note       text,
+    CONSTRAINT events_account_fk FOREIGN KEY (account_id) REFERENCES accounts (id)
+) PARTITION BY RANGE (created_at);`)}, fkOptions(url))
+	require.ErrorIs(t, err, executor.ErrPartitionDetachPending)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	assert.Empty(t, res.Reason, "a stop is not a refusal")
+	require.Len(t, res.Plan.Statements, 2, "the stop carries the plan it did not run")
+	assert.Contains(t, res.Detail, "nothing was executed")
+	assert.Empty(t, res.Verdicts, "no statement was attempted")
+	assert.False(t, eventsHasNote(t, pool, schema), "the ADD COLUMN planned ahead of the foreign key did not run")
+}
+
 // The control: the same column and foreign key to the plain accounts table on
 // a single-level tree pass admission, and the run adds both.
 func TestRunDesiredAdmitsAPartitionedForeignKeyTheBuildTakes(t *testing.T) {

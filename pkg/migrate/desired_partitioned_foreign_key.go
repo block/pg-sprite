@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -33,7 +34,9 @@ import (
 // error, is a tree the build fails on (a foreign table partition, a
 // partition whose detach has not finished) or a catalog read that could not
 // finish. Nothing has executed in either case and the detail says so. The
-// boolean is false when the plan is not admitted.
+// detail is a fixed sentence per cause; the error, which a host matches with
+// errors.Is against the executor's sentinels, carries the names and any
+// server error. The boolean is false when the plan is not admitted.
 func AdmitPlanPartitionedForeignKeys(ctx context.Context, pool *pgxpool.Pool, report plan.Report) (DesiredResult, bool, error) {
 	for i, ps := range report.Statements {
 		if ps.Execution != planner.ExecutionPartitionedForeignKeyBuild {
@@ -45,15 +48,38 @@ func AdmitPlanPartitionedForeignKeys(ctx context.Context, pool *pgxpool.Pool, re
 		}
 		if r, ok := partitionedForeignKeyCatalogRefusal(err); ok {
 			return DesiredResult{Plan: report}.refused(r, fmt.Sprintf(
-				"planned statement %d (%s) adds a foreign key to a partitioned table, which the engine cannot run safely: %v; nothing was executed",
-				i+1, ps.SQL, err)), false, nil
+				"planned statement %d (%s) adds a foreign key to a partitioned table, and %s; nothing was executed",
+				i+1, ps.SQL, partitionedForeignKeyStopReason(err))), false, nil
 		}
 		return DesiredResult{
 			Plan:    report,
 			Outcome: verdict.OutcomeFailed,
-			Detail: fmt.Sprintf("planned statement %d of %d adds a foreign key to a partitioned table, and the check of its referenced table and partition tree stopped: %v; nothing was executed",
-				i+1, len(report.Statements), err),
+			Detail: fmt.Sprintf("planned statement %d of %d adds a foreign key to a partitioned table, and %s; nothing was executed",
+				i+1, len(report.Statements), partitionedForeignKeyStopReason(err)),
 		}, false, fmt.Errorf("planned statement %d adds a foreign key to a partitioned table: %w", i+1, err)
 	}
 	return DesiredResult{}, true, nil
+}
+
+// partitionedForeignKeyStopReason says, in the foreign key's own words, why
+// its admission stopped the plan and what clears it. A refusal returns no
+// error, so its detail keeps the engine's own sentence, which names the
+// referenced table or the partitions and carries no driver text, with the
+// change to make; a failed stop gets a fixed sentence, and its returned
+// error carries the names and any server error.
+func partitionedForeignKeyStopReason(err error) string {
+	switch {
+	case errors.Is(err, executor.ErrPartitionedForeignKeyReferencedTable):
+		return err.Error() + "; reference a plain table outside the partition tree"
+	case errors.Is(err, executor.ErrPartitionedForeignKeySubPartitioned):
+		return err.Error()
+	case errors.Is(err, executor.ErrForeignTablePartition):
+		return "the partition tree holds a foreign table, which the build does not take; detach the foreign table, then run the plan again"
+	case errors.Is(err, executor.ErrPartitionDetachPending):
+		return "a partition's DETACH PARTITION ... CONCURRENTLY has not finished; run that statement again to finish the detach, then run the plan again"
+	}
+	if _, ok := admissionRefusal(err); ok {
+		return err.Error()
+	}
+	return "its referenced table and partition tree could not be checked"
 }
