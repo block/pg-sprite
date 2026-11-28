@@ -445,16 +445,25 @@ and writes its record to `results-kill.json` (`LOAD_PROOF_RESULTS` moves it). It
 operator-run, not a CI gate; it is skipped unless `LOAD_PROOF_KILL=1`, which the target sets.
 
 The harness polls the checkpoint row, the same read a status command makes, every 50
-milliseconds, and kills the binary from that poll; nothing is timed:
+milliseconds, and kills the binary from that poll; nothing is timed. The runs it kills print
+no verdict, so they run with `--progress=always` in place of `--json`, and the binary prints
+a plain progress line on stderr per change of step, operation, or ten-percent mark; the run
+it lets finish keeps `--json`. The harness seeds the table and runs `ANALYZE` on it, so the
+verify pass's line carries a percent from the source's catalog row count. That line is
+human-facing prose, so the harness reads only two of its fields: the `checksum` operation
+and the percent right after it.
 
 1. The first run is killed in `copying` once the row carries a saved watermark short of the
    key space and the shadow's heap is at least half the source's, so the rerun has a save to
    resume from and rows above it to clear. The binary saves the copy's watermark as soon as
    its first chunk lands and every ten seconds after, so even at a smoke size, where the copy
    lasts about a second, the kill lands after a save.
-2. The second run resumes from that row and is killed at the first poll that sees the row
-   in `verifying`. The poll also notes the first watermark it sees this run save in
-   `copying`.
+2. The second run resumes from that row and is killed once the row is in `verifying` and
+   the run has printed a verify progress line above 0%. The percent counts rows from chunks
+   whose comparison has ended, so the pass has compared at least one chunk. A line is
+   printed only while the pass runs, and the harness reads the row again as soon as one
+   arrives rather than at its next poll, so the kill follows the line by milliseconds. The
+   poll also notes the first watermark it sees this run save in `copying`.
 3. The third run resumes from the `verifying` row and runs to its verdict.
 
 Before each rerun the harness waits, for at most the server's `wal_sender_timeout` plus 30
@@ -463,15 +472,14 @@ it held is refused as `resume-slot-held`; it never drops or takes over the slot.
 for the load to commit a few writes per worker, so the interval in which no binary runs holds
 writes only the kept slot can carry into the new table. A kill in `catching_up` is not made:
 at a smoke size that phase lasts less than a poll or two, so a kill aimed at it would land
-only some of the time. Nor is the kill in `verifying` held until the pass has compared a
-chunk, as the library proof's cancel is: the row records nothing of the pass's progress, and
-the binary reports it nowhere a harness outside the process can read.
+only some of the time.
 
 A pass proves, beyond what the load proof's oracles prove of the result:
 
 - each kill landed inside its phase: the binary died of SIGKILL, not of its own accord, and
   the row it left stands in the phase the poll saw, a killed copy's saved watermark still
-  short of the key space;
+  short of the key space, and the last verify progress line before the kill in `verifying`
+  above 0%;
 - the killed copy's rerun resumed from its save: the first watermark the poll saw the rerun
   save is at or above the one the killed run left, where a copy started over would save one
   below it first;
@@ -489,7 +497,8 @@ A pass proves, beyond what the load proof's oracles prove of the result:
 
 The record has the load proof's shape plus `runs`: per run, when it started and how long it
 ran, how long the harness waited for the slot before it, the phase it was killed in with the
-two heap sizes the poll read then, the signal that ended it and its exit code, the row's
+two heap sizes the poll read then, the last verify progress line it judged and that line's
+percent (`verify_progress_at_kill`, `verify_percent_at_kill`), the signal that ended it and its exit code, the row's
 phase and watermark after it (`watermark_at_kill`), for the killed copy's rerun the first
 watermark the poll saw it save (`first_saved_watermark`), the shadow's OID, the writes the
 load committed before the next run, and, for the last run, the verdict's outcome and code.

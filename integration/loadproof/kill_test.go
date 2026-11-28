@@ -50,6 +50,13 @@ type killRun struct {
 	KilledIn          string `json:"killed_in,omitempty"`
 	ShadowBytesAtKill int64  `json:"shadow_bytes_at_kill,omitempty"`
 	SourceBytesAtKill int64  `json:"source_bytes_at_kill,omitempty"`
+	// VerifyPercentAtKill is the verify pass's percent on the last
+	// progress line the run printed before the poll sent SIGKILL (for a
+	// run the poll did not kill, the last it printed), and
+	// VerifyProgressAtKill that line, both absent when the run printed no
+	// verify progress by then.
+	VerifyPercentAtKill  *float64 `json:"verify_percent_at_kill,omitempty"`
+	VerifyProgressAtKill string   `json:"verify_progress_at_kill,omitempty"`
 	// ExitSignal names the signal that ended the binary, empty when it
 	// exited on its own; ExitCode is its exit code, -1 when a signal ended
 	// it.
@@ -124,6 +131,12 @@ func TestLoadProofKill(t *testing.T) {
 	removeLeftoversOnCleanup(t, pool, table, release)
 	t.Logf("seeding %d rows into %s", c.Rows, table.Qualified())
 	require.NoError(t, table.SeedRows(ctx, c.Rows))
+	// The verify pass's progress line carries a percent only once the
+	// catalog holds a row count for the source, and the verifying kill
+	// waits for that percent; a freshly seeded table has none until
+	// autovacuum analyzes it.
+	_, err = pool.Exec(ctx, "ANALYZE "+table.Qualified())
+	require.NoError(t, err)
 	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
 	require.NoError(t, err)
 
@@ -232,6 +245,10 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 		if k.sent {
 			run.KilledIn = point.phase().String()
 		}
+		if k.verify.Line != "" {
+			percent := k.verify.Percent
+			run.VerifyPercentAtKill, run.VerifyProgressAtKill = &percent, k.verify.Line
+		}
 		if k.signal != 0 {
 			run.ExitSignal = k.signal.String()
 		}
@@ -258,7 +275,7 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 			landed := cp.Watermark.Value()
 			run.WatermarkAtKill = &landed
 		}
-		if err := checkKilledAt(point, cp, k.signal, k.code, k.stdout); err != nil {
+		if err := checkKilledAt(point, cp, k.verify, k.signal, k.code, k.stdout); err != nil {
 			return 0, 0, fmt.Errorf("run %d: %w; stderr: %s", run.Run, err, k.stderr)
 		}
 		began = cp.Watermark
@@ -273,8 +290,8 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 				run.Run, run.ShadowOID, shadow)
 		}
 		shadow = run.ShadowOID
-		t.Logf("run %d killed in %s after %s; the row stands in %s", run.Run, run.KilledIn,
-			time.Duration(run.RunMillis)*time.Millisecond, run.RowPhase)
+		t.Logf("run %d killed in %s after %s; the row stands in %s; last verify progress %q", run.Run, run.KilledIn,
+			time.Duration(run.RunMillis)*time.Millisecond, run.RowPhase, run.VerifyProgressAtKill)
 		if waited, err = waitForSlotIdle(runCtx, pool, store, table, release); err != nil {
 			return 0, 0, fmt.Errorf("before run %d: %w", run.Run+1, err)
 		}
@@ -292,6 +309,9 @@ type killed struct {
 	// read when it did.
 	sent bool
 	fill copyFill
+	// verify is the last verify progress line the run had printed when the
+	// poll decided to kill it, or when the run ended without a kill.
+	verify verifySeen
 	// firstSaved is the first watermark the poll saw the row carry in
 	// copying other than the one it carried when the run started: the
 	// run's first copying save the poll saw, invalid when it saw none.
@@ -305,21 +325,23 @@ type killed struct {
 	stdout, stderr string
 }
 
-// runUntilKilled runs the binary with the proof's command line and kills
-// it with SIGKILL from a poll of the checkpoint row once the row shows the
-// run at point, noting the first copying save the poll sees move off
-// began, the watermark the row carried before the run. It returns how the
+// runUntilKilled runs the binary with the proof's command line, progress
+// on stderr in place of the verdict JSON (killArgs), and kills it with
+// SIGKILL from a poll of the checkpoint row and the progress lines once
+// they show the run at point, noting the first copying save the poll sees
+// move off began, the watermark the row carried before the run. It returns how the
 // run ended; its error is the harness's: a binary that could not start or
 // a poll that failed. When ctx ends — the operator interrupted the proof —
 // the binary is killed and waited for, and the test fails so its cleanups
 // run.
 func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, began copier.Watermark) (killed, error) {
 	t.Helper()
-	cmd := exec.CommandContext(runCtx, c.Binary, migrateArgs(c, table)...)
+	cmd := exec.CommandContext(runCtx, c.Binary, killArgs(c, table)...)
 	cmd.Env = append(os.Environ(), "PGSPRITE_URL="+c.DSN)
-	var stdout, stderr bytes.Buffer
+	var stdout bytes.Buffer
+	stderr := newProgressLines()
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stderr = stderr
 	k := killed{started: time.Now()}
 	if err := cmd.Start(); err != nil {
 		k.exited = time.Now()
@@ -340,7 +362,7 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 		}
 	}
 	wg.Go(func() {
-		k.sent, k.fill, pollErr = killWhenReached(pollCtx, pool, store, table, point, cmd.Process, seen)
+		k.sent, k.fill, k.verify, pollErr = killWhenReached(pollCtx, pool, store, table, point, cmd.Process, seen, stderr)
 	})
 	waitErr := cmd.Wait()
 	k.exited = time.Now()
@@ -348,6 +370,9 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 	wg.Wait()
 	require.NoError(t, context.Cause(ctx), "the proof was interrupted: the binary was killed, and the cleanups remove its replication slot and the seeded table")
 	k.stdout, k.stderr = stdout.String(), stderr.String()
+	if !k.sent {
+		k.verify = stderr.verify()
+	}
 	k.signal, k.code = exitSignal(cmd.ProcessState), cmd.ProcessState.ExitCode()
 	var exit *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exit) {
@@ -359,50 +384,56 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 	return k, nil
 }
 
-// killWhenReached polls the checkpoint row and the two relations' heap
-// sizes every killPollInterval until a reading shows the run at point,
-// then sends proc SIGKILL, handing seen every row it reads. It reports
-// whether it sent the signal to a process still running, and the sizes it
-// read then. It ends without sending when ctx ends — the binary exited
-// first — and returns any read error other than the row or its table not
-// existing yet.
-func killWhenReached(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, proc *os.Process, seen func(checkpoint.Checkpoint)) (bool, copyFill, error) {
+// killWhenReached reads the checkpoint row and the two relations' heap
+// sizes every killPollInterval, and at once whenever lines reports the
+// verify pass past 0%, until a reading together with the last verify
+// progress line shows the run at point, then sends proc SIGKILL, handing
+// seen every row it reads. It reports whether it sent the signal to a
+// process still running, and the sizes and verify progress it judged
+// then. It ends without sending when ctx ends — the binary exited first —
+// and returns any read error other than the row or its table not existing
+// yet.
+func killWhenReached(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, proc *os.Process, seen func(checkpoint.Checkpoint), lines *progressLines) (bool, copyFill, verifySeen, error) {
 	ticker := time.NewTicker(killPollInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return false, copyFill{}, nil
+			return false, copyFill{}, verifySeen{}, nil
 		case <-ticker.C:
+		case <-lines.wake:
 		}
+		// The progress is read before the row, so a row in verifying read
+		// after a line past 0% is the pass that printed it.
+		verify := lines.verify()
 		cp, err := store.Inspect(ctx, table.Schema, table.Table)
 		if errors.Is(err, checkpoint.ErrNotFound) || errors.Is(err, checkpoint.ErrTableMissing) {
 			continue
 		}
 		if ctx.Err() != nil {
-			return false, copyFill{}, nil
+			return false, copyFill{}, verifySeen{}, nil
 		}
 		if err != nil {
-			return false, copyFill{}, fmt.Errorf("inspect the checkpoint row: %w", err)
+			return false, copyFill{}, verifySeen{}, fmt.Errorf("inspect the checkpoint row: %w", err)
 		}
 		seen(cp)
 		fill, err := readCopyFill(ctx, pool, table.Schema, table.Table, cp.ShadowTable)
 		if ctx.Err() != nil {
-			return false, copyFill{}, nil
+			return false, copyFill{}, verifySeen{}, nil
 		}
 		if err != nil {
-			return false, copyFill{}, err
+			return false, copyFill{}, verifySeen{}, err
 		}
-		if !point.reached(cp, fill) {
+		if !point.reached(cp, fill, verify) {
 			continue
 		}
 		if err := proc.Signal(syscall.SIGKILL); err != nil {
 			if errors.Is(err, os.ErrProcessDone) {
-				return false, fill, nil
+				return false, fill, verify, nil
 			}
-			return false, fill, fmt.Errorf("send the binary SIGKILL: %w", err)
+			return false, fill, verify, fmt.Errorf("send the binary SIGKILL: %w", err)
 		}
-		return true, fill, nil
+		return true, fill, verify, nil
 	}
 }
 
