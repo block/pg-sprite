@@ -389,7 +389,7 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 		return verdict.Verdict{}, err
 	}
 	if stopped.blocks(st, opts) {
-		return copySwapRunStoppedVerdict(st, qualified(st), stopped), nil
+		return copySwapRunStoppedVerdict(st, qualified(st), stopped, true), nil
 	}
 	resumes := stopped.resumedBy(st)
 	if err := checkDropRoute(rs, dropped); err != nil {
