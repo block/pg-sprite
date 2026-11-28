@@ -66,6 +66,26 @@ var (
 	errAttachedUnderAnotherBound = errors.New("the table is a partition of the parent under another bound")
 )
 
+// attachNotReady reports whether err says the attach found the table or the
+// DEFAULT partition short of what the earlier steps give them, so that the
+// ATTACH would scan or build. A rerun of those steps gives them what is
+// missing.
+func attachNotReady(err error) bool {
+	for _, notReady := range []error{
+		errAttachProofNotReady,
+		errAttachDefaultPartitionChanged,
+		errAttachProofsNotOfTheBound,
+		errAttachIndexNotReady,
+		errAttachForeignKeyNotReady,
+		errAttachIndexIncomplete,
+	} {
+		if errors.Is(err, notReady) {
+			return true
+		}
+	}
+	return false
+}
+
 // attachPartitionAction says what the step did.
 type attachPartitionAction string
 

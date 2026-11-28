@@ -188,6 +188,63 @@ const (
 	// CodePartitionedKeyUnsettled: partitions kept appearing without the key
 	// constraint until the build ran out of passes; a rerun resumes.
 	CodePartitionedKeyUnsettled Code = "partitioned-key-unsettled"
+	// CodeAttachUnsupportedShape: the statement handed to the online attach
+	// is not one ALTER TABLE schema.parent ATTACH PARTITION ... FOR VALUES:
+	// it attaches a DEFAULT partition, or leaves the parent unqualified;
+	// nothing was changed.
+	CodeAttachUnsupportedShape Code = "attach-unsupported-shape"
+	// CodeAttachTable: the table the online attach would attach does not
+	// exist, is not a plain table, or is already a partition or inheritance
+	// child of another table; nothing was changed.
+	CodeAttachTable Code = "attach-table"
+	// CodeAttachDefaultWindow: the parent has a DEFAULT partition, and the
+	// caller did not accept the write window its proof opens; nothing was
+	// changed.
+	CodeAttachDefaultWindow Code = "attach-default-window"
+	// CodeAttachBoundUnprovable: the online attach cannot derive a CHECK
+	// the server accepts as proof of the bound, for the parent's partition
+	// key or for the bound's values; nothing was changed.
+	CodeAttachBoundUnprovable Code = "attach-bound-unprovable"
+	// CodeAttachProofNameTaken: a name a CHECK of the online attach needs on
+	// the table or the DEFAULT partition is held by another constraint; the
+	// occupant is left for an operator.
+	CodeAttachProofNameTaken Code = "attach-proof-name-taken"
+	// CodeAttachProofNotPlainTable: the parent's DEFAULT partition is not a
+	// plain table, so the online attach cannot prove it online; nothing was
+	// added to it.
+	CodeAttachProofNotPlainTable Code = "attach-proof-not-plain-table"
+	// CodeAttachColumnMissing: the table lacks a column the parent declares
+	// NOT NULL, which the attach refuses.
+	CodeAttachColumnMissing Code = "attach-column-missing"
+	// CodeAttachNotNullNotValid: a column of the table the parent declares
+	// NOT NULL has a NOT VALID not-null constraint (PostgreSQL 18), which
+	// setting it NOT NULL would validate under ACCESS EXCLUSIVE.
+	CodeAttachNotNullNotValid Code = "attach-not-null-not-valid"
+	// CodeAttachColumnRowType: a nullable column of a composite type is
+	// declared NOT NULL by the parent, which the online attach cannot set
+	// without a scan.
+	CodeAttachColumnRowType Code = "attach-column-row-type"
+	// CodeAttachIndexUnsupported: the parent has an index or key constraint
+	// the online attach cannot give the table, such as an EXCLUDE
+	// constraint's or a DEFERRABLE key's; nothing was built for it.
+	CodeAttachIndexUnsupported Code = "attach-index-unsupported"
+	// CodeAttachForeignKeyUnsupported: the parent has a foreign key the
+	// online attach cannot give the table; nothing was added for it.
+	CodeAttachForeignKeyUnsupported Code = "attach-foreign-key-unsupported"
+	// CodeAttachUnderAnotherBound: the table is already a partition of the
+	// parent under a bound other than the statement's; it is left as it is.
+	CodeAttachUnderAnotherBound Code = "attach-under-another-bound"
+	// CodeAttachParentChanged: the parent's CHECKs or NOT NULL columns
+	// changed while the online attach gave them to the table; what it
+	// finished stays, and a rerun brings the table to the parent as it is.
+	CodeAttachParentChanged Code = "attach-parent-changed"
+	// CodeAttachNotReady: the online attach found the table or the DEFAULT
+	// partition short of what its earlier steps give them (a proof missing
+	// or NOT VALID, an index the ATTACH would still build, a foreign key it
+	// would create), or the DEFAULT partition was another table, so the
+	// ATTACH would scan or build; nothing was attached, and a rerun gives
+	// them what is missing.
+	CodeAttachNotReady Code = "attach-not-ready"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -418,6 +475,20 @@ func Codes() []Code {
 		CodePartitionedKeyParentConflict,
 		CodePartitionedKeySubPartitioned,
 		CodePartitionedKeyUnsettled,
+		CodeAttachUnsupportedShape,
+		CodeAttachTable,
+		CodeAttachDefaultWindow,
+		CodeAttachBoundUnprovable,
+		CodeAttachProofNameTaken,
+		CodeAttachProofNotPlainTable,
+		CodeAttachColumnMissing,
+		CodeAttachNotNullNotValid,
+		CodeAttachColumnRowType,
+		CodeAttachIndexUnsupported,
+		CodeAttachForeignKeyUnsupported,
+		CodeAttachUnderAnotherBound,
+		CodeAttachParentChanged,
+		CodeAttachNotReady,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -499,6 +570,18 @@ func (c Code) Permanent() bool {
 		CodePartitionedKeyUnsupportedShape,
 		CodePartitionedKeyParentConflict,
 		CodePartitionedKeySubPartitioned,
+		CodeAttachUnsupportedShape,
+		CodeAttachTable,
+		CodeAttachDefaultWindow,
+		CodeAttachBoundUnprovable,
+		CodeAttachProofNameTaken,
+		CodeAttachProofNotPlainTable,
+		CodeAttachColumnMissing,
+		CodeAttachNotNullNotValid,
+		CodeAttachColumnRowType,
+		CodeAttachIndexUnsupported,
+		CodeAttachForeignKeyUnsupported,
+		CodeAttachUnderAnotherBound,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -668,6 +751,38 @@ func sentinelCode(err error) Code {
 		return CodePartitionedKeySubPartitioned
 	case errors.Is(err, ErrPartitionedKeyUnsettled):
 		return CodePartitionedKeyUnsettled
+	case errors.Is(err, ErrAttachPartitionUnsupportedShape):
+		return CodeAttachUnsupportedShape
+	case errors.Is(err, ErrAttachPartitionTable):
+		return CodeAttachTable
+	case errors.Is(err, ErrAttachPartitionDefaultWindow):
+		return CodeAttachDefaultWindow
+	case errors.Is(err, errAttachBoundUnprovable):
+		return CodeAttachBoundUnprovable
+	case errors.Is(err, errAttachProofNameTaken):
+		return CodeAttachProofNameTaken
+	case errors.Is(err, errAttachProofViolation):
+		// Rows of the table outside the bound, or of the DEFAULT partition
+		// inside it: corrected in the data before a rerun.
+		return CodeDataFault
+	case errors.Is(err, errAttachProofNotPlainTable):
+		return CodeAttachProofNotPlainTable
+	case errors.Is(err, errAttachColumnMissing):
+		return CodeAttachColumnMissing
+	case errors.Is(err, errAttachNotNullNotValid):
+		return CodeAttachNotNullNotValid
+	case errors.Is(err, errAttachColumnRowType):
+		return CodeAttachColumnRowType
+	case errors.Is(err, errAttachIndexUnsupported):
+		return CodeAttachIndexUnsupported
+	case errors.Is(err, errAttachForeignKeyUnsupported):
+		return CodeAttachForeignKeyUnsupported
+	case errors.Is(err, errAttachedUnderAnotherBound):
+		return CodeAttachUnderAnotherBound
+	case errors.Is(err, errAttachParentChanged):
+		return CodeAttachParentChanged
+	case attachNotReady(err):
+		return CodeAttachNotReady
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):

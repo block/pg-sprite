@@ -810,6 +810,41 @@ the tree's locks before the referenced table's, the server's own order, so it me
 against a transaction that read the referenced table and then writes the partitioned table; the
 step rolls back, every partition's foreign key stays, and the rerun adopts them.
 
+### Outcomes of an online attach
+
+`executor.AttachPartitionOnline` (and `AttachPartitionOnlineAsStep`) runs a reviewed `ALTER
+TABLE schema.parent ATTACH PARTITION table FOR VALUES ...` online, under the parent's advisory
+lock. It first gives the table a validated `CHECK` that implies the bound, then the parent's
+`CHECK` constraints and `NOT NULL` columns, its indexes and keys, and its enforced foreign keys,
+each while writes go on; then it gives the parent's `DEFAULT` partition, when there is one, a
+validated `CHECK` that excludes the bound; and last it runs the `ATTACH`, which scans and builds
+nothing, and drops both proof `CHECK`s in the same transaction. A library caller calls it
+directly; no front door routes to it yet.
+
+It stops at the first error and keeps what earlier steps finished, and **running the same
+statement again resumes from there**. A bound proof a stop leaves on the table is enforced for
+new rows, so writes to the table outside the bound fail until the attach; a `DEFAULT`
+partition's proof refuses writes the parent routes there inside the bound until the attach, which
+is the window `AttachPartitionOptions.AcceptDefaultWriteWindow` accepts. The codes it shares with
+the builds above (`not-partitioned-table`, `table-lock-unconfirmed`, `invariant-violation`,
+`commit-outcome-unknown`, `budget-lock-exceeded`, `budget-statement-exceeded`,
+`execution-failed`, and `*dbconn.TableLockHeldError`), the key build's codes its index step
+returns, and the foreign key build's codes its foreign key step returns, route as in their
+tables, with "whatever was finished" meaning the table's steps. The codes of its own, and
+`data-fault`, route as follows:
+
+| Outcome | Persists | Retry | Orchestrator action |
+| --- | --- | --- | --- |
+| `attach-unsupported-shape` | nothing | no, permanent | The statement attaches a `DEFAULT` partition or leaves the parent unqualified; change the statement |
+| `attach-table` | nothing | no, permanent | The table to attach is missing, is not a plain table, or is already another table's partition or inheritance child. Surface to an operator |
+| `attach-default-window` | nothing | no, permanent | The parent has a `DEFAULT` partition. Accept the write window (`AcceptDefaultWriteWindow`) after checking that no writer sends rows inside the new bound to the parent meanwhile, or detach the `DEFAULT` partition first |
+| `attach-bound-unprovable` | nothing | no, permanent | The partition key or the bound is one the attach cannot prove ahead of time. Surface to an operator |
+| `data-fault` | the table's bound proof, `NOT VALID` and enforced for new writes, when the table's rows break it; the steps before the `DEFAULT` partition's proof, when its rows break that proof, which is dropped | no, permanent | Rows of the table fall outside the bound, or rows of the `DEFAULT` partition fall inside it. Move or correct them, then the same statement resumes |
+| `attach-proof-name-taken`, `attach-proof-not-plain-table`, `attach-column-missing`, `attach-not-null-not-valid`, `attach-column-row-type`, `attach-index-unsupported`, `attach-foreign-key-unsupported` | earlier steps | no, permanent | Something on the table, the `DEFAULT` partition, or the parent stands in the way of an online attach (the code names it). An operator resolves it, then the same statement resumes |
+| `attach-under-another-bound` | nothing changed by the run | no, permanent | The table is already a partition of the parent under another bound. Surface to an operator |
+| `attach-parent-changed` | earlier steps | yes | The parent's constraints changed during the run. Retry the same statement; if it repeats, find what else changes the parent |
+| `attach-not-ready` | earlier steps | yes | Something removed what an earlier step gave the table or the `DEFAULT` partition, or the `DEFAULT` partition changed, before the `ATTACH`. Retry the same statement; if it repeats, find what else changes them |
+
 ### Wiring the build through `migrate.Run` and `migrate.RunDesired`
 
 A `CREATE INDEX` on a partitioned table that reaches `migrate.Run` or `migrate.RunDesired` runs
