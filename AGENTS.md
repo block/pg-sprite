@@ -240,6 +240,19 @@ no printing to process stdout) are enforced by `.golangci.yml`, not prose.
 
 - Do not create PRs automatically — pushing a branch is fine; opening the PR is the author's
   decision. When asked, create PRs as drafts (`gh pr create --draft`); the author marks ready.
+- PR titles are conventional commits: `<type>(<scope>): <sentence>`. The type is `feat`,
+  `fix`, `docs`, `refactor`, `perf`, `test`, `ci`, or `chore`; the scope is the package or
+  area the change is about (`planner`, `executor`, `migrate`, `cli`). The sentence says what
+  the change does in words a reviewer understands without the diff, starts lowercase, and has
+  no trailing period: `feat(planner): refuse to retype or drop a column that a publication
+  includes`. A plain sentence with no prefix is a malformed title. PRs merge as squash
+  commits, so the title becomes the commit subject on `main`, where it can no longer be
+  fixed. Pass `--title` explicitly, never `--fill` or a commit subject, and read it back
+  after creating the PR and after every retitle:
+
+  ```bash
+  gh pr view <n> --json title --jq .title | grep -Eq '^(feat|fix|docs|refactor|perf|test|ci|chore)(\([a-z0-9-]+\))?!?: [^ ]' || echo "PR title is not a conventional commit"
+  ```
 - Never squash or rewrite history after a human has reviewed (comments or approval) — add
   commits so reviewers can see increments. Squash freely before review.
 - Agent disclosure lines (agent name + model) go at the *bottom* of PR bodies and issue
