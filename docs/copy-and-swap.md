@@ -252,7 +252,7 @@ run above, with `--json`:
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)",
   "table": "public.orders",
-  "detail": "verified 52693 rows in 26 chunks (1 settled against the stream); the retained source is dropped",
+  "detail": "verified 52693 rows in 26 chunks (1 settled against the stream); the retained source is dropped; the new table was analyzed before the swap, so the planner has its statistics",
   "swap_lsn": "0/3F2A1B8",
   "verification": {
     "rows": 52693,
@@ -260,6 +260,12 @@ run above, with `--json`:
     "settled": 1,
     "unsettled": 2,
     "carried": 3
+  },
+  "statistics_refresh": {
+    "columns": [
+      "amount"
+    ],
+    "refreshed": true
   }
 }
 ```
@@ -274,6 +280,27 @@ settled against the stream, the chunks it could not settle, and how many keys of
 for the swap to compare under its lock (`carried`, a count, never the keys). `detail` states
 the rows, chunks, and settled chunks too; `unsettled` and `carried` are only in the object.
 On this outcome a non-zero `unsettled` or `carried` is a record, not a warning: the swap compared those keys under its lock and would have refused had any differed.
+
+The table the swap moves in is a new relation, and a new relation has no planner statistics:
+no row count and nothing in `pg_stats`. Left that way, the planner estimates every query on
+the table from defaults until autovacuum next analyzes it, which on a busy server can be
+minutes, and on a table with `autovacuum_enabled = false` (a storage parameter the swap keeps)
+is never. So once the verification pass and the cutover gate have passed, pg-sprite runs a
+whole-table `ANALYZE` on the shadow, before the swap. `ANALYZE` only reads a sample of the
+shadow and blocks neither the copy's writes, a live run's catch-up, nor anything on the
+source, and the per-column and extended statistics targets the shadow carries over from the
+source are already set, so it samples as the source would be sampled. The statistics belong
+to the shadow's relation, which the swap renames to the source's name, so the planner has the
+row count, per-column statistics, and extended statistics data the moment the swap commits.
+`statistics_refresh` reports it in the same shape the native type change uses
+([binary-coercible-type-changes.md](binary-coercible-type-changes.md)): `columns` lists the
+columns the statement retyped (an empty list for a statement that retyped none; the
+`ANALYZE` covers every column either way) and `refreshed` says the `ANALYZE` committed. An
+`ANALYZE` that cannot run within the run's lock and statement budgets — another `ANALYZE` or
+a `VACUUM` holding the shadow, say — does not stop the run or the swap: the swap goes ahead,
+`refreshed` is `false`, `pending` names the `ANALYZE` to run on the table, and `detail` says
+the new table has no planner statistics. A run that only finished a swap an earlier run
+committed reports no `statistics_refresh`; the run that made the swap made the `ANALYZE`.
 
 The old table is dropped once the swap commits. Add `--keep-old` to keep it under its `_old`
 name for a rollback window; you drop it yourself when the window ends.

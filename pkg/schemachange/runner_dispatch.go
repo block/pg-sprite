@@ -44,6 +44,9 @@ type runState struct {
 	// copyPaced is how far the stream's lag held this run's copy back;
 	// the zero value when this run copied nothing or was never held.
 	copyPaced copier.Paced
+	// statistics is the outcome of this run's ANALYZE of the shadow
+	// before its swap; nil until the run reaches it.
+	statistics *ShadowStatistics
 }
 
 // dispatch reads the target's checkpoint row and starts fresh or resumes

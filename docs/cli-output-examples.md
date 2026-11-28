@@ -545,7 +545,14 @@ text verdict does not print it either. A non-zero `unsettled` or `carried`
 is a record, not a warning: the swap compared those keys under its lock and
 would have refused had any differed. A pg-sprite build older than the
 object never writes it, so a program that must tell "no pass" from "not
-reported" records the binary's version beside the verdict:
+reported" records the binary's version beside the verdict. `statistics_refresh`
+reports the `ANALYZE` the run made of the new table before the swap, in the
+shape a native type change reports its refresh: `columns` the statement
+retyped (an empty list when it retyped none), `refreshed`, and, when the
+`ANALYZE` could not run within its budgets, `pending`, the `ANALYZE` still to
+run; the swap goes ahead either way. A run that only finished an earlier run's
+swap leaves it out
+([copy-and-swap.md](copy-and-swap.md#run-it)):
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy-and-swap --free-disk 20GiB --json
@@ -553,7 +560,7 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE users ALTER COLUMN id TYPE text",
   "table": "public.users",
-  "detail": "verified 1000 rows in 2 chunks; the retained source is dropped",
+  "detail": "verified 1000 rows in 2 chunks; the retained source is dropped; the new table was analyzed before the swap, so the planner has its statistics",
   "swap_lsn": "0/1A2B3C8",
   "verification": {
     "rows": 1000,
@@ -561,6 +568,12 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --copy
     "settled": 0,
     "unsettled": 0,
     "carried": 0
+  },
+  "statistics_refresh": {
+    "columns": [
+      "id"
+    ],
+    "refreshed": true
   }
 }
 ```

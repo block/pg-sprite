@@ -167,6 +167,10 @@ func (r *Runner) fillLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	if err != nil {
 		return CutoverReady{}, report, err
 	}
+	// The ANALYZE runs while the capture still applies the stream, so the
+	// changes that arrive meanwhile stay off the drain the swap runs under
+	// its lock.
+	r.analyzeShadowStatistics(ctx, pool, lock, state)
 	return ready, report, nil
 }
 
