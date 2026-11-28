@@ -183,6 +183,16 @@ type Change struct {
 	// must still be when the drop runs. The old index is dropped only while
 	// it is.
 	Replacement *IndexReplacement `json:"-"`
+	// UniquenessKeptBy is set on the DROP INDEX of a unique index and the
+	// DROP CONSTRAINT of a unique constraint when another unique index or
+	// key of the desired table rejects every duplicate the dropped one
+	// rejects, and is in place before the drop runs: kept from the live
+	// table, or built earlier in the plan by a statement the drop waits
+	// for. It names that object. The drop still removes the dropped object,
+	// so it stays destructive, but no row written after it repeats the
+	// values the dropped object kept unique. Explanatory: the fingerprint
+	// covers the statements that build the object it names.
+	UniquenessKeptBy string `json:"-"`
 	// Renames is set on a ChangeRenameIndex: the live index the rename
 	// gives the desired name and the definition the plan matched it by.
 	// The rename runs only while the index still has that definition.
@@ -505,6 +515,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		renamedRules: renamedConstraintDefs(desired, liveCons),
 		foreignKeys:  installsForeignKey(desired, liveCons, desiredCons),
 		checks:       addsCheck(desired, liveCons),
+		retyped:      retypedColumns(live, desired.Columns),
 	}
 	// A held foreign key waits for the foreign keys the plan adds or
 	// validates, which come last; every other held drop goes before them, so a foreign key
@@ -512,6 +523,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	var heldChanges, heldForeignKeys []Change
 	waits := func(ch Change) bool { return !columnsFirst && held.holds(ch) }
 	appendDrop := func(ch Change) {
+		ch.UniquenessKeptBy = held.uniquenessKeeper(ch, waits(ch), partitioned, desired)
 		switch {
 		case !waits(ch):
 			changes = append(changes, ch)
