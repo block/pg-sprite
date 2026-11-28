@@ -66,7 +66,7 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 		{name: "a type change to text", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE text", help: recreate},
 		{
 			name: "a type change copy-and-swap would run", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(20)",
-			help: "add a column of the new type instead, backfill it, point those views and materialized views at it, then drop the old column",
+			help: "add a column of the new type instead, have the application write to both and backfill it, point those views and materialized views at it and switch reads to it, then drop the old column once nothing uses it",
 		},
 		{
 			name: "a column drop", statement: "ALTER TABLE %s.users DROP COLUMN email",
@@ -105,6 +105,20 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 		}, plan.Decisions[0].DependentViews)
 		assert.Equal(t, []string{fmt.Sprintf(`"%s"."Mail Report"`, schema)}, plan.Decisions[0].DependentMaterializedViews)
 		assert.Equal(t, planner.DependentFixRecreateAroundChange, plan.Decisions[0].DependentFix)
+	})
+
+	// A view that reads one of the blocking views has to be dropped
+	// before it, so the refusal names it to drop first and recreate last,
+	// and warns that recreating drops the views' grants and indexes.
+	t.Run("the refusal names the views that read the views", func(t *testing.T) {
+		schema := seed(t)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE VIEW %[1]s.mail_top AS SELECT email FROM %[1]s."Mail Report"`, schema))
+		require.NoError(t, err)
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Contains(t, v.Detail, fmt.Sprintf(`first drop view "%s"."mail_top", which reads them, and recreate it last; this type change runs in place`, schema))
+		assert.Contains(t, v.Detail, "a view dropped and recreated loses its grants, and a materialized view its indexes too")
 	})
 
 	for _, tc := range []struct {

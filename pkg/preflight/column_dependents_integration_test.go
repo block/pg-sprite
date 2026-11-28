@@ -20,7 +20,9 @@ import (
 // a column, or reads another table, does not count against the column, and
 // a column no view reads is absent. A view on an inheritance child counts
 // for the tree, not for the table alone. The materialized views among them
-// are named apart, so a refusal can call each by its kind.
+// are named apart, so a refusal can call each by its kind, and so are the
+// views that read them, directly or through another view, each with its
+// longest chain from the view, since those have to be dropped first.
 func TestReadColumnDependentsViews(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -37,7 +39,9 @@ func TestReadColumnDependentsViews(t *testing.T) {
 		CREATE VIEW %[1]s.user_count AS SELECT pg_catalog.count(*) FROM %[1]s.users;
 		CREATE VIEW %[1]s.team_mail AS SELECT email FROM %[1]s.teams;
 		CREATE TABLE %[1]s.admins (level int) INHERITS (%[1]s.users);
-		CREATE VIEW %[1]s.admin_notes AS SELECT note, level FROM %[1]s.admins`, schema, other))
+		CREATE VIEW %[1]s.admin_notes AS SELECT note, level FROM %[1]s.admins;
+		CREATE VIEW %[2]s.notes_top AS SELECT note FROM %[2]s."Notes";
+		CREATE MATERIALIZED VIEW %[1]s.notes_top_n AS SELECT t.note FROM %[2]s.notes_top t JOIN %[2]s."Notes" n USING (note)`, schema, other))
 	require.NoError(t, err)
 
 	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "users")
@@ -54,7 +58,10 @@ func TestReadColumnDependentsViews(t *testing.T) {
 		"note":  sortedQualified([2]string{schema, "admin_notes"}, [2]string{other, "Notes"}),
 	}, views.Tree)
 	assert.Equal(t, views.Tree, views.Drop, "admins inherits every column from users alone, so a drop reaches it")
-	assert.Equal(t, []string{fmt.Sprintf(`"%s"."Notes"`, other)}, deps.MaterializedViews)
+	notes, notesTop, notesTopN := fmt.Sprintf(`"%s"."Notes"`, other), fmt.Sprintf(`"%s"."notes_top"`, other), fmt.Sprintf(`"%s"."notes_top_n"`, schema)
+	assert.Equal(t, sortedQualified([2]string{other, "Notes"}, [2]string{schema, "notes_top_n"}), deps.MaterializedViews)
+	assert.Equal(t, map[string]map[string]int{notes: {notesTop: 1, notesTopN: 2}}, deps.ViewReaders,
+		"notes_top_n reads Notes itself and through notes_top, so it is two views away")
 	assert.Empty(t, deps.Policies.Tree, "no policy reads users")
 }
 

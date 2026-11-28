@@ -291,6 +291,7 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 // them to a new column when the type change rewrites the table.
 func TestClassifyNamesMaterializedViewsAndTheirManualPath(t *testing.T) {
 	mail := `"reports"."mail"`
+	const grants = "; a view dropped and recreated loses its grants, and a materialized view its indexes too, so recreate those with each view"
 	facts := planner.Facts{
 		ColumnTypes:        map[string]string{"email": "character varying(50)"},
 		DependentViews:     map[string][]string{"email": {`"app"."active_users"`, mail}},
@@ -305,19 +306,20 @@ func TestClassifyNamesMaterializedViewsAndTheirManualPath(t *testing.T) {
 		{
 			sql:  "ALTER TABLE t DROP COLUMN email",
 			fix:  planner.DependentFixRewriteDependents,
-			help: "change those views and materialized views so they no longer read the column, then re-plan the drop",
+			help: "change those views and materialized views so they no longer read the column, then re-plan the drop" + grants,
 		},
 		{
 			sql: "ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
 			fix: planner.DependentFixRecreateAroundChange,
 			help: "this type change runs in place, without rewriting the table, so in one transaction drop those views and materialized views, run the change, and recreate them; " +
-				"recreating a materialized view runs its query to fill it again while the transaction blocks the table",
+				"recreating a materialized view runs its query to fill it again while the transaction blocks the table" + grants,
 		},
 		{
 			sql: "ALTER TABLE t ALTER COLUMN email TYPE bigint USING email::bigint",
 			fix: planner.DependentFixExpandContract,
 			help: "this type change rewrites the table, so recreating the views and materialized views around it would block the table for the whole rewrite; " +
-				"add a column of the new type instead, backfill it, point those views and materialized views at it, then drop the old column",
+				"add a column of the new type instead, have the application write to both and backfill it, " +
+				"point those views and materialized views at it and switch reads to it, then drop the old column once nothing uses it" + grants,
 		},
 	} {
 		plan, err := planner.Classify(tc.sql, facts)
@@ -335,22 +337,42 @@ func TestClassifyNamesMaterializedViewsAndTheirManualPath(t *testing.T) {
 		d      planner.Decision
 		phrase string
 		noun   string
+		grants string
 	}{
 		"views only": {
 			d:      planner.Decision{DependentViews: []string{`"a"."v"`, `"a"."w"`}},
 			phrase: `views "a"."v", "a"."w"`,
 			noun:   "views",
+			grants: "; a view dropped and recreated loses its grants, so recreate those with each view",
 		},
 		"one materialized view": {
 			d:      planner.Decision{DependentViews: []string{`"a"."m"`}, DependentMaterializedViews: []string{`"a"."m"`}},
 			phrase: `materialized view "a"."m"`,
 			noun:   "materialized views",
+			grants: grants,
 		},
 	} {
 		assert.Equal(t, tc.phrase, tc.d.ViewsPhrase(), name)
 		assert.Equal(t, tc.noun, tc.d.ViewsNoun(), name)
-		assert.Equal(t, "drop or redefine those "+tc.noun+" first, then re-plan", tc.d.ViewsHelp(), name)
+		assert.Equal(t, "drop or redefine those "+tc.noun+" first, then re-plan"+tc.grants, tc.d.ViewsHelp(), name)
 	}
+
+	// A view that reads a blocking view, directly or through another,
+	// has to be dropped before it, so the help names the readers deepest
+	// first, each by its kind, to drop first and recreate last.
+	facts.ViewReaders = map[string]map[string]int{
+		mail:                   {`"reports"."mail_top"`: 1, `"reports"."mail_sum"`: 1, `"reports"."mail_top_n"`: 2},
+		`"app"."active_users"`: {`"reports"."mail_top_n"`: 1},
+	}
+	facts.MaterializedViews = append(facts.MaterializedViews, `"reports"."mail_sum"`)
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN email TYPE varchar(100)", facts)
+	require.NoError(t, err)
+	d := plan.Decisions[0]
+	assert.Equal(t, []string{`"reports"."mail_top_n"`, `"reports"."mail_sum"`, `"reports"."mail_top"`}, d.DependentViewReaders)
+	assert.Equal(t, []string{mail, `"reports"."mail_sum"`}, d.DependentMaterializedViews)
+	assert.True(t, strings.HasPrefix(d.ViewsHelp(),
+		`first drop view "reports"."mail_top_n", then materialized view "reports"."mail_sum", then view "reports"."mail_top", which read them, and recreate them last; this type change runs in place`),
+		d.ViewsHelp())
 }
 
 // A view on a table below counts against a recursive change and not

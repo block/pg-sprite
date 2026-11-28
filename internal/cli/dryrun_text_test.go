@@ -523,6 +523,7 @@ func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
 func TestDryRunTextDependentViewRefusalNamesMaterializedViews(t *testing.T) {
 	for name, tc := range map[string]struct {
 		fix        planner.DependentFix
+		readers    []string
 		views      []string
 		refusal    string
 		help       string
@@ -531,15 +532,17 @@ func TestDryRunTextDependentViewRefusalNamesMaterializedViews(t *testing.T) {
 		"a materialized view on an in-place type change": {
 			fix:     planner.DependentFixRecreateAroundChange,
 			views:   []string{`"app"."mail"`},
+			readers: []string{`"app"."mail_top"`},
 			refusal: `ALTER COLUMN email TYPE varchar(100) changes a column read by materialized view "app"."mail", and PostgreSQL refuses`,
-			help: "help: this type change runs in place, without rewriting the table, so in one transaction drop those materialized views, run the change, and recreate them; " +
-				"recreating a materialized view runs its query to fill it again while the transaction blocks the table",
+			help: `help: first drop view "app"."mail_top", which reads them, and recreate it last; this type change runs in place, without rewriting the table, so in one transaction drop those materialized views, run the change, and recreate them; ` +
+				"recreating a materialized view runs its query to fill it again while the transaction blocks the table; " +
+				"a view dropped and recreated loses its grants, and a materialized view its indexes too, so recreate those with each view",
 		},
 		"a view and a materialized view on a type change that rewrites the table": {
 			fix:        planner.DependentFixExpandContract,
 			views:      []string{`"app"."active_users"`, `"app"."mail"`},
 			refusal:    `ALTER COLUMN email TYPE varchar(100) changes a column read by view "app"."active_users" and materialized view "app"."mail", and PostgreSQL refuses`,
-			help:       "point those views and materialized views at it, then drop the old column",
+			help:       "point those views and materialized views at it and switch reads to it, then drop the old column once nothing uses it",
 			notContain: "fill it again",
 		},
 	} {
@@ -559,6 +562,7 @@ func TestDryRunTextDependentViewRefusalNamesMaterializedViews(t *testing.T) {
 					Reason:                     planner.ReasonDependentView,
 					DependentViews:             tc.views,
 					DependentMaterializedViews: []string{`"app"."mail"`},
+					DependentViewReaders:       tc.readers,
 					DependentFix:               tc.fix,
 				}},
 			})

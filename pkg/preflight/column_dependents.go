@@ -18,10 +18,18 @@ type ColumnDependents struct {
 	// Views are the views and materialized views that read the column,
 	// each rendered "schema"."view".
 	Views DependentObjects
-	// MaterializedViews names the materialized views among Views, rendered
-	// the same way, sorted, each once. Recreating one runs its query to
-	// fill it again, so the manual path names it apart from a plain view.
+	// MaterializedViews names the materialized views among Views and
+	// ViewReaders, rendered the same way, sorted, each once. Recreating
+	// one runs its query to fill it again, so the manual path names it
+	// apart from a plain view.
 	MaterializedViews []string
+	// ViewReaders maps each view in Views to the views and materialized
+	// views that read it, directly or through other views, rendered the
+	// same way, each to its longest chain of views from the view: 1 for a
+	// view that reads it itself. PostgreSQL refuses to drop a view another
+	// view reads, so the readers have to go first, and dropping the deeper
+	// ones before the shallower never drops a view another still reads.
+	ViewReaders map[string]map[string]int
 	// Policies are the row-level security policies whose USING or WITH
 	// CHECK expression reads the column, each rendered
 	// "policy" ON "schema"."table", the form DROP POLICY takes. A policy
@@ -95,8 +103,14 @@ func ReadColumnDependents(ctx context.Context, pool *pgxpool.Pool, schema, table
 	if err != nil {
 		return ColumnDependents{}, fmt.Errorf("read the objects that depend on the columns of %s: %w", name, err)
 	}
+	readers, readerMaterialized, err := readViewReaders(ctx, pool, tables)
+	if err != nil {
+		return ColumnDependents{}, fmt.Errorf("read the views that read the views on %s: %w", name, err)
+	}
+	materialized = slices.Compact(slices.Sorted(slices.Values(append(materialized, readerMaterialized...))))
 	deps := ColumnDependents{
 		MaterializedViews:     materialized,
+		ViewReaders:           readers,
 		Views:                 newDependentObjects(),
 		Policies:              newDependentObjects(),
 		Triggers:              newDependentObjects(),
@@ -381,6 +395,91 @@ func readDependentTree(ctx context.Context, pool *pgxpool.Pool, schema, table st
 	}
 	slices.Sort(materialized)
 	return tables, root, slices.Compact(materialized), nil
+}
+
+// maxViewDepth bounds the walk over views that read views. PostgreSQL
+// records no cycle among views, so the bound only keeps a catalog it does
+// not expect from walking forever.
+const maxViewDepth = 64
+
+// readViewReaders reads, for each view that reads a column in tables, the
+// views and materialized views that read it, directly or through other
+// views, each with its longest distance from the view. It also names the
+// readers that are materialized views.
+func readViewReaders(ctx context.Context, pool *pgxpool.Pool, tables map[uint32]*dependentTable) (map[string]map[string]int, []string, error) {
+	var schemas, relations []string
+	for _, t := range tables {
+		for _, c := range t.columns {
+			for _, d := range c.dependents {
+				if d.kind == dependentView {
+					schemas, relations = append(schemas, d.schema), append(relations, d.relation)
+				}
+			}
+		}
+	}
+	if len(schemas) == 0 {
+		return nil, nil, nil
+	}
+	// INV: CO-9 — every relation, function, and operator is
+	// pg_catalog-qualified.
+	rows, err := pool.Query(ctx, `WITH RECURSIVE roots(oid) AS (
+			SELECT DISTINCT v.oid
+			FROM ROWS FROM (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[])) AS r(nspname, relname)
+			JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) r.nspname
+			JOIN pg_catalog.pg_class v ON v.relnamespace OPERATOR(pg_catalog.=) n.oid
+				AND v.relname OPERATOR(pg_catalog.=) r.relname
+		),
+		walk(root, oid, depth) AS (
+			SELECT oid, oid, 0 FROM roots
+			UNION
+			SELECT walk.root, rv.oid, walk.depth OPERATOR(pg_catalog.+) 1
+			FROM walk
+			JOIN pg_catalog.pg_depend d ON d.refobjid OPERATOR(pg_catalog.=) walk.oid
+				AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+				AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass
+			JOIN pg_catalog.pg_rewrite r ON r.oid OPERATOR(pg_catalog.=) d.objid
+			JOIN pg_catalog.pg_class rv ON rv.oid OPERATOR(pg_catalog.=) r.ev_class
+			WHERE rv.oid OPERATOR(pg_catalog.<>) walk.oid
+			  AND rv.relkind OPERATOR(pg_catalog.=) ANY ('{v,m}'::pg_catalog."char"[])
+			  AND walk.depth OPERATOR(pg_catalog.<) $3
+		)
+		SELECT rn.nspname::pg_catalog.text, rc.relname::pg_catalog.text,
+			n.nspname::pg_catalog.text, c.relname::pg_catalog.text,
+			c.relkind OPERATOR(pg_catalog.=) 'm', pg_catalog.max(walk.depth)::pg_catalog.int4
+		FROM walk
+		JOIN pg_catalog.pg_class rc ON rc.oid OPERATOR(pg_catalog.=) walk.root
+		JOIN pg_catalog.pg_namespace rn ON rn.oid OPERATOR(pg_catalog.=) rc.relnamespace
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) walk.oid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE walk.depth OPERATOR(pg_catalog.>) 0
+		GROUP BY rn.nspname, rc.relname, n.nspname, c.relname, c.relkind`, schemas, relations, maxViewDepth)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	readers := map[string]map[string]int{}
+	var materialized []string
+	for rows.Next() {
+		var rootSchema, rootRelation, schema, relation string
+		var isMaterialized bool
+		var depth int32
+		if err := rows.Scan(&rootSchema, &rootRelation, &schema, &relation, &isMaterialized, &depth); err != nil {
+			return nil, nil, err
+		}
+		root := dependentName{kind: dependentView, schema: rootSchema, relation: rootRelation}.render()
+		reader := dependentName{kind: dependentView, schema: schema, relation: relation}.render()
+		if readers[root] == nil {
+			readers[root] = map[string]int{}
+		}
+		readers[root][reader] = int(depth)
+		if isMaterialized {
+			materialized = append(materialized, reader)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	return readers, materialized, nil
 }
 
 // droppedCopies returns the tables whose copy of column a recursive DROP

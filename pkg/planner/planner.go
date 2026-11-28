@@ -22,8 +22,10 @@
 package planner
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -356,10 +358,17 @@ type Decision struct {
 	// whenever one blocks the change, whatever the decision's reason.
 	DependentViews []string `json:"dependent_views,omitempty"`
 	// DependentMaterializedViews names the materialized views among
-	// DependentViews, rendered the same way, so the help can call each by
-	// its kind; recreating one runs its query to fill it again. Like
-	// DependentFix, it is not part of the plan-report contract.
+	// DependentViews and DependentViewReaders, rendered the same way, so
+	// the help can call each by its kind; recreating one runs its query to
+	// fill it again. Like DependentFix, it is not part of the plan-report
+	// contract.
 	DependentMaterializedViews []string `json:"-"`
+	// DependentViewReaders names the views that read DependentViews,
+	// directly or through other views, in an order to drop them in: the
+	// deepest first. PostgreSQL refuses to drop a view another view reads,
+	// so the manual path drops these first and recreates them last. Like
+	// DependentFix, it is not part of the plan-report contract.
+	DependentViewReaders []string `json:"-"`
 	// DependentPolicies names the row-level security policies that read
 	// the column, each rendered "policy" ON "schema"."table" with every
 	// identifier quoted, present whenever one blocks the change, whatever
@@ -445,7 +454,8 @@ func (f DependentFix) Help(plural string) string {
 		return "this type change runs in place, without rewriting the table, so in one transaction drop those " + plural + ", run the change, and recreate them"
 	case DependentFixExpandContract:
 		return "this type change rewrites the table, so recreating the " + plural + " around it would block the table for the whole rewrite; " +
-			"add a column of the new type instead, backfill it, point those " + plural + " at it, then drop the old column"
+			"add a column of the new type instead, have the application write to both and backfill it, point those " + plural +
+			" at it and switch reads to it, then drop the old column once nothing uses it"
 	}
 	return string(f)
 }
@@ -494,17 +504,70 @@ func (d Decision) ViewsNoun() string {
 // ViewsHelp is the manual path for the views that block the change,
 // phrased to follow a sentence that names them: the dependent fix every
 // recreatable dependent shares, or, on a decision that carries none,
-// redefining the views before planning again.
+// redefining the views before planning again. The views that read them
+// are dropped first and recreated last, and what a dropped view takes
+// with it, its grants and a materialized view's indexes, is named so the
+// reader recreates it too.
 func (d Decision) ViewsHelp() string {
 	noun := d.ViewsNoun()
-	if d.DependentFix == "" {
-		return "drop or redefine those " + noun + " first, then re-plan"
+	help := "drop or redefine those " + noun + " first, then re-plan"
+	if d.DependentFix != "" {
+		help = d.DependentFix.Help(noun)
 	}
-	help := d.DependentFix.Help(noun)
 	if d.DependentFix == DependentFixRecreateAroundChange && len(d.DependentMaterializedViews) > 0 {
 		help += "; recreating a materialized view runs its query to fill it again while the transaction blocks the table"
 	}
-	return help
+	if len(d.DependentViewReaders) > 0 {
+		help = "first drop " + d.viewReadersPhrase() + ", which " + pluralize(len(d.DependentViewReaders), "reads", "read") +
+			" them, and recreate " + pluralize(len(d.DependentViewReaders), "it", "them") + " last; " + help
+	}
+	help += "; a view dropped and recreated loses its grants"
+	if len(d.DependentMaterializedViews) > 0 {
+		help += ", and a materialized view its indexes too"
+	}
+	return help + ", so recreate those with each view"
+}
+
+// viewReadersPhrase names DependentViewReaders in the order to drop them,
+// each by its kind: view "a"."top", then materialized view "a"."sum".
+func (d Decision) viewReadersPhrase() string {
+	names := make([]string, len(d.DependentViewReaders))
+	for i, name := range d.DependentViewReaders {
+		names[i] = "view " + name
+		if slices.Contains(d.DependentMaterializedViews, name) {
+			names[i] = "materialized view " + name
+		}
+	}
+	return strings.Join(names, ", then ")
+}
+
+// pluralize is singular for one and plural otherwise.
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return singular
+	}
+	return plural
+}
+
+// viewReaders names the views that read views, directly or through other
+// views, leaving out views itself names, deepest first and then by name.
+// Each reader's depth is its longest chain from any of views, so a reader
+// always sorts ahead of every view it reads.
+func viewReaders(views []string, readers map[string]map[string]int) []string {
+	depths := map[string]int{}
+	for _, view := range views {
+		for reader, depth := range readers[view] {
+			if !slices.Contains(views, reader) {
+				depths[reader] = max(depths[reader], depth)
+			}
+		}
+	}
+	if len(depths) == 0 {
+		return nil
+	}
+	return slices.SortedFunc(maps.Keys(depths), func(a, b string) int {
+		return cmp.Or(cmp.Compare(depths[b], depths[a]), cmp.Compare(a, b))
+	})
 }
 
 // OtherDependents phrases the dependents that block the change besides
@@ -602,8 +665,13 @@ type Facts struct {
 	// all an ALTER TABLE ONLY changes.
 	OwnDependentViews map[string][]string
 	// MaterializedViews names the materialized views among the dependent
-	// views, rendered as they are (preflight.ColumnDependents).
+	// views and their readers, rendered as they are
+	// (preflight.ColumnDependents).
 	MaterializedViews []string
+	// ViewReaders maps each dependent view to the views that read it,
+	// directly or through other views, each to its longest chain of views
+	// from the dependent view (preflight.ColumnDependents).
+	ViewReaders map[string]map[string]int
 	// DependentPolicies maps a column to the row-level security policies
 	// that read it, wherever they are defined, on the table or on any
 	// table below it (preflight.ReadColumnDependents), each rendered
@@ -1039,7 +1107,8 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	// Every kind of dependent that blocks the change is named, so the
 	// manual path clears all of them; the reason is the first kind.
 	d.DependentViews = viewsReadingColumn(op, facts)
-	d.DependentMaterializedViews = slices.DeleteFunc(slices.Clone(d.DependentViews), func(name string) bool {
+	d.DependentViewReaders = viewReaders(d.DependentViews, facts.ViewReaders)
+	d.DependentMaterializedViews = slices.DeleteFunc(slices.Concat(d.DependentViews, d.DependentViewReaders), func(name string) bool {
 		return !slices.Contains(facts.MaterializedViews, name)
 	})
 	if len(d.DependentMaterializedViews) == 0 {
