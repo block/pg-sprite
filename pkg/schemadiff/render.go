@@ -46,12 +46,6 @@ var ErrUnrenderableForeignKey = errors.New("tables that own or are referenced by
 // replication behavior — the renderer refuses instead.
 var ErrUnrenderableUnlogged = errors.New("unlogged tables cannot be rendered as a desired schema")
 
-// ErrUnrenderableCollation is returned when a column carries an explicit
-// collation. The declarative model does not manage collations, so a
-// rendered baseline without the COLLATE clause would silently change sort
-// order and index semantics — the renderer refuses instead.
-var ErrUnrenderableCollation = errors.New("columns with an explicit collation cannot be rendered as a desired schema")
-
 // ErrUnrenderableVirtual is returned when a column is generated VIRTUAL.
 // The desired-file grammar cannot parse VIRTUAL, and rendering the column
 // as STORED or as a plain default would silently change what it is.
@@ -92,7 +86,6 @@ func renderRefusals() []error {
 		ErrUnrenderableInheritance,
 		ErrUnrenderableForeignKey,
 		ErrUnrenderableUnlogged,
-		ErrUnrenderableCollation,
 		ErrUnrenderableVirtual,
 		ErrUnrenderableToastOptions,
 		ErrMultipleOwnedSequences,
@@ -314,14 +307,12 @@ func renderOptions(opts []string) (string, error) {
 // rendered back to its pseudo-type so the desired file recreates the owned
 // sequence on the scratch schema; every other sequence-backed default is
 // refused because the sequence it references cannot exist there. An
-// explicit column collation is refused: the model carries it only to keep
-// the baseline from silently dropping it. A virtual generated column is
-// refused because no desired file can declare one, and so is a sequence
-// declaration the column's definition cannot state.
+// explicit column collation is written after the type, schema-qualified as
+// the catalog names it, so the file materializes to the same collation and
+// a later plan compares it. A virtual generated column is refused because
+// no desired file can declare one, and so is a sequence declaration the
+// column's definition cannot state.
 func renderColumnDef(table string, c Column) (string, error) {
-	if c.Collation != "" {
-		return "", fmt.Errorf("column %q collation %s: %w", c.Name, c.Collation, ErrUnrenderableCollation)
-	}
 	if c.Virtual {
 		return "", fmt.Errorf("column %q: %w", c.Name, ErrUnrenderableVirtual)
 	}
@@ -341,7 +332,18 @@ func renderColumnDef(table string, c Column) (string, error) {
 	if err := identityExpressible(c); err != nil {
 		return "", err
 	}
+	if c.Collation != "" {
+		return collatedColumnDef(c), nil
+	}
 	return columnDef(c), nil
+}
+
+// collatedColumnDef is columnDef with the column's COLLATE clause, which
+// PostgreSQL takes directly after the type.
+func collatedColumnDef(c Column) string {
+	collated := c
+	collated.Type = collatedType(c)
+	return columnDef(collated)
 }
 
 // identityExpressible refuses an identity column whose sequence a column

@@ -353,7 +353,7 @@ rows:
       migrate: refused
       diff: not_applicable
     refusal_reason: not-native-safe-rewrite-required
-    reason_notes: "Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom is surfaced as guidance: pre-prove the bound with a validated `CHECK` on the new table, exclude it with a validated `CHECK` on the parent's `DEFAULT` partition if it has one, and build the parent's indexes on the new table first, a unique one backing its constraint through `USING INDEX`, so the attach neither scans nor builds. The new table must also carry the parent's `CHECK` constraints, under the same names and validated, and `NOT NULL` wherever the parent declares it, or the attach refuses it. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one"
+    reason_notes: "Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom is surfaced as guidance: pre-prove the bound with a validated `CHECK` on the new table, exclude it with a validated `CHECK` on the parent's `DEFAULT` partition if it has one, build the parent's indexes on the new table first, a unique one backing its constraint through `USING INDEX`, and give it each of the parent's foreign keys, validated (`ADD ... NOT VALID`, then `VALIDATE`), so the attach neither scans nor builds. The new table must also carry the parent's `CHECK` constraints, under the same names and validated, and `NOT NULL` wherever the parent declares it, or the attach refuses it. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one"
   - id: detach-partition-concurrently
     area: "partitioned_tables"
     operation: "`DETACH PARTITION [CONCURRENTLY]`"
@@ -533,7 +533,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: not-native-safe-rewrite-required
-    reason_notes: "Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite"
+    reason_notes: "Exported and compared, not converged. `pull` writes a column's collation as a schema-qualified `COLLATE` clause, and a file that keeps it plans the table's other changes. A collation delta is a typed refusal: converging it rewrites the column and rebuilds its indexes"
   - id: table-storage-parameters
     area: "declarative_model"
     operation: "Table storage parameters (`WITH (fillfactor = ...)`, `toast.*`)"

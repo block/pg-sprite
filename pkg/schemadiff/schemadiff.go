@@ -75,11 +75,10 @@ type Column struct {
 	SequenceOwned bool
 	// Collation is the column's explicit collation as a schema-qualified,
 	// quote_ident-quoted name, empty when the column uses its type's
-	// default collation. The declarative model does not manage collations yet, so
-	// the model carries it only to refuse: dropping a COLLATE clause from
-	// a rendered baseline would silently change sort order and index
-	// semantics, and a collation delta cannot be converged without a
-	// table rewrite.
+	// default collation. Rendering writes it as the column's COLLATE
+	// clause and a type change carries it, since dropping the clause would
+	// silently change sort order and index semantics. A collation delta is
+	// refused: it cannot be converged without a table rewrite.
 	Collation string
 	// Identity is the identity kind, IdentityNone for plain columns.
 	Identity Identity

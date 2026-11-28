@@ -806,7 +806,8 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	// the engine does not derive it, so a delta fails closed instead of
 	// diffing to silence.
 	if live.Collation != desired.Collation {
-		return nil, unsupported(CauseCollationChange, "%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
+		return nil, unsupported(CauseCollationChange, "%w: column %q collation changes from %s to %s, which rewrites the column and rebuilds its indexes; keep %s in the file",
+			ErrUnsupportedChange, live.Name, describeCollation(live.Collation), describeCollation(desired.Collation), keepCollation(live.Collation))
 	}
 	if desired.IsGenerated() && live.Type != desired.Type {
 		return nil, unsupported(CauseGenerated, "%w: column %q generated column type change", ErrUnsupportedChange, live.Name)
@@ -821,7 +822,7 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	}
 	if live.Type != desired.Type {
 		changes = append(changes, Change{
-			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + desired.Type,
+			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + collatedType(desired),
 			Kind: ChangeAlterType,
 		})
 	}
@@ -880,6 +881,17 @@ func dropNotNullChanges(table string, live Model, desiredCols map[string]Column)
 // columnDef renders a canonical column definition for ADD COLUMN. All parts
 // are server-canonical: the type from format_type, expressions from
 // pg_get_expr.
+// collatedType is the column's type with its COLLATE clause, for an ALTER
+// COLUMN ... TYPE: without the clause, PostgreSQL gives the retyped column
+// the new type's default collation, which changes its sort order and the
+// indexes built on it.
+func collatedType(c Column) string {
+	if c.Collation == "" {
+		return c.Type
+	}
+	return c.Type + " COLLATE " + c.Collation
+}
+
 func columnDef(c Column) string {
 	def := pgx.Identifier{c.Name}.Sanitize() + " " + c.Type
 	switch {
@@ -1201,4 +1213,23 @@ func isUnfinishedBuild(partitioned bool, ix Index) bool {
 		return false
 	}
 	return ix.Invalid
+}
+
+// describeCollation names a column's collation for a refusal: the
+// schema-qualified name when the column declares one, and the type's default
+// otherwise.
+func describeCollation(collation string) string {
+	if collation == "" {
+		return "the type's default"
+	}
+	return collation
+}
+
+// keepCollation names, for a refusal, the declaration that leaves a column's
+// live collation as it is.
+func keepCollation(collation string) string {
+	if collation == "" {
+		return "the column without a COLLATE clause"
+	}
+	return "COLLATE " + collation
 }
