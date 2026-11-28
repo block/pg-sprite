@@ -444,9 +444,11 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 		}
 		return v, nil
 	}
+	code := copySwapFailureCode(err)
 	return verdict.Verdict{
 		Outcome:       verdict.OutcomeFailed,
-		Code:          string(copySwapFailureCode(err)),
+		Code:          string(code),
+		Cause:         copySwapFailureCause(code, err),
 		Statement:     st.SQL(),
 		Table:         qualified(st),
 		Detail:        "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(hold, err),
@@ -463,6 +465,13 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 func runAbandoned(err error) bool {
 	var abandoned *schemachange.AbandonedError
 	return errors.As(err, &abandoned)
+}
+
+// isDivergence reports whether the run stopped because the shadow did not
+// match the source (*checksum.DivergenceError).
+func isDivergence(err error) bool {
+	_, ok := errors.AsType[*checksum.DivergenceError](err)
+	return ok
 }
 
 // copySwapStoppedRemedy says what the operator does with a stopped run.
@@ -512,7 +521,7 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		return "the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, " + released + ", and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
 	}
 	startOver := "correct the data or the statement, then start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release + ", deletes the checkpoint row, and runs the change from the start"
-	if _, ok := errors.AsType[*checksum.DivergenceError](err); ok {
+	if isDivergence(err) {
 		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + startOver
 	}
 	if schemachange.IsDataFault(err) {
@@ -559,8 +568,14 @@ func slotBacklogRefusalDetail(backlog *schemachange.SlotBacklogError) string {
 // the Runner. The Runner's errors are not the executor's, so the
 // conditions the codes already name are matched on their own sentinels and
 // predicates — a data fault whether or not its abandon finished, since the
-// code names what the operator corrects, not what was left behind; the
-// rest is an execution failure.
+// code names what the operator corrects, not what was left behind, and a
+// slot over its lag ceiling; the rest is an execution failure. The order
+// is the precedence when the Runner joins a capture's stop with the fill's
+// (a slot lag stop beside a data fault or a breach in the copy) or the
+// catch-up carries one beside the caller's cancellation: the cancellation,
+// the breach, the fault, and a divergence each outrank the slot lag stop. A
+// divergence is an execution failure whose remedy is a restart, so a slot
+// lag code beside it would invite a resume that verifies the same copy.
 func copySwapFailureCode(err error) executor.Code {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
@@ -569,8 +584,40 @@ func copySwapFailureCode(err error) executor.Code {
 		return executor.CodeInvariantViolation
 	case schemachange.IsDataFault(err):
 		return executor.CodeDataFault
+	case isDivergence(err):
+		return executor.CodeExecutionFailed
+	case errors.Is(err, decode.ErrSlotLagCeiling):
+		return executor.CodeSlotLagExceeded
 	default:
 		return executor.OutcomeCode(err)
+	}
+}
+
+// copySwapFailureCause is the typed cause that narrows a failed verdict's
+// code: under slot-lag-exceeded, the measure that crossed the ceiling, read
+// off the *decode.SlotLagExceededError; empty for every other code.
+func copySwapFailureCause(code executor.Code, err error) verdict.Cause {
+	if code != executor.CodeSlotLagExceeded {
+		return verdict.CauseNone
+	}
+	lag, ok := errors.AsType[*decode.SlotLagExceededError](err)
+	if !ok {
+		// The ceiling's sentinel without the typed error carries no
+		// measure; the code still names the stop.
+		return verdict.CauseNone
+	}
+	switch lag.Cause {
+	case decode.SlotLagStreamBehind:
+		return verdict.CauseSlotLagStreamBehind
+	case decode.SlotLagWALRetained:
+		return verdict.CauseSlotLagWALRetained
+	case decode.SlotLagWALRetainedHardLimit:
+		return verdict.CauseSlotLagWALRetainedHardLimit
+	default:
+		// A measure this build does not name carries the code alone, as
+		// decode asks of a caller that switches on the cause; Detail still
+		// names the measure.
+		return verdict.CauseNone
 	}
 }
 
