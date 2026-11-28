@@ -47,10 +47,20 @@ func (s *stopAfter) hook(_ context.Context, cp checkpoint.Checkpoint) error {
 	return nil
 }
 
+// seen is the sequence of phases the hook was shown, with consecutive
+// repeats collapsed: the copy saves its watermark in copying once its
+// first chunk lands and again when it ends, and whether those are one
+// save or two depends on how fast the copy runs.
 func (s *stopAfter) seen() []checkpoint.Phase {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]checkpoint.Phase(nil), s.phases...)
+	var out []checkpoint.Phase
+	for _, p := range s.phases {
+		if len(out) == 0 || out[len(out)-1] != p {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // assertResumedToDone runs the table again with a fresh Runner under
@@ -358,8 +368,8 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 	var qty int
 	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+pgx.Identifier{f.schema, "orders"}.Sanitize()+" WHERE id = 1500").Scan(&qty))
 	assert.Equal(t, 1500, qty, "the live table carries the source's row, not the stray shadow row")
-	// The resumed copy's one copying save is the finished copy recording
-	// its complete watermark before the verifying save.
+	// The resumed copy's copying saves record what it landed, the last
+	// its complete watermark, before the verifying save.
 	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseCopying, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone}, second.seen(), "the resumed run finished the copy and went on through verification")
 }
 

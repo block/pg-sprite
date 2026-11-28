@@ -124,8 +124,10 @@ type DesiredResult struct {
 	Owner verdict.Owner `json:"owner,omitempty"`
 	// Cause narrows the refusal reason to its typed discriminator, the
 	// same token the statement verdict would carry: the copy-and-swap
-	// gate or preflight cause of a whole-plan refusal at admission, or the
-	// cause of the statement verdict that stopped execution. Empty when
+	// gate or preflight cause of a whole-plan refusal at admission, the
+	// changed-foreign-key or undeclarable-foreign-key cause of a
+	// declarative-foreign-key refusal at admission, or the cause of the
+	// statement verdict that stopped execution. Empty when
 	// the reason has none or Outcome is not refused.
 	Cause verdict.Cause `json:"cause,omitempty"`
 	// Detail is the human explanation: why refused, what committed, or
@@ -204,10 +206,13 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // Options.Connection is unset or reaches another database than the pool. A
 // plan whose partitioned key build the live catalog already refuses, for a
 // partition key column the key leaves out or a sub-partitioned partition, is
-// refused before anything runs ([AdmitPlanPartitionedKeys]). An empty plan
-// is executed with nothing to run, unless the table has a copy-and-swap run
-// stopped short of done: its shape may match only because that run swapped
-// it in, so it is refused with cause
+// refused before anything runs ([AdmitPlanPartitionedKeys]), and a plan whose
+// partitioned foreign key build would refuse the referenced table or the
+// partition tree is refused or stopped whole by the build's own catalog
+// checks ([AdmitPlanPartitionedForeignKeys]). An empty plan is executed with
+// nothing to run, unless the table has a copy-and-swap run stopped short of
+// done: its shape may match only because that run swapped it in, so it is
+// refused with cause
 // copy-and-swap-run-stopped and the stopped statement is finished through
 // [Run]. Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
@@ -371,6 +376,13 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if !admitted {
 		return stopped, nil
 	}
+	stopped, admitted, err = AdmitPlanPartitionedForeignKeys(ctx, pool, report)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
+	}
 
 	return executePlan(ctx, pool, report, opts, req.AllowDestructive, req.AcceptBlocking, func(ctx context.Context) (plan.Report, error) {
 		return diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
@@ -440,7 +452,13 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 		case ps.Destructive:
 			stmtOpts := opts
 			stmtOpts.AllowDestructive = allowDestructive
-			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
+			dropped, err := droppedWithReplacement(ps)
+			if err != nil {
+				result.Outcome = verdict.OutcomeFailed
+				result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+				return result, fmt.Errorf("planned statement %d: %w", i+1, err)
+			}
+			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, dropped, ps.Renames)
 		default:
 			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
 		}
@@ -903,10 +921,14 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		}
 		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
 		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
-			return r, detail("drops a foreign key, which desired-state execution does not run yet — " +
-				"to apply it, run the statement through the imperative front door (migrate --alter)")
+			return r.WithCause(ps.RefusalCause), detail(foreignKeyDropRefusalDetail(ps.RefusalCause))
 		}
 		if err == nil {
+			if d, ok := firstRefusedDecision(ps.Decisions); ok {
+				if why, specific := refusedDecisionDetail(d); specific {
+					return r, detail("has no safe path: " + why)
+				}
+			}
 			return r, detail("has no safe path")
 		}
 		// Keep the statement's own reason where it has one; the class
@@ -917,6 +939,23 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		return planIncoherentRefusal(), detail("is refused but carries no refusal class")
 	default:
 		return planIncoherentRefusal(), detail("carries a disposition this build does not know")
+	}
+}
+
+// foreignKeyDropRefusalDetail says why desired-state apply does not run a
+// planned foreign-key drop, and what to do instead, by the kind of drop
+// the plan refused.
+func foreignKeyDropRefusalDetail(cause verdict.Cause) string {
+	switch cause {
+	case verdict.CauseChangedForeignKey:
+		return "drops a foreign key the file changes under the same name where the new key cannot be added in the same statement, " +
+			"which would leave writes checked against no key until the new one is added — declare the changed key under a new name"
+	case verdict.CauseUndeclarableForeignKey:
+		return "drops a foreign key a desired file cannot declare, one into another schema or one onto its own table through a standalone unique index — " +
+			"to remove it, run the statement through the imperative front door (migrate --alter)"
+	default:
+		return "drops a foreign key: either the file changes it under the same name where the new key cannot be added in the same statement, so declare the changed key under a new name, " +
+			"or a desired file cannot declare it, so remove it through the imperative front door (migrate --alter)"
 	}
 }
 

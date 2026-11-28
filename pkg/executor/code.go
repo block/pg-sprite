@@ -18,11 +18,22 @@ type Code string
 // The codes an executor outcome can carry.
 const (
 	// CodeBudgetLockExceeded: the lock was not granted within
-	// lock_timeout; nothing was executed.
+	// lock_timeout, or a transaction held a lock that reads or writes take
+	// on the table for the whole wait outside the lock queue, so the lock
+	// was never requested (*LingeringHolderError); nothing was executed.
 	CodeBudgetLockExceeded Code = "budget-lock-exceeded"
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
+	// CodeSlotLagExceeded: a live copy-and-swap run stopped because its
+	// replication slot crossed the slot lag ceiling; the checkpoint row and
+	// the slot stay for a resume. A failed verdict carrying it names the
+	// measure that crossed in its Cause. It is not permanent: a run stopped
+	// on retained WAL can resume under the same ceiling once the
+	// transaction holding the WAL ends or the write rate drops, and a run
+	// whose stream fell behind is refused at its resume rather than stopped
+	// here again, so no retry reproduces this code by itself.
+	CodeSlotLagExceeded Code = "slot-lag-exceeded"
 	// CodeRowSecurityPlanChanged requires a fresh preview and SQL review before retry.
 	CodeRowSecurityPlanChanged Code = "row-security-plan-changed"
 	// CodeRowSecurityRefused requires a declaration, target, or privilege change.
@@ -153,6 +164,18 @@ const (
 	// after its first transaction committed, leaving the partition
 	// detach-pending; running the same statement again finishes it.
 	CodeDetachInterrupted Code = "partition-detach-interrupted"
+	// CodeAttachPartitionUnsupportedShape: the online attach's statement is
+	// not one ALTER TABLE schema.parent ATTACH PARTITION ... FOR VALUES;
+	// nothing was executed.
+	CodeAttachPartitionUnsupportedShape Code = "attach-partition-unsupported-shape"
+	// CodeAttachPartitionTable: the table the online attach attaches is not
+	// a standalone plain table with the parent's columns, or the parent's
+	// DEFAULT partition is not a plain table; nothing was added.
+	CodeAttachPartitionTable Code = "attach-partition-table"
+	// CodeAttachPartitionDefaultWindow: the parent has a DEFAULT partition
+	// and the caller did not accept the write window its proof opens;
+	// nothing was added.
+	CodeAttachPartitionDefaultWindow Code = "attach-partition-default-window"
 	// CodePartitionedIndexTablespace: the partitioned index statement has a
 	// TABLESPACE clause, which would reach the parent's index and not the
 	// partitions' indexes; nothing was created.
@@ -316,6 +339,11 @@ const (
 	// again under the table's lock; nothing was validated. Re-plan against
 	// the constraint as it stands.
 	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
+	// CodeTimeZoneDrift: a native change between timestamp and timestamptz
+	// reached a session whose time zone is not UTC, read inside the
+	// change's own transaction; nothing ran. The planner routes the change
+	// native only in UTC, so plan again in the zone the engine runs in.
+	CodeTimeZoneDrift Code = "time-zone-drift"
 	// CodeRenamedIndexDrift: the relation an ALTER INDEX ... RENAME TO
 	// names is no longer a plain index on the preflighted table, read
 	// again under the table's lock — gone, not an index, on another table,
@@ -374,6 +402,7 @@ func Codes() []Code {
 	return []Code{
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
+		CodeSlotLagExceeded,
 		CodeBlockingOutcomeUnknown,
 		CodeCommitOutcomeUnknown,
 		CodeDropOutcomeUnknown,
@@ -410,6 +439,9 @@ func Codes() []Code {
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
 		CodeDetachInterrupted,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedIndexUnsettled,
 		CodePartitionedKeyNameTaken,
@@ -448,6 +480,7 @@ func Codes() []Code {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -493,6 +526,9 @@ func (c Code) Permanent() bool {
 		CodePartitionedForeignKeyNotValidSupported,
 		CodePartitionDetachPending,
 		CodeDetachDefaultPartition,
+		CodeAttachPartitionUnsupportedShape,
+		CodeAttachPartitionTable,
+		CodeAttachPartitionDefaultWindow,
 		CodePartitionedIndexTablespace,
 		CodePartitionedKeyNameTaken,
 		CodePartitionedKeyConflict,
@@ -527,6 +563,7 @@ func (c Code) Permanent() bool {
 		CodeDroppedColumnPartitionKey,
 		CodeDroppedColumnPartitionDependent,
 		CodeValidatedConstraintDrift,
+		CodeTimeZoneDrift,
 		CodeRenamedIndexDrift,
 		CodeEnumTypeDrift,
 		CodeEnumLabelExists,
@@ -567,6 +604,9 @@ func OutcomeCode(err error) Code {
 	}
 	if budgetErr, ok := errors.AsType[*BudgetError](err); ok {
 		return budgetErr.Code()
+	}
+	if holderErr, ok := errors.AsType[*LingeringHolderError](err); ok {
+		return holderErr.Code()
 	}
 	if _, ok := errors.AsType[*RowSecurityOutcomeUnknownError](err); ok {
 		return CodeRowSecurityOutcomeUnknown
@@ -650,6 +690,12 @@ func sentinelCode(err error) Code {
 		return CodeDetachDefaultPartition
 	case errors.Is(err, ErrDetachInterrupted):
 		return CodeDetachInterrupted
+	case errors.Is(err, ErrAttachPartitionUnsupportedShape):
+		return CodeAttachPartitionUnsupportedShape
+	case errors.Is(err, ErrAttachPartitionTable):
+		return CodeAttachPartitionTable
+	case errors.Is(err, ErrAttachPartitionDefaultWindow):
+		return CodeAttachPartitionDefaultWindow
 	case errors.Is(err, ErrPartitionedIndexTablespace):
 		return CodePartitionedIndexTablespace
 	case errors.Is(err, ErrPartitionedIndexUnsettled):
@@ -726,6 +772,8 @@ func sentinelCode(err error) Code {
 		return CodeDroppedColumnPartitionDependent
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
+	case errors.Is(err, ErrTimeZoneDrift):
+		return CodeTimeZoneDrift
 	case errors.Is(err, ErrRenamedIndexDrift):
 		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrEnumTypeDrift):

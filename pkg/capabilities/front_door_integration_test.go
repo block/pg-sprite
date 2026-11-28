@@ -322,6 +322,7 @@ var declarativeOnlyClaims = []string{
 	"declarative-unnamed-check-numbering",
 	"extension-objects-named-unqualified-in-a-desired-file",
 	"declarative-foreign-key-add",
+	"declarative-foreign-key-drop",
 }
 
 // Every capability row that publishes `front_doors.migrate: supported` must

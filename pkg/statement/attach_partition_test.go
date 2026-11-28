@@ -66,6 +66,48 @@ func TestAttachedPartitionReadsHashAndDefaultBounds(t *testing.T) {
 	assert.Equal(t, statement.PartitionBound{Default: true}, got.Bound)
 }
 
+// A partition's bound as pg_get_expr prints it reads as the same bound the
+// statement would carry; text that is not one whole bound is refused.
+func TestPrintedPartitionBound(t *testing.T) {
+	for _, tc := range []struct {
+		printed string
+		want    statement.PartitionBound
+	}{
+		{
+			printed: `FOR VALUES FROM ('2027-01-01') TO (MAXVALUE)`,
+			want: statement.PartitionBound{
+				Strategy: statement.PartitionByRange,
+				Lower:    []statement.BoundDatum{{Kind: statement.BoundValue, Value: "2027-01-01"}},
+				Upper:    []statement.BoundDatum{{Kind: statement.BoundMaxValue}},
+			},
+		},
+		{
+			printed: `FOR VALUES IN (NULL, 'eu')`,
+			want: statement.PartitionBound{
+				Strategy: statement.PartitionByList,
+				List:     []statement.BoundDatum{{Kind: statement.BoundNull}, {Kind: statement.BoundValue, Value: "eu"}},
+			},
+		},
+		{
+			printed: `FOR VALUES WITH (modulus 8, remainder 3)`,
+			want:    statement.PartitionBound{Strategy: statement.PartitionByHash, Modulus: 8, Remainder: 3},
+		},
+		{printed: `DEFAULT`, want: statement.PartitionBound{Default: true}},
+	} {
+		got, err := statement.PrintedPartitionBound(tc.printed)
+		require.NoError(t, err, tc.printed)
+		assert.Equal(t, tc.want, got, tc.printed)
+	}
+
+	for _, printed := range []string{
+		``,
+		`FOR VALUES IN ('eu'); DROP TABLE app.events`,
+	} {
+		_, err := statement.PrintedPartitionBound(printed)
+		assert.Error(t, err, printed)
+	}
+}
+
 func TestAttachedPartitionIgnoresOtherStatements(t *testing.T) {
 	for _, sql := range []string{
 		`ALTER TABLE app.events DETACH PARTITION app.events_2024`,

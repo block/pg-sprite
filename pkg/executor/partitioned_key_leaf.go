@@ -127,6 +127,15 @@ type leafKeyResult struct {
 // renamed. The caller holds the parent's advisory table lock (LK-1), and the
 // pool needs the concurrent build's two connections.
 func ensureLeafKey(ctx context.Context, pool *pgxpool.Pool, spec partitionedKeySpec, node partitionNode, b ConcurrentBudget) (leafKeyResult, error) {
+	return ensureLeafKeyExcept(ctx, pool, spec, node, nil, b)
+}
+
+// ensureLeafKeyExcept is ensureLeafKey for a table some of whose indexes go
+// to something other than this key: taken maps each such index's OID to what
+// takes it. The step neither adopts nor reports one of them, and builds the
+// key's index when nothing else is left.
+func ensureLeafKeyExcept(ctx context.Context, pool *pgxpool.Pool, spec partitionedKeySpec, node partitionNode,
+	taken map[uint32]string, b ConcurrentBudget) (leafKeyResult, error) {
 	if err := spec.validate(); err != nil {
 		return leafKeyResult{}, err
 	}
@@ -151,6 +160,9 @@ func ensureLeafKey(ctx context.Context, pool *pgxpool.Pool, spec partitionedKeyS
 		return err
 	})
 	if err != nil {
+		return leafKeyResult{}, err
+	}
+	if facts, err = facts.withoutTaken(spec, node, taken); err != nil {
 		return leafKeyResult{}, err
 	}
 	plan, err := decideLeafKey(spec, node, name, facts)
