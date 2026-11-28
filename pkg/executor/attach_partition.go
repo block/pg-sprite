@@ -10,28 +10,61 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// The attach step of an online ATTACH PARTITION. Once the table carries a
-// validated CHECK that implies the bound, and the parent's DEFAULT
-// partition, when there is one, a validated CHECK that excludes it
-// (ensureAttachProof), the ATTACH skips both scans. Once the table also
-// carries the parent's indexes, constraints, and foreign keys, it builds and
-// validates nothing either, and changes only the catalog. This file runs
-// that ATTACH in one brief transaction under the run's lock and statement
-// budgets, and drops the two proof CHECKs in the same transaction, under the
-// locks the ATTACH already holds, so they never outlive it. Anything the
-// table still lacks makes the ATTACH scan or build under its locks, for no
-// longer than the statement budget: past it, the attempt ends and rolls
-// back, rather than holding the locks for the whole scan.
+// The attach step, the last of an online ATTACH PARTITION: the proof step
+// (ensureAttachProof) gives the table a validated CHECK that implies the
+// bound and the parent's DEFAULT partition one that excludes it, the
+// constraint step (ensureAttachConstraints) gives the table the parent's
+// CHECKs and NOT NULLs, the index step (ensureAttachIndexes) the parent's
+// indexes, and the foreign key step the parent's foreign keys; this step
+// then runs the reviewed ATTACH.
+//
+// Once both proofs are validated, the ATTACH skips both scans. Once the
+// table also has, for every index of the parent, an index the ATTACH takes,
+// and for every foreign key of the parent, a validated one it adopts, it
+// builds and validates nothing either, and changes only the catalog. The
+// step reads all of that before it requests any lock, and again under the
+// locks, and refuses an ATTACH that would do more, so the transaction it
+// runs is brief: the ATTACH and the drop of the two proof CHECKs, under the
+// locks the ATTACH already holds, so the proofs never outlive it. The run's
+// statement budget bounds the ATTACH all the same: were the server not to
+// take a proof as implying what it proves, the ATTACH would scan under its
+// locks, and past the budget the attempt ends and rolls back.
 
-// errAttachPartitionNotReady is returned when the table, or the parent's
-// DEFAULT partition, lacks the validated proof CHECK the attach needs to
-// skip its scan, or the parent's DEFAULT partition is not the one the run
-// proved. Nothing is attached.
-var errAttachPartitionNotReady = errors.New("the attach is not proven to skip its scans")
+var (
+	// errAttachProofNotReady is returned when the table's or the DEFAULT
+	// partition's proof CHECK is missing or NOT VALID. Running the proof
+	// step again brings it to a validated CHECK.
+	errAttachProofNotReady = errors.New("the attach's proof CHECK is missing or NOT VALID")
+	// errAttachDefaultPartitionChanged is returned when the parent's
+	// DEFAULT partition is not the one the run proved, or the parent has
+	// one and the run proved none. The run's proofs stand on another
+	// table, so the attach needs a new plan.
+	errAttachDefaultPartitionChanged = errors.New("the parent's DEFAULT partition is not the one the run proved")
+	// errAttachProofsNotOfTheBound is returned when the proofs the step is
+	// given are not the CHECKs the statement's bound derives, so they
+	// would not let the ATTACH skip its scans. The attach needs a new
+	// plan.
+	errAttachProofsNotOfTheBound = errors.New("the attach's proofs are not the ones its bound derives")
+	// errAttachIndexNotReady is returned when the table has no index the
+	// ATTACH takes for an index of the parent, which the ATTACH would build
+	// under its locks. Running the index step again gives the table one.
+	errAttachIndexNotReady = errors.New("the attach would build an index on the table")
+	// errAttachForeignKeyNotReady is returned when the table has no
+	// validated foreign key the ATTACH adopts for a foreign key of the
+	// parent, which the ATTACH would create and validate under its locks.
+	// Running the foreign key step again gives the table one.
+	errAttachForeignKeyNotReady = errors.New("the attach would create or validate a foreign key on the table")
+	// errAttachedUnderAnotherBound is returned when the table is already a
+	// partition of the parent, under a bound other than the reviewed
+	// statement's. The step leaves it and the proofs as they are, for an
+	// operator to decide.
+	errAttachedUnderAnotherBound = errors.New("the table is a partition of the parent under another bound")
+)
 
 // attachPartitionAction says what the step did.
 type attachPartitionAction string
@@ -78,10 +111,23 @@ func (t attachPartitionTarget) proofs() []attachProof {
 	return []attachProof{t.bound}
 }
 
+// lockOrder is the proofs' tables in the order the ATTACH takes ACCESS
+// EXCLUSIVE on them: ATExecAttachPartition locks the DEFAULT partition
+// before it opens the table it attaches.
+func (t attachPartitionTarget) lockOrder() []attachProof {
+	if t.hasDefault() {
+		return []attachProof{t.deflt, t.bound}
+	}
+	return []attachProof{t.bound}
+}
+
 // validate refuses a target the step cannot act on.
 func (t attachPartitionTarget) validate() error {
 	if t.parentOID == 0 {
 		return fmt.Errorf("%w: the attach names no resolved parent", ErrInvariantViolation)
+	}
+	if len(t.searchPath) == 0 {
+		return fmt.Errorf("%w: the attach names no search_path to run under", ErrInvariantViolation)
 	}
 	if t.bound.kind != attachProofBound {
 		return fmt.Errorf("%w: the attach's table proof is of kind %q", ErrInvariantViolation, t.bound.kind)
@@ -105,24 +151,28 @@ func (t attachPartitionTarget) validate() error {
 }
 
 // attachPartitionOnline attaches the table to the parent, reading and
-// deciding every call, so a rerun resumes:
+// deciding every call, so a rerun resumes. It first requires the target's
+// proofs to be the CHECKs the statement's bound derives, then:
 //
-//   - a table that is already a partition of the parent is found as it
-//     stands, and any proof CHECK still on it, or on the DEFAULT partition,
-//     is dropped;
+//   - a table that is already a partition of the parent under the
+//     statement's bound is found as it stands, and any proof CHECK still on
+//     it, or on the DEFAULT partition, is dropped; under another bound it
+//     is refused, and nothing is dropped;
 //   - a standalone table whose proofs are validated, under a parent whose
-//     DEFAULT partition is the one proved, is attached;
+//     DEFAULT partition is the one proved, and that has every index and
+//     foreign key of the parent the ATTACH would otherwise build or
+//     validate, is attached;
 //   - anything else is refused before any lock is requested.
 //
 // Before the ATTACH requests its locks, the step waits outside the lock
 // queue, up to holderWait, while a reader or writer holds the table or the
-// DEFAULT partition, and reports the wait to tracker, which may be nil. The
+// DEFAULT partition, or a writer holds a table the ATTACH reaches through a
+// foreign key, and reports the wait to tracker, which may be nil. The
 // transaction then takes the ATTACH's locks in the server's own order,
 // proves under them that the statement's names resolve to the tables the
-// run resolved, that the DEFAULT partition is the proved one, and that both
-// proofs are validated, runs the ATTACH, proves the table a partition of the
-// parent, and drops the proofs, all under b. The caller holds the parent's
-// advisory table lock (LK-1).
+// run resolved and decides again as in the first read, runs the ATTACH,
+// proves the table a partition of the parent, and drops the proofs, all
+// under b. The caller holds the parent's advisory table lock (LK-1).
 func attachPartitionOnline(ctx context.Context, pool *pgxpool.Pool, t attachPartitionTarget, b Budget,
 	holderWait time.Duration, tracker *progress.Tracker, started attachProofStatementStarted) (attachPartitionResult, error) {
 	if err := t.validate(); err != nil {
@@ -131,32 +181,53 @@ func attachPartitionOnline(ctx context.Context, pool *pgxpool.Pool, t attachPart
 	if err := b.validate(); err != nil {
 		return attachPartitionResult{}, err
 	}
+	attach, _, err := statement.AttachedPartition(t.st.SQL())
+	if err != nil {
+		return attachPartitionResult{}, fmt.Errorf("parse the attach: %w", err)
+	}
 	tx := briefTx{pool: pool}
 	var parent relationFacts
 	var membership attachMembership
-	err := tx.read(ctx, "inspect the attach of "+t.bound.qualified(), func(ctx context.Context, q querier) error {
+	var present []attachProof
+	var fkTables []lockedTable
+	err = tx.read(ctx, "inspect the attach of "+t.bound.qualified(), func(ctx context.Context, q querier) error {
 		var err error
 		if parent, err = attachParent(ctx, q, t.parentOID); err != nil {
+			return err
+		}
+		key, reviewed, err := requireProofsOfBound(ctx, q, t, attach.Bound)
+		if err != nil {
 			return err
 		}
 		if membership, err = readAttachMembership(ctx, q, t.bound); err != nil {
 			return err
 		}
 		if membership.isPartitionOf(t.parentOID) {
-			return nil
+			if err := requireAttachedUnder(ctx, q, key, reviewed, t.bound, membership.bound); err != nil {
+				return err
+			}
+			present, err = presentAttachProofs(ctx, q, t.proofs())
+			return err
 		}
 		if err := membership.requireStandalone(t.bound); err != nil {
 			return err
 		}
-		return requireAttachReady(ctx, q, t, nil)
+		facts, err := requireAttachReady(ctx, q, t, nil)
+		if err != nil {
+			return err
+		}
+		fkTables, err = attachForeignKeyLockedTables(ctx, q, facts.parentFKs, t.parentOID)
+		return err
 	})
 	if err != nil {
 		return attachPartitionResult{}, err
 	}
 	if membership.isPartitionOf(t.parentOID) {
 		// An earlier run's attach committed, or someone else attached the
-		// table: the proofs are redundant either way.
-		for _, p := range t.proofs() {
+		// table under the same bound: the proofs are redundant either way.
+		// Only those still there are dropped, so a rerun with nothing left
+		// to drop neither waits for nor locks either table.
+		for _, p := range present {
 			if err := dropAttachProof(ctx, pool, p, holderWait, tracker); err != nil {
 				return attachPartitionResult{}, err
 			}
@@ -164,12 +235,15 @@ func attachPartitionOnline(ctx context.Context, pool *pgxpool.Pool, t attachPart
 		return attachPartitionResult{action: attachPartitionFound, bound: membership.bound}, nil
 	}
 	// INV: LK-2 — the ATTACH takes ACCESS EXCLUSIVE on the table and the
-	// DEFAULT partition, so it requests its locks once no long-lived reader
-	// or writer holds either, or once holderWait runs out.
-	locked := make([]lockedTable, 0, 2)
+	// DEFAULT partition, and then SHARE ROW EXCLUSIVE on the tables it
+	// reaches through foreign keys, so it requests its locks once no
+	// long-lived reader or writer holds the first two, and no long-lived
+	// writer the others, or once holderWait runs out.
+	var locked []lockedTable
 	for _, p := range t.proofs() {
 		locked = append(locked, p.lockedTables()...)
 	}
+	locked = append(locked, fkTables...)
 	if _, err := waitOutsideLockQueue(ctx, pool, locked, holderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
 		return attachPartitionResult{}, err
 	}
@@ -184,6 +258,13 @@ func attachPartitionOnline(ctx context.Context, pool *pgxpool.Pool, t attachPart
 		if err := proveAttachNames(ctx, tx, t, parent); err != nil {
 			return err
 		}
+		// The index definitions the readiness compares are printed fully
+		// qualified only under pg_catalog alone, so the decision reads
+		// under it, and the statement's own search_path is restored for
+		// the ATTACH.
+		if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(catalogReadPath()...)); err != nil {
+			return fmt.Errorf("scope the attach's catalog reads: %w", err)
+		}
 		m, err := readAttachMembership(ctx, tx, t.bound)
 		if err != nil {
 			return err
@@ -191,7 +272,13 @@ func attachPartitionOnline(ctx context.Context, pool *pgxpool.Pool, t attachPart
 		if err := m.requireStandalone(t.bound); err != nil {
 			return err
 		}
-		return requireAttachReady(ctx, tx, t, oids)
+		if _, err := requireAttachReady(ctx, tx, t, oids); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(t.searchPath...)); err != nil {
+			return fmt.Errorf("restore the attach's search_path: %w", err)
+		}
+		return nil
 	}
 	after := func(ctx context.Context, tx pgx.Tx) error {
 		m, err := readAttachMembership(ctx, tx, t.bound)
@@ -244,56 +331,32 @@ func attachParent(ctx context.Context, q querier, parentOID uint32) (relationFac
 	return parent, nil
 }
 
-// requireAttachReady requires the DEFAULT partition of the parent to be the
-// one the run proved, or none, and every proof to be a validated CHECK. When
-// oids is set, it records each proof's constraint OID by its table.
-func requireAttachReady(ctx context.Context, q querier, t attachPartitionTarget, oids map[uint32]uint32) error {
-	var defaultOID uint32
-	err := q.QueryRow(ctx, attachDefaultPartitionSQL, t.parentOID).Scan(&defaultOID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("%w: ST-7: table %d is no longer partitioned", ErrInvariantViolation, t.parentOID)
-	}
-	if err != nil {
-		return fmt.Errorf("read the DEFAULT partition of table %d: %w", t.parentOID, err)
-	}
-	if defaultOID != t.deflt.tableOID {
-		return fmt.Errorf("%w: the parent's DEFAULT partition is table %d, and the run proved table %d",
-			errAttachPartitionNotReady, defaultOID, t.deflt.tableOID)
-	}
-	for _, p := range t.proofs() {
-		state, oid, err := readAttachProof(ctx, q, p)
+// presentAttachProofs returns the proofs whose CHECK is still on its table,
+// NOT VALID or validated.
+func presentAttachProofs(ctx context.Context, q querier, proofs []attachProof) ([]attachProof, error) {
+	var present []attachProof
+	for _, p := range proofs {
+		state, _, err := readAttachProof(ctx, q, p)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if state != attachProofDone {
-			return fmt.Errorf("%w: %s has no validated CHECK %s", errAttachPartitionNotReady, p.qualified(), p.name())
-		}
-		if oids != nil {
-			oids[p.tableOID] = oid
+		if state != attachProofAddNeeded {
+			present = append(present, p)
 		}
 	}
-	return nil
+	return present, nil
 }
-
-// attachDefaultPartitionSQL reads the parent's DEFAULT partition, 0 for
-// none. Every relation and operator is pg_catalog-qualified (CO-9).
-const attachDefaultPartitionSQL = `SELECT p.partdefid
-	FROM pg_catalog.pg_partitioned_table p
-	WHERE p.partrelid OPERATOR(pg_catalog.=) $1`
 
 // lockAttachTables takes, under the transaction's lock_timeout (LK-2), the
 // locks the ATTACH takes, in its order: SHARE UPDATE EXCLUSIVE on the
-// parent, then ACCESS EXCLUSIVE on its DEFAULT partition and on the table.
-// It then proves each proof's table under its name, a plain table.
+// parent, then ACCESS EXCLUSIVE on its DEFAULT partition and on the table
+// (lockOrder). It then proves each proof's table under its name, a plain
+// table.
 func lockAttachTables(ctx context.Context, tx pgx.Tx, parent relationFacts, t attachPartitionTarget) error {
 	if err := lockOnly(ctx, tx, parent.schema, parent.name, "SHARE UPDATE EXCLUSIVE"); err != nil {
 		return err
 	}
-	proofs := t.proofs()
-	if t.hasDefault() {
-		proofs = []attachProof{t.deflt, t.bound}
-	}
-	for _, p := range proofs {
+	for _, p := range t.lockOrder() {
 		if err := lockOnly(ctx, tx, p.schema, p.table, "ACCESS EXCLUSIVE"); err != nil {
 			return err
 		}

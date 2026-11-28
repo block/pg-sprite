@@ -833,8 +833,9 @@ cancelled wait leaves is a detach-pending partition, which the server keeps cons
 through the table leave it out, rows in its range are refused) and the executor detects from
 `pg_inherits.inhdetachpending` and finishes with `DETACH PARTITION ... FINALIZE` when the same
 statement runs again, so the bound costs a rerun rather than an unrecoverable state. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors; before a native step, a create step that adds a foreign key, or a table drop
-first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
+native and copy-and-swap executors; before a native step, a create step that adds a foreign key, a table drop,
+an attach proof's `ADD` or `DROP` of its CHECK, or the online `ATTACH PARTITION` itself
+(`pkg/executor/attach_proof.go`, `pkg/executor/attach_partition.go`) first requests its lock, it waits outside the lock queue while a reader or writer that has held a conflicting
 lock on a table the step locks, across two reads of `pg_locks`, keeps holding it, for at most
 `RetryPolicy.HolderWait` (30 s in `DefaultRetryPolicy`), one deadline bounding the wait and its reads, and then
 requests its lock under its lock budget either way, so the wait adds at most `HolderWait` to the bound and never

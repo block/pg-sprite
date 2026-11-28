@@ -211,7 +211,7 @@ func TestAttachPartitionOnlineRefusesAnUnprovenAttach(t *testing.T) {
 			f.exec(t, eventsAttachParent)
 			target := f.attachTarget(t, attachProofBound)
 			_, err := attachPartitionOnline(t.Context(), f.pool, target, attachPartitionBudget, 0, nil, nil)
-			require.ErrorIs(t, err, errAttachPartitionNotReady)
+			require.ErrorIs(t, err, errAttachProofNotReady)
 			assert.Empty(t, f.partitionBound(t, "events_2027"))
 		})
 
@@ -222,7 +222,7 @@ func TestAttachPartitionOnlineRefusesAnUnprovenAttach(t *testing.T) {
 			f.exec(t, "ALTER TABLE %[1]s.events_default ADD CONSTRAINT "+
 				pgx.Identifier{target.deflt.name()}.Sanitize()+" CHECK ("+target.deflt.expr+") NOT VALID")
 			_, err := attachPartitionOnline(t.Context(), f.pool, target, attachPartitionBudget, 0, nil, nil)
-			require.ErrorIs(t, err, errAttachPartitionNotReady)
+			require.ErrorIs(t, err, errAttachProofNotReady)
 			assert.Empty(t, f.partitionBound(t, "events_2027"))
 		})
 
@@ -232,7 +232,7 @@ func TestAttachPartitionOnlineRefusesAnUnprovenAttach(t *testing.T) {
 			target := f.attachTarget(t)
 			target.deflt = attachProof{}
 			_, err := attachPartitionOnline(t.Context(), f.pool, target, attachPartitionBudget, 0, nil, nil)
-			require.ErrorIs(t, err, errAttachPartitionNotReady)
+			require.ErrorIs(t, err, errAttachDefaultPartitionChanged)
 			assert.Empty(t, f.partitionBound(t, "events_2027"))
 		})
 	})
@@ -321,6 +321,62 @@ func TestAttachPartitionOnlineFindsAnAttachedTableAndRefusesAMovedOne(t *testing
 			require.ErrorIs(t, err, ErrInvariantViolation)
 			assert.Empty(t, f.partitionBound(t, "events_2027"))
 		})
+	})
+}
+
+// After an attach that committed with its drops, a rerun has nothing to
+// drop, so it neither waits for a reader of the DEFAULT partition, nor locks
+// the DEFAULT partition by name: it finds the partition with a reader still
+// holding the DEFAULT partition, and again once the DEFAULT partition is
+// renamed.
+func TestAttachPartitionOnlineRerunTouchesNeitherTableWhenTheProofsAreGone(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, eventsAttachParent)
+		target := f.attachTarget(t)
+		res, err := attachPartitionOnline(t.Context(), f.pool, target, attachPartitionBudget, 0, nil, nil)
+		require.NoError(t, err)
+		require.Equal(t, attachPartitionAttached, res.action)
+		want := attachPartitionResult{action: attachPartitionFound, bound: events2027Bound}
+
+		release, _ := f.holdLock(t, "events_default", "ACCESS SHARE")
+		// The rerun is given the full holder wait; the deadline, a third
+		// of it, ends any rerun that waits on the reader.
+		ctx, cancel := context.WithTimeout(t.Context(), DefaultHolderWait/3)
+		defer cancel()
+		again, err := attachPartitionOnline(ctx, f.pool, target, attachPartitionBudget, DefaultHolderWait, nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, want, again)
+		release()
+
+		f.exec(t, `ALTER TABLE %[1]s.events_default RENAME TO events_other`)
+		again, err = attachPartitionOnline(t.Context(), f.pool, target, attachPartitionBudget, 0, nil, nil)
+		require.NoError(t, err)
+		assert.Equal(t, want, again)
+	})
+}
+
+// An interrupted DETACH PARTITION ... CONCURRENTLY leaves events_2027 in
+// pg_inherits under the parent, detach-pending: neither a partition the
+// step finds, nor the standalone table it resolved. The step refuses it as
+// not the table the run resolved, and drops neither proof. The parent has a
+// DEFAULT partition, which DETACH ... CONCURRENTLY refuses, so the test marks
+// the detach pending in the catalog, the state an interrupted detach leaves.
+func TestAttachPartitionOnlineRefusesADetachPendingTable(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, eventsAttachParent)
+		target := f.attachTarget(t)
+		f.exec(t, `ALTER TABLE %[1]s.events
+			ATTACH PARTITION %[1]s.events_2027
+			FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')`)
+		f.exec(t, `UPDATE pg_catalog.pg_inherits SET inhdetachpending = true
+			WHERE inhrelid = '%[1]s.events_2027'::regclass`)
+
+		_, err := attachPartitionOnline(t.Context(), f.pool, target, attachPartitionBudget, 0, nil, nil)
+		require.ErrorIs(t, err, ErrInvariantViolation)
+		assert.Len(t, f.proofConstraints(t, "events_2027"), 1)
+		assert.Len(t, f.proofConstraints(t, "events_default"), 1)
 	})
 }
 
