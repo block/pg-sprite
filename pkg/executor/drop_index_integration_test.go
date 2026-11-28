@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -242,13 +243,9 @@ func TestExecuteDropIndexConcurrentlyNeverBlocksTheTable(t *testing.T) {
 	t.Cleanup(workers.Wait)
 
 	require.Eventually(t, func() bool {
-		var waiting bool
-		err := pool.QueryRow(t.Context(),
-			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			  WHERE state = 'active' AND query ILIKE 'DROP INDEX CONCURRENTLY%' AND query LIKE '%' || $1 || '%')`,
-			"t_a_idx").Scan(&waiting)
+		waiting, err := testutil.BlockedBy(t.Context(), pool, old.Conn().PgConn().PID())
 		return err == nil && waiting
-	}, 30*time.Second, 20*time.Millisecond, "the drop must be waiting on the old transaction as DROP INDEX CONCURRENTLY")
+	}, 30*time.Second, 20*time.Millisecond, "the drop must be waiting on the old transaction")
 
 	// The table is open to everyone else while the drop waits.
 	other, err := pool.Acquire(t.Context())
