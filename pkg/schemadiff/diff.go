@@ -172,9 +172,10 @@ type Change struct {
 	// and execution refuses when the name now stands for something else.
 	Drops *DroppedObject `json:"-"`
 	// ReplacedBy is set on the DROP INDEX of a changed index the plan
-	// replaces: the index an earlier statement built under the desired
-	// definition, which is valid before the drop runs and takes the dropped
-	// index's name in the rename after it. The table has an index with the
+	// replaces, and on the DROP CONSTRAINT of a unique constraint the plan
+	// replaces with a standalone index: the index an earlier statement built
+	// under the desired definition, which is valid before the drop runs and
+	// takes the dropped object's name after it. The table has an index with the
 	// desired definition before the old one goes; what the desired
 	// definition drops from the old one, the drop removes.
 	ReplacedBy string `json:"-"`
@@ -228,6 +229,10 @@ type DroppedObject struct {
 	// refuses a drop that would take along anything the plan did not list;
 	// an entry the table has lost since is no reason to refuse.
 	Dependents []string `json:"dependents,omitempty"`
+	// Replacement, for a constraint, is the index that replaces it, which
+	// the run attaches from the plan's [Change.Replacement]. The constraint
+	// is dropped only while that index is still in place.
+	Replacement *IndexReplacement `json:"-"`
 }
 
 // Dependent is an object that goes with a column when the column is dropped.
@@ -450,17 +455,26 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	resumedBuilds := make(map[string]struct{}, len(replacedIdx))
+	// claimed are the live indexes a replacement accounts for: an earlier
+	// run's build it picks up, or a standalone index a unique constraint
+	// replaces. None of them is dropped or renamed on its own.
+	claimed := make(map[string]struct{}, len(replacedIdx))
 	for _, r := range replacedIdx {
-		resumedBuilds[r.temp] = struct{}{}
+		claimed[r.temp] = struct{}{}
 	}
 	for name, r := range replaced {
 		if r.built {
-			resumedBuilds[replacementIndexName(name)] = struct{}{}
+			claimed[replacementIndexName(name)] = struct{}{}
+		}
+		if r.index.Name != "" {
+			claimed[r.index.Name] = struct{}{}
 		}
 	}
-	renamed, err := renamedIndexes(partitioned, live.Indexes, desired.Indexes, liveIdx, desiredIdx, adopted, resumedBuilds)
+	renamed, err := renamedIndexes(partitioned, live.Indexes, desired.Indexes, liveIdx, desiredIdx, adopted, claimed, replacedIdx)
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseConstraintOnRenamedIndexName(renamed, liveCons, desiredCons); err != nil {
 		return nil, err
 	}
 	renameTargets := renameIndexTargets(renamed)
@@ -527,7 +541,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// adopts stays: the constraint takes it over below. A replaced index is
 	// dropped in the create bucket, once its replacement is built, and an
 	// earlier run's build of a replacement stays to be renamed, or, for a
-	// key, to be swapped in.
+	// key, to be swapped in. A standalone index a unique constraint replaces
+	// is dropped once the constraint's index is built.
 	for _, ix := range live.Indexes {
 		if _, ok := adopted[ix.Name]; ok {
 			continue
@@ -535,7 +550,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if _, ok := replacedIdx[ix.Name]; ok {
 			continue
 		}
-		if _, ok := resumedBuilds[ix.Name]; ok {
+		if _, ok := claimed[ix.Name]; ok {
 			continue
 		}
 		if _, ok := renamed[ix.Name]; ok {
@@ -558,12 +573,16 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// Other constraints to drop: gone from desired, or changed (re-added
 	// below). One left NOT VALID with the desired definition is validated
 	// below instead, and one replaced in place is dropped by the statement
-	// that adds its replacement.
+	// that adds its replacement. A unique constraint the desired table
+	// declares as a standalone index is dropped once that index is built.
 	for _, con := range live.Constraints {
 		if con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
 			continue
 		}
 		if replacedLive[con.Name] {
+			continue
+		}
+		if r, ok := replacedIdx[con.Name]; ok && r.constraint.Name != "" {
 			continue
 		}
 		if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
@@ -736,7 +755,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// is injected.
 	for _, ix := range desired.Indexes {
 		if r, ok := replacedIdx[ix.Name]; ok {
-			replacement, err := replaceIndexChanges(schema, r)
+			if r.constraint.Name != "" {
+				if err := refuseReferencedKeyDrop(schema, live.Table, r.constraint, droppedForeignKeys); err != nil {
+					return nil, err
+				}
+			}
+			replacement, err := replaceIndexChanges(schema, table, r)
 			if err != nil {
 				return nil, err
 			}

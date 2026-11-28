@@ -113,7 +113,9 @@ func replacesConstraint(ops []statement.Op, d *schemadiff.DroppedObject) bool {
 // refuseDroppedObjectDrift locks st's table in ACCESS EXCLUSIVE, the lock
 // every drop it checks takes anyway, then reads the object the statement
 // drops and refuses unless it still has the definition d carries and
-// dropping it takes along nothing that d does not list. Holding
+// dropping it takes along nothing that d does not list. A constraint d
+// names a replacement for is dropped only while that index is valid with the
+// definition the plan built. Holding
 // the lock until the drop commits means the object cannot change between
 // this read and the drop. The read runs under the attempt's search_path,
 // the one the plan's definitions were read under, so the two print alike.
@@ -139,6 +141,11 @@ func refuseDroppedObjectDrift(ctx context.Context, tx pgx.Tx, st statement.State
 	if extra := schemadiff.UnlistedDependents(d.Dependents, live.Dependents); len(extra) > 0 {
 		return fmt.Errorf("%w: dropping %s %s of %s would also remove %s, which the plan did not review; re-plan",
 			ErrDroppedObjectDrift, d.Kind, d.Name, target, strings.Join(extra, "; "))
+	}
+	if d.Replacement != nil {
+		if err := refuseReplacementIndexDrift(ctx, tx, st.Schema(), st.Table(), *d.Replacement); err != nil {
+			return err
+		}
 	}
 	return refuseDropBelow(ctx, tx, st, d, target)
 }

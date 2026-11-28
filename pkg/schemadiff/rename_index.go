@@ -1,6 +1,7 @@
 package schemadiff
 
 import (
+	"maps"
 	"slices"
 	"strings"
 
@@ -15,13 +16,15 @@ import (
 // index while the new one builds, which for a unique index lets duplicates
 // in. The result maps the live name to the desired index.
 //
-// An unfinished build, an index a new key constraint takes over, an earlier
-// run's build of a replacement, and a desired index already matched are
-// left out, and each index joins at most one pair. Indexes are visited in
+// An unfinished build, an index a new key constraint takes over, a claimed
+// index (an earlier run's build of a replacement, or an index a unique
+// constraint replaces), a desired index a replacement builds, and a desired
+// index already matched are left out, and each index joins at most one
+// pair. Indexes are visited in
 // name order, so two live indexes with the same definition always pair the
 // same way.
 func renamedIndexes(partitioned bool, live, desired []Index, liveIdx, desiredIdx map[string]Index,
-	adopted, resumedBuilds map[string]struct{}) (map[string]Index, error) {
+	adopted, claimed map[string]struct{}, replaced map[string]indexReplacement) (map[string]Index, error) {
 	renamed := make(map[string]Index)
 	taken := make(map[string]bool)
 	for _, ix := range sortedIndexes(live) {
@@ -31,11 +34,14 @@ func renamedIndexes(partitioned bool, live, desired []Index, liveIdx, desiredIdx
 		if _, ok := adopted[ix.Name]; ok {
 			continue
 		}
-		if _, ok := resumedBuilds[ix.Name]; ok {
+		if _, ok := claimed[ix.Name]; ok {
 			continue
 		}
 		for _, want := range sortedIndexes(desired) {
 			if _, exists := liveIdx[want.Name]; exists || taken[want.Name] {
+				continue
+			}
+			if _, built := replaced[want.Name]; built {
 				continue
 			}
 			same, err := sameIndexUnderName(ix, want)
@@ -50,6 +56,23 @@ func renamedIndexes(partitioned bool, live, desired []Index, liveIdx, desiredIdx
 		}
 	}
 	return renamed, nil
+}
+
+// refuseConstraintOnRenamedIndexName refuses a plan that gives a new
+// constraint the name of a live index it renames. The index has to keep its
+// name until its rename, and the constraint needs the name to be added, so
+// one of the two would run against a name still in use.
+func refuseConstraintOnRenamedIndexName(renamed map[string]Index, liveCons, desiredCons map[string]Constraint) error {
+	for _, from := range slices.Sorted(maps.Keys(renamed)) {
+		if _, live := liveCons[from]; live {
+			continue
+		}
+		if _, declared := desiredCons[from]; declared {
+			return unsupported(CauseRenamedIndexName, "%w: constraint %q takes the name of index %q, which the desired table renames to %q; rename the index in one change and add the constraint in the next",
+				ErrUnsupportedChange, from, from, renamed[from].Name)
+		}
+	}
+	return nil
 }
 
 // renameIndexTargets returns the desired names renamed maps to.
