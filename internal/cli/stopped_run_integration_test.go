@@ -36,10 +36,15 @@ var errStopped = errors.New("stopped in verifying")
 
 // stoppedOrders creates orders, with row security enabled and one policy so
 // a row security file can describe it, and stops the retype of qty in
-// verifying. It returns the server URL, the schema, and a pool on it.
+// verifying. It returns the database URL, the schema, and a pool on it.
+// The database is the test's own: the dry runs' add-column probes create a
+// temporary table without waiting for catalog locks, and on a database
+// other packages share, autovacuum truncating a catalog their churn left
+// bloated holds it ACCESS EXCLUSIVE and fails the probe. Catalogs are per
+// database, so that churn cannot reach this one's.
 func stoppedOrders(t *testing.T) (string, string, *pgxpool.Pool) {
 	t.Helper()
-	url := testutil.StartPostgres(t)
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 	cfg := dbconn.Config{URL: url, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
