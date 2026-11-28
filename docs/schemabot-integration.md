@@ -1147,7 +1147,11 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   and a statement with `Drops` set and a column, constraint, or NOT NULL kind through
   `executor.RunSequenceDropping` with that `DroppedObject`; a `Drops` of kind
   `index` is a `DROP INDEX` that runs through `executor.ExecuteDropIndexConcurrently` with the
-  definition. A `SET NOT NULL` that runs as the online helper-constraint sequence carries
+  definition. A new primary key or unique constraint that runs as a concurrent build and then
+  `ADD CONSTRAINT ... USING INDEX` carries `Adopts` for its attach step, naming the index its
+  build leaves: an adapter that runs the steps on their own runs the attach through
+  `executor.ExecuteNativeAdoptingWithProgress`, so it never takes over an index put under that
+  name between the two steps. A `SET NOT NULL` that runs as the online helper-constraint sequence carries
   `Validates` for its validation step and `DropsHelper` for the step that drops the helper: an
   adapter that runs the steps on their own runs that drop through
   `executor.RunSequenceDropping` with `DropsHelper`. `DropsHelper` is the helper as it stands
