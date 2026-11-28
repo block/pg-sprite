@@ -202,6 +202,125 @@ func TestEnsureAttachForeignKeysStopsOnAnOrphanRowAndResumes(t *testing.T) {
 	})
 }
 
+// A row whose merchant is missing fails the second foreign key's VALIDATE.
+// The step returns the first foreign key's result with the error: that
+// foreign key is on the table, validated, and stays.
+func TestEnsureAttachForeignKeysReturnsTheEarlierResultsWithAFailure(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, paymentsFKParent)
+		f.exec(t, `INSERT INTO %[1]s.payments_2027 VALUES (3, '2027-05-01', 1, 99)`)
+		parent, table := f.parentOID(t, "payments"), f.standalone(t, "payments_2027")
+		accountFK := derivedPartitionIndexName("payments_account_fk", table.oid)
+
+		results, err := ensureAttachForeignKeys(t.Context(), f.pool, parent, table, attachProofTestBudget, nil)
+		require.ErrorIs(t, err, ErrPartitionedForeignKeyViolation)
+		assert.ErrorContains(t, err, "payments_merchant_fk")
+		fks := f.tableFKs(t, "payments_2027")
+		require.Len(t, results, 1, "the account foreign key was given before the merchant one failed")
+		assert.Equal(t, attachForeignKeyResult{
+			parentFK:     "payments_account_fk",
+			leafFKResult: leafFKResult{action: leafFKAdded, constraint: accountFK, constraintOID: fks[accountFK].oid},
+		}, results[0])
+		assert.True(t, fks[accountFK].validated)
+	})
+}
+
+// A parent can carry two foreign keys of one definition: PostgreSQL does
+// not deduplicate them. The attach adopts the table's foreign key for one of
+// them only and creates and validates a second for the other under its
+// lock, and the leaf step cannot give the table two of one definition, so
+// the step refuses the parent before it adds anything.
+func TestEnsureAttachForeignKeysRefusesTwoParentForeignKeysOfOneDefinition(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY
+			);
+			CREATE TABLE %[1]s.payments (
+				id bigint NOT NULL,
+				paid date NOT NULL,
+				account_id bigint,
+				CONSTRAINT payments_account_fk_a FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id),
+				CONSTRAINT payments_account_fk_b FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
+			) PARTITION BY RANGE (paid);
+			CREATE TABLE %[1]s.payments_2027 (
+				id bigint NOT NULL,
+				paid date NOT NULL,
+				account_id bigint
+			)`)
+		_, err := ensureAttachForeignKeys(t.Context(), f.pool, f.parentOID(t, "payments"), f.standalone(t, "payments_2027"), attachProofTestBudget, nil)
+		require.ErrorIs(t, err, ErrPartitionedForeignKeyConflict)
+		assert.Empty(t, f.tableFKs(t, "payments_2027"), "nothing is added for a parent the step cannot satisfy")
+	})
+}
+
+// Every refusal runs before the first ADD: a parent whose second foreign key
+// has an ON DELETE column list is refused before its first, supported one is
+// added and validated, a scan the attach could not use.
+func TestEnsureAttachForeignKeysRefusesBeforeBuildingAnEarlierOne(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		if major := f.serverMajor(t); major < 15 {
+			t.Skipf("PostgreSQL %d has no ON DELETE column list", major)
+		}
+		f.exec(t, `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY
+			);
+			CREATE TABLE %[1]s.cards (
+				id bigint NOT NULL,
+				issued date NOT NULL,
+				account_id bigint,
+				owner_id bigint,
+				CONSTRAINT cards_account_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id),
+				CONSTRAINT cards_owner_fk FOREIGN KEY (owner_id) REFERENCES %[1]s.accounts (id) ON DELETE SET NULL (owner_id)
+			) PARTITION BY RANGE (issued);
+			CREATE TABLE %[1]s.cards_2027 (
+				id bigint NOT NULL,
+				issued date NOT NULL,
+				account_id bigint,
+				owner_id bigint
+			)`)
+		_, err := ensureAttachForeignKeys(t.Context(), f.pool, f.parentOID(t, "cards"), f.standalone(t, "cards_2027"), attachProofTestBudget, nil)
+		require.ErrorIs(t, err, errAttachForeignKeyUnsupported)
+		assert.Empty(t, f.tableFKs(t, "cards_2027"), "the unsupported foreign key is refused before the supported one is built and validated")
+	})
+}
+
+// A parent that is itself a partition carries the foreign keys it inherited
+// as children of its parent's, on another table. Those are foreign keys the
+// attach gives the table, so the step gives them too.
+func TestEnsureAttachForeignKeysOnASubPartitionedParent(t *testing.T) {
+	withAttachProofServer(t, func(t *testing.T, newFixture func(t *testing.T) attachProofFixture) {
+		f := newFixture(t)
+		f.exec(t, `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY
+			);
+			CREATE TABLE %[1]s.payments (
+				id bigint NOT NULL,
+				paid date NOT NULL,
+				account_id bigint,
+				CONSTRAINT payments_account_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
+			) PARTITION BY RANGE (paid);
+			CREATE TABLE %[1]s.payments_2027 PARTITION OF %[1]s.payments
+				FOR VALUES FROM ('2027-01-01') TO ('2028-01-01')
+				PARTITION BY RANGE (id);
+			CREATE TABLE %[1]s.payments_2027_low (
+				id bigint NOT NULL,
+				paid date NOT NULL,
+				account_id bigint
+			)`)
+		results, err := ensureAttachForeignKeys(t.Context(), f.pool, f.parentOID(t, "payments_2027"), f.standalone(t, "payments_2027_low"), attachProofTestBudget, nil)
+		require.NoError(t, err)
+		require.Len(t, results, 1, "the foreign key payments_2027 inherited from payments is one the attach gives payments_2027_low")
+		assert.Equal(t, "payments_account_fk", results[0].parentFK)
+		assert.Equal(t, leafFKAdded, results[0].action)
+	})
+}
+
 // From PostgreSQL 18 a partitioned table's foreign key can be NOT VALID or
 // NOT ENFORCED. The attach still validates a new partition against a NOT
 // VALID one, so the step gives the table that foreign key validated. It
@@ -289,7 +408,7 @@ func TestEnsureAttachForeignKeysRefusesAForeignKeyItCannotGive(t *testing.T) {
 
 		// A foreign key to a partitioned table puts one more foreign key on
 		// the referencing table per referenced partition. The step reads
-		// past those, and the leaf step refuses the partitioned reference.
+		// past those and refuses the partitioned reference.
 		t.Run("a reference to a partitioned table", func(t *testing.T) {
 			f := newFixture(t)
 			f.exec(t, `
