@@ -235,6 +235,13 @@ const (
 	// within wal_sender_timeout of losing its client, and the resume is
 	// inspected again after it.
 	CauseResumeSlotHeld RefusalCause = "resume-slot-held"
+	// CauseResumeSlotBacklog means the row's slot is intact and free, but
+	// it already holds more WAL its stream has not confirmed than the
+	// run's slot lag ceiling (ST-3): the catch-up's first reading would
+	// stop the resume stream-behind before the stream could read through
+	// that backlog. Nothing is written; the resume needs a higher ceiling,
+	// with room on the volume for the backlog, or a restart.
+	CauseResumeSlotBacklog RefusalCause = "resume-slot-backlog"
 	// CauseCopyShadowMismatch means the shadow the Runner handed its copier
 	// does not describe a copy into the proven target's shadow (ST-6): the
 	// built-shadow proof is empty, names another table or the source
@@ -310,6 +317,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeShadowGone,
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
+		CauseResumeSlotBacklog,
 		CauseCopyShadowMismatch,
 		CauseCopyConversionDrift,
 		CauseCopyFrontierBroken,
@@ -350,7 +358,7 @@ func (c RefusalCause) Invariant() string {
 		return "ST-4"
 	case CauseResumeRowMismatch, CauseShadowUnrecorded, CauseResumeShadowGone:
 		return "ST-2"
-	case CauseResumeSlotForeign, CauseResumeRowDecoding:
+	case CauseResumeSlotForeign, CauseResumeRowDecoding, CauseResumeSlotBacklog:
 		return "ST-3"
 	default:
 		return ""
@@ -380,7 +388,7 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
 		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
-		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld,
+		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld, CauseResumeSlotBacklog,
 		CauseRestartSwapCommitted, CauseCopyConversionDrift, CauseFinishAdmissionStale:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewColumn, CauseStatementNewSequence:

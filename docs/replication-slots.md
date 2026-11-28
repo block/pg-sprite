@@ -261,12 +261,11 @@ holding WAL while you decide.
    running-transactions record, about 15 seconds later, and the segments go at the next
    checkpoint, not at once.
 3. **Resume** by running the same command again:
-   - `stream-behind`: the slot keeps the unconfirmed WAL over the ceiling after the stop, and
-     the resume reads the slot on its first catch-up cycle, before it has read through that
-     backlog, so a resume under the same ceiling stops again unless it reads through it within
-     that cycle. Once the write rate drops, resume with a higher ceiling, above the unconfirmed
-     WAL the detail reports, if the volume has room; or start over with `--restart`, which drops
-     the slot and the WAL it holds.
+   - `stream-behind`: the slot keeps the unconfirmed WAL over the ceiling after the stop, so a
+     resume under the same ceiling is refused with `resume-slot-backlog` before it opens the
+     stream or restarts the copy, and nothing is written. Once the write rate drops, resume
+     with a higher ceiling, above the unconfirmed WAL the detail reports, if the volume has
+     room; or start over with `--restart`, which drops the slot and the WAL it holds.
    - `wal-retained` or `wal-retained-hard-limit` with the transaction ended: resume as is.
    - Either one with no transaction to blame: the cluster writes more than the ceiling holds.
      Resume with a higher ceiling, above the retained WAL the detail reports:
@@ -406,5 +405,9 @@ decisions as this page, from typed errors rather than the CLI's prose:
   the next run reconciles.
 - A resume refused because the old stream still holds the slot carries the refusal cause
   `schemachange.CauseResumeSlotHeld` (`resume-slot-held`); retry after `wal_sender_timeout`.
+- A resume refused because the slot already holds more unconfirmed WAL than the run's
+  `SlotLagCeiling` carries `schemachange.CauseResumeSlotBacklog` (`resume-slot-backlog`);
+  retry with a higher ceiling and room on the volume for it, or start over with
+  `RunOptions.Restart`.
 - `decode.RetainedHardLimit(ceiling)` is the retained WAL a run stops at regardless of grace,
   the figure to size a volume and `max_slot_wal_keep_size` by.

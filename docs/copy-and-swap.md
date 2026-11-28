@@ -199,9 +199,9 @@ slot and the saved progress stay, so running the same command again resumes the 
 
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
   pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
-  stop, and a resume reads the slot on its first catch-up cycle, before it has read through
-  the backlog, so a resume under the same ceiling stops again unless it reads through the
-  backlog within that cycle.
+  stop, so running the same command again under the same ceiling is refused
+  (`resume-slot-backlog`) before it opens the stream or restarts the copy, and nothing is
+  written.
 - **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
   for longer than it takes to release WAL pg-sprite has confirmed: an open or prepared
   transaction holds it back, or the cluster writes more WAL per release interval and cycle than

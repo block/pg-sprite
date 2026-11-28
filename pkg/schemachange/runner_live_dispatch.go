@@ -124,14 +124,18 @@ func checkLiveRow(target preflight.CopySwapTarget, cp checkpoint.Checkpoint) err
 // the row in the phase its watermark implies with the new slot's
 // consistent point as the position to resume from. The reconcile's own
 // saves go through the store alone; the row it leaves is handed to
-// AfterCheckpoint once, as the run's state.
+// AfterCheckpoint once, as the run's state. A slot the resume keeps is
+// refused as resume-slot-backlog when it already holds more unconfirmed
+// WAL than the run's slot lag ceiling, from the same reading, before the
+// stream opens or the copy restarts (ST-3); a reconcile's fresh slot holds
+// none.
 func (r *Runner) liveReady(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, state *runState) error {
 	resume, err := InspectResume(ctx, pool, target, state.cp)
 	if err != nil {
 		return err
 	}
 	if resume.Mode == ResumeClean {
-		return nil
+		return checkResumeBacklog(resume.Slot, r.opts.slotLagCeiling())
 	}
 	reconciler, err := NewReconciler(r.cfg, lock, r.store, target, state.built, r.opts.Checksum)
 	if err != nil {

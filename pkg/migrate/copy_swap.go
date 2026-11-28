@@ -426,6 +426,11 @@ func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (ver
 				executor.ErrInvariantViolation, cause)
 		}
 		v := refusedVerdict(st, r, err.Error())
+		if cause == schemachange.CauseResumeSlotBacklog {
+			// The library names SlotLagCeiling and a restart; the CLI
+			// operator acts on the flags.
+			v.Detail += "; the checkpoint row remains and its replication slot stays and pins WAL on the server: " + slotBacklogRemedy
+		}
 		if hold == holdFence {
 			// A refusal raised after the row was saved leaves the run's
 			// fence standing (fenceAfterStop read the row), so the table
@@ -475,8 +480,8 @@ func runAbandoned(err error) bool {
 // names the ceiling to raise, since a resume under the same ceiling meets
 // the same write rate; one it stopped because the stream fell behind names
 // the ceiling to raise and the restart, since the slot keeps the
-// unconfirmed WAL over the ceiling and a resume's first catch-up cycle
-// reads it before the stream has read through it. In each case the detail
+// unconfirmed WAL over the ceiling and a resume under the same ceiling is
+// refused before it starts. In each case the detail
 // names the hold the run keeps or kept on the source, since that is what
 // the operator is paying for in the meantime: the write fence of a run that
 // blocked writes, or the replication slot of a live run, which pins WAL on
@@ -508,20 +513,29 @@ func copySwapStoppedRemedy(hold sourceHold, err error) string {
 		return "the server rejected the rows as the statement would shape them and the run could not be abandoned, so running the same statement again would copy the same rows and stop here again; " + startOver
 	}
 	resume := "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
-	countedAgainstDisk := "the resume counts that ceiling against --free-disk beside the shadow, less the shadow already built and the WAL the slot already retains, so pass the free space the volume has now"
 	lag, ok := errors.AsType[*decode.SlotLagExceededError](err)
 	if ok && lag.Cause.RetainsWAL() {
 		return resume + "; when no open or prepared write transaction on the source holds the WAL back, the write rate is the cause, " +
-			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); " + countedAgainstDisk
+			"so resume with a slot-lag ceiling above the WAL the slot retained (--slot-lag-ceiling SIZE); " + raisedCeilingOnDisk
 	}
 	if ok && lag.Cause == decode.SlotLagStreamBehind {
-		return resume + "; the WAL the stream had not confirmed, more than the ceiling, stays in the slot, so a resume under the same ceiling stops again on its first catch-up cycle " +
-			"unless the stream reads through that WAL within the cycle: once the write rate has dropped, resume with a slot-lag ceiling above the unconfirmed WAL (--slot-lag-ceiling SIZE); " +
-			countedAgainstDisk + "; or start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release +
-			", deletes the checkpoint row, and runs the change from the start"
+		return resume + "; the WAL the stream had not confirmed, more than the ceiling, stays in the slot, so a resume under the same ceiling is refused before it starts (resume-slot-backlog): " +
+			slotBacklogRemedy
 	}
 	return resume
 }
+
+// raisedCeilingOnDisk is how the resume's preflight counts a raised
+// slot-lag ceiling against the volume.
+const raisedCeilingOnDisk = "the resume counts that ceiling against --free-disk beside the shadow, less the shadow already built and the WAL the slot already retains, so pass the free space the volume has now"
+
+// slotBacklogRemedy is what a live run whose slot holds more unconfirmed
+// WAL than its ceiling needs to go on: the stream-behind stop that leaves
+// such a slot and the resume-slot-backlog refusal that meets one both name
+// it.
+const slotBacklogRemedy = "once the write rate has dropped, resume with a slot-lag ceiling above the unconfirmed WAL (--slot-lag-ceiling SIZE); " +
+	raisedCeilingOnDisk + "; or start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " +
+	"drops the replication slot, deletes the checkpoint row, and runs the change from the start"
 
 // copySwapFailureCode names the executor outcome code for an error out of
 // the Runner. The Runner's errors are not the executor's, so the

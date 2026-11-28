@@ -262,8 +262,8 @@ func TestCopySwapRunVerdict(t *testing.T) {
 	// holding it back stops a resume under the same ceiling again, so the
 	// remedy names the setting to raise on both front doors. A stream that
 	// fell behind leaves its slot holding more unconfirmed WAL than the
-	// ceiling, which a resume's first catch-up cycle reads before the stream
-	// has read through it, so its remedy names the ceiling and the restart.
+	// ceiling, which refuses a resume under the same ceiling before it
+	// starts, so its remedy names the ceiling and the restart.
 	t.Run("a slot over the ceiling on retained WAL names the ceiling to raise", func(t *testing.T) {
 		lag := &decode.SlotLagExceededError{Slot: "pgsprite_x", Cause: decode.SlotLagWALRetained,
 			Retained: 2 << 30, Unconfirmed: 1 << 20, Ceiling: 1 << 30}
@@ -291,6 +291,19 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("catch up: %w", lag))
 		assert.ErrorIs(t, err, decode.ErrSlotLagCeiling)
 		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.Contains(t, v.Detail, "above the unconfirmed WAL (--slot-lag-ceiling SIZE)")
+		assert.Contains(t, v.Detail, "(--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot")
+	})
+
+	// A resume refused for the slot's backlog is a refused verdict, not a
+	// stop, and its detail names the flags the CLI operator acts on.
+	t.Run("a resume refused for its slot's backlog names the ceiling to raise and the restart", func(t *testing.T) {
+		refused := &schemachange.RefusalError{Cause: schemachange.CauseResumeSlotBacklog, Detail: "slot pgsprite_x is over the SlotLagCeiling"}
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("run: %w", refused))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
+		assert.Equal(t, verdict.Cause(schemachange.CauseResumeSlotBacklog), v.Cause)
 		assert.Contains(t, v.Detail, "above the unconfirmed WAL (--slot-lag-ceiling SIZE)")
 		assert.Contains(t, v.Detail, "(--restart SCHEMA.TABLE), which drops the shadow, drops the replication slot")
 	})
