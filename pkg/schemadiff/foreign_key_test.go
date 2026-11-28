@@ -78,4 +78,17 @@ func TestForeignKeysDroppedBeforeTheirReplacement(t *testing.T) {
 	require.Len(t, moved, 2)
 	assert.Equal(t, ChangeAddForeignKey, moved[0].Kind, "the new key is added first")
 	assert.Equal(t, ChangeDropForeignKey, moved[1].Kind, "the old key is dropped once the new one is in place")
+
+	// A move whose validation failed left the new key NOT VALID beside the old
+	// one. The next plan validates the new key and drops the old one.
+	pending := fk("events_user_cascade_fk", cascade+notValidSuffix)
+	pending.NotValid = true
+	stalled := withKeys(base(), live.Constraints[len(live.Constraints)-1], pending)
+	assert.Equal(t, map[string]bool{}, ForeignKeysDroppedBeforeTheirReplacement(stalled, withKeys(base(), fk("events_user_cascade_fk", cascade))))
+	resumed, err := Diff("app", stalled, withKeys(base(), fk("events_user_cascade_fk", cascade)))
+	require.NoError(t, err)
+	require.Len(t, resumed, 2)
+	assert.Equal(t, ChangeValidateForeignKey, resumed[0].Kind, "the new key is validated first")
+	assert.Equal(t, ChangeDropForeignKey, resumed[1].Kind)
+	assert.Equal(t, "events_user_fk", resumed[1].Drops.Name)
 }

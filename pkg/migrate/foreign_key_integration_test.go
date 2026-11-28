@@ -266,6 +266,60 @@ CREATE TABLE orders (
 	assert.True(t, validated, "the run validates the rows under the new key")
 }
 
+// A key moved to a new name whose rule the existing rows break stops at its
+// validation with both keys in place: the old key still valid, and the new
+// one NOT VALID but checking every new write. Once the rows are fixed, the
+// next run validates the new key before it drops the old one.
+func TestRunDesiredForeignKeyMovedToANewNameStopsAtValidationWithBothKeys(t *testing.T) {
+	pool, schema := foreignKeySchema(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.premium_users (id bigint PRIMARY KEY);
+		INSERT INTO %[1]s.premium_users VALUES (1);
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, user_id bigint NOT NULL REFERENCES %[1]s.users (id));
+		INSERT INTO %[1]s.orders VALUES (10, 1), (11, 2)`, schema))
+	require.NoError(t, err)
+	const desired = `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL CONSTRAINT orders_user_id_premium_fkey REFERENCES premium_users (id)
+);`
+	newKeyValidated := func() (exists, validated bool) {
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT count(*) > 0, coalesce(bool_and(convalidated), false) FROM pg_catalog.pg_constraint
+			WHERE conrelid = ($1 || '.orders')::regclass AND conname = 'orders_user_id_premium_fkey'`, schema).Scan(&exists, &validated))
+		return exists, validated
+	}
+
+	res, err := migrate.RunDesired(t.Context(), pool, reviewedDestructiveRequest(t, pool, schema, desired), runOptions())
+
+	require.Error(t, err)
+	var pgErr *pgconn.PgError
+	require.True(t, errors.As(err, &pgErr), "the server's own error is kept: %v", err)
+	assert.Equal(t, "23503", pgErr.Code)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	oldExists, oldValidated := ordersForeignKeyValidated(t, pool, schema)
+	assert.True(t, oldExists && oldValidated, "the old key still holds")
+	newExists, newValidated := newKeyValidated()
+	assert.True(t, newExists, "the new key's NOT VALID step committed")
+	assert.False(t, newValidated, "user 2 keeps the new key from validating")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.orders VALUES (12, 2)", schema))
+	require.True(t, errors.As(err, &pgErr), "the new key checks new writes: %v", err)
+	assert.Equal(t, "23503", pgErr.Code)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.premium_users VALUES (2)", schema))
+	require.NoError(t, err)
+	res, err = migrate.RunDesired(t.Context(), pool, reviewedDestructiveRequest(t, pool, schema, desired), runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome, res.Detail)
+	require.Len(t, res.Plan.Statements, 2)
+	assert.Equal(t, schemadiff.ChangeValidateForeignKey, res.Plan.Statements[0].Kind, "the new key is validated first")
+	assert.Equal(t, schemadiff.ChangeDropForeignKey, res.Plan.Statements[1].Kind)
+	oldExists, _ = ordersForeignKeyValidated(t, pool, schema)
+	assert.False(t, oldExists, "the old key is gone")
+	_, newValidated = newKeyValidated()
+	assert.True(t, newValidated)
+}
+
 // A file that changes the orders key under the same name is refused before
 // anything runs: the old key would be dropped before the new one could be
 // added, and writes between the two would be checked against no key.

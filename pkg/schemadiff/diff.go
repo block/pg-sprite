@@ -463,10 +463,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
 		renamedRules: renamedConstraintDefs(desired, liveCons),
-		foreignKeys:  addsForeignKey(desired, liveCons, desiredCons),
+		foreignKeys:  installsForeignKey(desired, liveCons, desiredCons),
 	}
-	// A held foreign key waits for the foreign keys the plan adds, which
-	// come last; every other held drop goes before them, so a foreign key
+	// A held foreign key waits for the foreign keys the plan adds or
+	// validates, which come last; every other held drop goes before them, so a foreign key
 	// the plan adds cannot bind to a key the plan is about to drop.
 	var heldChanges, heldForeignKeys []Change
 	waits := func(ch Change) bool { return !dropsOrRetypes && held.holds(ch) }

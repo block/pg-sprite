@@ -79,13 +79,17 @@ per-operation status.
   PostgreSQL 18, and a new table is created with its foreign keys. A foreign
   key the file no longer declares is dropped, as a destructive change that
   needs `--allow-destructive`. A key the file declares under a new name is
-  added before the old one is dropped; the drop of a key changed under the
-  same name is refused, since writes would be checked against no key between
-  the drop and the add. So is the drop of a key a file cannot declare, one into another
-  schema or one from a table to itself whose referenced columns are unique
-  only through a standalone unique index, is refused with
-  `declarative-foreign-key`; both refusals use that reason. Export refuses
-  foreign keys unless the caller opts in with `RenderOptions.ForeignKeys`.
+  added and validated before the old one is dropped. If rows break the new
+  key, the validation fails and both keys stay: the old one valid, the new one
+  `NOT VALID` but checking every new write. Fix the rows and the next plan
+  validates the new key and drops the old one; or take the new key out of the
+  file and the next plan drops it. The drop of a key changed under the same name is
+  refused, since writes would be checked against no key between the drop and
+  the add. So is the drop of a key a file cannot declare: one into another
+  schema, or one from a table to itself whose referenced columns are unique
+  only through a standalone unique index. Both refusals use
+  `declarative-foreign-key`. Export refuses foreign keys unless the caller
+  opts in with `RenderOptions.ForeignKeys`.
 - **Changed stored generated expressions** are planned but not executed:
   `diff` shows one `SET EXPRESSION` statement (PostgreSQL 17+) refused with
   `unsupported-statement`, since it recomputes every row under an exclusive
