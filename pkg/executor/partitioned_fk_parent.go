@@ -151,13 +151,15 @@ func lockAndProveReference(ctx context.Context, tx pgx.Tx, ref fkReference) erro
 }
 
 // proveLeafFKRecorded proves, under the tree's lock, that the partition has
-// exactly one foreign key of the requested definition, validated, attached
-// to no parent's, and that it is the one its leaf step recorded. Anything
-// else means the partition changed after its leaf step: the parent's
-// statement could adopt another foreign key or validate a new one under the
-// tree's locks, so the step rolls back with
+// exactly one foreign key the parent's statement could adopt (isAdoptable:
+// validated, attached to no parent's, and of the requested definition apart
+// from any ON DELETE column list), and that it is the one its leaf step
+// recorded. Anything else means the partition changed after its leaf step:
+// the parent's statement could adopt another foreign key or validate a new
+// one under the tree's locks, so the step rolls back with
 // ErrPartitionedForeignKeyLeafChanged, and a rerun decides the partition
-// again.
+// again; a rerun that finds a column-list foreign key among them refuses it
+// with ErrPartitionedForeignKeyConflict.
 // INV: ST-7 — the parent adopts exactly the foreign keys the leaf steps made
 // or proved.
 func proveLeafFKRecorded(ctx context.Context, q querier, fk resolvedFK, n partitionNode, rec leafFKResult) error {
@@ -169,9 +171,12 @@ func proveLeafFKRecorded(ctx context.Context, q querier, fk resolvedFK, n partit
 	if err != nil {
 		return err
 	}
-	matches := requestedForeignKeys(fks, fk.spec, attnums, fk.ref)
+	// Adoptable, not requested: the parent's statement could adopt any of
+	// them, a column-list foreign key included, so the leaf step's must be
+	// the only one.
+	matches := adoptableForeignKeys(fks, fk.spec, attnums, fk.ref)
 	if len(matches) != 1 {
-		return fmt.Errorf("%w: partition %s has %d foreign keys of the requested definition, not the one %s (%d) its leaf step left",
+		return fmt.Errorf("%w: partition %s has %d foreign keys the parent's could adopt, not the one %s (%d) its leaf step left",
 			ErrPartitionedForeignKeyLeafChanged, n.qualified(), len(matches), rec.constraint, rec.constraintOID)
 	}
 	if !matches[0].isRecorded(rec) {

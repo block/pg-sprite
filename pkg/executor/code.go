@@ -115,9 +115,11 @@ const (
 	// foreign key needs on a partition is held by another constraint; the
 	// occupant is left for an operator.
 	CodePartitionedForeignKeyNameTaken Code = "partitioned-foreign-key-name-taken"
-	// CodePartitionedForeignKeyConflict: a partition already has foreign
-	// keys of the requested definition the parent's could not adopt as the
-	// only one; nothing was added to it.
+	// CodePartitionedForeignKeyConflict: a partition already has a foreign
+	// key that keeps the parent's from adopting the requested one as the
+	// only one, such as a second one of the requested definition or one the
+	// parent's statement could adopt that has an ON DELETE column list;
+	// nothing was added to it.
 	CodePartitionedForeignKeyConflict Code = "partitioned-foreign-key-conflict"
 	// CodePartitionedForeignKeyReferencedTable: the foreign key references a
 	// table that is not a plain table outside the partition tree; nothing

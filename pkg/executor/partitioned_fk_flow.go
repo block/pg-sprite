@@ -205,9 +205,10 @@ func requireAdoptedFKEverywhere(ctx context.Context, q querier, target indexTarg
 	return len(tree), nil
 }
 
-// readTree lists the partition tree and refuses a tree the build does not
-// take. It is read at the start and on every later pass, so a foreign table
-// or a sub-partitioned partition attached mid-run refuses the run too.
+// readTree lists the partition tree, refuses a tree the build does not take,
+// and refuses a leaf whose foreign keys stand in the way. It is read at the
+// start and on every later pass, so a foreign table, a sub-partitioned
+// partition, or a conflicting leaf attached mid-run refuses the run too.
 func (f *partitionedFKFlow) readTree(ctx context.Context) ([]partitionNode, error) {
 	var tree []partitionNode
 	err := f.tx.read(ctx, "list the partition tree", func(ctx context.Context, q querier) error {
@@ -221,8 +222,30 @@ func (f *partitionedFKFlow) readTree(ctx context.Context) ([]partitionNode, erro
 	if err := refuseFKTree(f.target, f.fk.ref, tree); err != nil {
 		return nil, err
 	}
+	if err := f.refuseLeafConflicts(ctx, tree); err != nil {
+		return nil, err
+	}
 	f.rep.Partitions = len(tree)
 	return tree, nil
+}
+
+// refuseLeafConflicts decides every leaf from one read-only transaction
+// before the pass's first leaf step, and returns the first refusal a leaf
+// step would meet: two foreign keys of the requested definition, one
+// attached to a parent's, one the parent's statement could adopt that has an
+// ON DELETE column list, or the derived name held by another constraint. So
+// a conflict on a late leaf refuses the pass before any earlier leaf is
+// given the foreign key. Each leaf step still decides again, so a leaf that
+// changes after this read is refused at its own step.
+func (f *partitionedFKFlow) refuseLeafConflicts(ctx context.Context, tree []partitionNode) error {
+	return f.tx.read(ctx, "inspect the foreign keys of every partition", func(ctx context.Context, q querier) error {
+		for _, n := range tree {
+			if _, err := readAndDecideLeafFK(ctx, q, f.fk, n, derivedPartitionIndexName(f.fk.spec.name, n.oid)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // refuseFKTree refuses a tree holding a foreign table, which cannot carry a
