@@ -267,8 +267,11 @@ func recoverAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, 
 // table can start between them; the re-verification inside the lock
 // closes the window between the caller's inspection and the lock grant.
 func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target indexTarget, index string, existing invalidIndex) error {
+	// ready is the entry's readiness as the latest statement read it: the
+	// caller's inspection until the under-lock read below replaces it.
+	ready := existing.ready
 	fail := func(cleanup error) error {
-		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, Cleanup: cleanup}
+		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, Ready: ready, Cleanup: cleanup}
 	}
 	// The observation must be of the table the statement names. The entry's
 	// table OID already matched the resolution, but a rename between the
@@ -329,16 +332,17 @@ func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target in
 		tableName   *string
 		tableSchema *string
 		facts       indexFacts
+		indisready  bool
 		builderPID  *int32
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT t.relname, tn.nspname, c.oid, c.relname, i.indisvalid, i.indrelid, `+droppableColumn+`, `+builderPIDSubquery+`
+		`SELECT t.relname, tn.nspname, c.oid, c.relname, i.indisvalid, i.indisready, i.indrelid, `+droppableColumn+`, `+builderPIDSubquery+`
 		   FROM pg_catalog.pg_index i
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
 		   LEFT JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) $1
 		   LEFT JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
 		  WHERE c.oid OPERATOR(pg_catalog.=) $2`,
-		target.tableOID, existing.oid).Scan(&tableName, &tableSchema, &facts.oid, &facts.name, &facts.valid, &facts.tableOID, &facts.droppable, &builderPID)
+		target.tableOID, existing.oid).Scan(&tableName, &tableSchema, &facts.oid, &facts.name, &facts.valid, &indisready, &facts.tableOID, &facts.droppable, &builderPID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The entry is gone: someone else removed it. Nothing to
 		// quarantine; the build will find the name free or refuse anew.
@@ -347,6 +351,7 @@ func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target in
 	if err != nil {
 		return fail(fmt.Errorf("re-verify index %s.%s under lock: %w", target.schema, index, err))
 	}
+	ready = readinessOf(indisready)
 	if tableName == nil || *tableName != target.table || tableSchema == nil || *tableSchema != target.schema {
 		return fail(ErrTargetIdentityChanged)
 	}
@@ -354,7 +359,8 @@ func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target in
 		return fail(ErrAbandonmentUnproven)
 	}
 	if pid := pidValue(builderPID); pid != 0 {
-		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, BuilderPID: pid, Cleanup: ErrInvalidIndexBuildInFlight}
+		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, BuilderPID: pid,
+			Ready: ready, Cleanup: ErrInvalidIndexBuildInFlight}
 	}
 
 	quarantined := quarantineName(existing.oid)
@@ -432,7 +438,7 @@ func dropQuarantinedIndexes(ctx context.Context, pool *pgxpool.Pool, q querier, 
 			// builder this session cannot see holds the table lock the
 			// drop needs, and surfaces as the drop's lock budget.
 			return dropped, skipped, &InvalidIndexError{Schema: target.schema, Index: name, Table: entry.table,
-				BuilderPID: entry.builder.pid, Cleanup: ErrInvalidIndexBuildInFlight}
+				BuilderPID: entry.builder.pid, Ready: entry.ready, Cleanup: ErrInvalidIndexBuildInFlight}
 		}
 		remaining, err := b.remainingAfter(time.Since(sweepStart))
 		if err != nil {
@@ -470,7 +476,7 @@ func (b ConcurrentBudget) remainingAfter(spent time.Duration) (ConcurrentBudget,
 // happens to start with the prefix is never matched.
 func listQuarantinedIndexes(ctx context.Context, q querier, target indexTarget) ([]invalidIndex, error) {
 	rows, err := q.Query(ctx,
-		`SELECT c.oid, i.indrelid, t.relname, `+droppableColumn+`, `+builderPIDSubquery+`, `+builderVisibilityColumns+`
+		`SELECT c.oid, i.indisready, i.indrelid, t.relname, `+droppableColumn+`, `+builderPIDSubquery+`, `+builderVisibilityColumns+`
 		   FROM pg_catalog.pg_index i
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
 		   JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
@@ -487,13 +493,15 @@ func listQuarantinedIndexes(ctx context.Context, q querier, target indexTarget) 
 	for rows.Next() {
 		var (
 			entry      invalidIndex
+			indisready bool
 			builderPID *int32
 			hiddenRows int64
 			tracking   bool
 		)
-		if err := rows.Scan(&entry.oid, &entry.tableOID, &entry.table, &entry.droppable, &builderPID, &hiddenRows, &tracking); err != nil {
+		if err := rows.Scan(&entry.oid, &indisready, &entry.tableOID, &entry.table, &entry.droppable, &builderPID, &hiddenRows, &tracking); err != nil {
 			return nil, fmt.Errorf("list quarantined indexes on table %d: %w", target.tableOID, err)
 		}
+		entry.ready = readinessOf(indisready)
 		entry.builder = newBuilderFacts(builderPID, hiddenRows, tracking)
 		found = append(found, entry)
 	}
@@ -531,7 +539,7 @@ func dropQuarantinedIndex(ctx context.Context, pool *pgxpool.Pool, target indexT
 	name := quarantineName(entry.oid)
 	ref := pgx.Identifier{target.schema, name}
 	fail := func(cleanup error) error {
-		return &InvalidIndexError{Schema: target.schema, Index: name, Table: entry.table, Cleanup: cleanup}
+		return &InvalidIndexError{Schema: target.schema, Index: name, Table: entry.table, Ready: entry.ready, Cleanup: cleanup}
 	}
 	conn, release, err := acquireBudgetedSession(ctx, pool, b, "")
 	if err != nil {

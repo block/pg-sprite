@@ -189,6 +189,39 @@ func TestQuarantineAbandonedIndexFailsClosedOnStaleObservation(t *testing.T) {
 		assert.Equal(t, "idx_moved", f.indexName(t), "the entry keeps the mover's name")
 	})
 
+	t.Run("refusal after the under-lock read reports what that read saw", func(t *testing.T) {
+		// The caller's observation carries no readiness; the under-lock
+		// read does. A refusal that comes after that read must report the
+		// readiness it read, not the caller's. The fixture's build failed
+		// on rows already in the table, in its first scan, so the entry
+		// was never made ready.
+		f := newStaleProofFixture(t)
+		f.exec(t, "ALTER INDEX %s.idx_left RENAME TO idx_moved", f.schema)
+		existing := f.existing
+		existing.ready = ReadinessUnknown
+
+		err := quarantineAbandonedIndex(t.Context(), f.conn, f.target, "idx_left", existing)
+
+		require.ErrorIs(t, err, ErrAbandonmentUnproven)
+		var invalidErr *InvalidIndexError
+		require.ErrorAs(t, err, &invalidErr)
+		assert.Equal(t, ReadinessNotReady, invalidErr.Ready)
+	})
+
+	t.Run("refusal before the under-lock read reports the caller's readiness", func(t *testing.T) {
+		f := newStaleProofFixture(t)
+		f.exec(t, "ALTER TABLE %s.t RENAME TO t2", f.schema)
+		existing := f.existing
+		existing.ready = ReadinessUnknown
+
+		err := quarantineAbandonedIndex(t.Context(), f.conn, f.target, "idx_left", existing)
+
+		require.ErrorIs(t, err, ErrTargetIdentityChanged)
+		var invalidErr *InvalidIndexError
+		require.ErrorAs(t, err, &invalidErr)
+		assert.Equal(t, ReadinessUnknown, invalidErr.Ready, "no statement under the lock read the entry")
+	})
+
 	t.Run("index made valid", func(t *testing.T) {
 		f := newStaleProofFixture(t)
 		f.makeValid(t, "idx_left")
