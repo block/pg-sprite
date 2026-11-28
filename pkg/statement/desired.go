@@ -291,7 +291,13 @@ func parseDesiredTree(source *desiredSource, stmts []fileStatement) (DesiredSche
 			}
 		}
 	}
+	// A file with no CREATE TABLE also reports its refused statements, so
+	// its author fixes both in one edit. A refused CREATE TABLE still names
+	// the file's table, so this reports only a file that declares none.
 	if err := refused.err(); err != nil {
+		if ds.table == "" {
+			return DesiredSchema{}, errors.Join(err, ErrNoCreateTable)
+		}
 		return DesiredSchema{}, err
 	}
 	if ds.table == "" {

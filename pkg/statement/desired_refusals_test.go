@@ -200,3 +200,24 @@ func TestRefusalCollectorKeepsTheCauseWhenTheSourceCannotBeScanned(t *testing.T)
 	assert.ErrorIs(t, second, ErrMultipleCreateTables)
 	assert.Same(t, scanErr, source.scanErr, "the source is scanned once")
 }
+
+// A file that declares no table and also holds a refused statement reports
+// both, so its author adds the table and fixes the statement in one edit. A
+// file whose CREATE TABLE is itself refused still declares a table, so it
+// reports only the refusal.
+func TestParseDesiredFileReportsAMissingTableBesideItsRefusals(t *testing.T) {
+	t.Run("no table", func(t *testing.T) {
+		_, err := ParseDesiredFile("CREATE INDEX orders_placed_at ON orders (placed_at);\nALTER TABLE orders ADD COLUMN note text;\n")
+		require.ErrorIs(t, err, ErrNoCreateTable)
+		refused, ok := errors.AsType[*RefusedStatementsError](err)
+		require.True(t, ok, "the error lists the refused statements: %v", err)
+		require.Len(t, refused.Refusals, 1)
+		assert.Equal(t, 2, refused.Refusals[0].Line)
+		assert.ErrorIs(t, refused.Refusals[0], ErrDisallowedStatement)
+	})
+	t.Run("a refused table", func(t *testing.T) {
+		_, err := ParseDesiredFile("CREATE TABLE prod.orders (id bigint PRIMARY KEY);\n")
+		require.ErrorIs(t, err, ErrQualifiedName)
+		assert.NotErrorIs(t, err, ErrNoCreateTable)
+	})
+}
