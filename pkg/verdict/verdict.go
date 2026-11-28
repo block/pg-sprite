@@ -946,7 +946,9 @@ func (v Verdict) String() string {
 	if v.Cause != CauseNone {
 		fmt.Fprintf(&b, "\n  cause:     %s", v.Cause)
 	}
-	fmt.Fprintf(&b, "\n  statement: %s", v.Statement)
+	if v.Statement != "" {
+		fmt.Fprintf(&b, "\n  statement: %s", v.Statement)
+	}
 	if v.Attempts > 0 {
 		fmt.Fprintf(&b, "\n  attempts:  %d", v.Attempts)
 	}

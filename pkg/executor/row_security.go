@@ -273,18 +273,27 @@ func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 	return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
 }
 
+// RowSecurityTableShapeRefusal returns the error ExecuteDesiredRowSecurity
+// refuses live with because of the table's shape, such as a partitioned
+// parent or an unlogged table, or nil when the executor can change the row
+// security of a table shaped like live.
+func RowSecurityTableShapeRefusal(live schemadiff.Model) error {
+	_, err := rowSecurityTableShape(live)
+	return err
+}
+
 // rowSecurityTableShape returns m without its row security or the facts
 // only an export refuses, and refuses a table shape the row security path
 // does not support. Render refuses unsupported shapes even when two models
 // happen to match.
 func rowSecurityTableShape(m schemadiff.Model) (schemadiff.Model, error) {
 	if m.PartitionKey != "" {
-		return schemadiff.Model{}, fmt.Errorf("row security target: partitioned parent (PARTITION BY %s): %w", m.PartitionKey, schemadiff.ErrUnrenderablePartitionedRowSecurity)
+		return schemadiff.Model{}, fmt.Errorf("%w: partitioned parent (PARTITION BY %s): %w", ErrRowSecurityTableShape, m.PartitionKey, schemadiff.ErrUnrenderablePartitionedRowSecurity)
 	}
 	table := withoutExportOnlyRefusals(m)
 	table.RowSecurity = schemadiff.RowSecurity{}
 	if _, err := schemadiff.Render(table); err != nil {
-		return schemadiff.Model{}, fmt.Errorf("row security target: %w", err)
+		return schemadiff.Model{}, fmt.Errorf("%w: %w", ErrRowSecurityTableShape, err)
 	}
 	return table, nil
 }

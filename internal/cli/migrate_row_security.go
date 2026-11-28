@@ -148,6 +148,9 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 	v.ExecutedSQL = nil
 	v.Detail = err.Error()
 	if refusal, ok := migrate.RowSecurityRefusal(err); ok {
+		if errors.Is(err, executor.ErrRowSecurityTableShape) {
+			v.Detail = rowSecurityShapeNextStep(err)
+		}
 		return v.WithRefusal(refusal)
 	}
 	v.Code = string(executor.OutcomeCode(err))

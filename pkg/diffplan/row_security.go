@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -94,7 +95,13 @@ func compareWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema stri
 	if reviewErr != nil {
 		return reviewErr
 	}
-	return &RowSecurityReviewRequired{Schema: schema, Table: desired.Table(), Review: review, cause: err}
+	return &RowSecurityReviewRequired{
+		Schema:       schema,
+		Table:        desired.Table(),
+		Review:       review,
+		ShapeRefusal: executor.RowSecurityTableShapeRefusal(live),
+		cause:        err,
+	}
 }
 
 // unchangedReport is the report for an existing table that matches the
@@ -142,7 +149,10 @@ type RowSecurityReviewRequired struct {
 	Schema string
 	Table  string
 	Review schemadiff.RowSecurityReview
-	cause  error
+	// ShapeRefusal is why migrate --desired refuses to change the row
+	// security of the live table's shape, or nil when it can.
+	ShapeRefusal error
+	cause        error
 }
 
 // Error explains why the comparison cannot produce an executable plan.

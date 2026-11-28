@@ -103,6 +103,47 @@ CREATE POLICY readers ON %[1]s.t FOR SELECT USING (owner_id = 7);`, schema))
 	return pool, schema
 }
 
+// A row security difference on a table whose shape migrate --desired does
+// not change, such as an unlogged table, carries the executor's refusal, so
+// the next step does not promise a run that would be refused. An ordinary
+// table carries none.
+func TestRowSecurityReviewCarriesTheExecutorsTableShapeRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		live    string
+		create  string
+		refusal error
+	}{
+		{name: "an ordinary table", create: "CREATE TABLE t (id int PRIMARY KEY, owner_id int NOT NULL);"},
+		{
+			name:    "an unlogged table",
+			live:    "ALTER TABLE %s.t SET UNLOGGED;",
+			create:  "CREATE UNLOGGED TABLE t (id int PRIMARY KEY, owner_id int NOT NULL);",
+			refusal: schemadiff.ErrUnrenderableUnlogged,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, schema := rowSecurityTable(t)
+			if tc.live != "" {
+				_, err := pool.Exec(t.Context(), fmt.Sprintf(tc.live, schema))
+				require.NoError(t, err)
+			}
+			desired, err := statement.ParseDesiredWithRowSecurity(tc.create + `
+ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+CREATE POLICY readers ON t FOR SELECT USING (owner_id = 8);`)
+			require.NoError(t, err)
+
+			var review *RowSecurityReviewRequired
+			require.ErrorAs(t, compareWithRowSecurity(t.Context(), pool, schema, desired), &review)
+			if tc.refusal == nil {
+				assert.NoError(t, review.ShapeRefusal)
+				return
+			}
+			assert.ErrorIs(t, review.ShapeRefusal, tc.refusal)
+		})
+	}
+}
+
 // newOwnersTable creates t in a fresh schema from live, where %[1]s names
 // the schema, and returns the pool and the schema.
 func newOwnersTable(t *testing.T, live string) (*pgxpool.Pool, string) {

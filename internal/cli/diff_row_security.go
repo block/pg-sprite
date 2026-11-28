@@ -53,7 +53,7 @@ func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, desired statement.DesiredW
 			return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, create)
 		}
 		if errors.Is(err, schemadiff.ErrUnsupportedChange) {
-			return c.writeRowSecurityRefusal(out, err)
+			return c.writeRowSecurityRefusal(out, err, create)
 		}
 		return desiredFileRefusal(out, c.palette(out), c.JSON, c.SQL, err, create)
 	}
@@ -62,13 +62,16 @@ func (c *DiffCmd) writeRowSecurityPlan(out io.Writer, desired statement.DesiredW
 
 // A refused comparison has no executable plan. Emit the existing verdict shape
 // instead of an empty plan that could be mistaken for successful convergence.
-func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
+// The verdict names the file's CREATE TABLE, and for a row security change
+// its detail says how to apply the file instead.
+func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error, create string) error {
 	var review *diffplan.RowSecurityReviewRequired
 	errors.As(cause, &review)
-	v := verdict.Verdict{Detail: cause.Error()}.WithRefusal(plan.RowSecurityReviewRefusal())
+	v := verdict.Verdict{Statement: create, Detail: cause.Error()}.WithRefusal(plan.RowSecurityReviewRefusal())
 	if review == nil {
 		return c.writeVerdictRefusal(out, v, cause)
 	}
+	v.Detail = rowSecurityNextStep(review)
 	switch {
 	case c.JSON:
 		report := struct {
@@ -90,7 +93,7 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(strings.TrimSuffix(text.String(), "\n"))); err != nil {
 			return fmt.Errorf("write RLS review: %w", err)
 		}
-		if _, err := fmt.Fprintln(out, sqlDiagnosticComment("refused: "+cause.Error())); err != nil {
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment("refused: "+v.Detail)); err != nil {
 			return fmt.Errorf("write RLS refusal: %w", err)
 		}
 	default:
@@ -102,6 +105,78 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 		}
 	}
 	return errors.Join(verdict.ErrRefused, cause)
+}
+
+// rowSecurityNextStep says how to apply a file whose row security differs
+// from the live table's. Neither diff nor migrate --dry-run plans row
+// security: migrate --desired works the change out again under its own lock
+// and applies it in one transaction, only for a table shape it supports, and
+// only when the file's table definition matches the live one, so a file that
+// also changes the table is applied in two runs. The text reads the same in
+// text and JSON output, so it points at nothing printed beside it.
+func rowSecurityNextStep(review *diffplan.RowSecurityReviewRequired) string {
+	switch {
+	case review.ShapeRefusal != nil:
+		return rowSecurityShapeNextStep(review.ShapeRefusal)
+	case review.Review.TableChanged:
+		return "the file changes both the table and its row security, which are applied in separate runs: " +
+			"first run migrate --desired with the table definition as it is live and the new row security, " +
+			"then change the table definition in a second run"
+	case !review.Review.TableComparisonComplete:
+		return "the table definition does not compare with the live table, so apply the row security on its own: " +
+			"run migrate --desired with the table definition as it is live and the new row security, " +
+			"then plan the table change separately"
+	default:
+		return "row security is not planned ahead: migrate --desired works out the change again under its own lock " +
+			"and applies what differs then in one transaction, so review this output right before you run it"
+	}
+}
+
+// rowSecurityShapeNextStep says why migrate --desired leaves the row
+// security of a table shaped like this one alone, in the table's terms, and
+// what to do instead. diff and migrate print the same text.
+func rowSecurityShapeNextStep(shape error) string {
+	return "migrate --desired does not change row security on this table because " +
+		rowSecurityShapeReason(shape) + "; change its row security outside pg-sprite"
+}
+
+// rowSecurityShapeReason names what the table has that the row security
+// path does not support, from the renderer's verdict in shape, or returns
+// that verdict's own text when no reason is listed, so a new verdict still
+// prints something true.
+func rowSecurityShapeReason(shape error) string {
+	refusal, ok := schemadiff.RenderRefusal(shape)
+	if !ok {
+		return shape.Error()
+	}
+	switch {
+	case errors.Is(refusal, schemadiff.ErrUnrenderablePartitionedRowSecurity):
+		return "it is a partitioned parent"
+	case errors.Is(refusal, schemadiff.ErrUnrenderablePartition):
+		return "it is a partition"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableInheritance):
+		return "it uses table inheritance"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableForeignKey):
+		return "it owns or is referenced by a foreign key"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableUnlogged):
+		return "it is unlogged"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableVirtual):
+		return "it has a virtual generated column"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableDefault):
+		return "a column default uses a sequence"
+	case errors.Is(refusal, schemadiff.ErrMultipleOwnedSequences):
+		return "a column default uses more than one sequence the column owns"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableSequenceOptions):
+		return "a sequence the table owns has options"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableToastOptions):
+		return "it sets TOAST storage parameters"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableMergedConstraints):
+		return "two of its constraints repeat each other on the same columns"
+	case errors.Is(refusal, schemadiff.ErrUnrenderableUnattachedIndex):
+		return "one of its partitioned indexes is not attached on every partition"
+	default:
+		return refusal.Error()
+	}
 }
 
 // previewCreateWithRowSecurity shows what migrate --desired runs for a table

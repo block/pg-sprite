@@ -311,7 +311,19 @@ produces this review before the refusal verdict:
 public.documents — row security review
   enabled: true → false [may-widen]
 Access impact is advisory; grants, role membership, and helper bodies are not compared.
+refused (unsupported-statement)
+  class:     capability-boundary
+  statement: CREATE TABLE documents (id bigint PRIMARY KEY, owner_id bigint NOT NULL)
+  detail:    row security is not planned ahead: migrate --desired works out the change again under its own lock and applies what differs then in one transaction, so review this output right before you run it
 ```
+
+The verdict names the file's `CREATE TABLE`, and its detail says how to apply
+the file. `migrate --desired` does not run what `diff` reviewed: it compares
+the file with the table again under its own lock, so review the output right
+before the run. When the file also changes the table, the detail says to apply
+the row security first with the table definition as it is live, then change
+the table in a second run. For a table shape the run refuses, such as an
+unlogged table or a partitioned parent, the detail says so instead.
 
 Policy additions, removals, and edits show complete before/after definitions,
 including roles, commands, predicates, and comments. Arbitrary predicate changes
@@ -328,6 +340,8 @@ With `--json`, the existing refusal verdict gains `schema`, `table`, and a
 {
   "outcome": "refused",
   "reason": "unsupported-statement",
+  "statement": "CREATE TABLE documents (id bigint PRIMARY KEY, owner_id bigint NOT NULL)",
+  "detail": "row security is not planned ahead: migrate --desired works out the change again under its own lock and applies what differs then in one transaction, so review this output right before you run it",
   "schema": "public",
   "table": "documents",
   "row_security_review": {
