@@ -79,7 +79,9 @@ import (
 // unique constraint and a unique index of the same name swap kinds: a
 // drop-constraint whose replacement is a standalone index, and a drop-index
 // whose replacement a constraint takes over.
-const FormatVersion = 31
+// Version 32 added the dependent-publication planner reason and the
+// dependent_publications decision field.
+const FormatVersion = 32
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -217,6 +219,14 @@ type Statement struct {
 	// is the producer's answer, while Cause.Class() is the reading library's
 	// and answers "" for a cause added in a newer engine.
 	Cause executor.CreateShapeCause `json:"cause,omitempty"`
+	// RefusalCause is the refusal's own cause, where its reason spans more
+	// than one meaning: which kind of foreign-key drop a
+	// declarative-foreign-key refusal is, say. A host branches on it to name
+	// the one remedy that applies. Set once, by the refusal that first
+	// refused the statement, and empty for a refusal with no narrower cause.
+	// In-process only, like Adopts: the JSON report carries no field for it,
+	// and it is not part of the fingerprint.
+	RefusalCause verdict.Cause `json:"-"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`
 	// ExecSQL is the ordered SQL the native backend would run — the safer
@@ -589,6 +599,7 @@ func refuseStatements(report *Report, refused func(i int) (verdict.Refusal, exec
 			// INV: RF-7 — the statement's class comes from the proof.
 			st.Reason, st.Class, st.Owner = r.Reason(), r.Class(), r.Owner()
 			st.Cause = cause
+			st.RefusalCause = r.Cause()
 			st.BlockingPassthroughEligible = new(verdict.AcceptedBlockingEligible(r))
 		}
 		if report.Disposition != router.DispositionRefuse {

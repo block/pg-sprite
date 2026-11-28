@@ -28,8 +28,9 @@ import (
 // vocabulary; version 8 added the validate-in-transaction code; version 9
 // added the not-null-without-default planner reason to the embedded
 // Reasons vocabulary; version 10 added the dependent-trigger,
-// dependent-generated-column, and partition-key planner reasons.
-const FormatVersion = 10
+// dependent-generated-column, and partition-key planner reasons; version 11
+// added the dependent-publication planner reason.
+const FormatVersion = 11
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string

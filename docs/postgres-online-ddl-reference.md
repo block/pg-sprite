@@ -56,9 +56,9 @@ catalog change is instant; the running application code that still uses the old 
 what breaks, so `migrate` refuses it as `rewrite-required` unless forced). `replica-identity` is a refusal: the operation would drop what the table's
 replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
 drops a column a view reads, which PostgreSQL refuses, and `dependent-policy`,
-`dependent-trigger`, `dependent-generated-column`, and `partition-key` are the same refusal
-for a column a row-level security policy, a trigger, a generated column, or a partition key
-depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
+`dependent-trigger`, `dependent-publication`, `dependent-generated-column`, and
+`partition-key` are the same refusal for a column a row-level security policy, a trigger, a
+publication's column list or row filter, a generated column, or a partition key depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
 that nothing fills to a table with rows, which PostgreSQL refuses. `cascading-drop` is a
 refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
@@ -121,8 +121,8 @@ the same dynamic via metadata locks. Read it first if any of that is unfamiliar.
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | ACCESS EXCLUSIVE | Yes | No | ✅ **Yes** | Values must be computed |
 | `ADD COLUMN ... UNIQUE` / `PRIMARY KEY` / `REFERENCES` / `CHECK` (inline constraint) | ACCESS EXCLUSIVE + index build or validation | No | No | ➖ Native pattern | Same work as the `ADD CONSTRAINT` form, under the `ADD COLUMN` lock — split: add the column first, then build the constraint online (`CONCURRENTLY` + `USING INDEX`, or `NOT VALID` + `VALIDATE`) |
 | `DROP COLUMN` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only; disk space reclaimed lazily by VACUUM |
-| `ALTER COLUMN TYPE` — binary-coercible (`varchar(50)→varchar(100)`, `varchar→text`, `numeric(10,2)→numeric(12,2)`) | ACCESS EXCLUSIVE (brief) | **No** | No (brief) | ❌ No | No scan when binary-coercible and no length restriction is added |
-| `ALTER COLUMN TYPE` — general (`int→bigint`, `text→jsonb`, `timestamp→timestamptz` w/ conversion) | ACCESS EXCLUSIVE | **Yes** (rewrite + reindex + revalidate FKs) | No | ✅ **Yes** | The classic "needs a tool" case |
+| `ALTER COLUMN TYPE` — binary-coercible (`varchar(50)→varchar(100)`, `varchar→text`, `numeric(10,2)→numeric(12,2)`, `timestamp(3)→timestamp(6)`, `varbit(8)→varbit(16)`, `cidr→inet`, `timestamp→timestamptz` in a UTC session on a column no index or foreign key reads) | ACCESS EXCLUSIVE (brief) | **No** | No (brief) | ❌ No | No scan when binary-coercible and no length restriction is added |
+| `ALTER COLUMN TYPE` — general (`int→bigint`, `text→jsonb`, `timestamp→timestamptz` outside UTC, or on a column an index or foreign key reads) | ACCESS EXCLUSIVE | **Yes** (rewrite + reindex + revalidate FKs) | No | ✅ **Yes** | The classic "needs a tool" case |
 | `ALTER COLUMN SET DEFAULT` / `DROP DEFAULT` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only |
 | `ALTER COLUMN SET NOT NULL` | ACCESS EXCLUSIVE | No, but **full scan** | No | ➖ Native pattern | Use `NOT VALID` `CHECK` + `VALIDATE` (PG 12+) to skip the blocking scan |
 | `ALTER COLUMN DROP NOT NULL` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only |
@@ -510,16 +510,17 @@ adding the column does not rewrite it.
 | runs as written | brief `ACCESS EXCLUSIVE` | none — column relabeled in place | 0 |
 
 PostgreSQL refuses the statement outright when a view, a row-level security policy, a
-trigger's `UPDATE OF` list or `WHEN` condition, a `STORED` generated column, or a partition
-key depends on the altered column. The planner reads those dependents from the catalog and
-refuses the change as [`dependent-view`](#dependent-view),
-[`dependent-policy`](#dependent-policy), [`dependent-trigger`](#dependent-trigger),
+trigger's `UPDATE OF` list or `WHEN` condition, a publication's column list or row filter, a
+`STORED` generated column, or a partition key depends on the altered column. The planner
+reads those dependents from the catalog and refuses the change as
+[`dependent-view`](#dependent-view), [`dependent-policy`](#dependent-policy),
+[`dependent-trigger`](#dependent-trigger), [`dependent-publication`](#dependent-publication),
 [`dependent-generated-column`](#dependent-generated-column), or
 [`partition-key`](#partition-key) instead; a rule is left to the server's own refusal. See
 [No rewrite is not no cost](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost).
 
 The type change is binary-coercible (for example `varchar(50)` → `varchar(100)`,
-or `varchar` → `text`), so PostgreSQL relabels the column in place without a
+`varchar` → `text`, `timestamp(3)` → `timestamp(6)`, or `cidr` → `inet`), so PostgreSQL relabels the column in place without a
 table rewrite. Runs as written. How PostgreSQL decides, which changes only
 *look* free (shortening `varchar`, changing `numeric` scale, `char(n)` → `text`),
 and the exact rules pg-sprite accepts are in
@@ -685,7 +686,20 @@ column, or also inherits it from a table outside the drop, keeps its copy, so a
 view on that copy does not count, while a child that inherits it along two paths
 from the dropped table loses it, so a view on that copy does. The plan
 names each view in `decisions[].dependent_views`, and a refused run's verdict in
-`dependent_views`. Drop or redefine the views first, then re-plan. A rename is not
+`dependent_views`. The refusal names a materialized view by its kind, and its help
+gives the manual path the change takes, chosen as for
+[`dependent-policy`](#dependent-policy): change the views so they no longer read the
+column before a drop, recreate them around a type change PostgreSQL runs in place in
+one transaction, or point them at a new column for a type change that rewrites the
+table. Recreating a materialized view runs its query to fill it again while that
+transaction blocks the table. `CREATE OR REPLACE VIEW` cannot remove or retype a
+column, so changing a view, or pointing it at a new column, means dropping and recreating
+it in one transaction, and the help says so. PostgreSQL refuses to drop a view another
+view reads, so when one view reads another the help gives the order to drop every view
+in, the blocking views and the views that read them, deepest first, and says to
+recreate them in reverse. A dropped view loses its grants, comment, owner, options such
+as `security_barrier`, rules, `INSTEAD OF` triggers and column defaults, and a
+materialized view its indexes too, so the help says to recreate them. A rename is not
 refused, because a view follows the column. `DROP COLUMN … CASCADE`, which the
 server runs by dropping the views with the column, is refused as `cascading-drop`
 instead.
@@ -717,11 +731,11 @@ briefly without them, which hides the rows a permissive policy admitted and show
 rows a restrictive policy filtered out. A type change that rewrites the table cannot
 take that path, because the transaction would block the table for the whole rewrite,
 and copy-and-swap rebuilds the table's policies before it retypes the column, so it
-meets the same refusal. Add a column of the new type instead, backfill it, point the
-policies at it, then drop the old column. A rename is not refused, because a policy follows
+meets the same refusal. Add a column of the new type instead, have the application write to both and backfill it, point the
+policies at it and switch reads to it, then drop the old column once nothing uses it. A rename is not refused, because a policy follows
 the column. `DROP COLUMN … CASCADE`, which drops the policies with the column, is
 refused as `cascading-drop` instead. When a view and a policy both read the column,
-the decision is `dependent-view`; re-plan after the views are handled. The planner
+the decision is `dependent-view`, and the help gives the same path for both. The planner
 reads the policies from live facts, so the linter, which has none, never reports it,
 and the server's own refusal remains the backstop for a policy created after
 planning.
@@ -752,6 +766,28 @@ parent is not named on its own: PostgreSQL drops the clones with the parent's tr
 and refuses to drop one alone. When a view or a policy also depends on the column,
 the decision's reason names those first, and `dependent_triggers` still names the
 triggers.
+
+### `dependent-publication`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a publication's column list
+or row filter for the table names. PostgreSQL refuses both while the publication names
+it (`cannot alter type of a column used by a publication WHERE clause`, which it says
+for a column list too, and `cannot drop column … because other objects depend on it`
+for a drop), so the statement could only fail. A publication that publishes the table
+without a column list or row filter does not count. The change reaches partitions and
+inheritance children the same way as for `dependent-view`. The plan names each
+publication as `"publication"` in `decisions[].dependent_publications`, and a refused
+run's verdict in `dependent_publications`. The manual path: before a drop, remove the
+column from the publications' column lists and row filters with `ALTER PUBLICATION ...
+SET TABLE`; around a type change, remove it, run the change, and add it back, knowing
+that until it is back subscribers do not receive the column, or receive rows the row
+filter would have held back. A rename is not refused, because a publication follows the
+column. When a view, a policy, or a trigger also depends on the column, the decision's
+reason names those first, and `dependent_publications` still names the publications.
 
 ### `dependent-generated-column`
 

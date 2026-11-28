@@ -384,6 +384,27 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.False(t, exists, "the refused plan must not create the partition")
 	})
 
+	t.Run("refuses a statement the server rejects on the scratch schema", func(t *testing.T) {
+		// An index on a column the file does not declare is a mistake in
+		// the file: the server rejects it while the planner builds the
+		// desired table, and the same file gets the same answer every time.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, legacy text)", schema))
+		require.NoError(t, err)
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema:  schema,
+			Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY); CREATE INDEX t_legacy_idx ON t (legacy)"),
+		}, runOptions())
+		require.NoError(t, err, "a statement the server rejects is a refusal, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+		assert.Equal(t, verdict.ClassByDesign, res.Class)
+		assert.Contains(t, res.Detail, `column "legacy" does not exist (SQLSTATE 42703)`)
+		assert.Contains(t, res.Detail, "in: CREATE INDEX t_legacy_idx ON t USING btree (legacy)")
+		assert.Empty(t, res.Verdicts, "nothing was attempted")
+	})
+
 	t.Run("refuses a desired set that claims one name twice before anything runs", func(t *testing.T) {
 		// The plan SQL says nothing about why statement 2 is refused — the
 		// cause is the collision with the implicit primary-key index name,

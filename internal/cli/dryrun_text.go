@@ -72,9 +72,16 @@ func writeDependentHelp(w *stickyWriter, d planner.Decision) {
 		}
 		w.diag("help", "", text)
 	}
-	help(planner.ReasonDependentView, "view", "views", d.DependentViews, "drop or redefine those views first, then re-plan")
+	if len(d.DependentViews) > 0 {
+		text := d.ViewsHelp()
+		if d.Reason != planner.ReasonDependentView {
+			text = "the change is also blocked by " + d.ViewsPhrase() + ": " + text
+		}
+		w.diag("help", "", text)
+	}
 	help(planner.ReasonDependentPolicy, "policy", "policies", d.DependentPolicies, d.DependentFix.Help("policies"))
 	help(planner.ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers, d.DependentFix.Help("triggers"))
+	help(planner.ReasonDependentPublication, "publication", "publications", d.DependentPublications, planner.PublicationHelp(d.Kind))
 	help(planner.ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns, planner.GeneratedColumnHelp)
 }
 
@@ -99,6 +106,9 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
 		codes = appendCode(codes, string(d.Reason))
+		if d.ReadsInTimeZone != "" {
+			w.diag("note", "", fmt.Sprintf("%s converts each stored value in the session time zone %s", d.Operation, d.ReadsInTimeZone))
+		}
 		writeDependentHelp(w, d)
 		if len(d.PartitionKeyTables) > 0 {
 			w.diag("help", "", planner.PartitionKeyHelp)
@@ -387,6 +397,8 @@ func impactText(r planner.Reason) string {
 		return "changes a column a row-level security policy reads; PostgreSQL refuses this until the policy is dropped"
 	case planner.ReasonDependentTrigger:
 		return "changes a column a trigger's UPDATE OF list or WHEN condition names; PostgreSQL refuses this until the trigger is dropped"
+	case planner.ReasonDependentPublication:
+		return "changes a column a publication's column list or row filter names; PostgreSQL refuses this until the publication stops naming it"
 	case planner.ReasonDependentGeneratedColumn:
 		return "changes a column a generated column reads; PostgreSQL refuses this until the generated column is dropped, except that PostgreSQL 14 drops the generated column along with a dropped column"
 	case planner.ReasonPartitionKey:
@@ -409,10 +421,26 @@ func verdictText(r verdict.Reason) string {
 	case verdict.ReasonUnsupportedPartitionedParent:
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
 	case verdict.ReasonDeclarativeForeignKey:
-		return "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also drops or retypes a column, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
+		return "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
 			"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"
 	default:
 		return string(r)
+	}
+}
+
+// foreignKeyRefusalText names the one remedy for a refused foreign-key drop
+// when the refusal's cause says which kind of drop it is, and both when it
+// does not, as for a report decoded from JSON, which carries no cause.
+func foreignKeyRefusalText(cause verdict.Cause) string {
+	switch cause {
+	case verdict.CauseChangedForeignKey:
+		return "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, " +
+			"which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
+	case verdict.CauseUndeclarableForeignKey:
+		return "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, " +
+			"so to remove it, run the statement with pg-sprite migrate --alter"
+	default:
+		return verdictText(verdict.ReasonDeclarativeForeignKey)
 	}
 }
 
@@ -433,6 +461,9 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			"which takes ACCESS EXCLUSIVE on the parent, every partition, and every partition's index — run it with " +
 			"pg-sprite migrate --alter, --accept-blocking, and --allow-destructive naming the table"
 	}
+	if r == verdict.ReasonDeclarativeForeignKey {
+		return foreignKeyRefusalText(ps.RefusalCause)
+	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)
 	}
@@ -447,7 +478,7 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 		return "the planner knows no safe path for this statement"
 	}
 	if d.Reason == planner.ReasonDependentView {
-		return d.Operation + " changes a column read by " + strings.Join(d.DependentViews, ", ") +
+		return d.Operation + " changes a column read by " + d.ViewsPhrase() +
 			", and PostgreSQL refuses to retype or drop a column while a view reads it"
 	}
 	if d.Reason == planner.ReasonDependentPolicy {
@@ -457,6 +488,10 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 	if d.Reason == planner.ReasonDependentTrigger {
 		return d.Operation + " changes a column named by " + planner.DependentsPhrase("trigger", "triggers", d.DependentTriggers) +
 			", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it"
+	}
+	if d.Reason == planner.ReasonDependentPublication {
+		return d.Operation + " changes a column named by " + planner.DependentsPhrase("publication", "publications", d.DependentPublications) +
+			", and PostgreSQL refuses to retype or drop a column while a publication's column list or row filter names it"
 	}
 	if d.Reason == planner.ReasonDependentGeneratedColumn {
 		return d.Operation + " changes a column read by " +

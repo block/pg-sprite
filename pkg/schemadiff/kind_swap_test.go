@@ -190,18 +190,38 @@ func TestDiffRefusesASameNameKindSwapAForeignKeyReferences(t *testing.T) {
 	assert.Equal(t, CauseReferencedIndex, refusal.Cause)
 }
 
-// A table whose diff drops a column keeps the drop first: a dropped column
-// takes the indexes and constraints that read it with it.
-func TestDiffSameNameKindSwapDropsFirstWithAColumnDrop(t *testing.T) {
+// A table whose diff drops a column still builds the new index first and
+// drops the column last, so the column never takes the old constraint with
+// it before the new index holds the key.
+func TestDiffSameNameKindSwapBuildsFirstWithAColumnDrop(t *testing.T) {
 	live := swapConstraintTable()
-	live.Columns = append(live.Columns, Column{Name: "legacy", Type: "text"})
+	live.Columns = append(live.Columns, Column{Name: "legacy", Type: "text", BuiltInType: true})
 	changes, err := Diff("public", live, swapIndexTable(swapIndexDef))
 	require.NoError(t, err)
 	assert.Equal(t, []string{
+		"CREATE UNIQUE INDEX events_email_key_new ON public.events USING btree (email) INCLUDE (name, id)",
 		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key"`,
+		`ALTER INDEX "public"."events_email_key_new" RENAME TO "events_email_key"`,
 		`ALTER TABLE "public"."events" DROP COLUMN "legacy"`,
-		"CREATE UNIQUE INDEX events_email_key ON public.events USING btree (email) INCLUDE (name, id)",
 	}, sqls(changes))
+}
+
+// A table whose diff drops a column beside an add that may rewrite the
+// table keeps the drops first, since the rewrite would leave the drop
+// reviewed against a table that no longer exists.
+func TestDiffSameNameKindSwapDropsFirstBesideARewritingAdd(t *testing.T) {
+	live := swapConstraintTable()
+	live.Columns = append(live.Columns, Column{Name: "legacy", Type: "text", BuiltInType: true})
+	desired := swapIndexTable(swapIndexDef)
+	desired.Columns = append(desired.Columns, Column{Name: "score", Type: "integer", Default: "0", BuiltInType: true})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	got := sqls(changes)
+	require.Len(t, got, 4, "%q", got)
+	assert.Equal(t, `ALTER TABLE "public"."events" DROP CONSTRAINT "events_email_key"`, got[0])
+	assert.Equal(t, `ALTER TABLE "public"."events" DROP COLUMN "legacy"`, got[1])
+	assert.Contains(t, got[2], `ADD COLUMN "score"`)
+	assert.Equal(t, "CREATE UNIQUE INDEX events_email_key ON public.events USING btree (email) INCLUDE (name, id)", got[3])
 }
 
 // A unique index whose definition the file keeps under another name, while
