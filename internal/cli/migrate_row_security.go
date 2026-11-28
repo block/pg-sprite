@@ -42,6 +42,15 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 		if err := c.rejectPinOnAtomicRowSecurity(); err != nil {
 			return err
 		}
+		// The run refuses the change while a copy-and-swap run on the table
+		// is stopped, and so does the dry run, in place of the review.
+		v, held, err := migrate.AdmitRowSecurityStoppedRun(ctx, pool, c.Schema, desired.Table())
+		if err != nil {
+			return err
+		}
+		if held {
+			return c.emit(out, v)
+		}
 		return diff.writeRowSecurityDiff(ctx, out, pool, desired, b, report, planErr)
 	}
 	if runsTheTablePlan(report, planErr) || c.pinnedAndConverged(report, planErr) {
@@ -60,6 +69,16 @@ func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, d
 	}
 	if err := c.rejectPinOnAtomicRowSecurity(); err != nil {
 		return err
+	}
+	// The atomic change runs no statement a stopped copy-and-swap run
+	// records, so a run stopped on the table refuses it before it locks
+	// the table.
+	refusal, held, err := migrate.AdmitRowSecurityStoppedRun(ctx, pool, c.Schema, desired.Table())
+	if err != nil {
+		return err
+	}
+	if held {
+		return c.emit(out, refusal)
 	}
 	runReport, runErr := executor.ExecuteDesiredRowSecurity(ctx, pool, c.Schema, "", desired, b)
 	v := rowSecurityVerdict(c.Schema+"."+desired.Table(), runReport, runErr)
