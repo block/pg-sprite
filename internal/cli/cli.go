@@ -32,7 +32,7 @@ type CLI struct {
 	Lint         LintCmd         `cmd:"" help:"Lint DDL for unsafe patterns."`
 	Suggest      SuggestCmd      `cmd:"" help:"Recommend safer native forms for risky DDL."`
 	Capabilities CapabilitiesCmd `cmd:"" help:"Print the embedded support matrix."`
-	Status       StatusCmd       `cmd:"" help:"Report the status of a running schema change."`
+	Status       StatusCmd       `cmd:"" help:"Report pg-sprite's live sessions and every copy-and-swap run with a checkpoint row, running or stopped, with its replication slot and write fence."`
 	Reap         ReapCmd         `cmd:"" help:"Drop the orphan replication slots and publications that stopped copy-and-swap runs left in the connected database."`
 	Discard      DiscardCmd      `cmd:"" help:"Abandon a stopped copy-and-swap run on one table without running its change: drop its shadow table, its write fence or replication slot and publication, and its checkpoint row."`
 }
@@ -101,16 +101,17 @@ func (f DBFlags) diagWriter() io.Writer {
 	return os.Stderr
 }
 
-// audit returns the operator audit logger: warn-level text on stderr (or the
-// test override), always on — an audit record of a deliberate safety
-// override must not depend on --debug. The machine-readable counterpart is
-// the verdict itself.
+// audit returns the operator audit logger: info-level text on stderr (or
+// the test override), always on — an audit record of a deliberate safety
+// override (warn) or of a resumed copy-and-swap run (info) must not depend
+// on --debug. The machine-readable counterpart of an override is the
+// verdict itself.
 func (f DBFlags) audit() *slog.Logger {
 	out := f.diagOut
 	if out == nil {
 		out = os.Stderr
 	}
-	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
 // MigrateCmd runs a schema change (imperative front-end): classify the
@@ -324,11 +325,12 @@ func (c *CapabilitiesCmd) Run() error { return c.run(os.Stdout) }
 
 func (c *CapabilitiesCmd) binaryVersion() string { return c.version }
 
-// StatusCmd reports schema-change progress.
+// StatusCmd reports the engine's live sessions and the copy-and-swap runs
+// whose checkpoint rows are still in flight.
 type StatusCmd struct {
 	DBFlags `embed:""`
 
-	JSON bool `help:"Emit the session listing as JSON."`
+	JSON bool `help:"Emit the status report as JSON."`
 }
 
 // Run implements the status subcommand.

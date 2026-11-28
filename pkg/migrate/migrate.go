@@ -142,11 +142,14 @@ type Options struct {
 	// (applier.CatchupOptions.Logger lists them).
 	Logger *slog.Logger
 
-	// Audit receives the force-override audit record; nil discards it.
-	// The verdict's Forced field is the machine-readable record and is
-	// always set, so the run's outcome never depends on this logger; the
-	// CLI wires an always-on stderr handler here so an operator's
-	// deliberate safety override is visible even without diagnostics.
+	// Audit receives the operator records; nil discards them. A deliberate
+	// safety override (the force, destructive, blocking, block-writes, and
+	// restart acknowledgements) is recorded at Warn, and a resumed
+	// copy-and-swap run at Info. The verdict's Forced field is the
+	// machine-readable record of an override and is always set, so the
+	// run's outcome never depends on this logger; the CLI wires an
+	// always-on stderr handler here so these records are visible even
+	// without diagnostics.
 	Audit *slog.Logger
 
 	// Progress, when set, is the tracker the whole call reports to, for the
@@ -429,9 +432,12 @@ func runStatement(ctx context.Context, pool *pgxpool.Pool, st statement.Statemen
 	if resumes {
 		// The stopped run's statement goes back to the route that started
 		// it, Options.Force included: the override chooses a native attempt
-		// over a shadow table, and this change already has one.
-		logger.Debug("stopped copy-and-swap run found; resuming it",
-			"phase", string(stopped.cp.Phase), "route", string(classified.Route))
+		// over a shadow table, and this change already has one. The resume
+		// is an operator record, not a diagnostic: a run that picks up
+		// another run's shadow and slot says so without --debug.
+		opts.audit().Info("resuming a stopped copy-and-swap run",
+			"schema", st.Schema(), "table", st.Table(), "phase", stopped.cp.Phase.String(),
+			"last_saved", stopped.cp.UpdatedAt, "route", string(classified.Route))
 		v, err = copyAndSwap(ctx, pool, st, opts, step, logger)
 	} else {
 		v, err = dispatch(ctx, pool, st, canonical, rs, opts, step, adopts, validates, dropped, logger)

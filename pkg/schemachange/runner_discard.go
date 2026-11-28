@@ -299,6 +299,20 @@ SELECT EXISTS (
 	  AND NOT tg.tgisinternal
 )`
 
+// WriteFencePresent reports whether schema.table carries a trigger under
+// the write fence's name, of whatever shape: what a discard takes off the
+// table, and what a status reader shows as the fence a stopped run left.
+// It is a read and nothing more: it takes no lock, so it decides nothing a
+// write may rest on, and its qualified catalog reads do not depend on db's
+// search_path (CO-9).
+func WriteFencePresent(ctx context.Context, db dbconn.RowQuerier, schema, table string) (bool, error) {
+	var present bool
+	if err := db.QueryRow(ctx, writeFencePresentSQL, schema, table, WriteFenceTrigger).Scan(&present); err != nil {
+		return false, fmt.Errorf("read write fence on %s.%s: %w", schema, table, err)
+	}
+	return present, nil
+}
+
 // publicationPresentSQL reports whether a publication bears the name.
 // Every catalog name is qualified (CO-9).
 const publicationPresentSQL = `
@@ -355,8 +369,8 @@ func (r *Runner) findRelationLeftovers(ctx context.Context, pool *pgxpool.Pool, 
 	if _, found.shadow, err = lookupRelation(ctx, tx, schema, ShadowName(schema, table)); err != nil {
 		return leftovers{}, err
 	}
-	if err := tx.QueryRow(ctx, writeFencePresentSQL, schema, table, WriteFenceTrigger).Scan(&found.fence); err != nil {
-		return leftovers{}, fmt.Errorf("read write fence on %s.%s: %w", schema, table, err)
+	if found.fence, err = WriteFencePresent(ctx, tx, schema, table); err != nil {
+		return leftovers{}, err
 	}
 	if err := tx.QueryRow(ctx, publicationPresentSQL, shape.DecodingName()).Scan(&found.publication); err != nil {
 		return leftovers{}, fmt.Errorf("read publication %s: %w", shape.DecodingName(), err)

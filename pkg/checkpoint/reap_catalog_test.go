@@ -16,6 +16,7 @@ func TestSlotReadsQualifyEveryRelationFunctionCastAndOperator(t *testing.T) {
 	for name, query := range map[string]string{
 		"candidateSlotsSQL":   candidateSlotsSQL,
 		"liveRowSlotsSQL":     liveRowSlotsSQL,
+		"unfinishedSQL":       unfinishedSQL,
 		"databaseIdentitySQL": databaseIdentitySQL,
 		"slotLockSQL":         slotLockSQL,
 	} {

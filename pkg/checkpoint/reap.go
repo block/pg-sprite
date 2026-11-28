@@ -64,18 +64,29 @@ WHERE database OPERATOR(pg_catalog.=) pg_catalog.current_database()
   AND slot_name OPERATOR(pg_catalog.~~) $1
 ORDER BY slot_name`
 
-// liveRowSlotsSQL names, among the given slots, those a checkpoint row in a
-// non-terminal phase owns. Terminal is judged by name, done or failed, and
+// nonTerminalPhaseSQL is the predicate every read of the rows still in
+// flight shares, with the terminal phase names (terminalPhaseNames) as its
+// first two parameters. Terminal is judged by name, done or failed, and
 // every other phase counts as live: a row a newer engine left in a phase
 // this one does not know keeps its slot, since only that engine knows
-// whether the run behind it still decodes from it. Its comparisons are
+// whether the run behind it still decodes from it. Its comparison is
 // pg_catalog-qualified for the same reason as candidateSlotsSQL's; NOT IN
 // is its expansion, <> ALL.
+const nonTerminalPhaseSQL = `phase OPERATOR(pg_catalog.<>) ALL (ARRAY[$1, $2]::pg_catalog.text[])`
+
+// terminalPhaseNames are nonTerminalPhaseSQL's two parameters.
+func terminalPhaseNames() []any {
+	return []any{PhaseDone.String(), PhaseFailed.String()}
+}
+
+// liveRowSlotsSQL names, among the given slots, those a checkpoint row in a
+// non-terminal phase owns. Its slot comparison is pg_catalog-qualified for
+// the same reason as candidateSlotsSQL's.
 const liveRowSlotsSQL = `
 SELECT slot_name
 FROM ` + tableIdent + `
-WHERE slot_name OPERATOR(pg_catalog.=) ANY ($1::pg_catalog.text[])
-  AND phase OPERATOR(pg_catalog.<>) ALL (ARRAY[$2, $3]::pg_catalog.text[])`
+WHERE ` + nonTerminalPhaseSQL + `
+  AND slot_name OPERATOR(pg_catalog.=) ANY ($3::pg_catalog.text[])`
 
 // candidateSlot is one row of candidateSlotsSQL.
 type candidateSlot struct {
@@ -249,7 +260,7 @@ func (s *Store) candidateSlots(ctx context.Context) ([]candidateSlot, error) {
 // database without the checkpoint table is refused whether or not it has
 // slots.
 func (s *Store) liveRowSlots(ctx context.Context, names []string) (map[string]bool, error) {
-	rows, err := s.pool.Query(ctx, liveRowSlotsSQL, names, PhaseDone.String(), PhaseFailed.String())
+	rows, err := s.pool.Query(ctx, liveRowSlotsSQL, append(terminalPhaseNames(), names)...)
 	if err != nil {
 		return nil, fmt.Errorf("read slot owners: %w", tableUnusable(err))
 	}
