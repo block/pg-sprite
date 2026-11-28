@@ -415,12 +415,16 @@ func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 	if disallowed, isStatement := errors.AsType[*statement.DisallowedStatementError](err); isStatement {
 		sql = disallowed.SQL
 		detail = "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, " +
-			"so this statement is not allowed in it; nothing was planned or executed"
+			"so this " + disallowed.Object.String() + " is not allowed in it; nothing was planned or executed"
+		if disallowed.Object == statement.DeclaredEnumType {
+			detail = "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, " +
+				"so this enum type belongs in a file of its own; nothing was planned or executed"
+		}
 	}
 	if extra, isExtra := errors.AsType[*statement.EnumTypeFileError](err); isExtra {
 		sql = extra.SQL
-		detail = "a desired enum type file holds exactly one CREATE TYPE ... AS ENUM, so this statement belongs " +
-			"in a file of its own; nothing was planned or executed"
+		detail = "a desired enum type file holds exactly one CREATE TYPE ... AS ENUM, so this " + extra.Object.String() +
+			" belongs in " + enumFileExtraHome(extra.Object) + "; nothing was planned or executed"
 	}
 	if rejected, isRejected := errors.AsType[*schemadiff.DesiredStatementError](err); isRejected {
 		sql = rejected.Statement
@@ -599,4 +603,15 @@ func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
 		return plan.RowSecurityMissingTableRefusal(), true
 	}
 	return verdict.Refusal{}, false
+}
+
+// enumFileExtraHome names the desired file a statement an enum type file
+// cannot hold belongs in: a second enum type takes a file of its own, and
+// an index, a policy, its comment, or a row security change belongs with
+// its table.
+func enumFileExtraHome(object statement.DeclaredObject) string {
+	if object == statement.DeclaredEnumType {
+		return "a file of its own"
+	}
+	return "its table's file"
 }

@@ -56,7 +56,8 @@ var (
 // DisallowedStatementError is [ErrDisallowedStatement] for one statement of
 // a desired file. It carries the statement's SQL and the kind [ParseOne]
 // gives the statement's source text, so a caller can classify the refusal
-// the way the imperative front door classifies the same statement.
+// the way the imperative front door classifies the same statement, and the
+// object the statement declares, so it can say where the statement belongs.
 type DisallowedStatementError struct {
 	// SQL is the refused statement in the deparser's canonical form, or its
 	// source text when the canonical form would classify as a different
@@ -65,6 +66,10 @@ type DisallowedStatementError struct {
 	SQL string
 	// Kind is the kind [ParseOne] gives the statement's source text.
 	Kind Kind
+	// Object is the kind of object the statement declares, changes, or
+	// annotates, finer than Kind, so a caller can tell the file's author
+	// where the statement belongs instead.
+	Object DeclaredObject
 }
 
 func (e *DisallowedStatementError) Error() string {
@@ -107,7 +112,7 @@ func disallowedStatement(source *desiredSource, raw *pganalyze.RawStmt) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDisallowedStatement, err)
 	}
-	return &DisallowedStatementError{SQL: sql, Kind: kind}
+	return &DisallowedStatementError{SQL: sql, Kind: kind, Object: declaredObject(raw.GetStmt())}
 }
 
 // refusedStatement returns the text a refusal names for raw, a statement of
