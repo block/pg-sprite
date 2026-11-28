@@ -82,6 +82,7 @@ func TestRunSequenceReportsTheFinalizeThatEndedItsOwnInterruptedDetach(t *testin
 			                  AND inhdetachpending)
 			   AND NOT EXISTS (SELECT 1 FROM pg_stat_activity
 			                    WHERE query LIKE 'ALTER TABLE % DETACH PARTITION %'
+			                      AND strpos(query, $1) > 0
 			                      AND state = 'active'
 			                      AND pid <> pg_backend_pid())`, schema).Scan(&between)
 		return err == nil && between
