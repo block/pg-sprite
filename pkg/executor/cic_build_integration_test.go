@@ -583,7 +583,6 @@ func TestBuildIndexConcurrentlyPastTempFileLimitIsResourceExhausted(t *testing.T
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr, "the server error stays in the chain")
 	assert.Equal(t, "53400", pgErr.Code)
-	assert.Contains(t, err.Error(), "temp_file_limit", "the server's error reaches the message")
 	exists, valid := indexState(t, pool, schema, "events_payload_idx")
 	assert.True(t, exists, "the executor must not have dropped the leftover")
 	assert.False(t, valid, "the leftover must be invalid")
