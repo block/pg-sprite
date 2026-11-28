@@ -81,10 +81,10 @@ func TestRunnerRestartDiscardsAStoppedRunAndStartsOver(t *testing.T) {
 	result, err := f.run(t, "orders", restartAlter, schemachange.RunOptions{Restart: true, KeepOld: true, AfterCheckpoint: restarted.hook})
 	require.NoError(t, err)
 	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
-	// The two copying saves are a fresh run's: the row recorded as the
-	// restart's shadow is built, then the finished copy recording its
-	// complete watermark before the verifying save.
-	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseCopying, checkpoint.PhaseCopying, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone},
+	// The copying saves are a fresh run's: the row recorded as the
+	// restart's shadow is built, then the copy recording the watermark it
+	// landed before the verifying save.
+	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseCopying, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone},
 		restarted.seen(), "the restart ran every phase from the start")
 	assert.NotEqual(t, stoppedShadowOID, result.Shadow.ShadowOID, "the restart built a shadow of its own")
 	assert.Equal(t, sourceOID, result.Swapped.OldOID, "the source the stopped run fenced is the one swapped out")

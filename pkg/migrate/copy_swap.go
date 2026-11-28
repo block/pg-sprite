@@ -146,8 +146,10 @@ type CopySwapOptions struct {
 	// CheckpointInterval is how often a copy in progress saves its landed
 	// watermark to the checkpoint row, which is how far a run that stops
 	// mid-copy resumes from, and how often OnCheckpoint hears from the
-	// copy. Zero means the Runner's default; a negative value is refused
-	// before anything is read.
+	// copy. The copy also saves once as soon as it first lands past the
+	// watermark the run began from, so a copy shorter than the interval
+	// still leaves a save to resume from. Zero means the Runner's default;
+	// a negative value is refused before anything is read.
 	CheckpointInterval time.Duration
 
 	// SlotLagCeilingBytes is the WAL, in bytes, a live run's replication
@@ -181,8 +183,9 @@ type CopySwapOptions struct {
 	// it runs: the phase saves call it on the goroutine that called Run,
 	// with the table's lock session held and, for a quiesced run, the
 	// source fenced against writes; the periodic watermark saves call it
-	// on the copy's saving goroutine, every CheckpointInterval rather than
-	// as the copy lands rows, and a slow call there delays the next save.
+	// on the copy's saving goroutine, once the copy first lands past where
+	// the run began and then every CheckpointInterval, rather than as the
+	// copy lands rows, and a slow call there delays the next save.
 	// It must be safe to call from either goroutine and should return
 	// promptly. An error it returns stops the run there, as a failed
 	// verdict with the row as that save left it, and the next run resumes
