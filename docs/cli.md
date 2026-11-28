@@ -562,8 +562,9 @@ refused (plan-fingerprint-mismatch)
   destructive plan, `fingerprint` covers the refused plan and cannot be
   pinned: pin `pinnable_fingerprint`, the same value the text output prints
   under `fingerprint:`. A run pinned to the refused plan's fingerprint refuses
-  with `plan-fingerprint-mismatch`, and its detail names the fingerprint to pin
-  instead of saying the table or the file changed.
+  with `plan-fingerprint-mismatch` and cause `pinned-refused-preview`, and its
+  detail names the fingerprint to pin instead of saying the table or the file
+  changed.
   A dry run compares `--expect-fingerprint` as the run does and refuses with
   `plan-fingerprint-mismatch` on a difference, for a table, a row security
   file, an enum type file, and a non-destructive plan alike.

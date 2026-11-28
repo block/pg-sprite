@@ -818,7 +818,7 @@ func CheckPlanPin(expected string, report plan.Report) (DesiredResult, bool) {
 		return DesiredResult{}, true
 	}
 	if pinsRefusedPreview(expected, report) {
-		return DesiredResult{Plan: report}.refused(fingerprintMismatchRefusal(), fmt.Sprintf(
+		return DesiredResult{Plan: report}.refused(pinnedRefusedPreviewRefusal(), fmt.Sprintf(
 			"the pinned fingerprint %s identifies a dry run's refused preview of this plan, which no run executes; "+
 				"pin the plan's own fingerprint, %s",
 			expected, report.Fingerprint)), false

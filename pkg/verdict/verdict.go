@@ -541,6 +541,12 @@ const (
 	// unique index, so the diff plans its drop whatever the file says. The
 	// imperative front door removes it.
 	CauseUndeclarableForeignKey Cause = "undeclarable-foreign-key"
+	// CausePinnedRefusedPreview: under ReasonPlanFingerprintMismatch, the
+	// pinned fingerprint is the one a desired-state dry run gives its refused
+	// preview of a destructive plan, which no run executes. Nothing changed
+	// since the review; the operator pinned the wrong value, and the detail
+	// names the plan's own fingerprint to pin instead.
+	CausePinnedRefusedPreview Cause = "pinned-refused-preview"
 )
 
 // Verdict is the structured outcome of one migrate invocation.

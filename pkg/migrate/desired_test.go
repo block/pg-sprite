@@ -365,13 +365,15 @@ func TestCheckPlanPinNamesThePlanWhenTheRefusedPreviewIsPinned(t *testing.T) {
 	res, ok := CheckPlanPin(preview.Fingerprint, report)
 	require.False(t, ok)
 	assert.Equal(t, verdict.ReasonPlanFingerprintMismatch, res.Reason)
+	assert.Equal(t, verdict.CausePinnedRefusedPreview, res.Cause)
 	assert.Equal(t, fmt.Sprintf(
 		"the pinned fingerprint %s identifies a dry run's refused preview of this plan, which no run executes; "+
 			"pin the plan's own fingerprint, %s", preview.Fingerprint, report.Fingerprint), res.Detail)
 
 	res, ok = CheckPlanPin("sha256:older", report)
 	require.False(t, ok)
-	assert.Contains(t, res.Detail, "the live table or the desired schema changed", "any other pin still blames a change")
+	assert.Equal(t, verdict.CauseNone, res.Cause, "any other pin still blames a change")
+	assert.Contains(t, res.Detail, "the live table or the desired schema changed")
 
 	_, ok = CheckPlanPin(report.Fingerprint, report)
 	assert.True(t, ok)

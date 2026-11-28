@@ -77,6 +77,13 @@ func fingerprintMismatchRefusal() verdict.Refusal {
 	return verdict.Environmental(verdict.ReasonPlanFingerprintMismatch)
 }
 
+// pinnedRefusedPreviewRefusal: the pin names a dry run's refused preview of
+// the plan rather than the plan, so nothing moved under the review and the
+// operator pins the plan's own fingerprint instead.
+func pinnedRefusedPreviewRefusal() verdict.Refusal {
+	return fingerprintMismatchRefusal().WithCause(verdict.CausePinnedRefusedPreview)
+}
+
 // createCollisionRefusal: a target or claimed name is occupied at apply time.
 func createCollisionRefusal() verdict.Refusal {
 	return verdict.Environmental(verdict.ReasonCreateCollision)
@@ -124,6 +131,7 @@ func siteRefusals() []siteRefusal {
 		{"budget-exceeded", budgetExceededRefusal()},
 		{"destructive-change", destructiveChangeRefusal()},
 		{"plan-fingerprint-mismatch", fingerprintMismatchRefusal()},
+		{"plan-fingerprint-mismatch/pinned-refused-preview", pinnedRefusedPreviewRefusal()},
 		{"create-collision", createCollisionRefusal()},
 		{"attached-index-drop", attachedIndexDropRefusal()},
 		{"constraint-index-drop", constraintIndexDropRefusal()},
