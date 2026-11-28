@@ -141,21 +141,24 @@ func refuseOverStoppedRun(ctx context.Context, pool *pgxpool.Pool, st statement.
 	if !stopped.standing() {
 		return verdict.Verdict{}, false, nil
 	}
-	return copySwapRunStoppedVerdict(st, schema+"."+table, stopped), true, nil
+	return copySwapRunStoppedVerdict(st, schema+"."+table, stopped, false), true, nil
 }
 
 // copySwapRunStoppedVerdict is the imperative door's refusal of st over
-// the stopped run on table, naming the run and the remedy. A run whose row
-// is past cutover may have committed its swap, which a restart does not
-// discard, so only finishing it is offered there.
-func copySwapRunStoppedVerdict(st statement.Statement, table string, s stoppedRun) verdict.Verdict {
-	v := refusedVerdict(st, copySwapRunStoppedRefusal(), stoppedRunDetail(table, s)+"; nothing was executed")
+// the stopped run on table, naming the run and the remedy. restartable says
+// whether st can route to copy-and-swap, so that the restart
+// acknowledgement could discard the run for it; an index statement cannot.
+// A run whose row is past cutover may have committed its swap, which a
+// restart does not discard, so only finishing it is offered there.
+func copySwapRunStoppedVerdict(st statement.Statement, table string, s stoppedRun, restartable bool) verdict.Verdict {
+	v := refusedVerdict(st, copySwapRunStoppedRefusal(), stoppedRunDetail(table, s, restartable)+"; nothing was executed")
 	v.Table = table
 	return v
 }
 
-// stoppedRunDetail names the stopped run on table and the way past it.
-func stoppedRunDetail(table string, s stoppedRun) string {
+// stoppedRunDetail names the stopped run on table and the way past it,
+// offering the restart only when restartable.
+func stoppedRunDetail(table string, s stoppedRun, restartable bool) string {
 	if s.unjudged != "" {
 		return fmt.Sprintf("a copy-and-swap run on %s left %s standing, and this pg-sprite cannot judge it: %s; "+
 			"finish or discard that run with a pg-sprite and a role that can read its checkpoint row, then run this statement",
@@ -164,7 +167,7 @@ func stoppedRunDetail(table string, s stoppedRun) string {
 	detail := fmt.Sprintf("a copy-and-swap run of %q on %s stopped in phase %s, and this statement is not the one it records; "+
 		"run the stopped statement again to finish it, then run this one",
 		s.cp.Statement, table, s.cp.Phase)
-	if s.cp.Phase != checkpoint.PhaseCutover {
+	if restartable && s.cp.Phase != checkpoint.PhaseCutover {
 		detail += ", or, when this statement routes to copy-and-swap, start it over with the restart acknowledgement " +
 			"and the route opened (--restart SCHEMA.TABLE with --copy-and-swap; CopySwapOptions.Restart with Enabled), " +
 			"which discards the stopped run first"
@@ -178,6 +181,8 @@ func stoppedRunDetail(table string, s stoppedRun) string {
 // carries no restart acknowledgement, so none lifts the refusal. A
 // statement with no table, such as an ALTER TYPE ... ADD VALUE, meets no
 // stopped run. The row is read without the table's lock, as Run reads it.
+// An unqualified st's verdict names the statement the way Run's does,
+// qualified with schema.
 func AdmitStoppedRun(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, schema, table string) (verdict.Verdict, bool, error) {
 	stopped, err := findStoppedRun(ctx, pool, schema, table)
 	if err != nil {
@@ -186,7 +191,13 @@ func AdmitStoppedRun(ctx context.Context, pool *pgxpool.Pool, st statement.State
 	if !stopped.blocks(st, Options{}) {
 		return verdict.Verdict{}, false, nil
 	}
-	return copySwapRunStoppedVerdict(st, schema+"."+table, stopped), true, nil
+	target := st
+	if st.Schema() == "" && st.Table() != "" {
+		if target, err = resolveForVerdict(st, schema); err != nil {
+			return verdict.Verdict{}, false, err
+		}
+	}
+	return copySwapRunStoppedVerdict(target, schema+"."+table, stopped, true), true, nil
 }
 
 // AdmitPlanStoppedRun is the desired-state dry run's forecast of what a
@@ -220,7 +231,7 @@ func AdmitPlanStoppedRun(ctx context.Context, pool *pgxpool.Pool, report plan.Re
 	if !stopped.blocks(first, Options{}) {
 		return DesiredResult{}, false, nil
 	}
-	result := DesiredResult{Plan: report, Verdicts: []verdict.Verdict{copySwapRunStoppedVerdict(first, desiredTable(report), stopped)}}
+	result := DesiredResult{Plan: report, Verdicts: []verdict.Verdict{copySwapRunStoppedVerdict(first, desiredTable(report), stopped, true)}}
 	return result.refused(copySwapRunStoppedRefusal(),
 		committedPrefixDetail(0, len(report.Statements), "was refused at execution time")), true, nil
 }
@@ -266,9 +277,9 @@ func refuseEmptyPlanOverStoppedRun(ctx context.Context, pool *pgxpool.Pool, repo
 // acknowledgement to discard the stopped run.
 func desiredRunStoppedDetail(lead, schema, table string, s stoppedRun) string {
 	if s.unjudged != "" {
-		return lead + ", but " + stoppedRunDetail(schema+"."+table, s) + "; nothing was executed"
+		return lead + ", but " + stoppedRunDetail(schema+"."+table, s, false) + "; nothing was executed"
 	}
 	return fmt.Sprintf("%s, but a copy-and-swap run of %q on %s.%s stopped in phase %s; "+
-		"run that statement again with migrate --alter to finish it; nothing was executed",
+		"run that statement again with migrate --alter and --copy-and-swap to finish it; nothing was executed",
 		lead, s.cp.Statement, schema, table, s.cp.Phase)
 }

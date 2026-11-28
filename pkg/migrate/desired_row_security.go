@@ -162,7 +162,7 @@ func rowSecurityPlanRefusal(err error) (DesiredResult, bool) {
 		return DesiredResult{}, false
 	case errors.As(err, &review):
 		return DesiredResult{}.refused(plan.RowSecurityReviewRefusal(),
-			fmt.Sprintf("%v; the row security differs from the file, and this path changes only the table: converge the row security first with executor.ExecuteDesiredRowSecurity; nothing was executed", err)), true
+			fmt.Sprintf("%v; the row security differs from the file, and this path changes only the table: converge the row security first with executor.ExecuteDesiredRowSecurity, once AdmitRowSecurityStoppedRun finds no copy-and-swap run stopped on the table; nothing was executed", err)), true
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		return DesiredResult{}.refused(plan.RowSecurityMissingTableRefusal(),
 			fmt.Sprintf("%v; create the table with its row security through executor.ExecuteDesiredRowSecurity; nothing was executed", err)), true
