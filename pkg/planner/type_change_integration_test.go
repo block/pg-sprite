@@ -279,6 +279,34 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 			route:  planner.RouteNative,
 		},
 		{
+			name: "raise timetz precision",
+			create: `CREATE TABLE %[1]s (
+    c timetz(2)
+)`,
+			alter: `ALTER TABLE %[1]s
+    ALTER COLUMN c TYPE timetz(5)`,
+			route: planner.RouteNative,
+		},
+		{
+			// PostgreSQL clamps a precision above 6 to 6, with a warning.
+			name: "timestamp above the maximum precision",
+			create: `CREATE TABLE %[1]s (
+    c timestamp(3)
+)`,
+			alter: `ALTER TABLE %[1]s
+    ALTER COLUMN c TYPE timestamp(7)`,
+			route: planner.RouteNative,
+		},
+		{
+			name: "timestamptz to the maximum precision",
+			create: `CREATE TABLE %[1]s (
+    c timestamptz
+)`,
+			alter: `ALTER TABLE %[1]s
+    ALTER COLUMN c TYPE timestamptz(6)`,
+			route: planner.RouteNative,
+		},
+		{
 			name:     "lower time precision",
 			create:   "CREATE TABLE %[1]s (c time(5))",
 			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE time(2)",
