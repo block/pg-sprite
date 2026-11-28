@@ -79,7 +79,9 @@ import (
 // unique constraint and a unique index of the same name swap kinds: a
 // drop-constraint whose replacement is a standalone index, and a drop-index
 // whose replacement a constraint takes over.
-const FormatVersion = 31
+// Version 32 added the dependent-publication planner reason and the
+// dependent_publications decision field.
+const FormatVersion = 32
 
 // Source identifies which front door derived the plan.
 type Source string

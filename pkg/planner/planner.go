@@ -89,6 +89,7 @@ func Reasons() []Reason {
 		ReasonDependentView,
 		ReasonDependentPolicy,
 		ReasonDependentTrigger,
+		ReasonDependentPublication,
 		ReasonDependentGeneratedColumn,
 		ReasonPartitionKey,
 		ReasonNotNullWithoutDefault,
@@ -193,6 +194,14 @@ const (
 	// column does not count, since the server records no dependency for
 	// it.
 	ReasonDependentTrigger Reason = "dependent-trigger"
+	// ReasonDependentPublication: the operation changes the type of, or
+	// drops, a column that a publication's column list or row filter for
+	// the table names. PostgreSQL refuses both while the publication
+	// names it, so the statement could only fail, and a desired-state run
+	// would stop part-way with the steps before it committed. The decision
+	// names the publications; a publication that publishes the table
+	// without a column list or row filter does not count.
+	ReasonDependentPublication Reason = "dependent-publication"
 	// ReasonDependentGeneratedColumn: the operation changes the type of,
 	// or drops, a column that a generated column's expression reads.
 	// PostgreSQL refuses both while the generated column exists, so the
@@ -382,6 +391,11 @@ type Decision struct {
 	// "schema"."table" with every identifier quoted, present whenever one
 	// blocks the change, whatever the decision's reason.
 	DependentTriggers []string `json:"dependent_triggers,omitempty"`
+	// DependentPublications names the publications whose column list or
+	// row filter for the table names the column, each rendered
+	// "publication" with its identifier quoted, present whenever one
+	// blocks the change, whatever the decision's reason.
+	DependentPublications []string `json:"dependent_publications,omitempty"`
 	// DependentGeneratedColumns names the generated columns whose
 	// expression reads the column, each rendered "schema"."table"."column"
 	// with every identifier quoted, present whenever one blocks the change,
@@ -437,6 +451,17 @@ const (
 // names the generated columns.
 const GeneratedColumnHelp = "drop those generated columns first, then re-plan; " +
 	"adding a stored one back afterwards, or changing a stored one's expression instead, rewrites the table"
+
+// PublicationHelp is the operator-facing manual path for a
+// dependent-publication decision on an operation of kind, phrased to
+// follow a sentence that names the publications.
+func PublicationHelp(kind statement.OpKind) string {
+	if kind == statement.OpDropColumn {
+		return "remove the column from those publications' column lists and row filters with ALTER PUBLICATION ... SET TABLE, then re-plan the drop"
+	}
+	return "remove the column from those publications' column lists and row filters with ALTER PUBLICATION ... SET TABLE, run the change, then add it back; " +
+		"until it is back, subscribers do not receive the column, or receive rows the row filter would have held back"
+}
 
 // PartitionKeyHelp is the operator-facing manual path for a partition-key
 // decision, phrased to follow a sentence that names the partitioned
@@ -613,6 +638,7 @@ func (d Decision) OtherDependents() string {
 	}
 	add(ReasonDependentPolicy, "policy", "policies", d.DependentPolicies)
 	add(ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers)
+	add(ReasonDependentPublication, "publication", "publications", d.DependentPublications)
 	add(ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns)
 	return strings.Join(others, " and ")
 }
@@ -717,6 +743,10 @@ type Facts struct {
 	// reads the column is not one: the server records no dependency for
 	// it and lets the change run.
 	DependentTriggers ColumnDependents
+	// DependentPublications maps a column to the publications whose column
+	// list or row filter for the table names it
+	// (preflight.ReadColumnDependents), each rendered "publication".
+	DependentPublications ColumnDependents
 	// GeneratedColumnCopies maps each generated column to its own copies,
 	// named as DependentGeneratedColumns names them, so a statement that
 	// drops a generated column stops it blocking a change to the columns
@@ -849,8 +879,8 @@ func policiesReadingColumn(op statement.Op, facts Facts) []string {
 
 // dependentsReached returns the dependents that read the column op
 // retypes or drops: the two column changes PostgreSQL refuses while a
-// view, a policy, a trigger, a generated column, or a partition key reads
-// the column. A rename is not one of them, since each follows the column. Under ONLY the change stops at
+// view, a policy, a trigger, a publication, a generated column, or a
+// partition key reads the column. A rename is not one of them, since each follows the column. Under ONLY the change stops at
 // the table, so only its own dependents count, and a recursive drop
 // counts only the copies of the column it drops.
 func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []string {
@@ -1102,8 +1132,8 @@ func withoutInheritedCopies(generated []string, copies ColumnDependents) []strin
 }
 
 // dependentReason is the refusal reason for the first kind of dependent
-// that blocks d, in the order views, policies, triggers, generated
-// columns.
+// that blocks d, in the order views, policies, triggers, publications,
+// generated columns.
 func dependentReason(d Decision) (Reason, bool) {
 	switch {
 	case len(d.DependentViews) > 0:
@@ -1112,6 +1142,8 @@ func dependentReason(d Decision) (Reason, bool) {
 		return ReasonDependentPolicy, true
 	case len(d.DependentTriggers) > 0:
 		return ReasonDependentTrigger, true
+	case len(d.DependentPublications) > 0:
+		return ReasonDependentPublication, true
 	case len(d.DependentGeneratedColumns) > 0:
 		return ReasonDependentGeneratedColumn, true
 	}
@@ -1161,6 +1193,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	}
 	d.DependentPolicies = policiesReadingColumn(op, facts)
 	d.DependentTriggers = facts.DependentTriggers.reached(op)
+	d.DependentPublications = facts.DependentPublications.reached(op)
 	d.DependentGeneratedColumns = withoutInheritedCopies(facts.DependentGeneratedColumns.reached(op), facts.GeneratedColumnCopies)
 	if len(d.DependentViews) > 0 || len(d.DependentPolicies) > 0 || len(d.DependentTriggers) > 0 {
 		d.DependentFix = dependentFix(op, facts)

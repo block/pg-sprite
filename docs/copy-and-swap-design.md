@@ -797,7 +797,7 @@ verify and the swap and then failed that catalog comparison.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | before | 50,000 | 1 | fail, `execution-failed` | live verify, after 31 s | — | — | 3, the bound | chunk [min, 1010]: source 978 rows, shadow 979; no keys named |
 | before | 50,000 | 2 | fail, `execution-failed` | live verify, after 61 s | — | — | 3, the bound | chunk [1008, 3020]: source 1950 rows, shadow 1952; no keys named |
-| before | 100,000 | 1 | fail, `execution-failed` | catch-up: slot over the 1 GiB ceiling | — | — | — | — |
+| before | 100,000 | 1 | fail, `execution-failed` as recorded; a slot-lag stop reports `slot-lag-exceeded` ([outcome codes](execution-model.md#outcome-codes)) | catch-up: slot over the 1 GiB ceiling | — | — | — | — |
 | settling | 50,000 | 1 | pass | — | 26 | 25 | not recorded | none |
 | settling | 50,000 | 2 | pass | — | 31 | 30 | not recorded | none |
 | settling | 50,000 | 3 | pass | — | 36 | 36 | not recorded | none |

@@ -200,7 +200,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -242,7 +242,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -422,6 +422,13 @@ $ pg-sprite migrate --alter 'ALTER TABLE orders ALTER COLUMN note TYPE varchar(3
 pg-sprite: error: run public.orders: copy-and-swap run on public.orders abandoned on a data fault: copy chunk [2001, 4000] of public.orders into _pgsprite_c74da4a21f58f903_new: ERROR: value too long for type character varying(32) (SQLSTATE 22001)
 ```
 
+A live copy-and-swap run that its replication slot's lag ceiling stopped fails
+the same way, with `"code": "slot-lag-exceeded"` and a `cause` naming the
+measure that crossed the ceiling: `stream-behind`, `wal-retained`, or
+`wal-retained-hard-limit`. The checkpoint row and the slot stay; the detail
+says how to resume, and a consumer branches on `code` and `cause`, not on the
+detail's wording ([replication slots](replication-slots.md#the-slot-lag-ceiling)).
+
 ### Refused: no online rewrite exists (`rewrite-required`) — exit 2
 
 The column and its constraint arrive in one statement, so no online
@@ -435,7 +442,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -477,7 +484,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -572,7 +579,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -611,7 +618,7 @@ when it starts.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -707,7 +714,7 @@ cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE events ADD CONSTRAINT events_pkey PRIMARY KEY USING INDEX events_id_idx' --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -772,7 +779,7 @@ table. A mismatched acknowledgement executes nothing and exits 1.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -817,7 +824,7 @@ object it removes, and the fingerprint covers it.
 ```console
 $ pg-sprite migrate --desired orders.sql --dry-run --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "diff",
   "schema": "public",
   "table": "orders",
@@ -890,7 +897,7 @@ ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
 ```console
 $ pg-sprite lint /tmp/changes.sql --json
 {
-  "format_version": 10,
+  "format_version": 11,
   "postgres_versions": "14-18",
   "findings": [
     {
@@ -995,7 +1002,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 31,
+  "format_version": 32,
   "source": "diff",
   "schema": "public",
   "table": "users",
