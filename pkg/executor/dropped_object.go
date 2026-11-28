@@ -193,7 +193,7 @@ func refuseEmptyPartitionedColumnDrop(ctx context.Context, tx pgx.Tx, st stateme
 // PostgreSQL versions. A drop with ONLY is refused too, as on any table
 // with tables below it.
 func refusePartitionedDrop(ctx context.Context, tx pgx.Tx, st statement.Statement, d schemadiff.DroppedObject, target string) error {
-	only, err := dropSaysOnly(st)
+	only, err := dropSaysOnly(st, &d)
 	if err != nil {
 		return err
 	}

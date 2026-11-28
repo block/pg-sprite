@@ -202,3 +202,23 @@ func TestRunDesiredKeepsARuleWhileRenamingIt(t *testing.T) {
 		t.Run(name, func(t *testing.T) { runWhileWritingForbidden(t, tc) })
 	}
 }
+
+// A file that narrows a CHECK under the same name on a partitioned parent
+// never lets in a row both rules reject: the old rule is dropped and the new
+// one added NOT VALID, to the parent and every partition, in one statement,
+// and only then are the existing rows validated.
+func TestRunDesiredKeepsACheckWhileChangingItOnAPartitionedParent(t *testing.T) {
+	runWhileWritingForbidden(t, columnDropCase{
+		fixture: `CREATE TABLE %[1]s.t (id int NOT NULL, amt int, CONSTRAINT t_pkey PRIMARY KEY (id),
+			CONSTRAINT t_amt_chk CHECK (amt >= 0 AND amt < 1000)) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.t_low PARTITION OF %[1]s.t FOR VALUES FROM (MINVALUE) TO (500000);
+		CREATE TABLE %[1]s.t_high PARTITION OF %[1]s.t FOR VALUES FROM (500000) TO (MAXVALUE);
+		INSERT INTO %[1]s.t SELECT g, g %% 500 FROM generate_series(1, 1000) g`,
+		desired: `CREATE TABLE t (id int NOT NULL, amt int, CONSTRAINT t_pkey PRIMARY KEY (id),
+			CONSTRAINT t_amt_chk CHECK (amt >= 0 AND amt < 500)) PARTITION BY RANGE (id);`,
+		forbidden: func(schema string, n int64) string {
+			return fmt.Sprintf(`INSERT INTO %s.t (id, amt) VALUES (%d, -1)`, schema, 100000+n)
+		},
+		rule: "t_amt_chk", wantDef: func(string) string { return "CHECK (((amt >= 0) AND (amt < 500)))" },
+	})
+}

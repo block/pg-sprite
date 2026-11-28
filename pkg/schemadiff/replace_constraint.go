@@ -50,10 +50,12 @@ type inPlaceReplacement struct {
 }
 
 // replacedInPlace names the constraints of a table diff that are replaced
-// in place, keyed by constraint name. A partitioned parent keeps the drop
-// and re-add, since the server refuses USING INDEX and NOT VALID foreign
-// keys there. So does a table whose diff changes its columns first (see
-// changesColumnsFirst). A diff that only drops columns replaces in place
+// in place, keyed by constraint name. On a partitioned parent only a CHECK
+// is: the server takes a NOT VALID CHECK there, adding it to every
+// partition, but refuses USING INDEX and NOT VALID foreign keys, so a
+// changed key or foreign key keeps the drop and re-add. A table whose diff
+// changes its columns first (see changesColumnsFirst) keeps it for every
+// constraint. A diff that only drops columns replaces in place
 // like any other: the column drops run after the replacements, so a dropped
 // column never takes an old constraint with it before the new one holds.
 //
@@ -67,13 +69,16 @@ type inPlaceReplacement struct {
 // swapped in, not built again. Any other index under that name is refused.
 func replacedInPlace(partitioned, columnsFirst bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]inPlaceReplacement, error) {
 	replaced := make(map[string]inPlaceReplacement)
-	if partitioned || columnsFirst {
+	if columnsFirst {
 		return replaced, nil
 	}
 	desiredCons := constraintsByName(desired.Constraints)
 	for _, con := range desired.Constraints {
 		had, ok := liveCons[con.Name]
 		if !ok || had.Def == con.Def || validatesInPlace(had, con) || !sameConstraintFamily(had, con) {
+			continue
+		}
+		if partitioned && !isCheckConstraint(con) {
 			continue
 		}
 		if !isKey(con) {
@@ -85,6 +90,9 @@ func replacedInPlace(partitioned, columnsFirst bool, schema string, liveCons map
 			return nil, err
 		}
 		replaced[con.Name] = r
+	}
+	if partitioned {
+		return replaced, nil
 	}
 	if had, con, ok := renamedPrimaryKey(liveCons, liveIdx, desired.Constraints, desiredCons); ok {
 		r, err := keyReplacement(schema, had, con, liveCons, liveIdx, desiredIdx, desiredCons)

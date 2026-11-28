@@ -85,7 +85,7 @@ func TestDiffReplacesADeferrableKeyInPlace(t *testing.T) {
 // A CHECK whose definition changes is swapped in one statement that adds the
 // new rule NOT VALID, so new writes are checked by one rule or the other at
 // every moment. The existing rows are scanned afterwards by a VALIDATE that
-// blocks no writes.
+// blocks no writes. A partitioned parent is no exception.
 func TestDiffReplacesACheckInPlace(t *testing.T) {
 	live := base()
 	live.Constraints = append(live.Constraints, Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"})
@@ -101,6 +101,15 @@ func TestDiffReplacesACheckInPlace(t *testing.T) {
 	assert.Equal(t, &DroppedObject{Kind: DroppedConstraint, Name: "events_name_check", Definition: "CHECK ((length((name)::text) > 0))"}, changes[0].Drops)
 	assert.False(t, changes[1].Destructive)
 	require.NotNil(t, changes[1].Validates, "the VALIDATE names the rule it settles")
+
+	live.PartitionKey = "RANGE (id)"
+	desired.PartitionKey = "RANGE (id)"
+	changes, err = Diff("public", live, desired)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check", ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 2)) NOT VALID`,
+		`ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`,
+	}, sqls(changes), "a partitioned parent takes a NOT VALID CHECK, so it swaps the rule the same way")
 }
 
 // A FOREIGN KEY whose definition changes under the same name is replaced in
