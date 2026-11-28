@@ -81,12 +81,14 @@ func (c *MigrateCmd) previewDesiredPlan(report plan.Report) (preview plan.Report
 // the run's plan admission accepts, under the dry run's pin and
 // acknowledgement, next meets the copy-and-swap route's refusal of a table
 // in a partition or inheritance tree, and then the partitioned key build's
-// catalog refusals, which the run reads at admission before anything
-// executes, and then a copy-and-swap run stopped on the table, which the
-// plan's first statement meets; the dry run prints any such refusal as the
-// run's result, and refuses an empty plan over a stopped run as the run
-// does. Every other plan is previewed by writeDesiredPreview, which reports
-// plan admission's refusals as the run would.
+// catalog refusals and the partitioned foreign key build's checks of the
+// referenced table and the partition tree, which the run reads at admission
+// before anything executes, and then a copy-and-swap run stopped on the
+// table, which the plan's first statement meets; the dry run prints any such
+// refusal or stop as the run's result, and refuses an empty plan over a
+// stopped run as the run does. Every other plan is previewed by
+// writeDesiredPreview, which reports plan admission's refusals as the run
+// would.
 func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out io.Writer, report plan.Report) error {
 	if err := migrate.CheckDesiredAllowDestructiveTable(c.AllowDestructive, report); err != nil {
 		return err
@@ -115,6 +117,10 @@ func (c *MigrateCmd) previewDesired(ctx context.Context, pool *pgxpool.Pool, out
 			if !admitted {
 				return c.finishDesired(out, refusal, nil)
 			}
+		}
+		refusal, admitted, err := migrate.AdmitPlanPartitionedForeignKeys(ctx, pool, report)
+		if !admitted {
+			return c.finishDesired(out, refusal, err)
 		}
 		// The admitted plan's first statement meets a copy-and-swap run
 		// stopped on the table, which refuses it unless it is the stopped
