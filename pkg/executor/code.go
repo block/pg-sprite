@@ -202,6 +202,46 @@ const (
 	// CodePartitionedKeyUnsettled: partitions kept appearing without the key
 	// constraint until the build ran out of passes; a rerun resumes.
 	CodePartitionedKeyUnsettled Code = "partitioned-key-unsettled"
+	// CodeAttachPartitionBoundUnprovable: the online attach cannot derive a CHECK
+	// the server accepts as proof of the bound, for the parent's partition
+	// key or for the bound's values; nothing was changed.
+	CodeAttachPartitionBoundUnprovable Code = "attach-partition-bound-unprovable"
+	// CodeAttachPartitionProofNameTaken: a name a CHECK of the online attach needs on
+	// the table or the DEFAULT partition is held by another constraint; the
+	// occupant is left for an operator.
+	CodeAttachPartitionProofNameTaken Code = "attach-partition-proof-name-taken"
+	// CodeAttachPartitionColumnMissing: the table lacks a column the parent declares
+	// NOT NULL, which the attach refuses.
+	CodeAttachPartitionColumnMissing Code = "attach-partition-column-missing"
+	// CodeAttachPartitionNotNullNotValid: a column of the table the parent declares
+	// NOT NULL has a NOT VALID not-null constraint (PostgreSQL 18), which
+	// setting it NOT NULL would validate under ACCESS EXCLUSIVE.
+	CodeAttachPartitionNotNullNotValid Code = "attach-partition-not-null-not-valid"
+	// CodeAttachPartitionColumnRowType: a nullable column of a composite type is
+	// declared NOT NULL by the parent, which the online attach cannot set
+	// without a scan.
+	CodeAttachPartitionColumnRowType Code = "attach-partition-column-row-type"
+	// CodeAttachPartitionIndexUnsupported: the parent has an index or key constraint
+	// the online attach cannot give the table, such as an EXCLUDE
+	// constraint's or a DEFERRABLE key's; nothing was built for it.
+	CodeAttachPartitionIndexUnsupported Code = "attach-partition-index-unsupported"
+	// CodeAttachPartitionForeignKeyUnsupported: the parent has a foreign key the
+	// online attach cannot give the table; nothing was added for it.
+	CodeAttachPartitionForeignKeyUnsupported Code = "attach-partition-foreign-key-unsupported"
+	// CodeAttachPartitionUnderAnotherBound: the table is already a partition of the
+	// parent under a bound other than the statement's; it is left as it is.
+	CodeAttachPartitionUnderAnotherBound Code = "attach-partition-under-another-bound"
+	// CodeAttachPartitionParentChanged: the parent's CHECKs or NOT NULL columns
+	// changed while the online attach gave them to the table; what it
+	// finished stays, and a rerun brings the table to the parent as it is.
+	CodeAttachPartitionParentChanged Code = "attach-partition-parent-changed"
+	// CodeAttachPartitionNotReady: the online attach found the table or the DEFAULT
+	// partition short of what its earlier steps give them (a proof missing
+	// or NOT VALID, an index the ATTACH would still build, a foreign key it
+	// would create), or the DEFAULT partition was another table, so the
+	// ATTACH would scan or build; nothing was attached, and a rerun gives
+	// them what is missing.
+	CodeAttachPartitionNotReady Code = "attach-partition-not-ready"
 	// CodeEmptySequence: the sequence had no steps to run.
 	CodeEmptySequence Code = "empty-sequence"
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
@@ -440,6 +480,16 @@ func Codes() []Code {
 		CodePartitionedKeyParentConflict,
 		CodePartitionedKeySubPartitioned,
 		CodePartitionedKeyUnsettled,
+		CodeAttachPartitionBoundUnprovable,
+		CodeAttachPartitionProofNameTaken,
+		CodeAttachPartitionColumnMissing,
+		CodeAttachPartitionNotNullNotValid,
+		CodeAttachPartitionColumnRowType,
+		CodeAttachPartitionIndexUnsupported,
+		CodeAttachPartitionForeignKeyUnsupported,
+		CodeAttachPartitionUnderAnotherBound,
+		CodeAttachPartitionParentChanged,
+		CodeAttachPartitionNotReady,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -525,6 +575,14 @@ func (c Code) Permanent() bool {
 		CodePartitionedKeyUnsupportedShape,
 		CodePartitionedKeyParentConflict,
 		CodePartitionedKeySubPartitioned,
+		CodeAttachPartitionBoundUnprovable,
+		CodeAttachPartitionProofNameTaken,
+		CodeAttachPartitionColumnMissing,
+		CodeAttachPartitionNotNullNotValid,
+		CodeAttachPartitionColumnRowType,
+		CodeAttachPartitionIndexUnsupported,
+		CodeAttachPartitionForeignKeyUnsupported,
+		CodeAttachPartitionUnderAnotherBound,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -704,6 +762,30 @@ func sentinelCode(err error) Code {
 		return CodePartitionedKeySubPartitioned
 	case errors.Is(err, ErrPartitionedKeyUnsettled):
 		return CodePartitionedKeyUnsettled
+	case errors.Is(err, errAttachBoundUnprovable):
+		return CodeAttachPartitionBoundUnprovable
+	case errors.Is(err, errAttachProofNameTaken):
+		return CodeAttachPartitionProofNameTaken
+	case errors.Is(err, errAttachProofViolation):
+		// Rows of the table outside the bound, or of the DEFAULT partition
+		// inside it: corrected in the data before a rerun.
+		return CodeDataFault
+	case errors.Is(err, errAttachColumnMissing):
+		return CodeAttachPartitionColumnMissing
+	case errors.Is(err, errAttachNotNullNotValid):
+		return CodeAttachPartitionNotNullNotValid
+	case errors.Is(err, errAttachColumnRowType):
+		return CodeAttachPartitionColumnRowType
+	case errors.Is(err, errAttachIndexUnsupported):
+		return CodeAttachPartitionIndexUnsupported
+	case errors.Is(err, errAttachForeignKeyUnsupported):
+		return CodeAttachPartitionForeignKeyUnsupported
+	case errors.Is(err, errAttachedUnderAnotherBound):
+		return CodeAttachPartitionUnderAnotherBound
+	case errors.Is(err, errAttachParentChanged):
+		return CodeAttachPartitionParentChanged
+	case attachNotReady(err):
+		return CodeAttachPartitionNotReady
 	case errors.Is(err, ErrEmptySequence):
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):
