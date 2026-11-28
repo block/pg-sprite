@@ -470,7 +470,11 @@ and the percent right after it.
    whose comparison has ended, so the pass has compared at least one chunk. A line is
    printed only while the pass runs, and the harness reads the row again as soon as one
    arrives rather than at its next poll, so the kill follows the line by milliseconds. The
-   poll also notes the first watermark it sees this run save in `copying`.
+   binary samples progress at most once a second, so this kill needs a pass that runs at
+   least that long after its first chunk compares; unlike the copy kill, it may not land
+   at a smoke size, and a pass that ends first fails the proof as not killed, quoting the
+   last verify line, with the hint to seed more rows (`LOAD_PROOF_ROWS`). The poll also
+   notes the first watermark it sees this run save in `copying`.
 3. The third run resumes from the `verifying` row and runs to its verdict, under the same
    poll, which sends nothing.
 

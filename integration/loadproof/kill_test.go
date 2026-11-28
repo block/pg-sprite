@@ -111,8 +111,10 @@ func readKillConfig(t *testing.T) config {
 }
 
 // The crash proof: the same identity-key retype as TestLoadProof, under
-// the same load, run through the same binary with the same flags. The
-// harness kills the binary with SIGKILL once mid-copy and once in the
+// the same load, run through the same binary with the same flags, except
+// that a run the harness kills prints progress in place of the verdict
+// JSON, which is how the harness sees the verify pass compare a chunk.
+// The harness kills the binary with SIGKILL once mid-copy and once in the
 // verification pass — no cleanup, no last save, its connections dropped
 // by the server — and after each kill runs the same command again, as an
 // operator does after a crash, once the server has let go of the dead
@@ -149,6 +151,9 @@ func TestLoadProofKill(t *testing.T) {
 	// autovacuum analyzes it.
 	_, err = pool.Exec(ctx, "ANALYZE "+table.Qualified())
 	require.NoError(t, err)
+	var reltuples float64
+	require.NoError(t, pool.QueryRow(ctx, `SELECT reltuples FROM pg_class WHERE oid = $1::regclass`, table.Qualified()).Scan(&reltuples))
+	require.Positive(t, reltuples, "ANALYZE left the catalog no row count for %s, so the verify pass would print no percent", table.Qualified())
 	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
 	require.NoError(t, err)
 
@@ -354,17 +359,18 @@ type killed struct {
 	stdout, stderr string
 }
 
-// runUntilKilled runs the binary with the proof's command line — for a run
-// it is to kill, progress on stderr in place of the verdict JSON
-// (killArgs) — and kills it with SIGKILL from a poll of the checkpoint row
-// and the progress lines once they show the run at point, noting the first
-// copying save the poll sees move off began, the watermark the row carried
-// before the run, and the phase of the first row it reads. It returns how
-// the run ended; its error is the harness's: a binary that could not start
-// or a poll that failed. A poll that fails kills the binary at once, so
-// the run's error is the poll's rather than a wait for the run budget.
-// When ctx ends — the operator interrupted the proof — the binary is
-// killed and waited for, and the test fails so its cleanups run.
+// runUntilKilled runs the binary with the proof's command line — for a
+// run it is to kill, progress on stderr in place of the verdict JSON
+// (killArgs) — and kills it with SIGKILL from a poll of the checkpoint
+// row and the progress lines once they show the run at point, noting the
+// first copying save the poll sees move off began, the watermark the row
+// carried before the run, and the phase of the first row it reads. It
+// returns how the run ended; its error is the harness's: a binary that
+// could not start or a poll that failed. A poll that fails kills the
+// binary at once, so the run's error is the poll's rather than a wait for
+// the run budget. When ctx ends — the operator interrupted the proof —
+// the binary is killed and waited for, and the test fails so its cleanups
+// run.
 func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, began copier.Watermark) (killed, error) {
 	t.Helper()
 	// The run left to finish prints the verdict JSON the proof judges.

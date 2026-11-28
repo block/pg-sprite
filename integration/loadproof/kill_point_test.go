@@ -209,6 +209,10 @@ var errNotKilled = errors.New("the run did not end where the harness killed it")
 // saying the pass had compared a chunk — so the kill landed inside the
 // phase. stdout is the binary's, quoted when it exited on its own.
 func checkKilledAt(point killPoint, cp checkpoint.Checkpoint, sent bool, verify verifySeen, signal syscall.Signal, code int, stdout string) error {
+	if signal != syscall.SIGKILL && point == killMidVerify {
+		return fmt.Errorf("%w: the binary exited with code %d before the kill in %s landed; %s; the last verify progress line was %q; stdout: %s",
+			errNotKilled, code, point.phase(), point.notReachedHint(), verify.Line, stdout)
+	}
 	if signal != syscall.SIGKILL {
 		return fmt.Errorf("%w: the binary exited with code %d before the kill in %s landed; %s; stdout: %s",
 			errNotKilled, code, point.phase(), point.notReachedHint(), stdout)

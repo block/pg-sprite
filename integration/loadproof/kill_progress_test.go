@@ -137,6 +137,20 @@ func (p *progressLines) String() string {
 	return p.all.String()
 }
 
+// A killed run's command line swaps the verdict JSON for progress lines
+// and keeps every other argument: without the swap the binary prints no
+// progress, and the verifying kill never fires.
+func TestKillArgsShowProgressInPlaceOfTheVerdict(t *testing.T) {
+	c := config{FreeDisk: "1GiB"}
+	table := testutil.WorkloadTable{Schema: "public", Table: "w"}
+	full := migrateArgs(c, table)
+	killed := killArgs(c, table)
+	assert.Contains(t, full, "--json")
+	assert.NotContains(t, killed, "--json")
+	assert.Contains(t, killed, progressFlag)
+	assert.Len(t, killed, len(full))
+}
+
 // The percent is read only off a line whose operation field is checksum,
 // from the field right after it.
 func TestVerifyPercentReadsTheChecksumLineOnly(t *testing.T) {
