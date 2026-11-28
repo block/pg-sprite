@@ -843,7 +843,7 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 // decoded from JSON, names both.
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
 	const (
-		changed      = "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table or in a plan that also drops or retypes a column, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
+		changed      = "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
 		undeclarable = "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"
 	)
 	for _, tt := range []struct {
@@ -853,7 +853,7 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	}{
 		{"a key changed under the same name", verdict.CauseChangedForeignKey, changed},
 		{"a key a desired file cannot declare", verdict.CauseUndeclarableForeignKey, undeclarable},
-		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also drops or retypes a column, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
+		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
 			"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

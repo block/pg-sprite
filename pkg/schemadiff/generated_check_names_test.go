@@ -72,6 +72,7 @@ func TestDiffMatchesNamedChecksByName(t *testing.T) {
 // One check changed alongside the reorder. The unchanged check keeps its
 // live name; the new one would be added under the name that check now
 // holds, so it moves on to the next free pass number instead of colliding.
+// The dropped check keeps rejecting writes until the new one is added.
 func TestDiffAddsANewUnnamedCheckUnderAFreeName(t *testing.T) {
 	live := checks(false,
 		Constraint{Name: "events_check1", Def: checkA},
@@ -84,11 +85,11 @@ func TestDiffAddsANewUnnamedCheckUnderAFreeName(t *testing.T) {
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
-		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_check1"`,
 		`ALTER TABLE "public"."events" ADD CONSTRAINT "events_check3" CHECK ((id < 1000000))`,
+		`ALTER TABLE "public"."events" DROP CONSTRAINT "events_check1"`,
 	}, sqls(changes))
-	assert.Equal(t, []ChangeKind{ChangeDropConstraint, ChangeAddConstraint}, []ChangeKind{changes[0].Kind, changes[1].Kind})
-	assert.True(t, changes[0].Destructive)
+	assert.Equal(t, []ChangeKind{ChangeAddConstraint, ChangeDropConstraint}, []ChangeKind{changes[0].Kind, changes[1].Kind})
+	assert.True(t, changes[1].Destructive)
 }
 
 // A live check whose name the file states belongs to that declaration, so

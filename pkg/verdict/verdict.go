@@ -508,7 +508,8 @@ const (
 	// CauseChangedForeignKey: under ReasonDeclarativeForeignKey, the plan
 	// drops a foreign key it changes under the same name before the new key
 	// is added, because the two cannot share one statement: the table is
-	// partitioned, or the plan also drops or retypes a column. Declaring the
+	// partitioned, or the plan also retypes a column or drops one beside an
+	// added column that may rewrite the table. Declaring the
 	// changed key under a new name adds it before the old one is dropped.
 	CauseChangedForeignKey Cause = "changed-foreign-key"
 	// CauseUndeclarableForeignKey: under ReasonDeclarativeForeignKey, the

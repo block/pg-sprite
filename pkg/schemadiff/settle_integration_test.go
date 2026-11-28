@@ -136,9 +136,10 @@ func TestDiffTakesAPulledDesiredFileAsTheSame(t *testing.T) {
 // A live text that does not apply to the desired table is not on the
 // chain. Here the live check reads column x, which the desired table drops,
 // so replaying it on the scratch table fails with an undefined column. That
-// failure is rolled back with its savepoint: the check and the dropped
-// column are still planned, and the partial index after it, which the file
-// holds in its pulled form, is still matched to the live one.
+// failure is rolled back with its savepoint: the check is still replaced,
+// in place so the table is never without it, the column is still dropped,
+// and the partial index after it, which the file holds in its pulled form,
+// is still matched to the live one.
 func TestDiffPlansALiveExpressionTheDesiredTableCannotHold(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -168,10 +169,10 @@ func TestDiffPlansALiveExpressionTheDesiredTableCannotHold(t *testing.T) {
 		sqls = append(sqls, c.SQL)
 	}
 	assert.Equal(t, []string{
-		fmt.Sprintf(`ALTER TABLE "%s"."t" DROP CONSTRAINT "ck"`, schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."t" DROP CONSTRAINT "ck", ADD CONSTRAINT "ck" CHECK ((((a IS DISTINCT FROM 1) OR (b IS DISTINCT FROM 2)) OR (c IS DISTINCT FROM 3))) NOT VALID`, schema),
+		fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "ck"`, schema),
 		fmt.Sprintf(`ALTER TABLE "%s"."t" DROP COLUMN "x"`, schema),
-		fmt.Sprintf(`ALTER TABLE "%s"."t" ADD CONSTRAINT "ck" CHECK ((((a IS DISTINCT FROM 1) OR (b IS DISTINCT FROM 2)) OR (c IS DISTINCT FROM 3)))`, schema),
-	}, sqls, "the check and the dropped column are planned; the index is not")
+	}, sqls, "the check is replaced in place before the column it read is dropped; the index is not planned")
 }
 
 // Matching a live text to the desired chain never hides a real change. A

@@ -125,6 +125,9 @@ type heldDrops struct {
 	// foreignKeys says the plan adds or validates a foreign key, which may
 	// be what replaces a foreign key it drops.
 	foreignKeys bool
+	// checks says the plan adds or changes a CHECK, which may be what
+	// replaces a CHECK it drops.
+	checks      bool
 	liveIdx     map[string]Index
 	liveCons    map[string]Constraint
 	desiredIdx  map[string]Index
@@ -133,8 +136,9 @@ type heldDrops struct {
 
 // holds reports whether ch is a drop that waits: a unique index or unique
 // constraint when the plan adds uniqueness, a foreign key when the plan adds
-// one, or a constraint the desired table adds again under another name. A drop whose name the desired table
-// reuses never waits, since it clears that name.
+// one, a CHECK when the plan adds or changes one, or a constraint the
+// desired table adds again under another name. A drop whose name the
+// desired table reuses never waits, since it clears that name.
 func (h heldDrops) holds(ch Change) bool {
 	if ch.Drops == nil || namedByDesired(ch.Drops.Name, h.desiredIdx, h.desiredCons) {
 		return false
@@ -148,7 +152,8 @@ func (h heldDrops) holds(ch Change) bool {
 		if !ok || con.Primary {
 			return false
 		}
-		return (h.uniqueness && isUniqueConstraint(con)) || (h.foreignKeys && con.ForeignKey) || h.renamedRules[con.Def]
+		return (h.uniqueness && isUniqueConstraint(con)) || (h.foreignKeys && con.ForeignKey) ||
+			(h.checks && isCheckConstraint(con)) || h.renamedRules[con.Def]
 	}
 	return false
 }
@@ -194,6 +199,23 @@ func addsUniqueness(desired Model, liveIdx map[string]Index, liveCons map[string
 	return false
 }
 
+// addsCheck reports whether the plan adds a CHECK under a name the live
+// table does not have or changes one it has. A CHECK the plan drops waits
+// for it, so a rule that moves to another name and definition keeps
+// rejecting writes while its replacement is added and validated, and a
+// replacement that fails validation leaves the old rule standing.
+func addsCheck(desired Model, liveCons map[string]Constraint) bool {
+	for _, con := range desired.Constraints {
+		if !isCheckConstraint(con) {
+			continue
+		}
+		if had, ok := liveCons[con.Name]; !ok || had.Def != con.Def {
+			return true
+		}
+	}
+	return false
+}
+
 // installsForeignKey reports whether the plan adds or validates a foreign
 // key: one under a name the live table does not have, one it changes, or one
 // an earlier run left NOT VALID. A foreign key the plan drops waits for it,
@@ -217,8 +239,8 @@ func installsForeignKey(desired Model, liveCons, desiredCons map[string]Constrai
 // plan drops before a foreign key it adds or validates is in place, which
 // leaves writes between the two statements checked against no key at all.
 // That is every dropped key in a plan that adds or validates a foreign key
-// and also drops or retypes a column, since such a plan keeps its drops
-// first, and, on a partitioned parent, a key the desired table declares under
+// and also changes its columns first (see changesColumnsFirst), since such a
+// plan keeps its drops first, and, on a partitioned parent, a key the desired table declares under
 // the same name with another definition: the server refuses a NOT VALID
 // foreign key there, so the key is dropped and added again in two statements.
 // Elsewhere a key changed under the same name is replaced by one statement
@@ -226,7 +248,7 @@ func installsForeignKey(desired Model, liveCons, desiredCons map[string]Constrai
 func ForeignKeysDroppedBeforeTheirReplacement(live, desired Model) map[string]bool {
 	liveCons := constraintsByName(live.Constraints)
 	desiredCons := constraintsByName(desired.Constraints)
-	dropsFirst := dropsOrRetypesColumn(live, columnsByName(desired.Columns)) && installsForeignKey(desired, liveCons, desiredCons)
+	dropsFirst := changesColumnsFirst(live, desired.Columns) && installsForeignKey(desired, liveCons, desiredCons)
 	partitioned := live.PartitionKey != ""
 	keys := map[string]bool{}
 	for _, con := range live.Constraints {

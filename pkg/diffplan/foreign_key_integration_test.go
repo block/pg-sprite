@@ -351,12 +351,10 @@ CREATE TABLE orders (
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
 }
 
-// A foreign key changed under the same name in a plan that also drops a
-// column cannot share one statement with its replacement, so the drop would
-// run before the new key is added and leave writes checked against no key in
-// between. The drop is shown for review and refused with the cause that
-// names that kind of drop, so the remedy offered is a new name for the key.
-func TestPlanChangedForeignKeyBesideAColumnDropIsRefused(t *testing.T) {
+// A foreign key changed under the same name in a plan that drops a column
+// is replaced in one statement before the column is dropped, so every write
+// is checked against a key throughout.
+func TestPlanChangedForeignKeyBesideAColumnDropIsReplacedFirst(t *testing.T) {
 	pool, schema := foreignKeyPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (
@@ -370,6 +368,39 @@ func TestPlanChangedForeignKeyBesideAColumnDropIsRefused(t *testing.T) {
 CREATE TABLE orders (
     id bigint PRIMARY KEY,
     user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE
+);`)
+
+	require.Len(t, report.Statements, 3)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %[1]s.orders DROP CONSTRAINT orders_user_id_fkey, ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) ON DELETE CASCADE NOT VALID", schema), report.Statements[0].SQL)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_user_id_fkey", schema), report.Statements[1].SQL)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders DROP legacy", schema), report.Statements[2].SQL)
+	for _, st := range report.Statements {
+		assert.Equal(t, router.DispositionExecute, st.Disposition, st.SQL)
+	}
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+}
+
+// A foreign key changed under the same name in a plan that drops a column
+// beside an added column that may rewrite the table cannot share one
+// statement with its replacement: the column drop runs first, so the key's
+// drop would leave writes checked against no key until the new one is added.
+// The drop is shown for review and refused with the cause that names that
+// kind of drop, so the remedy offered is a new name for the key.
+func TestPlanChangedForeignKeyBesideAColumnDropAndRewritingAddIsRefused(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id),
+			legacy text
+		)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    placed_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );`)
 
 	var drop *plan.Statement
