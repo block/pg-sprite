@@ -1,6 +1,7 @@
 package schemadiff_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -156,8 +157,9 @@ func TestDroppedColumnDoesNotListAPublication(t *testing.T) {
 	_, err = pool.Exec(t.Context(), publish)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, err := pool.Exec(t.Context(), `DROP PUBLICATION IF EXISTS `+pub)
-		assert.NoError(t, err)
+		if _, err := pool.Exec(context.WithoutCancel(t.Context()), `DROP PUBLICATION IF EXISTS `+pub); err != nil {
+			t.Logf("drop publication %s: %v", pub, err)
+		}
 	})
 
 	var edges int
