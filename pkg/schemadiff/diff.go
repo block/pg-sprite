@@ -777,7 +777,7 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	// the engine does not derive it, so a delta fails closed instead of
 	// diffing to silence.
 	if live.Collation != desired.Collation {
-		return nil, unsupported(CauseCollationChange, "%w: column %q collation changes from %s to %s, which rewrites the column and rebuilds its indexes; keep %s in the file, or add a new column with the collation you want",
+		return nil, unsupported(CauseCollationChange, "%w: column %q collation changes from %s to %s, which rewrites the column and rebuilds its indexes; keep %s in the file",
 			ErrUnsupportedChange, live.Name, describeCollation(live.Collation), describeCollation(desired.Collation), keepCollation(live.Collation))
 	}
 	if desired.IsGenerated() && live.Type != desired.Type {
@@ -793,7 +793,7 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	}
 	if live.Type != desired.Type {
 		changes = append(changes, Change{
-			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + desired.Type,
+			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + collatedType(desired),
 			Kind: ChangeAlterType,
 		})
 	}
@@ -852,6 +852,17 @@ func dropNotNullChanges(table string, live Model, desiredCols map[string]Column)
 // columnDef renders a canonical column definition for ADD COLUMN. All parts
 // are server-canonical: the type from format_type, expressions from
 // pg_get_expr.
+// collatedType is the column's type with its COLLATE clause, for an ALTER
+// COLUMN ... TYPE: without the clause, PostgreSQL gives the retyped column
+// the new type's default collation, which changes its sort order and the
+// indexes built on it.
+func collatedType(c Column) string {
+	if c.Collation == "" {
+		return c.Type
+	}
+	return c.Type + " COLLATE " + c.Collation
+}
+
 func columnDef(c Column) string {
 	def := pgx.Identifier{c.Name}.Sanitize() + " " + c.Type
 	switch {

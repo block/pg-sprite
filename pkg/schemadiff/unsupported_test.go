@@ -135,11 +135,11 @@ func TestDiffCollationChangeNamesTheWayForward(t *testing.T) {
 
 	_, err := Diff("public", collated(`pg_catalog."C"`), collated(""))
 	require.ErrorIs(t, err, ErrUnsupportedChange)
-	assert.Equal(t, `unsupported schema change: column "code" collation changes from pg_catalog."C" to the type's default, which rewrites the column and rebuilds its indexes; keep COLLATE pg_catalog."C" in the file, or add a new column with the collation you want`, err.Error())
+	assert.Equal(t, `unsupported schema change: column "code" collation changes from pg_catalog."C" to the type's default, which rewrites the column and rebuilds its indexes; keep COLLATE pg_catalog."C" in the file`, err.Error())
 
 	_, err = Diff("public", collated(""), collated(`pg_catalog."C"`))
 	require.ErrorIs(t, err, ErrUnsupportedChange)
-	assert.Equal(t, `unsupported schema change: column "code" collation changes from the type's default to pg_catalog."C", which rewrites the column and rebuilds its indexes; keep the column without a COLLATE clause in the file, or add a new column with the collation you want`, err.Error())
+	assert.Equal(t, `unsupported schema change: column "code" collation changes from the type's default to pg_catalog."C", which rewrites the column and rebuilds its indexes; keep the column without a COLLATE clause in the file`, err.Error())
 }
 
 func TestUnsupportedCausesAreDistinct(t *testing.T) {

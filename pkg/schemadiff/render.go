@@ -342,7 +342,7 @@ func renderColumnDef(table string, c Column) (string, error) {
 // PostgreSQL takes directly after the type.
 func collatedColumnDef(c Column) string {
 	collated := c
-	collated.Type = c.Type + " COLLATE " + c.Collation
+	collated.Type = collatedType(c)
 	return columnDef(collated)
 }
 
