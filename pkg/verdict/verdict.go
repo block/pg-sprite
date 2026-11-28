@@ -505,6 +505,18 @@ const (
 	// statement again, or discarded by a copy-and-swap run started over
 	// under the restart acknowledgement.
 	CauseCopyAndSwapRunStopped Cause = "copy-and-swap-run-stopped"
+	// CauseChangedForeignKey: under ReasonDeclarativeForeignKey, the plan
+	// drops a foreign key it changes under the same name before the new key
+	// is added, because the two cannot share one statement: the table is
+	// partitioned, or the plan also drops or retypes a column. Declaring the
+	// changed key under a new name adds it before the old one is dropped.
+	CauseChangedForeignKey Cause = "changed-foreign-key"
+	// CauseUndeclarableForeignKey: under ReasonDeclarativeForeignKey, the
+	// plan drops a live foreign key a desired file cannot declare, one into
+	// another schema or one from a table to itself through a standalone
+	// unique index, so the diff plans its drop whatever the file says. The
+	// imperative front door removes it.
+	CauseUndeclarableForeignKey Cause = "undeclarable-foreign-key"
 )
 
 // Verdict is the structured outcome of one migrate invocation.

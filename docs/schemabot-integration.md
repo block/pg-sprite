@@ -1179,7 +1179,7 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `ExecuteNativeWithProgress` carries no
   planned definition and runs an adoption, validation, or drop unchecked, and refuses an index
   rename under ST-7, since the statement names no table. `Adopts`, `Validates`,
-  `Replacement`, and `DropsHelper` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
+  `Replacement`, `DropsHelper`, and `RefusalCause` stay out of the plan's JSON, so an adapter that stores plans between plan and apply persists them itself
   or derives the plan again at apply time. `Drops` is in the JSON, covered by the plan's
   fingerprint, so a stored plan carries it.
 - **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
