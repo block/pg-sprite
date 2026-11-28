@@ -216,7 +216,7 @@ func TestClassifyTimeZoneSwapNeedsTheZoneAndTheIndexes(t *testing.T) {
 			facts := planner.Facts{
 				ColumnTypes:     map[string]string{"c": "timestamp without time zone"},
 				SessionTimeZone: tc.zone,
-				IndexedColumns:  tc.indexed,
+				KeyedColumns:    tc.indexed,
 			}
 			plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE timestamptz", facts)
 			require.NoError(t, err)
@@ -232,7 +232,7 @@ func TestClassifyTimeZoneSwapNeedsTheZoneAndTheIndexes(t *testing.T) {
 		facts := planner.Facts{
 			ColumnTypes:     map[string]string{"c": "timestamp without time zone"},
 			SessionTimeZone: "UTC",
-			IndexedColumns:  unindexed,
+			KeyedColumns:    unindexed,
 		}
 		plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE timestamptz USING c AT TIME ZONE 'UTC'", facts)
 		require.NoError(t, err)
@@ -251,7 +251,7 @@ func TestClassifyTimeZoneSwapUnderAPolicyExpandsAndContracts(t *testing.T) {
 	facts := planner.Facts{
 		ColumnTypes:           map[string]string{"c": "timestamp without time zone"},
 		SessionTimeZone:       "UTC",
-		IndexedColumns:        map[string]bool{},
+		KeyedColumns:          map[string]bool{},
 		DependentPolicies:     map[string][]string{"c": policies},
 		DropDependentPolicies: map[string][]string{"c": policies},
 		OwnDependentPolicies:  map[string][]string{"c": policies},

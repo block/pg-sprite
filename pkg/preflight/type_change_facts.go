@@ -19,12 +19,21 @@ func SessionTimeZone(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 	return zone, nil
 }
 
-// IndexedColumns names the columns of schema.table that an index reads, as
-// a key column or in an index expression or predicate, on the table or on
-// any of its partitions or inheritance children, since a type change on
-// the table changes the column there too. PostgreSQL records each of those
-// reads as a dependency of the index on the column.
-func IndexedColumns(ctx context.Context, pool *pgxpool.Pool, schema, table string) (map[string]bool, error) {
+// KeyedColumns names the columns of schema.table that an index or a
+// foreign key reads, on the table or on any of its partitions or
+// inheritance children, since a type change on the table changes the
+// column there too. A change between timestamp and timestamptz rebuilds
+// every index on the column and rechecks every foreign key the column is
+// part of under its exclusive lock, so a column in this set never relabels.
+//
+// Three catalog records cover the readers. A plain index depends on each
+// column it reads, as a key, in an expression, or in a predicate. An index
+// that backs a primary key, unique, or exclusion constraint depends on the
+// constraint instead, and the constraint depends on the columns, so the
+// index's own key columns are read from pg_index and the constraint's
+// columns, expressions and predicate from its dependencies. A foreign key
+// on the table depends on each of its referencing columns the same way.
+func KeyedColumns(ctx context.Context, pool *pgxpool.Pool, schema, table string) (map[string]bool, error) {
 	// INV: CO-9 — every function, operator, and relation is
 	// pg_catalog-qualified, and the table is found by name, not through
 	// the session search_path.
@@ -41,26 +50,42 @@ func IndexedColumns(ctx context.Context, pool *pgxpool.Pool, schema, table strin
 		)
 		SELECT DISTINCT a.attname
 		FROM tree t
-		JOIN pg_catalog.pg_depend d
-		  ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
-		 AND d.refobjid OPERATOR(pg_catalog.=) t.relid
-		 AND d.refobjsubid OPERATOR(pg_catalog.>) 0
-		 AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
-		JOIN pg_catalog.pg_index x ON x.indexrelid OPERATOR(pg_catalog.=) d.objid
 		JOIN pg_catalog.pg_attribute a
-		  ON a.attrelid OPERATOR(pg_catalog.=) d.refobjid
-		 AND a.attnum OPERATOR(pg_catalog.=) d.refobjsubid`
+		  ON a.attrelid OPERATOR(pg_catalog.=) t.relid
+		 AND a.attnum OPERATOR(pg_catalog.>) 0
+		 AND NOT a.attisdropped
+		WHERE EXISTS (
+			SELECT FROM pg_catalog.pg_index x
+			WHERE x.indrelid OPERATOR(pg_catalog.=) t.relid
+			  AND a.attnum OPERATOR(pg_catalog.=) ANY (x.indkey::pg_catalog.int2[])
+		) OR EXISTS (
+			SELECT FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_index x ON x.indexrelid OPERATOR(pg_catalog.=) d.objid
+			WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refobjid OPERATOR(pg_catalog.=) t.relid
+			  AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+		) OR EXISTS (
+			SELECT FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_constraint k ON k.oid OPERATOR(pg_catalog.=) d.objid
+			WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_constraint'::pg_catalog.regclass
+			  AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refobjid OPERATOR(pg_catalog.=) t.relid
+			  AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+			  AND k.conrelid OPERATOR(pg_catalog.=) t.relid
+			  AND k.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x', 'f']::"char"[])
+		)`
 	rows, err := pool.Query(ctx, q, schema, table)
 	if err != nil {
-		return nil, fmt.Errorf("read the indexed columns of %s: %w", qualifiedName(schema, table), err)
+		return nil, fmt.Errorf("read the keyed columns of %s: %w", qualifiedName(schema, table), err)
 	}
 	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return nil, fmt.Errorf("read the indexed columns of %s: %w", qualifiedName(schema, table), err)
+		return nil, fmt.Errorf("read the keyed columns of %s: %w", qualifiedName(schema, table), err)
 	}
-	indexed := make(map[string]bool, len(names))
+	keyed := make(map[string]bool, len(names))
 	for _, name := range names {
-		indexed[name] = true
+		keyed[name] = true
 	}
-	return indexed, nil
+	return keyed, nil
 }

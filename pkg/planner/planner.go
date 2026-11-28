@@ -610,11 +610,11 @@ type Facts struct {
 	// timestamp and timestamptz reads every stored value in. Empty when
 	// the fact was not read, as in an offline lint.
 	SessionTimeZone string
-	// IndexedColumns are the columns an index reads, on the table or on a
-	// table below it (preflight.IndexedColumns). Nil when the fact was not
-	// read, as in an offline lint; a column absent from a non-nil map has
-	// no index.
-	IndexedColumns map[string]bool
+	// KeyedColumns are the columns an index or a foreign key reads, on
+	// the table or on a table below it (preflight.KeyedColumns). Nil when
+	// the fact was not read, as in an offline lint; a column absent from a
+	// non-nil map has no index and no foreign key.
+	KeyedColumns map[string]bool
 }
 
 // TableStorage is what a live read says about a table's own storage.
@@ -1306,11 +1306,14 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 // other zone every value moves by the zone's offset and the table is
 // rewritten. Even in UTC every index on the column is rebuilt under the
 // change's exclusive lock, since the index's operator class changes with
-// the type, a precision below the maximum rounds every value, and an
-// array's elements are converted one by one. So the change is a relabel
-// only in UTC, for a scalar column no index reads, to an unspecified or
-// maximum precision. A zone or an index that was not read fails closed to
-// the rewrite route, marked unverified.
+// the type, and a foreign key the column is part of is checked again with
+// a scan, since its equality operator changes too. A precision below the
+// maximum rounds every value, and an array's elements are converted one by
+// one. So the change is a relabel only in UTC, for a scalar column no
+// index or foreign key reads, to an unspecified or maximum precision. A
+// zone or a key that was not read fails closed to the rewrite route,
+// marked unverified. The executor checks the zone again inside the
+// change's own transaction.
 func classifyTimeZoneSwap(op statement.Op, next typeShape, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing || next.array || !keepsTemporalPrecision(nil, next.mods) {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
@@ -1321,10 +1324,10 @@ func classifyTimeZoneSwap(op statement.Op, next typeShape, facts Facts) (Route, 
 	if !utcTimeZone(facts.SessionTimeZone) {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
-	if facts.IndexedColumns == nil {
+	if facts.KeyedColumns == nil {
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if facts.IndexedColumns[op.Column] {
+	if facts.KeyedColumns[op.Column] {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
 	return RouteNative, ReasonBinaryCoercible, false

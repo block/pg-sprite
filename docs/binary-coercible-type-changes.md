@@ -466,17 +466,23 @@ PostgreSQL can prove. It accepts exactly:
 - `varbit(n) → varbit(m)` with `m ≥ n`, and `varbit(n) → varbit`;
 - `cidr → inet`;
 - `timestamp ↔ timestamptz` when the session time zone is `UTC` or `Etc/UTC`, no index
-  reads the column, and the target precision is unspecified or 6.
+  or foreign key reads the column, and the target precision is unspecified or 6.
 
 Each rule leaves every stored value as it is, and the column's indexes are reused, not
 rebuilt. A lower temporal precision rounds every value, a shorter `varbit` truncates, and
 `inet → cidr` masks host bits, so each of those rewrites.
 
 The `timestamp ↔ timestamptz` rule reads two facts off the live database: the session
-`TimeZone` and the indexes on the column, across the table and its partitions. Even under
-UTC, an index on the column is rebuilt under `ACCESS EXCLUSIVE`, because its operator
-class changes with the type. A lower target precision rounds every value. A zone or an
-index that was not read, as in an offline lint, takes the rewrite route, marked unverified.
+`TimeZone`, and the indexes and foreign keys on the column, across the table and its
+partitions. That includes the index behind a primary key, unique, or exclusion constraint.
+Even under UTC, an index on the column is rebuilt under `ACCESS EXCLUSIVE`, because its
+operator class changes with the type. A foreign key on the column is checked again with a
+scan of the table, because its equality operator changes too. A lower target precision
+rounds every value. A zone or a key that was not read, as in an offline lint, takes the
+rewrite route, marked unverified.
+
+The executor reads the zone again inside the change's own transaction. If it is no longer
+UTC there, the change is refused with `time-zone-drift` and nothing runs: plan again.
 
 Under any other zone, each value moves by the zone's offset and the table is rewritten.
 Either way, the text plan names the zone: `converts each stored value in the session time
