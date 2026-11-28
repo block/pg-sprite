@@ -13,8 +13,9 @@ A `CREATE INDEX CONCURRENTLY` build that fails after registering its catalog ent
 the index in place, marked invalid. No query ever uses it. Once the build has marked it
 ready (`pg_index.indisready`), **every write still maintains it**, and a unique one rejects
 writes that duplicate its key. A build that failed before that point leaves an entry no
-write touches. `InvalidIndexError.Ready` says which one you have. It cannot heal on its own — it stays invalid until
-someone drops it or rebuilds it (`REINDEX INDEX CONCURRENTLY`). The same marking is also,
+write touches. `InvalidIndexError.Ready` says which one you have, or `ReadinessUnknown`
+when the refusal came before any statement read the entry. It cannot heal on its own — it
+stays invalid until someone drops it or rebuilds it (`REINDEX INDEX CONCURRENTLY`). The same marking is also,
 transiently, the normal state of a **healthy build still in progress**: an in-flight
 `CREATE INDEX CONCURRENTLY` is invalid until it finishes. That ambiguity is the entire
 reason this page exists — "invalid" alone does not tell you whether the entry is abandoned
@@ -172,7 +173,7 @@ the same way, and leaves a new invalid index behind. The error still reports wha
 failed build left; when that is its own leftover (`ErrBuildLeftInvalidIndex`), it occupies
 the name and a rerun is refused until it is gone. Rows already in the table fail the
 build's first scan, before the entry is ready, so that leftover rejects no writes (`Ready`
-is false). A duplicate written while the build ran is caught later, after the entry is
+is `ReadinessNotReady`). A duplicate written while the build ran is caught later, after the entry is
 ready, and then the leftover goes on rejecting writes that duplicate its key until it is
 dropped:
 

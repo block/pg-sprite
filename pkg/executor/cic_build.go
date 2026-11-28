@@ -430,7 +430,7 @@ func catalogVerdict(ctx context.Context, q querier, build concurrentIndexBuild, 
 		// this verdict does not understand, and indeterminate fails closed.
 		return fail(fmt.Errorf("inspect index %s.%s: entry row carries NULL identity facts: %w", target.schema, build.index, ErrAbandonmentUnproven))
 	}
-	existing := invalidIndex{oid: *indexOID, tableOID: *indexTable, table: *tableName, droppable: *droppable, ready: *indexReady,
+	existing := invalidIndex{oid: *indexOID, tableOID: *indexTable, table: *tableName, droppable: *droppable, ready: readinessOf(*indexReady),
 		builder: newBuilderFacts(builderPID, hiddenRows, tracking)}
 	owned := classifyInvalidIndex(existing, target, build.index, ErrBuildLeftInvalidIndex)
 	owned.Build = buildErr

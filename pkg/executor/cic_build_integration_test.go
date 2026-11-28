@@ -536,7 +536,7 @@ func TestBuildIndexConcurrentlyUniqueBuildOverDuplicatesIsDataFault(t *testing.T
 	assert.False(t, invalidErr.Recoverable(), "a rebuild would meet the same duplicate rows")
 	// Rows already in the table fail the build's first scan, before the
 	// server marks the entry ready, so no write maintains the leftover.
-	assert.False(t, invalidErr.Ready, "a build that fails its first scan leaves an entry no write maintains")
+	assert.Equal(t, executor.ReadinessNotReady, invalidErr.Ready, "a build that fails its first scan leaves an entry no write maintains")
 	assert.False(t, indexReady(t, pool, schema, "accounts_email_key"))
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr, "the server error stays in the chain")
@@ -544,6 +544,60 @@ func TestBuildIndexConcurrentlyUniqueBuildOverDuplicatesIsDataFault(t *testing.T
 	exists, valid := indexState(t, pool, schema, "accounts_email_key")
 	assert.True(t, exists, "the executor must not have dropped the leftover")
 	assert.False(t, valid, "the leftover must be invalid")
+}
+
+// A duplicate written while a unique build scans the table is not in the
+// scan's snapshot, so the build marks its entry ready and only the
+// validation that follows meets the duplicate. That leftover is reported
+// ready: every write maintains it, and it goes on rejecting writes that
+// duplicate its key until it is dropped. The index key is a function that
+// sleeps on every row, so the scan lasts long enough to write the
+// duplicate while it runs.
+func TestBuildIndexConcurrentlyDuplicateWrittenDuringBuildLeavesReadyLeftover(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %[1]s.slow_key(text) RETURNS text LANGUAGE plpgsql IMMUTABLE AS
+			$$BEGIN PERFORM pg_catalog.pg_sleep(0.02); RETURN $1; END$$;
+		CREATE TABLE %[1]s.accounts (id int PRIMARY KEY, email text NOT NULL);
+		INSERT INTO %[1]s.accounts SELECT n, 'user' || n || '@example.com' FROM generate_series(1, 100) n`, schema))
+	require.NoError(t, err)
+
+	built := make(chan error, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		_, buildErr := executor.BuildIndexConcurrently(t.Context(), pool, fmt.Sprintf(`
+			CREATE UNIQUE INDEX CONCURRENTLY accounts_email_key
+				ON %[1]s.accounts (%[1]s.slow_key(email))`, schema), buildBudget)
+		built <- buildErr
+	})
+	t.Cleanup(workers.Wait)
+
+	require.Eventually(t, func() bool {
+		var scanning bool
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_progress_create_index
+			                WHERE relid = ($1 || '.accounts')::regclass
+			                  AND phase LIKE 'building index%')`, schema).Scan(&scanning))
+		return scanning
+	}, 30*time.Second, 10*time.Millisecond, "the build must reach its table scan")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		`INSERT INTO %s.accounts VALUES (101, 'user1@example.com')`, schema))
+	require.NoError(t, err, "the entry is not ready yet, so the duplicate is written")
+
+	buildErr := <-built
+	assert.Equal(t, executor.CodeDataFault, executor.OutcomeCode(buildErr))
+	require.ErrorIs(t, buildErr, executor.ErrBuildLeftInvalidIndex)
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, buildErr, &invalidErr)
+	assert.Equal(t, "accounts_email_key", invalidErr.Index)
+	assert.Equal(t, executor.ReadinessReady, invalidErr.Ready, "validation fails after the entry is marked ready")
+	assert.True(t, indexReady(t, pool, schema, "accounts_email_key"))
+	exists, valid := indexState(t, pool, schema, "accounts_email_key")
+	assert.True(t, exists, "the executor must not have dropped the leftover")
+	assert.False(t, valid)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		`INSERT INTO %s.accounts VALUES (102, 'user2@example.com')`, schema))
+	require.Error(t, err, "the ready leftover rejects a write that duplicates its key")
 }
 
 // indexReady reads pg_index.indisready for schema.index.
@@ -575,7 +629,7 @@ func TestBuildIndexConcurrentlyReportsAReadyInvalidIndex(t *testing.T) {
 	var invalidErr *executor.InvalidIndexError
 	require.ErrorAs(t, err, &invalidErr)
 	assert.Equal(t, "idx_ready", invalidErr.Index)
-	assert.True(t, invalidErr.Ready, "the server maintains the entry on every write")
+	assert.Equal(t, executor.ReadinessReady, invalidErr.Ready, "the server maintains the entry on every write")
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %[1]s.t VALUES (1, 7); INSERT INTO %[1]s.t VALUES (2, 7)", schema))
 	require.Error(t, err, "the ready invalid unique index still rejects a duplicate key")
 }
