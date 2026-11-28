@@ -56,9 +56,9 @@ catalog change is instant; the running application code that still uses the old 
 what breaks, so `migrate` refuses it as `rewrite-required` unless forced). `replica-identity` is a refusal: the operation would drop what the table's
 replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
 drops a column a view reads, which PostgreSQL refuses, and `dependent-policy`,
-`dependent-trigger`, `dependent-generated-column`, and `partition-key` are the same refusal
-for a column a row-level security policy, a trigger, a generated column, or a partition key
-depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
+`dependent-trigger`, `dependent-publication`, `dependent-generated-column`, and
+`partition-key` are the same refusal for a column a row-level security policy, a trigger, a
+publication's column list or row filter, a generated column, or a partition key depends on. `not-null-without-default` is a refusal: the operation adds a `NOT NULL` column
 that nothing fills to a table with rows, which PostgreSQL refuses. `cascading-drop` is a
 refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
@@ -510,10 +510,11 @@ adding the column does not rewrite it.
 | runs as written | brief `ACCESS EXCLUSIVE` | none — column relabeled in place | 0 |
 
 PostgreSQL refuses the statement outright when a view, a row-level security policy, a
-trigger's `UPDATE OF` list or `WHEN` condition, a `STORED` generated column, or a partition
-key depends on the altered column. The planner reads those dependents from the catalog and
-refuses the change as [`dependent-view`](#dependent-view),
-[`dependent-policy`](#dependent-policy), [`dependent-trigger`](#dependent-trigger),
+trigger's `UPDATE OF` list or `WHEN` condition, a publication's column list or row filter, a
+`STORED` generated column, or a partition key depends on the altered column. The planner
+reads those dependents from the catalog and refuses the change as
+[`dependent-view`](#dependent-view), [`dependent-policy`](#dependent-policy),
+[`dependent-trigger`](#dependent-trigger), [`dependent-publication`](#dependent-publication),
 [`dependent-generated-column`](#dependent-generated-column), or
 [`partition-key`](#partition-key) instead; a rule is left to the server's own refusal. See
 [No rewrite is not no cost](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost).
@@ -765,6 +766,28 @@ parent is not named on its own: PostgreSQL drops the clones with the parent's tr
 and refuses to drop one alone. When a view or a policy also depends on the column,
 the decision's reason names those first, and `dependent_triggers` still names the
 triggers.
+
+### `dependent-publication`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a publication's column list
+or row filter for the table names. PostgreSQL refuses both while the publication names
+it (`cannot alter type of a column used by a publication WHERE clause`, which it says
+for a column list too, and `cannot drop column … because other objects depend on it`
+for a drop), so the statement could only fail. A publication that publishes the table
+without a column list or row filter does not count. The change reaches partitions and
+inheritance children the same way as for `dependent-view`. The plan names each
+publication as `"publication"` in `decisions[].dependent_publications`, and a refused
+run's verdict in `dependent_publications`. The manual path: before a drop, remove the
+column from the publications' column lists and row filters with `ALTER PUBLICATION ...
+SET TABLE`; around a type change, remove it, run the change, and add it back, knowing
+that until it is back subscribers do not receive the column, or receive rows the row
+filter would have held back. A rename is not refused, because a publication follows the
+column. When a view, a policy, or a trigger also depends on the column, the decision's
+reason names those first, and `dependent_publications` still names the publications.
 
 ### `dependent-generated-column`
 

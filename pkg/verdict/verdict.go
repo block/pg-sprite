@@ -688,6 +688,13 @@ type Verdict struct {
 	// carries, present whenever one blocks the change, whatever the
 	// refusal's reason, and empty otherwise.
 	DependentTriggers []string `json:"dependent_triggers,omitempty"`
+	// DependentPublications names the publications whose column list or
+	// row filter for the table names the column a refused statement
+	// retypes or drops, each rendered "publication" with its identifier
+	// quoted, sorted. The same list the plan report's refused decision
+	// carries, present whenever one blocks the change, whatever the
+	// refusal's reason, and empty otherwise.
+	DependentPublications []string `json:"dependent_publications,omitempty"`
 	// DependentGeneratedColumns names the generated columns whose
 	// expression reads the column a refused statement retypes or drops,
 	// each rendered "schema"."table"."column" with every identifier quoted,

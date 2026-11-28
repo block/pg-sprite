@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -600,4 +601,106 @@ func TestReadColumnDependentsNamesAClonedTriggerOnce(t *testing.T) {
 	}
 	_, err = tx.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN status TYPE varchar(64)", schema))
 	require.NoError(t, err, "with the named triggers gone the type change runs")
+}
+
+// ReadColumnDependents maps each column to the publications whose column
+// list or row filter for the table names it, each named once however many
+// tables of the tree it lists. A publication that publishes the table
+// whole records no dependency on a column and is not named. The server is
+// the oracle: it refuses to drop a named column, and drops it once the
+// publication stops naming it. Column lists and row filters exist from
+// PostgreSQL 15; before that no publication can name a column, and only
+// the whole-table publication is created.
+func TestReadColumnDependentsPublications(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	// Registered first, so it runs after the cleanups below that drop the
+	// publications and the schema.
+	t.Cleanup(pool.Close)
+
+	schema := testutil.NewSchema(t, pool)
+	listed, filtered, whole := schema+"_listed", schema+"_filtered", schema+"_whole"
+	t.Cleanup(func() {
+		for _, name := range []string{listed, filtered, whole} {
+			if _, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP PUBLICATION IF EXISTS "+name); err != nil {
+				t.Logf("drop publication %s: %v", name, err)
+			}
+		}
+	})
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id bigint PRIMARY KEY, email text, amt int, note text);
+		CREATE PUBLICATION %[2]s FOR TABLE %[1]s.orders`, schema, whole))
+	require.NoError(t, err)
+
+	var version int
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version))
+	const publicationFiltersSince = 150000
+	if version < publicationFiltersSince {
+		deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+		require.NoError(t, err)
+		assert.Empty(t, deps.Publications.Tree, "a whole-table publication names no column")
+		return
+	}
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.refunds (id bigint PRIMARY KEY, amt int);
+		CREATE PUBLICATION %[2]s FOR TABLE %[1]s.orders (id, email, amt), %[1]s.refunds (id, amt);
+		CREATE PUBLICATION %[3]s FOR TABLE %[1]s.orders WHERE (amt > 0)`, schema, listed, filtered))
+	require.NoError(t, err)
+
+	deps, err := preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	quoted := func(name string) string { return `"` + name + `"` }
+	named := map[string][]string{
+		"id":    {quoted(listed)},
+		"email": {quoted(listed)},
+		"amt":   {quoted(filtered), quoted(listed)},
+	}
+	assert.Equal(t, named, deps.Publications.Tree)
+	assert.Equal(t, named, deps.Publications.Drop)
+	assert.Equal(t, named, deps.Publications.Own)
+
+	// The server refuses to retype a column a column list alone names, the
+	// same refusal it gives for a row filter.
+	refusesRetype(t, pool, fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN email TYPE varchar(320)", schema))
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN note", schema))
+	require.NoError(t, err, "a column no publication names drops")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN amt", schema))
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "a named column does not drop")
+	assert.Equal(t, "2BP01", pgErr.Code)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		ALTER PUBLICATION %[2]s SET TABLE %[1]s.orders (id, email), %[1]s.refunds (id, amt);
+		ALTER PUBLICATION %[3]s SET TABLE %[1]s.orders`, schema, listed, filtered))
+	require.NoError(t, err)
+	deps, err = preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	assert.NotContains(t, deps.Publications.Tree, "amt")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.orders DROP COLUMN amt", schema))
+	require.NoError(t, err, "with no publication naming it the column drops")
+
+	// A column a row filter alone names is read as a dependent and the
+	// server refuses to retype it.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		ALTER TABLE %[1]s.orders ADD COLUMN region text;
+		ALTER PUBLICATION %[2]s SET TABLE %[1]s.orders WHERE (region <> '')`, schema, filtered))
+	require.NoError(t, err)
+	deps, err = preflight.ReadColumnDependents(t.Context(), pool, schema, "orders")
+	require.NoError(t, err)
+	assert.Equal(t, []string{quoted(filtered)}, deps.Publications.Tree["region"])
+	refusesRetype(t, pool, fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN region TYPE varchar(10)", schema))
+}
+
+// refusesRetype runs an ALTER COLUMN TYPE that a publication's column list
+// or row filter stands in the way of and asserts the server refuses it.
+func refusesRetype(t *testing.T, pool *pgxpool.Pool, sql string) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), sql)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the server refuses to retype a column a publication names")
+	assert.Equal(t, "0A000", pgErr.Code)
+	assert.Equal(t, "cannot alter type of a column used by a publication WHERE clause", pgErr.Message)
 }

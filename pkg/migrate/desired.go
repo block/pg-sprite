@@ -914,6 +914,11 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 			return r.WithCause(ps.RefusalCause), detail(foreignKeyDropRefusalDetail(ps.RefusalCause))
 		}
 		if err == nil {
+			if d, ok := firstRefusedDecision(ps.Decisions); ok {
+				if why, specific := refusedDecisionDetail(d); specific {
+					return r, detail("has no safe path: " + why)
+				}
+			}
 			return r, detail("has no safe path")
 		}
 		// Keep the statement's own reason where it has one; the class

@@ -522,6 +522,57 @@ func TestClassifyRefusesChangingAColumnATriggerNames(t *testing.T) {
 	}
 }
 
+// PostgreSQL refuses to retype or drop a column a publication's column
+// list or row filter names, so either change is refused with the
+// publications named and a manual path that suits the change. A rename,
+// which the publication follows, classifies as usual, and a column no
+// publication names is not held back.
+func TestClassifyRefusesChangingAColumnAPublicationNames(t *testing.T) {
+	publications := []string{`"orders_pub"`}
+	facts := planner.Facts{
+		ColumnTypes:           map[string]string{"status": "character varying(16)", "note": "text"},
+		DependentPublications: dependentsEverywhere("status", publications),
+	}
+	for _, sql := range []string{
+		"ALTER TABLE orders ALTER COLUMN status TYPE varchar(64)",
+		"ALTER TABLE orders ALTER COLUMN status TYPE int USING 0",
+		"ALTER TABLE orders DROP COLUMN status",
+		"ALTER TABLE ONLY orders DROP COLUMN status",
+	} {
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonDependentPublication, d.Reason, sql)
+		assert.Equal(t, publications, d.DependentPublications, sql)
+	}
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE orders RENAME COLUMN status TO state": planner.ReasonAppBreakingRename,
+		"ALTER TABLE orders ALTER COLUMN note TYPE text":   planner.ReasonBinaryCoercible,
+		"ALTER TABLE orders DROP COLUMN note":              planner.ReasonMetadataOnly,
+	} {
+		d := classifyWithFacts(t, sql, facts)
+		assert.Equal(t, reason, d.Reason, sql)
+		assert.Empty(t, d.DependentPublications, sql)
+	}
+	assert.Equal(t, "remove the column from those publications' column lists and row filters with ALTER PUBLICATION ... SET TABLE, then re-plan the drop",
+		planner.PublicationHelp(statement.OpDropColumn))
+	assert.Contains(t, planner.PublicationHelp(statement.OpAlterColumnType), "run the change, then add it back")
+}
+
+// A trigger and a publication both block a drop: the reason names the
+// trigger, the kind checked first, and the publication is still named so
+// the manual path clears both.
+func TestClassifyNamesAPublicationBesideATrigger(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes:           map[string]string{"status": "character varying(16)"},
+		DependentTriggers:     dependentsEverywhere("status", []string{`"audit_status" ON "public"."orders"`}),
+		DependentPublications: dependentsEverywhere("status", []string{`"orders_pub"`}),
+	}
+	d := classifyWithFacts(t, "ALTER TABLE orders DROP COLUMN status", facts)
+	assert.Equal(t, planner.ReasonDependentTrigger, d.Reason)
+	assert.Equal(t, []string{`"orders_pub"`}, d.DependentPublications)
+	assert.Equal(t, `publication "orders_pub"`, d.OtherDependents())
+}
+
 // PostgreSQL refuses to retype or drop a column a generated column reads,
 // so either change is refused with the generated columns named.
 func TestClassifyRefusesChangingAColumnAGeneratedColumnReads(t *testing.T) {
@@ -1593,6 +1644,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonDependentView,
 		planner.ReasonDependentPolicy,
 		planner.ReasonDependentTrigger,
+		planner.ReasonDependentPublication,
 		planner.ReasonDependentGeneratedColumn,
 		planner.ReasonPartitionKey,
 		planner.ReasonNotNullWithoutDefault,

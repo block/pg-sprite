@@ -81,6 +81,7 @@ func writeDependentHelp(w *stickyWriter, d planner.Decision) {
 	}
 	help(planner.ReasonDependentPolicy, "policy", "policies", d.DependentPolicies, d.DependentFix.Help("policies"))
 	help(planner.ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers, d.DependentFix.Help("triggers"))
+	help(planner.ReasonDependentPublication, "publication", "publications", d.DependentPublications, planner.PublicationHelp(d.Kind))
 	help(planner.ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns, planner.GeneratedColumnHelp)
 }
 
@@ -396,6 +397,8 @@ func impactText(r planner.Reason) string {
 		return "changes a column a row-level security policy reads; PostgreSQL refuses this until the policy is dropped"
 	case planner.ReasonDependentTrigger:
 		return "changes a column a trigger's UPDATE OF list or WHEN condition names; PostgreSQL refuses this until the trigger is dropped"
+	case planner.ReasonDependentPublication:
+		return "changes a column a publication's column list or row filter names; PostgreSQL refuses this until the publication stops naming it"
 	case planner.ReasonDependentGeneratedColumn:
 		return "changes a column a generated column reads; PostgreSQL refuses this until the generated column is dropped, except that PostgreSQL 14 drops the generated column along with a dropped column"
 	case planner.ReasonPartitionKey:
@@ -485,6 +488,10 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 	if d.Reason == planner.ReasonDependentTrigger {
 		return d.Operation + " changes a column named by " + planner.DependentsPhrase("trigger", "triggers", d.DependentTriggers) +
 			", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it"
+	}
+	if d.Reason == planner.ReasonDependentPublication {
+		return d.Operation + " changes a column named by " + planner.DependentsPhrase("publication", "publications", d.DependentPublications) +
+			", and PostgreSQL refuses to retype or drop a column while a publication's column list or row filter names it"
 	}
 	if d.Reason == planner.ReasonDependentGeneratedColumn {
 		return d.Operation + " changes a column read by " +

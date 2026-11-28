@@ -141,6 +141,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			facts.ViewReaders = deps.ViewReaders
 			facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 			facts.DependentTriggers = planner.ColumnDependents(deps.Triggers)
+			facts.DependentPublications = planner.ColumnDependents(deps.Publications)
 			facts.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
 			facts.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
 			facts.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)

@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -650,6 +651,18 @@ func TestDryRunTextHiddenDependentRefusalsNameTheObjects(t *testing.T) {
 			refusal: `ALTER COLUMN status TYPE varchar(64) changes a column named by trigger "audit_status" ON "app"."orders", and PostgreSQL refuses to retype or drop a column while a trigger's UPDATE OF list or WHEN condition names it`,
 			help:    `help: the change is also blocked by generated column "app"."orders"."status_upper": ` + planner.GeneratedColumnHelp,
 			anchor:  "#dependent-trigger",
+		},
+		{
+			name: "publication",
+			decision: planner.Decision{
+				Kind:                  statement.OpDropColumn,
+				Operation:             "DROP COLUMN amount",
+				Reason:                planner.ReasonDependentPublication,
+				DependentPublications: []string{`"orders_pub"`},
+			},
+			refusal: `DROP COLUMN amount changes a column named by publication "orders_pub", and PostgreSQL refuses to retype or drop a column while a publication's column list or row filter names it`,
+			help:    "help: " + planner.PublicationHelp(statement.OpDropColumn),
+			anchor:  "#dependent-publication",
 		},
 		{
 			name: "generated column",
