@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
@@ -79,10 +80,10 @@ func firstSaveIn(saves []saveInfo, phase checkpoint.Phase) (saveInfo, bool) {
 
 // relationOID is the OID of schema.name, an error when no relation has
 // that name.
-func relationOID(ctx context.Context, h host, schema, name string) (uint32, error) {
+func relationOID(ctx context.Context, pool *pgxpool.Pool, schema, name string) (uint32, error) {
 	var oid *uint32
 	qualified := pgx.Identifier{schema, name}.Sanitize()
-	if err := h.pool.QueryRow(ctx, `SELECT to_regclass($1)::oid`, qualified).Scan(&oid); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT to_regclass($1)::oid`, qualified).Scan(&oid); err != nil {
 		return 0, fmt.Errorf("read the OID of %s: %w", qualified, err)
 	}
 	if oid == nil {
