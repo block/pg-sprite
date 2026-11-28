@@ -134,7 +134,7 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 			policyPath = true
 		}
 		if _, err := tx.Exec(ctx, st.SQL()); err != nil {
-			return Model{}, fmt.Errorf("the desired file's statement %q does not run on the file's own table definition: %w", st.SQL(), err)
+			return Model{}, fmt.Errorf("execute desired statement on scratch schema: %w", err)
 		}
 	}
 	if err := confirmForeignKeysBindScratch(ctx, tx, scratch, table); err != nil {

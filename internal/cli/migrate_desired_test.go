@@ -161,15 +161,3 @@ func TestDesiredTextSummaryShowsAWholeRunRefusalsClass(t *testing.T) {
 	require.NoError(t, writeDesiredSummary(&out, palette{}, executed))
 	assert.Equal(t, "executed-natively: converged\n", out.String())
 }
-
-// A row security run with nothing to change has no statement to name, so
-// its verdict prints no statement line, in the CLI's rendering and in the
-// plain one alike.
-func TestRowSecurityVerdictAlreadyConvergedPrintsNoStatementLine(t *testing.T) {
-	v := rowSecurityVerdict("public.documents", executor.RowSecurityReport{}, nil)
-	var text strings.Builder
-	require.NoError(t, writeVerdictText(&text, palette{}, v))
-	assert.NotContains(t, text.String(), "statement:")
-	assert.Contains(t, text.String(), "already converged: row security matches; nothing to run")
-	assert.NotContains(t, v.String(), "statement:")
-}

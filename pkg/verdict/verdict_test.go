@@ -12,6 +12,15 @@ import (
 	"github.com/block/pg-sprite/pkg/refusal"
 )
 
+// A verdict with no statement prints no statement line. One with a
+// statement names it.
+func TestStringPrintsAStatementLineOnlyForAStatement(t *testing.T) {
+	v := Verdict{Outcome: OutcomeExecuted, Table: "public.documents"}
+	assert.Equal(t, "executed natively\n  table:     public.documents", v.String())
+	v.Statement = "ALTER TABLE documents ENABLE ROW LEVEL SECURITY"
+	assert.Equal(t, "executed natively\n  table:     public.documents\n  statement: ALTER TABLE documents ENABLE ROW LEVEL SECURITY", v.String())
+}
+
 func TestNewRefusalEnforcesRF7(t *testing.T) {
 	r, err := NewRefusal(ClassNoOnlineSafetyProblem, ReasonUnsupportedStatement, OwnerDataChangeRunner)
 	require.NoError(t, err)

@@ -71,7 +71,7 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error, create str
 	if review == nil {
 		return c.writeVerdictRefusal(out, v, cause)
 	}
-	v.Detail = rowSecurityNextStep(review.Review)
+	v.Detail = rowSecurityNextStep(review)
 	switch {
 	case c.JSON:
 		report := struct {
@@ -108,23 +108,27 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error, create str
 }
 
 // rowSecurityNextStep says how to apply a file whose row security differs
-// from the live table's. diff only previews such a file: migrate --desired
-// changes an existing table's row security in one transaction, and only when
-// the file's table definition matches the live one, so a file that also
-// changes the table is applied in two runs.
-func rowSecurityNextStep(review schemadiff.RowSecurityReview) string {
+// from the live table's. Neither diff nor migrate --dry-run plans row
+// security: migrate --desired works the change out again under its own lock
+// and applies it in one transaction, only for a table shape it supports, and
+// only when the file's table definition matches the live one, so a file that
+// also changes the table is applied in two runs. The text reads the same in
+// text and JSON output, so it points at nothing printed beside it.
+func rowSecurityNextStep(review *diffplan.RowSecurityReviewRequired) string {
 	switch {
-	case review.TableChanged:
+	case review.ShapeRefusal != nil:
+		return "migrate --desired does not change row security on this table: " + review.ShapeRefusal.Error()
+	case review.Review.TableChanged:
 		return "the file changes both the table and its row security, which are applied in separate runs: " +
 			"first run migrate --desired with the table definition as it is live and the new row security, " +
 			"then change the table definition in a second run"
-	case !review.TableComparisonComplete:
-		return "the table definition does not compare with the live table (see above), so apply the row security on its own: " +
+	case !review.Review.TableComparisonComplete:
+		return "the table definition does not compare with the live table, so apply the row security on its own: " +
 			"run migrate --desired with the table definition as it is live and the new row security, " +
 			"then plan the table change separately"
 	default:
-		return "diff does not plan row security; migrate --desired changes it in one transaction, " +
-			"checked against the review above"
+		return "row security is not planned ahead: migrate --desired works out the change again under its own lock " +
+			"and applies what differs then in one transaction, so review this output right before you run it"
 	}
 }
 

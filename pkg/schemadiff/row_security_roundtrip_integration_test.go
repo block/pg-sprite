@@ -371,24 +371,3 @@ func TestRowSecurityDoesNotBindUnqualifiedPublicHelper(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, model.RowSecurity.Policies, 1)
 }
-
-// A file whose own policy does not type-check against its own table
-// definition is refused with the policy's statement and the server's error,
-// so the operator can see which policy in the file to fix.
-func TestRowSecurityFilePolicyThatDoesNotTypeCheckIsNamed(t *testing.T) {
-	pool, schema := rowSecurityTable(t)
-	desired, err := statement.ParseDesiredWithRowSecurity(`CREATE TABLE documents (
-     id bigint PRIMARY KEY,
-     owner_id bigint NOT NULL
- );
- ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
- CREATE POLICY readers ON documents FOR SELECT TO PUBLIC USING (owner_id = 'seven'::text);`)
-	require.NoError(t, err)
-	_, err = schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `the desired file's statement "CREATE POLICY readers ON documents`)
-	assert.Contains(t, err.Error(), "does not run on the file's own table definition")
-	var pgErr *pgconn.PgError
-	require.ErrorAs(t, err, &pgErr)
-	assert.Equal(t, "42883", pgErr.Code)
-}

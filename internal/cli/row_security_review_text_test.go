@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/stretchr/testify/assert"
@@ -65,7 +66,7 @@ func TestSecurityReviewDefaultTextIncludesReview(t *testing.T) {
 	require.ErrorIs(t, cmd.writeRowSecurityRefusal(&out, review, "CREATE TABLE documents (id bigint)"), verdict.ErrRefused)
 	assert.Contains(t, out.String(), "public.documents — row security review")
 	assert.Contains(t, out.String(), "enabled: true → false [may-widen]")
-	assert.Contains(t, out.String(), "migrate --desired changes it in one transaction")
+	assert.Contains(t, out.String(), "migrate --desired works out the change again under its own lock")
 }
 
 func TestSecurityReviewJSONIsIndented(t *testing.T) {
@@ -84,19 +85,29 @@ func TestSecurityReviewJSONIsIndented(t *testing.T) {
 }
 
 // A refused row security change names the file's CREATE TABLE and says how
-// to apply the file: migrate --desired for the row security on its own, and
-// two runs when the file also changes the table.
+// to apply the file: migrate --desired for the row security on its own, two
+// runs when the file also changes the table, and neither for a table shape
+// migrate --desired refuses. The detail reads the same in text, JSON, and
+// SQL output, so it never points at output printed beside it.
 func TestRowSecurityRefusalSaysHowToApplyTheFile(t *testing.T) {
 	before, after := true, false
 	setting := []schemadiff.SecurityChange{{Kind: schemadiff.SecurityEnabled, BeforeSetting: &before, AfterSetting: &after, Impact: schemadiff.AccessMayWiden}}
 	const create = "CREATE TABLE documents (id bigint)"
 	for name, tc := range map[string]struct {
 		review schemadiff.RowSecurityReview
+		shape  error
 		detail string
 	}{
+		"a table shape migrate --desired does not change": {
+			review: schemadiff.RowSecurityReview{Version: 1, TableComparisonComplete: true, Changes: setting},
+			shape:  executor.RowSecurityTableShapeRefusal(schemadiff.Model{Table: "documents", PartitionKey: "RANGE (id)"}),
+			detail: "migrate --desired does not change row security on this table: " +
+				"row security target: partitioned parent (PARTITION BY RANGE (id)): " + schemadiff.ErrUnrenderablePartitionedRowSecurity.Error(),
+		},
 		"row security alone": {
 			review: schemadiff.RowSecurityReview{Version: 1, TableComparisonComplete: true, Changes: setting},
-			detail: "diff does not plan row security; migrate --desired changes it in one transaction, checked against the review above",
+			detail: "row security is not planned ahead: migrate --desired works out the change again under its own lock " +
+				"and applies what differs then in one transaction, so review this output right before you run it",
 		},
 		"row security and the table": {
 			review: schemadiff.RowSecurityReview{Version: 1, TableComparisonComplete: true, TableChanged: true, Changes: setting},
@@ -106,13 +117,13 @@ func TestRowSecurityRefusalSaysHowToApplyTheFile(t *testing.T) {
 		},
 		"a table that does not compare": {
 			review: schemadiff.RowSecurityReview{Version: 1, TableComparisonError: "unsupported schema change", Changes: setting},
-			detail: "the table definition does not compare with the live table (see above), so apply the row security on its own: " +
+			detail: "the table definition does not compare with the live table, so apply the row security on its own: " +
 				"run migrate --desired with the table definition as it is live and the new row security, " +
 				"then plan the table change separately",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			review := &diffplan.RowSecurityReviewRequired{Schema: "public", Table: "documents", Review: tc.review}
+			review := &diffplan.RowSecurityReviewRequired{Schema: "public", Table: "documents", Review: tc.review, ShapeRefusal: tc.shape}
 
 			var text strings.Builder
 			require.ErrorIs(t, (&DiffCmd{}).writeRowSecurityRefusal(&text, review, create), verdict.ErrRefused)
