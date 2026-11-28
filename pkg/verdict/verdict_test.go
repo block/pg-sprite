@@ -378,6 +378,7 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(CauseParentIndexAdoption), string(CauseParentNotValidForeignKey),
 		string(CauseParentConcurrentIndexDrop),
 		string(CauseCopyAndSwapNotEnabled), string(CauseCopyAndSwapRunStopped),
+		string(CauseChangedForeignKey), string(CauseUndeclarableForeignKey),
 	}
 	for _, r := range Reasons() {
 		toks = append(toks, string(r))

@@ -15,7 +15,7 @@ import (
 // is all-or-nothing, so one refused statement keeps the whole plan from
 // running.
 func RefuseUndeclarableForeignKeyDrops(report *Report, undeclarable map[string]bool) {
-	refuseForeignKeyDrops(report, undeclarable)
+	refuseForeignKeyDrops(report, undeclarable, UndeclarableForeignKeyRefusal())
 }
 
 // RefuseChangedForeignKeyDrops marks as refused every statement that drops
@@ -26,17 +26,18 @@ func RefuseUndeclarableForeignKeyDrops(report *Report, undeclarable map[string]b
 // against no key, so rows the new key forbids could get in. Declaring the
 // changed key under a new name adds it before the old one is dropped.
 func RefuseChangedForeignKeyDrops(report *Report, changed map[string]bool) {
-	refuseForeignKeyDrops(report, changed)
+	refuseForeignKeyDrops(report, changed, ChangedForeignKeyRefusal())
 }
 
 // refuseForeignKeyDrops refuses each statement that drops one of the named
-// foreign keys with declarative-foreign-key.
-func refuseForeignKeyDrops(report *Report, keys map[string]bool) {
+// foreign keys with refusal, a declarative-foreign-key refusal whose cause
+// says which kind of drop it is.
+func refuseForeignKeyDrops(report *Report, keys map[string]bool, refusal verdict.Refusal) {
 	refuseStatements(report, func(i int) (verdict.Refusal, executor.CreateShapeCause) {
 		st := report.Statements[i]
 		if st.Kind != schemadiff.ChangeDropForeignKey || st.Drops == nil || !keys[st.Drops.Name] {
 			return verdict.Refusal{}, ""
 		}
-		return ForeignKeyChangeRefusal(), ""
+		return refusal, ""
 	})
 }

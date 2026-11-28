@@ -73,11 +73,19 @@ autocommit-each-step has two shapes in the executor:
   locks for a while. A step that queued behind one would hold every later
   query of the table behind itself, so it waits outside the lock queue
   instead, for up to 30 s (`RetryPolicy.HolderWait`), and reports the
-  holder in progress as `lock_holder_wait`. Then it requests its lock as
-  usual, whether or not the holder has finished, so the wait can delay a
-  step but never fails one. It never ends another session. A step that
+  holder in progress as `lock_holder_wait`. Once the holder finishes, it
+  requests its lock as usual. A holder still there when the wait runs out
+  is not traffic a lock budget absorbs, so the step ends before it requests
+  its lock, with an `executor.LingeringHolderError` naming the holder's
+  backend and table, plus its state (such as `idle in transaction`) and
+  transaction age when the role can see that session. No reader or writer
+  queues behind it. The step
+  runs again unchanged once that transaction ends. It never ends another
+  session. A step that
   takes only `SHARE UPDATE EXCLUSIVE` conflicts with no reader or writer,
-  so it does not wait.
+  so it does not wait. The `CHECK` an online `ATTACH PARTITION` adds and
+  drops as its proof waits the same way, but when the wait runs out it
+  still requests its lock under its lock budget.
 - **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is
   true autocommit on a dedicated budgeted session: it refuses to run inside
   any transaction block and internally manages multiple transactions of its
@@ -369,7 +377,7 @@ concurrently is.
 
 | Code | Permanent | Meaning |
 | --- | --- | --- |
-| `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`; nothing executed |
+| `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`, or a transaction held the table for the whole wait outside the lock queue, so the lock was never requested; nothing executed |
 | `budget-statement-exceeded` | no | The statement ran past `statement_timeout` and was cancelled |
 | `row-security-plan-changed` | yes | Preview again and review the new ordered SQL before retrying; no target RLS statements ran |
 | `row-security-refused` | yes | Change the declaration, unsupported target shape, or privileges before retrying |
@@ -407,6 +415,9 @@ concurrently is.
 | `partition-detach-pending` | yes | The partition tree holds a partition whose `DETACH PARTITION ... CONCURRENTLY` did not finish. The server leaves that partition out when it attaches an index, so the parent's index could never become valid, and out of a parent's column drop, so it would keep its copy of the column, and a table detaches one partition at a time; refused before anything is created when a partitioned index build or a partitioned key build first reads the tree, before a reviewed column drop runs, and before a concurrent detach of another of the table's partitions runs. Finish the detach with `ALTER TABLE ... DETACH PARTITION ... FINALIZE`, then rerun |
 | `detach-default-partition` | yes | A `DETACH PARTITION ... CONCURRENTLY` step's table has a `DEFAULT` partition, and PostgreSQL refuses a concurrent detach there in every supported version; refused before any step runs, as an `unsupported-statement`, `by-design` refusal, in the dry run too. The only detach the table takes is the plain one, which holds `ACCESS EXCLUSIVE` on the table and the partition while it runs: submit it under the force and destructive acknowledgements, or detach the `DEFAULT` partition first |
 | `partition-detach-interrupted` | no | A `DETACH PARTITION ... CONCURRENTLY` step stopped after its first transaction committed: a budget, a cancellation, or a server error ended its wait for older transactions or its second transaction. The partition is detach-pending: queries of the table no longer read it and no row is routed into its range, but it stays in `pg_inherits` (`inhdetachpending`). Running the same statement again finishes it with `DETACH PARTITION ... FINALIZE`, as does running that statement directly; the finish waits for older transactions under the lock budget too, so raise the lock budget while a transaction older than it stays open |
+| `attach-partition-unsupported-shape` | yes | The statement handed to the online attach (`executor.AttachPartitionOnline`) is not one `ALTER TABLE schema.parent ATTACH PARTITION table FOR VALUES ...`: another statement, an unqualified parent, or a `DEFAULT` bound, which needs a proof against every other partition's bound. Nothing is executed; change the statement |
+| `attach-partition-table` | yes | The table the online attach attaches does not exist, is not a plain table, is already a partition or inheritance child of another table, or lacks or adds a column, or differs in a column's type or collation, against the parent; or the parent's `DEFAULT` partition is not a plain table. Read before anything is added; change the table, then rerun |
+| `attach-partition-default-window` | yes | The parent has a `DEFAULT` partition and the caller did not set `AttachPartitionOptions.AcceptDefaultWriteWindow`. The flow's proof on the `DEFAULT` partition refuses the writes the parent routes there inside the new bound from when it is added until the attach commits; nothing is added, and a proof an earlier run left there is dropped. Accept the window, or detach the `DEFAULT` partition first |
 | `partitioned-index-tablespace` | yes | The partitioned index statement has a `TABLESPACE` clause. A partition's index is built from the definition the server prints for the parent's index, which never names a tablespace, so the clause would place the parent's index and leave every partition's index in the default tablespace; refused before anything is created |
 | `partitioned-index-unsettled` | no | Partitions kept appearing without an index until the build ran out of passes; everything finished stays attached and a rerun resumes |
 | `partitioned-key-name-taken` | yes | The name a partitioned table's `PRIMARY KEY` or `UNIQUE` constraint needs on a partition, for its index and its constraint, is held by something that is not the requested key: another kind of relation, an index of another definition or on another table, an index already attached or backing a constraint, or another constraint. The occupant is left for an operator |

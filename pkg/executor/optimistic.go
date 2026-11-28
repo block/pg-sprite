@@ -109,9 +109,11 @@ type RetryPolicy struct {
 	// that has held a lock reads or writes take, on a table the step
 	// locks, keeps holding it. An attempt that queued behind such a
 	// transaction would hold back every later reader and writer of the
-	// table for its whole lock budget. Once the holder finishes, or the
-	// wait runs out, the attempts run as they would without it, so the
-	// wait delays a step but never fails one. Native and sequence steps,
+	// table for its whole lock budget. Once the holder finishes, the
+	// attempts run as they would without the wait. A holder still there
+	// when the wait runs out ends the step with a *LingeringHolderError
+	// before any attempt, so no reader or writer queues behind it; the
+	// step runs again unchanged once that transaction ends. Native and sequence steps,
 	// table drops, and create steps that declare a foreign key wait. An
 	// index rename, a concurrent partition detach, and an enum value add
 	// take no lock a reader or writer conflicts with, so they never wait.
@@ -365,10 +367,10 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		return err
 	}
 	// INV: LK-2 — the step requests its lock once no long-lived reader or
-	// writer holds one on a table it locks, or once HolderWait runs out,
-	// so it does not sit at the head of the lock queue behind a holder
-	// that is about to finish.
-	if _, err := waitOutsideLockQueue(ctx, pool, tables, retry.HolderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
+	// writer holds one on a table it locks, so it never sits at the head of
+	// the lock queue behind one, and ends without requesting it when one is
+	// still there after HolderWait.
+	if err := awaitLockQueue(ctx, pool, tables, retry.HolderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
 		return err
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
