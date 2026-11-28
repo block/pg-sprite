@@ -137,6 +137,8 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 				return plan.Report{}, err
 			}
 			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
+			facts.MaterializedViews = deps.MaterializedViews
+			facts.ViewReaders = deps.ViewReaders
 			facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 			facts.DependentTriggers = planner.ColumnDependents(deps.Triggers)
 			facts.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)

@@ -283,6 +283,121 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 	assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason)
 }
 
+// A refusal because views read the column calls each one by its kind and
+// gives the manual path the change takes with them out of the way, the
+// same one policies and triggers get: rewriting them before a drop,
+// recreating them around a type change that runs in place, where a
+// materialized view also runs its query to fill itself again, and moving
+// them to a new column when the type change rewrites the table.
+func TestClassifyNamesMaterializedViewsAndTheirManualPath(t *testing.T) {
+	mail := `"reports"."mail"`
+	const grants = "; a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults, and a materialized view its indexes too, so recreate those with each view"
+	const redefine = "; changing a view means dropping and recreating it in one transaction, since CREATE OR REPLACE VIEW cannot remove or retype a column"
+	facts := planner.Facts{
+		ColumnTypes:        map[string]string{"email": "character varying(50)"},
+		DependentViews:     map[string][]string{"email": {`"app"."active_users"`, mail}},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`, mail}},
+		MaterializedViews:  []string{mail},
+	}
+	for _, tc := range []struct {
+		sql  string
+		fix  planner.DependentFix
+		help string
+	}{
+		{
+			sql:  "ALTER TABLE t DROP COLUMN email",
+			fix:  planner.DependentFixRewriteDependents,
+			help: "change those views and materialized views so they no longer read the column, then re-plan the drop" + redefine + grants,
+		},
+		{
+			sql: "ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
+			fix: planner.DependentFixRecreateAroundChange,
+			help: "this type change runs in place, without rewriting the table, so in one transaction drop those views and materialized views, run the change, and recreate them; " +
+				"recreating a materialized view runs its query to fill it again while the transaction blocks the table" + grants,
+		},
+		{
+			sql: "ALTER TABLE t ALTER COLUMN email TYPE bigint USING email::bigint",
+			fix: planner.DependentFixExpandContract,
+			help: "this type change rewrites the table, so recreating the views and materialized views around it would block the table for the whole rewrite; " +
+				"add a column of the new type instead, have the application write to both and backfill it, " +
+				"point those views and materialized views at it and switch reads to it, then drop the old column once nothing uses it; " +
+				"pointing a view at the new column means dropping and recreating it, since CREATE OR REPLACE VIEW cannot remove or retype a column, " +
+				"so do that in one transaction at that step" + grants,
+		},
+	} {
+		plan, err := planner.Classify(tc.sql, facts)
+		require.NoError(t, err, tc.sql)
+		require.Len(t, plan.Decisions, 1, tc.sql)
+		d := plan.Decisions[0]
+		assert.Equal(t, planner.ReasonDependentView, d.Reason, tc.sql)
+		assert.Equal(t, []string{mail}, d.DependentMaterializedViews, tc.sql)
+		assert.Equal(t, tc.fix, d.DependentFix, tc.sql)
+		assert.Equal(t, `view "app"."active_users" and materialized view "reports"."mail"`, d.ViewsPhrase(), tc.sql)
+		assert.Equal(t, tc.help, d.ViewsHelp(), tc.sql)
+	}
+
+	for name, tc := range map[string]struct {
+		d      planner.Decision
+		phrase string
+		noun   string
+		grants string
+	}{
+		"views only": {
+			d:      planner.Decision{DependentViews: []string{`"a"."v"`, `"a"."w"`}},
+			phrase: `views "a"."v", "a"."w"`,
+			noun:   "views",
+			grants: "; a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults, so recreate those with each view",
+		},
+		"one materialized view": {
+			d:      planner.Decision{DependentViews: []string{`"a"."m"`}, DependentMaterializedViews: []string{`"a"."m"`}},
+			phrase: `materialized view "a"."m"`,
+			noun:   "materialized views",
+			grants: grants,
+		},
+	} {
+		assert.Equal(t, tc.phrase, tc.d.ViewsPhrase(), name)
+		assert.Equal(t, tc.noun, tc.d.ViewsNoun(), name)
+		assert.Equal(t, "drop or redefine those "+tc.noun+" first, then re-plan"+redefine+tc.grants, tc.d.ViewsHelp(), name)
+	}
+
+	// A view that reads a blocking view, directly or through another,
+	// has to be dropped before it, so the help names every view to drop,
+	// deepest first, each by its kind, and to recreate them in reverse.
+	facts.ViewReaders = map[string]map[string]int{
+		mail:                   {`"reports"."mail_top"`: 1, `"reports"."mail_sum"`: 1, `"reports"."mail_top_n"`: 2},
+		`"app"."active_users"`: {`"reports"."mail_top_n"`: 1},
+	}
+	facts.MaterializedViews = append(facts.MaterializedViews, `"reports"."mail_sum"`)
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN email TYPE varchar(100)", facts)
+	require.NoError(t, err)
+	d := plan.Decisions[0]
+	assert.Equal(t, []string{`"reports"."mail_top_n"`, `"reports"."mail_sum"`, `"reports"."mail_top"`, `"app"."active_users"`, mail}, d.DependentViewDropOrder)
+	assert.Equal(t, []string{mail, `"reports"."mail_sum"`}, d.DependentMaterializedViews)
+	assert.Equal(t, "this type change runs in place, without rewriting the table, so in one transaction drop those views and materialized views, run the change, and recreate them; "+
+		"recreating a materialized view runs its query to fill it again while the transaction blocks the table; "+
+		`drop the views in this order: view "reports"."mail_top_n", then materialized view "reports"."mail_sum", then view "reports"."mail_top", `+
+		`then view "app"."active_users", then materialized view "reports"."mail", and recreate them in reverse`+grants, d.ViewsHelp())
+}
+
+// When one blocking view reads another through a view that reads the
+// first, the drop order puts each view ahead of every view it reads,
+// blocking views included: v2 reads r, and r reads v1, so v2 is dropped
+// first, then r, then v1, and PostgreSQL accepts each DROP VIEW.
+func TestClassifyOrdersBlockingViewsThatReadEachOther(t *testing.T) {
+	v1, v2, r := `"app"."v1"`, `"app"."v2"`, `"app"."r"`
+	facts := planner.Facts{
+		ColumnTypes:        map[string]string{"email": "character varying(50)"},
+		DependentViews:     map[string][]string{"email": {v1, v2}},
+		DropDependentViews: map[string][]string{"email": {v1, v2}},
+		ViewReaders:        map[string]map[string]int{v1: {r: 1, v2: 2}},
+	}
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN email TYPE varchar(100)", facts)
+	require.NoError(t, err)
+	d := plan.Decisions[0]
+	assert.Equal(t, []string{v2, r, v1}, d.DependentViewDropOrder)
+	assert.Contains(t, d.ViewsHelp(), `drop the views in this order: view "app"."v2", then view "app"."r", then view "app"."v1", and recreate them in reverse`)
+}
+
 // A view on a table below counts against a recursive change and not
 // against one under ONLY, which stops at the table. A recursive drop counts
 // only the copies of the column it drops: a view on a child's own declared
