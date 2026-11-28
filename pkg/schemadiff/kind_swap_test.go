@@ -203,3 +203,25 @@ func TestDiffSameNameKindSwapDropsFirstWithAColumnDrop(t *testing.T) {
 		"CREATE UNIQUE INDEX events_email_key ON public.events USING btree (email) INCLUDE (name, id)",
 	}, sqls(changes))
 }
+
+// A unique index whose definition the file keeps under another name, while
+// a unique constraint takes its old name, is not swapped for the constraint:
+// dropping it would leave its columns without a unique rule while the index
+// of the new name builds. The index must be renamed before the constraint
+// can take the name, so the plan is refused with renamed-index-name.
+func TestDiffRefusesAConstraintOnTheNameOfARenamedIndex(t *testing.T) {
+	live := swapIndexTable("CREATE UNIQUE INDEX events_email_key ON events USING btree (email)")
+	desired := keyed()
+	desired.Constraints[1] = Constraint{
+		Name:     "events_email_key",
+		Def:      "UNIQUE (name)",
+		IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (name)",
+	}
+	desired.Indexes = append(desired.Indexes, Index{Name: "events_email_uniq", Def: "CREATE UNIQUE INDEX events_email_uniq ON events USING btree (email)"})
+
+	_, err := Diff("public", live, desired)
+	var refusal *UnsupportedChangeError
+	require.True(t, errors.As(err, &refusal), "%v", err)
+	assert.Equal(t, CauseRenamedIndexName, refusal.Cause)
+	assert.Contains(t, err.Error(), `constraint "events_email_key" takes the name of index "events_email_key", which the desired table renames to "events_email_uniq"`)
+}

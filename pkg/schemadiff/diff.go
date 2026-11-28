@@ -456,6 +456,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseConstraintOnRenamedIndexName(renamed, liveCons, desiredCons); err != nil {
+		return nil, err
+	}
 	renameTargets := renameIndexTargets(renamed)
 
 	// A unique index or unique constraint the plan drops is held back until

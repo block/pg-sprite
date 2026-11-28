@@ -48,7 +48,9 @@ func unsupportedChangeRefusal(err error) (verdict.Refusal, bool) {
 // index is built under: the object is renamed so the key can be replaced
 // without a moment unenforced. A file that removes or changes an index a
 // foreign key references is corrected too: the key is dropped or changed
-// first, or the index is kept. A
+// first, or the index is kept. So is a file that gives a new constraint the
+// name of an index it renames: the rename lands in one change and the
+// constraint in the next. A
 // name that holds another kind of type would have to be replaced, which the
 // planner does not construct.
 func unsupportedCauseRefusal(cause schemadiff.UnsupportedCause) (verdict.Refusal, bool) {
@@ -56,7 +58,8 @@ func unsupportedCauseRefusal(cause schemadiff.UnsupportedCause) (verdict.Refusal
 	case schemadiff.CauseStorageParameters, schemadiff.CauseIdentitySequence,
 		schemadiff.CauseEnumTypeMissing, schemadiff.CauseEnumValueRemoved:
 		return verdict.NoOnlineSafetyProblem(verdict.ReasonUnsupportedStatement, verdict.OwnerDirectOperator), true
-	case schemadiff.CauseEnumValueReordered, schemadiff.CauseReplacementIndexName, schemadiff.CauseReferencedIndex:
+	case schemadiff.CauseEnumValueReordered, schemadiff.CauseReplacementIndexName, schemadiff.CauseReferencedIndex,
+		schemadiff.CauseRenamedIndexName:
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	case schemadiff.CausePersistence, schemadiff.CauseCollationChange:
 		return rewriteRequiredRefusal(), true

@@ -71,7 +71,11 @@ import (
 // its part in the fingerprint.
 // Version 29 added the rename-index kind and the replaced_by statement
 // field, which a changed index the diff replaces rather than drops carries.
-const FormatVersion = 29
+// Version 30 also carries replaced_by on the drop of the old object when a
+// unique constraint and a unique index of the same name swap kinds: a
+// drop-constraint whose replacement is a standalone index, and a drop-index
+// whose replacement a constraint takes over.
+const FormatVersion = 30
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -134,7 +138,11 @@ type Statement struct {
 	// plan replaces rather than drops: the index an earlier statement of the
 	// plan built under the desired definition, valid before the drop runs,
 	// which the rename after the drop gives the dropped index's name (see
-	// schemadiff.Change.ReplacedBy). The table has an index with the desired
+	// schemadiff.Change.ReplacedBy). A unique constraint and a unique index
+	// of the same name that swap kinds carry it too, on the drop of the old
+	// object: a DROP CONSTRAINT whose replacement the rename after it names,
+	// or a DROP INDEX whose replacement the ADD CONSTRAINT ... USING INDEX
+	// after it takes over. The table has an index with the desired
 	// definition before the old one goes, so the drop removes only what the
 	// desired definition no longer asks for. That can still be a guarantee,
 	// as when a unique index becomes non-unique or its predicate narrows, so

@@ -14,26 +14,6 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// kindSwapDesired is the replaceIndexFixture table with extra declared as
-// its last table element when it is a constraint, or after the table when
-// it is an index.
-func kindSwapDesired(constraint, index string) string {
-	table := `CREATE TABLE t (
-		id int PRIMARY KEY,
-		email text,
-		name text,
-		qty int NOT NULL,
-		deleted_at timestamptz`
-	if constraint != "" {
-		table += ",\n\t\t" + constraint
-	}
-	desired := table + "\n\t);\n\tCREATE UNIQUE INDEX t_email_lower_key ON t (lower(email)) WHERE deleted_at IS NULL;"
-	if index != "" {
-		desired += "\n\t" + index + ";"
-	}
-	return desired
-}
-
 // liveConstraint returns the definition of the named constraint on schema.t,
 // and whether it exists.
 func liveConstraint(t *testing.T, pool *pgxpool.Pool, schema, name string) (string, bool) {
@@ -59,7 +39,16 @@ func TestRunDesiredSwapsAUniqueConstraintForAUniqueIndexBuildingFirst(t *testing
 	pool, schema := replaceIndexTable(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %s.t ADD CONSTRAINT t_email_key UNIQUE (email)`, schema))
 	require.NoError(t, err)
-	desired := kindSwapDesired("", "CREATE UNIQUE INDEX t_email_key ON t (lower(email))")
+	const desired = `
+CREATE TABLE t (
+    id int PRIMARY KEY,
+    email text,
+    name text,
+    qty int NOT NULL,
+    deleted_at timestamptz
+);
+CREATE UNIQUE INDEX t_email_lower_key ON t (lower(email)) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX t_email_key ON t (lower(email));`
 
 	reviewed := plannedDrop(t, pool, schema, desired)
 	require.Len(t, reviewed.Statements, 3)
@@ -100,7 +89,16 @@ func TestRunDesiredSwapsAUniqueIndexForAUniqueConstraintBuildingFirst(t *testing
 		CREATE UNIQUE INDEX t_qty_key ON %[1]s.t (qty, name);
 		INSERT INTO %[1]s.t VALUES (4, 'd@example.com', 'd', 3, NULL)`, schema))
 	require.NoError(t, err)
-	desired := kindSwapDesired("CONSTRAINT t_qty_key UNIQUE (qty)", "")
+	const desired = `
+CREATE TABLE t (
+    id int PRIMARY KEY,
+    email text,
+    name text,
+    qty int NOT NULL,
+    deleted_at timestamptz,
+    CONSTRAINT t_qty_key UNIQUE (qty)
+);
+CREATE UNIQUE INDEX t_email_lower_key ON t (lower(email)) WHERE deleted_at IS NULL;`
 
 	reviewed := plannedDrop(t, pool, schema, desired)
 	require.Len(t, reviewed.Statements, 3)

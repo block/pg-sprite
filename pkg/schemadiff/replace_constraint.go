@@ -3,6 +3,8 @@ package schemadiff
 import (
 	"crypto/sha256"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -149,6 +151,10 @@ func indexToConstraint(schema string, con Constraint, liveCons map[string]Constr
 	if ix.Invalid || ix.Def == con.IndexDef {
 		return inPlaceReplacement{}, false, nil
 	}
+	moved, err := declaredUnderAnotherName(ix, liveIdx, desiredIdx)
+	if err != nil || moved {
+		return inPlaceReplacement{}, false, err
+	}
 	if err := refuseReferencedIndexDrop(ix, true); err != nil {
 		return inPlaceReplacement{}, false, err
 	}
@@ -167,6 +173,24 @@ func indexToConstraint(schema string, con Constraint, liveCons map[string]Constr
 		r.built = true
 	}
 	return r, true, nil
+}
+
+// declaredUnderAnotherName reports whether the desired table declares ix's
+// definition under a name the live table does not use. Such an index is
+// renamed to that name and keeps enforcing there, so a constraint that takes
+// its old name does not replace it: dropping it would leave its rule unheld
+// while the index of the new name builds.
+func declaredUnderAnotherName(ix Index, liveIdx, desiredIdx map[string]Index) (bool, error) {
+	for _, want := range sortedIndexes(slices.Collect(maps.Values(desiredIdx))) {
+		if _, exists := liveIdx[want.Name]; exists {
+			continue
+		}
+		same, err := sameIndexUnderName(ix, want)
+		if err != nil || same {
+			return same, err
+		}
+	}
+	return false, nil
 }
 
 // refuseTakenKeyReplacementName refuses a key replacement whose temporary
