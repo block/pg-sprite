@@ -903,8 +903,7 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		}
 		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
 		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
-			return r, detail("drops a foreign key into another schema, which a desired file cannot declare — " +
-				"to remove it, run the statement through the imperative front door (migrate --alter)")
+			return r.WithCause(ps.RefusalCause), detail(foreignKeyDropRefusalDetail(ps.RefusalCause))
 		}
 		if err == nil {
 			return r, detail("has no safe path")
@@ -917,6 +916,23 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		return planIncoherentRefusal(), detail("is refused but carries no refusal class")
 	default:
 		return planIncoherentRefusal(), detail("carries a disposition this build does not know")
+	}
+}
+
+// foreignKeyDropRefusalDetail says why desired-state apply does not run a
+// planned foreign-key drop, and what to do instead, by the kind of drop
+// the plan refused.
+func foreignKeyDropRefusalDetail(cause verdict.Cause) string {
+	switch cause {
+	case verdict.CauseChangedForeignKey:
+		return "drops a foreign key the file changes under the same name where the new key cannot be added in the same statement, " +
+			"which would leave writes checked against no key until the new one is added — declare the changed key under a new name"
+	case verdict.CauseUndeclarableForeignKey:
+		return "drops a foreign key a desired file cannot declare, one into another schema or one onto its own table through a standalone unique index — " +
+			"to remove it, run the statement through the imperative front door (migrate --alter)"
+	default:
+		return "drops a foreign key: either the file changes it under the same name where the new key cannot be added in the same statement, so declare the changed key under a new name, " +
+			"or a desired file cannot declare it, so remove it through the imperative front door (migrate --alter)"
 	}
 }
 

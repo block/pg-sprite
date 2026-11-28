@@ -171,3 +171,37 @@ func TestBlockingIndexDropFailureDetailSaysWhatTheFailureLeftBehind(t *testing.T
 	assert.Contains(t, other, "index events_kind_idx did not commit and was rolled back")
 	assert.Contains(t, other, "still stands on app.events and every partition")
 }
+
+// A refused foreign-key drop says which kind of drop it is, and names the
+// one remedy that applies: a key changed under the same name is declared
+// under a new name, and a key a desired file cannot declare is removed
+// through the imperative front door. Without a cause, it names both.
+func TestStatementRefusalNamesTheForeignKeyDropsRemedy(t *testing.T) {
+	refused := func(cause verdict.Cause) plan.Statement {
+		return plan.Statement{
+			SQL:          `ALTER TABLE app.events DROP CONSTRAINT events_user_fk`,
+			Disposition:  router.DispositionRefuse,
+			Reason:       verdict.ReasonDeclarativeForeignKey,
+			Class:        verdict.ClassCapabilityBoundary,
+			RefusalCause: cause,
+		}
+	}
+	for name, tc := range map[string]struct {
+		cause   verdict.Cause
+		remedy  string
+		without string
+	}{
+		"a key changed under the same name": {cause: verdict.CauseChangedForeignKey, remedy: "declare the changed key under a new name", without: "migrate --alter"},
+		"a key a file cannot declare":       {cause: verdict.CauseUndeclarableForeignKey, remedy: "migrate --alter", without: "under a new name"},
+	} {
+		r, detail := statementRefusal(0, refused(tc.cause))
+		assert.Equal(t, tc.cause, r.Cause(), name)
+		assert.Contains(t, detail, tc.remedy, name)
+		assert.NotContains(t, detail, tc.without, name)
+	}
+
+	r, detail := statementRefusal(0, refused(""))
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, r.Reason())
+	assert.Contains(t, detail, "under a new name")
+	assert.Contains(t, detail, "migrate --alter")
+}
