@@ -758,9 +758,12 @@ func collationName(coll *pganalyze.CollateClause) string {
 }
 
 // collationQualifiedName is a COLLATE clause's name and schema, the zero
-// value when there is no clause.
+// value when there is no clause. A name of more than two parts (database,
+// schema, collation) is the zero value too: joining its first parts would
+// read it as one dotted schema, the same as a schema whose name holds a
+// dot, so it names no collation a consumer could match.
 func collationQualifiedName(coll *pganalyze.CollateClause) QualifiedName {
-	if coll == nil {
+	if coll == nil || len(coll.GetCollname()) > 2 {
 		return QualifiedName{}
 	}
 	return qualifiedName(coll.GetCollname())

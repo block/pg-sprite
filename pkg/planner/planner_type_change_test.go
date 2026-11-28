@@ -81,19 +81,22 @@ func TestClassifyTypeChangeRewritesACollatedLiveColumn(t *testing.T) {
 // column's indexes. A clause naming another collation, or none, changes the
 // collation and stays a rewrite. An unqualified name keeps only a
 // pg_catalog collation, since the engine's sessions search pg_catalog
-// first and any other schema depends on the search path.
+// first and any other schema depends on the search path. A name with a
+// database part is never read as kept: joined, its first parts would match
+// a schema whose name holds a dot.
 func TestClassifyTypeChangeKeepsTheRelabelWhenTheCollationStays(t *testing.T) {
 	for _, tc := range []struct {
 		name, live, sql string
 		route           planner.Route
 	}{
-		{"unqualified, built-in", `pg_catalog."C"`, `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE "C"`, planner.RouteNative},
-		{"qualified, built-in", `pg_catalog."C"`, `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE pg_catalog."C"`, planner.RouteNative},
-		{"qualified, schema-local", `app.names`, `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE app.names`, planner.RouteNative},
-		{"unqualified, schema-local", `app.names`, `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE names`, planner.RouteCopyAndSwap},
-		{"another collation", `pg_catalog."C"`, `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE "POSIX"`, planner.RouteCopyAndSwap},
-		{"another schema", `pg_catalog."C"`, `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE app."C"`, planner.RouteCopyAndSwap},
-		{"kept, narrowed", `pg_catalog."C"`, `ALTER TABLE t ALTER COLUMN c TYPE varchar(20) COLLATE "C"`, planner.RouteCopyAndSwap},
+		{name: "unqualified, built-in", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE "C"`, route: planner.RouteNative},
+		{name: "qualified, built-in", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE pg_catalog."C"`, route: planner.RouteNative},
+		{name: "qualified, schema-local", live: `app.names`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE app.names`, route: planner.RouteNative},
+		{name: "unqualified, schema-local", live: `app.names`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE names`, route: planner.RouteCopyAndSwap},
+		{name: "another collation", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE "POSIX"`, route: planner.RouteCopyAndSwap},
+		{name: "another schema", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE app."C"`, route: planner.RouteCopyAndSwap},
+		{name: "kept, narrowed", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(20) COLLATE "C"`, route: planner.RouteCopyAndSwap},
+		{name: "database-qualified", live: `"a.b".x`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE a.b.x`, route: planner.RouteCopyAndSwap},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := planner.Facts{
