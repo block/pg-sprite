@@ -225,3 +225,57 @@ func TestDiffRefusesAConstraintOnTheNameOfARenamedIndex(t *testing.T) {
 	assert.Equal(t, CauseRenamedIndexName, refusal.Cause)
 	assert.Contains(t, err.Error(), `constraint "events_email_key" takes the name of index "events_email_key", which the desired table renames to "events_email_uniq"`)
 }
+
+// A unique index swapped for a constraint of its name is refused when
+// another unique index the file builds takes over its key, whether that
+// index replaces a live one of the same name or is new and narrower: the
+// swap would drop the live index before the other is built, leaving the key
+// without a unique rule while it builds. An index of that key that already
+// stands is no reason to refuse.
+func TestDiffRefusesAKindSwapWhoseKeyMovesToABuild(t *testing.T) {
+	foo := "CREATE UNIQUE INDEX events_email_key ON events USING btree (email)"
+	withIndex := func(m Model, name, def string) Model {
+		m.Indexes = append(append([]Index(nil), m.Indexes...), Index{Name: name, Def: def})
+		return m
+	}
+	desiredWith := func(def string) Model {
+		m := keyed()
+		m.Constraints[1] = Constraint{
+			Name:     "events_email_key",
+			Def:      "UNIQUE (name)",
+			IndexDef: "CREATE UNIQUE INDEX events_email_key ON events USING btree (name)",
+		}
+		return withIndex(m, "events_email_uniq", def)
+	}
+
+	for name, tc := range map[string]struct {
+		live    Model
+		desired string
+	}{
+		"onto a live index it rebuilds unique": {
+			live:    withIndex(swapIndexTable(foo), "events_email_uniq", "CREATE INDEX events_email_uniq ON events USING btree (email)"),
+			desired: "CREATE UNIQUE INDEX events_email_uniq ON events USING btree (email)",
+		},
+		"onto a new, narrower index": {
+			live:    swapIndexTable(foo),
+			desired: "CREATE UNIQUE INDEX events_email_uniq ON events USING btree (email) WHERE (name IS NOT NULL)",
+		},
+	} {
+		_, err := Diff("public", tc.live, desiredWith(tc.desired))
+		var refusal *UnsupportedChangeError
+		require.True(t, errors.As(err, &refusal), "%s: %v", name, err)
+		assert.Equal(t, CauseMovedUniqueRule, refusal.Cause, name)
+		assert.Contains(t, err.Error(), `constraint "events_email_key" takes the name of unique index "events_email_key", whose key the desired table's index "events_email_uniq" also makes unique`, name)
+	}
+
+	t.Run("an index of the key that already stands", func(t *testing.T) {
+		standing := "CREATE UNIQUE INDEX events_email_uniq ON events USING btree (email)"
+		changes, err := Diff("public", withIndex(swapIndexTable(foo), "events_email_uniq", standing), desiredWith(standing))
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			"CREATE UNIQUE INDEX events_email_key_new ON public.events USING btree (name)",
+			`DROP INDEX "public"."events_email_key"`,
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_email_key" UNIQUE USING INDEX "events_email_key_new"`,
+		}, sqls(changes))
+	})
+}

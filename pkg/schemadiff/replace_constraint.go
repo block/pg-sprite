@@ -156,6 +156,9 @@ func indexToConstraint(schema, table string, con Constraint, liveCons map[string
 	if err != nil || moved {
 		return inPlaceReplacement{}, false, err
 	}
+	if err := refuseUniqueRuleMovedToABuild(con.Name, ix, liveIdx, desiredIdx); err != nil {
+		return inPlaceReplacement{}, false, err
+	}
 	if err := refuseReferencedIndexDrop(schema, table, ix, true, nil); err != nil {
 		return inPlaceReplacement{}, false, err
 	}
@@ -187,6 +190,62 @@ func declaredUnderAnotherName(ix Index, liveIdx, desiredIdx map[string]Index) (b
 			continue
 		}
 		same, err := sameIndexUnderName(ix, want)
+		if err != nil || same {
+			return same, err
+		}
+	}
+	return false, nil
+}
+
+// refuseUniqueRuleMovedToABuild refuses to swap the live unique index ix for
+// a constraint of its name when the desired table declares another unique
+// index on the same key, with or without a predicate, that this diff builds.
+// The swap drops ix with the other constraint changes, before the index
+// changes build that index, so the key would have no unique rule while it
+// builds. An index the desired table keeps as it stands, or whose
+// definition a live index of another name already holds, is in place
+// throughout and is no reason to refuse.
+func refuseUniqueRuleMovedToABuild(constraint string, ix Index, liveIdx, desiredIdx map[string]Index) error {
+	key, unique, err := statement.UniqueIndexKey(ix.Def)
+	if err != nil {
+		return fmt.Errorf("read the definition of index %s: %w", ix.Name, err)
+	}
+	if !unique {
+		return nil
+	}
+	for _, want := range sortedIndexes(slices.Collect(maps.Values(desiredIdx))) {
+		if want.Name == ix.Name || !indexNeedsCreate(liveIdx, want) {
+			continue
+		}
+		standing, err := standsUnderAnotherLiveName(want, ix, liveIdx)
+		if err != nil {
+			return err
+		}
+		if standing {
+			continue
+		}
+		wantKey, wantUnique, err := statement.UniqueIndexKey(want.Def)
+		if err != nil {
+			return fmt.Errorf("read the definition of index %s: %w", want.Name, err)
+		}
+		if wantUnique && wantKey == key {
+			return unsupported(CauseMovedUniqueRule, "%w: constraint %q takes the name of unique index %q, whose key the desired table's index %q also makes unique; %q would be dropped before %q is built, leaving the key without a unique rule while it builds. Add index %q in one change and the constraint in the next",
+				ErrUnsupportedChange, constraint, ix.Name, want.Name, ix.Name, want.Name, want.Name)
+		}
+	}
+	return nil
+}
+
+// standsUnderAnotherLiveName reports whether want's definition stands on
+// the live table under a name other than want's and ix's. That index holds
+// want's rule throughout, whether the diff renames it to want's name or
+// keeps it beside want.
+func standsUnderAnotherLiveName(want, ix Index, liveIdx map[string]Index) (bool, error) {
+	for _, had := range sortedIndexes(slices.Collect(maps.Values(liveIdx))) {
+		if had.Name == ix.Name || had.Name == want.Name || had.Invalid {
+			continue
+		}
+		same, err := sameIndexUnderName(had, want)
 		if err != nil || same {
 			return same, err
 		}
