@@ -331,10 +331,14 @@ func TestDiscardRefusesARunWhoseSwapCommitted(t *testing.T) {
 			return err
 		}
 		holder = tx
+		// Only this run's row: the checkpoint table is shared with every
+		// other test on the server, whose saves would time out on it too.
 		_, err = tx.Exec(ctx, `
 			SELECT 1
 			FROM pgsprite.pgsprite_checkpoint
-			FOR UPDATE`)
+			WHERE schema_name = $1
+				AND table_name = 'orders'
+			FOR UPDATE`, f.schema)
 		return err
 	})
 	require.Error(t, err, "the done save timed out on the locked row")

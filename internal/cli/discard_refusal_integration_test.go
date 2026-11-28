@@ -68,11 +68,15 @@ func holdDiscardSlot(t *testing.T, url string, pool *pgxpool.Pool, slot string) 
 	}, slotHeld, 50*time.Millisecond)
 }
 
-// deleteRows deletes every checkpoint row, as an operator who removed a
-// run's row by hand leaves its leftovers unrecorded.
+// deleteRows deletes the fixture's checkpoint row, as an operator who
+// removed a run's row by hand leaves its leftovers unrecorded. Only this
+// fixture's row: the checkpoint table may be shared with other tests.
 func (f discardFixture) deleteRows(t *testing.T) {
 	t.Helper()
-	_, err := f.pool.Exec(t.Context(), `DELETE FROM pgsprite.pgsprite_checkpoint`)
+	_, err := f.pool.Exec(t.Context(), `
+		DELETE FROM pgsprite.pgsprite_checkpoint
+		WHERE schema_name = $1
+			AND table_name = 'orders'`, f.schema)
 	require.NoError(t, err)
 }
 
