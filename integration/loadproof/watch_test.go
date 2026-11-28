@@ -24,6 +24,10 @@ const watchPollInterval = 250 * time.Millisecond
 type watched struct {
 	// FirstSeen is when the poll first saw the row in each phase.
 	FirstSeen map[checkpoint.Phase]time.Time
+	// Sequence is every phase the poll saw, in the order it saw them, a
+	// phase seen at consecutive polls listed once, so a row that went back
+	// to an earlier phase shows it there again.
+	Sequence []checkpoint.Phase
 	// SlotName is the slot the row named, for forensics on a leftover.
 	SlotName string
 	// PeakSlotLagBytes is the most WAL the poll ever saw written past the
@@ -119,6 +123,9 @@ func (w *watch) record(cp checkpoint.Checkpoint, progress testutil.Progress, rea
 	defer w.mu.Unlock()
 	if _, ok := w.seen.FirstSeen[cp.Phase]; !ok {
 		w.seen.FirstSeen[cp.Phase] = time.Now()
+	}
+	if n := len(w.seen.Sequence); n == 0 || w.seen.Sequence[n-1] != cp.Phase {
+		w.seen.Sequence = append(w.seen.Sequence, cp.Phase)
 	}
 	w.seen.SlotName = cp.SlotName
 	w.seen.PeakSlotLagBytes = max(w.seen.PeakSlotLagBytes, lag)

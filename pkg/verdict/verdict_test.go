@@ -369,6 +369,8 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(CauseParentIndexAdoption), string(CauseParentNotValidForeignKey),
 		string(CauseParentConcurrentIndexDrop),
 		string(CauseCopyAndSwapNotEnabled), string(CauseCopyAndSwapRunStopped),
+		string(CauseSlotLagStreamBehind), string(CauseSlotLagWALRetained),
+		string(CauseSlotLagWALRetainedHardLimit),
 		string(CauseChangedForeignKey), string(CauseUndeclarableForeignKey),
 	}
 	for _, r := range Reasons() {
@@ -455,6 +457,20 @@ func TestStringFailedIncludesCodeStepAndCommittedPrefix(t *testing.T) {
 	assert.Contains(t, s, "failed at: step 2: ALTER TABLE t VALIDATE CONSTRAINT c")
 	assert.Contains(t, s, "committed before the failure")
 	assert.NotContains(t, s, "executed as:", "a committed prefix is not a completed substitution")
+}
+
+// A failed verdict's cause tells apart stops that share one code, so the
+// one-line form prints it; a verdict without a cause prints no cause line.
+func TestStringIncludesTheCauseWhenSet(t *testing.T) {
+	failed := Verdict{
+		Outcome:   OutcomeFailed,
+		Code:      "slot-lag-exceeded",
+		Cause:     CauseSlotLagStreamBehind,
+		Statement: "ALTER TABLE t ALTER COLUMN v TYPE bigint",
+	}
+	assert.Contains(t, failed.String(), "\n  cause:     stream-behind\n")
+	failed.Cause = CauseNone
+	assert.NotContains(t, failed.String(), "cause:")
 }
 
 func TestStringIncludesAttemptsWhenSet(t *testing.T) {

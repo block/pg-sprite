@@ -379,6 +379,7 @@ concurrently is.
 | --- | --- | --- |
 | `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`, or a transaction held the table for the whole wait outside the lock queue, so the lock was never requested; nothing executed |
 | `budget-statement-exceeded` | no | The statement ran past `statement_timeout` and was cancelled |
+| `slot-lag-exceeded` | no | A live copy-and-swap run stopped because its replication slot crossed the slot lag ceiling; the checkpoint row and the slot stay. The failed verdict's `cause` names the measure that crossed: `stream-behind`, `wal-retained`, or `wal-retained-hard-limit` ([replication-slots.md](replication-slots.md#the-slot-lag-ceiling)). Not permanent, but the retry depends on the cause; see below the table |
 | `row-security-plan-changed` | yes | Preview again and review the new ordered SQL before retrying; no target RLS statements ran |
 | `row-security-refused` | yes | Change the declaration, unsupported target shape, or privileges before retrying |
 | `row-security-outcome-unknown` | no | The atomic RLS commit response is uncertain; inspect the catalog before retrying |
@@ -465,6 +466,13 @@ concurrently is.
 | `data-fault` | yes | The server rejected the table's rows as the statement would shape them (SQLSTATE class 22 or 23). The code names the fault, not the cleanup: a concurrent index build that failed on its rows (duplicate values under a unique index, an index expression raising on a row) returns an `*InvalidIndexError` whose `Recoverable()` is false and whose `Cleanup` says what it left — its own invalid index occupies the name, so correct the rows, drop it with `DROP INDEX CONCURRENTLY`, and run the change again ([runbook](invalid-index-recovery.md#a-build-that-failed-on-its-rows-data-fault)); a partitioned table's index build that stopped on one partition's rows names that partition and the invalid index it left there when the run proved that index its own, and once the rows are corrected the same statement run again drops that index itself and resumes; the copy-and-swap run abandoned itself when the verdict says `abandoned: true` (the error is a `*schemachange.AbandonedError`; match it with `errors.As`), so correct the data or the statement and run it again from the beginning; otherwise the abandon did not finish, the hold on the source and the checkpoint row stay, and the detail says to correct the data or the statement and start the run over with `--restart SCHEMA.TABLE` |
 | `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate. It outranks every other code: an error that carries the breach maps here whichever typed failure wraps it, and the typed errors' own `Code()` methods agree |
 | `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
+
+`slot-lag-exceeded` is not permanent, but whether a resume goes on depends on its `cause`.
+A `wal-retained` or `wal-retained-hard-limit` stop can resume under the same ceiling once
+the transaction holding the WAL ends or the write rate drops. A `stream-behind` stop is
+refused at its resume (`resume-slot-backlog`) until the ceiling is raised above the WAL its
+stream had not confirmed, so an adapter that retries every code `Permanent()` calls
+transient routes this one on `cause` first.
 
 ### Create-shape causes
 

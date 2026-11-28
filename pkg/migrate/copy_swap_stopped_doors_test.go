@@ -36,6 +36,7 @@ var stoppedRunChecks = []string{
 var executingPackages = map[string][]string{
 	"executor": {
 		"AdmitDetachPartition",
+		"AdmitPartitionedForeignKey",
 		"AdmitPartitionedForeignKeyShape",
 		"AdmitPartitionedIndexShape",
 		"AdmitPartitionedKey",

@@ -90,15 +90,19 @@ keeps the `NOT VALID` plan and is refused as `unsupported-partitioned-parent`, c
 `environmental`, before anything runs. On 18 nothing is routed.
 
 The plan's routing reads the statement, not the catalog, so the refusals the build makes from the
-catalog are not in the plan. A foreign key to a partitioned, foreign, or view table, including
-one that references the partitioned table itself or one of its partitions, and a tree with a
-sub-partitioned partition plan as the build and are refused (`capability-boundary`) when the run
-reaches the statement; a tree with a foreign-table partition or a detach pending fails there with
-`foreign-table-partition` or `partition-detach-pending`. The build stops before it touches a
-partition, but the statements planned ahead of it have committed by then, so
-a desired file that also adds a column keeps the column, and the next plan is the foreign key
-alone, refused the same way. Leave such a foreign key out of the desired file until the build
-carries it.
+catalog are read at admission instead. Before any statement runs, `migrate --desired`
+(`migrate.RunDesired`, through `migrate.AdmitPlanPartitionedForeignKeys`) runs the build's own
+catalog checks for every statement routed to it with `executor.AdmitPartitionedForeignKey`, which
+resolves the referenced table and lists the tree as the build does (`resolveFKReference`,
+`refuseFKTree`) in one bounded read, without the table lock. A foreign key to a partitioned,
+foreign, or view table, including one that references the partitioned table itself or one of its
+partitions, and a tree with a sub-partitioned partition refuse the whole plan
+(`unsupported-statement`, `capability-boundary`); a tree with a foreign-table partition or a
+detach pending stops it as a failed result with no verdict, whose error wraps the build's
+`ErrForeignTablePartition` or `ErrPartitionDetachPending`. Either way nothing has executed, so a desired file that
+also adds a column does not keep the column. `migrate --desired --dry-run` runs the same checks
+and prints the same result. The build makes the checks again under its lock when it runs, and
+that reading decides; a tree that changes between admission and the build still stops there.
 
 ## Routing from `migrate --alter`
 
@@ -108,8 +112,11 @@ statement (`preflight.RoutesToPartitionedForeignKeyBuild`), before the planner's
 `NOT VALID` then `VALIDATE` steps meet the partitioned-parent refusal. On 18 those steps run as
 they are. A forced run and a submitted `NOT VALID` are not routed. The dry run plans the
 statement with the execution `partitioned-foreign-key-build` and reports the build's shape
-refusals (`not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape`); the checks under
-the build's lock (the parent's constraints, the referenced table, the tree) are reported by the
-apply only. Those are refusals when the build stopped before any partition got the foreign key,
+refusals (`not-add-foreign-key`, `partitioned-foreign-key-unsupported-shape`) and, through
+`migrate.AdmitPartitionedForeignKeyCatalog` and `executor.AdmitPartitionedForeignKey`, the
+build's refusals of the referenced table and the sub-partitioned tree, with the verdict the apply
+gives; a foreign-table partition or a pending detach ends the dry run in the build's error, as
+the apply ends in a failed verdict. The parent's constraints are checked by the apply only, under
+the build's lock. The build's catalog refusals are refusals when the build stopped before any partition got the foreign key,
 and failed verdicts after; every other stop is a failed verdict with the executor's code
 ([schemabot-integration](schemabot-integration.md#outcomes-of-a-partitioned-foreign-key-build)).
