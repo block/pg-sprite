@@ -158,26 +158,33 @@ func readForeignKeys(ctx context.Context, q querier, relOID uint32, relName stri
 }
 
 // isRequested reports whether the foreign key has the requested
-// definition on a table whose foreign key columns are attnums: the same
-// referenced table and columns, in order, the same MATCH, actions, and
-// deferrability, no ON DELETE column list, and enforced. These are what the
-// parent's statement compares before it adopts a partition's foreign key
-// instead of creating and validating one. Whether it is validated or adopted
-// is judged apart.
+// definition on a table whose foreign key columns are attnums: one the
+// parent's statement would adopt (isAdoptable), with no ON DELETE column
+// list. Whether it is validated or adopted is judged apart.
 func (k catalogFK) isRequested(spec partitionedFKSpec, attnums []int16, ref fkReference) bool {
+	return k.isAdoptable(spec, attnums, ref) && !k.deleteSetColumns
+}
+
+// isAdoptable reports whether the parent's statement would adopt the
+// foreign key for the requested one instead of creating and validating its
+// own: the same referenced table and columns, in order, and the same MATCH,
+// actions, deferrability, and enforcement. These are what the server
+// compares. It does not compare the ON DELETE column list, so it adopts a
+// foreign key whose list differs from the parent's, and with it a delete
+// rule the parent does not have.
+func (k catalogFK) isAdoptable(spec partitionedFKSpec, attnums []int16, ref fkReference) bool {
 	return k.refOID == ref.oid &&
 		slices.Equal(k.key, attnums) &&
 		slices.Equal(k.refKey, ref.attnums) &&
 		k.sameRules(spec)
 }
 
-// sameRules reports whether the foreign key's MATCH, actions, and
-// deferrability are the requested ones.
+// sameRules reports whether the foreign key's MATCH, actions,
+// enforcement, and deferrability are the requested ones.
 func (k catalogFK) sameRules(spec partitionedFKSpec) bool {
 	return k.match == spec.match &&
 		k.onUpdate == spec.onUpdate &&
 		k.onDelete == spec.onDelete &&
-		!k.deleteSetColumns &&
 		!k.notEnforced &&
 		k.deferrable == spec.deferrable &&
 		k.initiallyDeferred == spec.initiallyDeferred
@@ -189,6 +196,18 @@ func requestedForeignKeys(fks []catalogFK, spec partitionedFKSpec, attnums []int
 	var out []catalogFK
 	for _, k := range fks {
 		if k.isRequested(spec, attnums, ref) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// adoptableForeignKeys returns the foreign keys the parent's statement
+// would adopt for the requested one.
+func adoptableForeignKeys(fks []catalogFK, spec partitionedFKSpec, attnums []int16, ref fkReference) []catalogFK {
+	var out []catalogFK
+	for _, k := range fks {
+		if k.isAdoptable(spec, attnums, ref) {
 			out = append(out, k)
 		}
 	}
@@ -260,8 +279,16 @@ type leafFKPlan struct {
 // definition is reused whatever its name, so an earlier run's and an
 // operator's own are both found; the derived name is judged only when there
 // is none. Foreign keys of another definition are left alone: the parent's
-// statement does not adopt them.
+// statement does not adopt them. One it would adopt that differs only in its
+// ON DELETE column list is refused, because the server picks among the
+// adoptable ones by name, so it could take that one in place of the step's.
 func decideLeafForeignKey(node partitionNode, name string, fk resolvedFK, facts leafFKFacts) (leafFKPlan, error) {
+	for _, k := range adoptableForeignKeys(facts.foreignKeys, fk.spec, facts.attnums, fk.ref) {
+		if !k.isRequested(fk.spec, facts.attnums, fk.ref) {
+			return leafFKPlan{}, fmt.Errorf("%w: foreign key %s on partition %s matches the requested one except its ON DELETE column list, and the parent's statement could adopt it in place of the requested one",
+				ErrPartitionedForeignKeyConflict, k.name, node.qualified())
+		}
+	}
 	matches := requestedForeignKeys(facts.foreignKeys, fk.spec, facts.attnums, fk.ref)
 	for _, k := range matches {
 		if k.parentOID != 0 {

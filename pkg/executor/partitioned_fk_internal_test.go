@@ -475,6 +475,24 @@ func TestAddPartitionedForeignKeyRefusals(t *testing.T) {
 				    ADD CONSTRAINT jan_account_fk_2 FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)`)
 			refuse(t, f, addEventsAccountFK, ErrPartitionedForeignKeyConflict, CodePartitionedForeignKeyConflict)
 		})
+
+		// PostgreSQL adopts a partition's foreign key whatever its ON
+		// DELETE column list says, so the parent's statement could adopt
+		// this one instead of the leaf step's, and with it a delete rule
+		// that differs from the parent's. The run stops before it touches
+		// any leaf. A column list exists from PostgreSQL 15.
+		t.Run("a leaf foreign key that differs only in its ON DELETE column list", func(t *testing.T) {
+			f := newFixture(t)
+			if major, err := dbconn.ServerMajor(t.Context(), f.pool); assert.NoError(t, err) && major < 15 {
+				t.Skipf("PostgreSQL %d has no ON DELETE column list", major)
+			}
+			f.events(t)
+			f.exec(t, `
+				ALTER TABLE %[1]s.events_2026_01
+				    ADD CONSTRAINT a_jan_account_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
+				    ON DELETE SET NULL (account_id)`)
+			refuse(t, f, addEventsAccountFK+` ON DELETE SET NULL`, ErrPartitionedForeignKeyConflict, CodePartitionedForeignKeyConflict)
+		})
 	})
 }
 
@@ -624,6 +642,29 @@ func TestAddPartitionedForeignKeyParentStepFailsClosed(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, PartitionForeignKeyFound, partitionFKActions(rep)["events_2026_02"])
 			f.requireAdopted(t, rep)
+		})
+
+		// A foreign key that differs from the recorded one only in its ON
+		// DELETE column list, added between the leaf steps and the parent's,
+		// sorts first by name, so the parent's ADD would adopt it. The proof
+		// refuses before the ADD. A column list exists from PostgreSQL 15.
+		t.Run("a build given a column-list foreign key before the parent's step", func(t *testing.T) {
+			f := newFixture(t)
+			if major, err := dbconn.ServerMajor(t.Context(), f.pool); assert.NoError(t, err) && major < 15 {
+				t.Skipf("PostgreSQL %d has no ON DELETE column list", major)
+			}
+			f.events(t)
+			at := f.atParentStep(t, func() {
+				f.exec(t, `
+					ALTER TABLE %[1]s.events_2026_02
+					    ADD CONSTRAINT a_feb_account_fk FOREIGN KEY (account_id) REFERENCES %[1]s.accounts (id)
+					    ON DELETE SET NULL (account_id)`)
+			})
+
+			_, err := f.addAt(t, addEventsAccountFK+` ON DELETE SET NULL`, at)
+
+			require.ErrorIs(t, err, ErrPartitionedForeignKeyLeafChanged)
+			assert.Empty(t, f.foreignKeys(t, "events"), "the parent has no foreign key")
 		})
 
 		// A leaf whose recorded foreign key is gone makes the parent's ADD
