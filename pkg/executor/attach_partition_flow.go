@@ -32,10 +32,13 @@ var (
 	ErrAttachPartitionUnsupportedShape = errors.New("the statement is not an ATTACH PARTITION ... FOR VALUES the online attach takes")
 	// ErrAttachPartitionTable is returned when the table the statement
 	// attaches does not exist, is not a plain table, is already a partition
-	// or inheritance child of another table, or does not have the parent's
-	// columns by name, type, and collation; or when the parent's DEFAULT
-	// partition is not a plain table, which the flow cannot prove online.
-	// Every one of these is read before anything is changed.
+	// or inheritance child of another table, or has columns the ATTACH
+	// refuses: by name, type, and collation, by whether and how each is
+	// generated, and, from PostgreSQL 17, an identity column; or when the
+	// parent's DEFAULT partition is not a plain table, which the flow cannot
+	// prove online. Every one of these is read before anything is added; a
+	// proof an earlier run left on the DEFAULT partition is dropped before
+	// the refusal returns.
 	ErrAttachPartitionTable = errors.New("the table to attach is not a standalone plain table with the parent's columns")
 	// ErrAttachPartitionDefaultWindow is returned, before anything is
 	// added, when the parent has a DEFAULT partition and the caller did
@@ -182,11 +185,14 @@ type AttachPartitionReport struct {
 // steps finished on the table, and rerunning the same statement resumes; a
 // table found already attached has any leftover proof dropped and is
 // reported as found. The DEFAULT partition's proof is the exception: a run
-// that stops without attaching, on an error, a cancel, or a lost table
-// lock, drops it under a context of its own, so the DEFAULT partition takes
-// the writes inside the new bound again, and reports the drop in Steps.
-// When that drop fails, the error names the CHECK and the statement that
-// drops it.
+// that stops without attaching, on an error, a refusal, a cancel, or a lost
+// table lock, drops it under a context of its own, so the DEFAULT partition
+// takes the writes inside the new bound again, and reports the drop in
+// Steps; a refusal that finds no proof neither waits for nor locks the
+// DEFAULT partition. When that drop fails, the error is an
+// *AttachDefaultProofLeftError naming the CHECK and the statement that
+// drops it. A process that dies between the proof's ADD and the ATTACH
+// leaves the proof until the same statement runs again.
 //
 // A pool smaller than a concurrent index build needs is refused with
 // ErrPoolTooSmall before the lock is taken.
@@ -291,7 +297,10 @@ type attachResolved struct {
 func (f attachPartitionFlow) run(ctx context.Context) error {
 	r, err := f.resolve(ctx)
 	if err != nil {
-		return err
+		if r.deflt.oid == 0 {
+			return err
+		}
+		return f.withdrawLeftoverDefaultProof(ctx, r, err)
 	}
 	table := attachTable{oid: r.table.oid, schema: r.table.schema, name: r.table.name}
 	f.rep.Schema, f.rep.Table = table.schema, table.name
@@ -303,7 +312,7 @@ func (f attachPartitionFlow) run(ctx context.Context) error {
 	if r.deflt.oid == 0 {
 		return f.attachTarget(ctx, table, target)
 	}
-	target.deflt = attachProof{kind: attachProofDefault, tableOID: r.deflt.oid, schema: r.deflt.schema, table: r.deflt.name, expr: exclusion}
+	target.deflt = r.defaultProof(exclusion)
 	// A run that stops without attaching takes the DEFAULT partition's
 	// proof off again, whichever step stopped it: the write window it opens
 	// was accepted for an attach, not for a stopped run.
@@ -353,10 +362,11 @@ func attachProofStepKind(p attachProof) AttachPartitionStepKind {
 	return AttachPartitionStepBoundProof
 }
 
-// resolve resolves the parent, the table as the statement spells it under
-// the attempt's search_path, and the parent's DEFAULT partition, and refuses
-// a table that is not a plain table with the parent's columns, and a DEFAULT
-// partition that is not a plain table.
+// resolve resolves the parent, the parent's DEFAULT partition, and the table
+// as the statement spells it under the attempt's search_path, and refuses a
+// DEFAULT partition that is not a plain table, and a table that is not a
+// plain table with the parent's columns. A refusal of the table returns
+// with the parent and the DEFAULT partition resolved.
 func (f attachPartitionFlow) resolve(ctx context.Context) (attachResolved, error) {
 	var r attachResolved
 	err := briefTx{pool: f.pool}.run(ctx, "resolve the tables of the attach", f.searchPath, false, func(ctx context.Context, tx pgx.Tx) error {
@@ -376,6 +386,27 @@ func (f attachPartitionFlow) resolve(ctx context.Context) (attachResolved, error
 				ErrNotPartitionedTable, qualifiedName(f.attach.ParentSchema, f.attach.Parent))
 		}
 		r.parentOID = parentOID
+		// The DEFAULT partition is read before the table, so a refusal of
+		// the table still names the DEFAULT partition whose leftover proof
+		// the run drops.
+		var defaultOID uint32
+		if err := tx.QueryRow(ctx, attachDefaultPartitionSQL, parentOID).Scan(&defaultOID); err != nil {
+			return fmt.Errorf("read the DEFAULT partition of %s: %w", qualifiedName(parent.schema, parent.name), err)
+		}
+		if defaultOID != 0 {
+			deflt, found, err := relationByOID(ctx, tx, defaultOID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("%w: ST-7: the DEFAULT partition %d of %s vanished", ErrInvariantViolation, defaultOID, qualifiedName(parent.schema, parent.name))
+			}
+			if deflt.relkind != "r" {
+				return fmt.Errorf("%w: the DEFAULT partition %s of %s is of kind %q, and the online attach proves only a plain table's rows",
+					ErrAttachPartitionTable, qualifiedName(deflt.schema, deflt.name), qualifiedName(parent.schema, parent.name), deflt.relkind)
+			}
+			r.deflt = deflt
+		}
 		tableOID, err := resolveAttachName(ctx, tx, f.attach.Schema, f.attach.Name)
 		if err != nil {
 			return err
@@ -390,28 +421,15 @@ func (f attachPartitionFlow) resolve(ctx context.Context) (attachResolved, error
 		if !found || r.table.relkind != "r" {
 			return fmt.Errorf("%w: %s is of kind %q, and the online attach takes a plain table", ErrAttachPartitionTable, spelled, r.table.relkind)
 		}
-		if err := requireAttachColumns(ctx, tx, parentOID, r.table); err != nil {
-			return err
-		}
-		var defaultOID uint32
-		if err := tx.QueryRow(ctx, attachDefaultPartitionSQL, parentOID).Scan(&defaultOID); err != nil {
-			return fmt.Errorf("read the DEFAULT partition of %s: %w", qualifiedName(parent.schema, parent.name), err)
-		}
-		if defaultOID != 0 {
-			if r.deflt, found, err = relationByOID(ctx, tx, defaultOID); err != nil {
-				return err
-			}
-			if !found {
-				return fmt.Errorf("%w: ST-7: the DEFAULT partition %d of %s vanished", ErrInvariantViolation, defaultOID, qualifiedName(parent.schema, parent.name))
-			}
-			if r.deflt.relkind != "r" {
-				return fmt.Errorf("%w: the DEFAULT partition %s of %s is of kind %q, and the online attach proves only a plain table's rows",
-					ErrAttachPartitionTable, qualifiedName(r.deflt.schema, r.deflt.name), qualifiedName(parent.schema, parent.name), r.deflt.relkind)
-			}
-		}
-		return nil
+		return requireAttachColumns(ctx, tx, parentOID, r.table)
 	})
 	return r, err
+}
+
+// defaultProof is the DEFAULT partition's proof that excludes the bound,
+// given the exclusion the statement's bound derives.
+func (r attachResolved) defaultProof(exclusion string) attachProof {
+	return attachProof{kind: attachProofDefault, tableOID: r.deflt.oid, schema: r.deflt.schema, table: r.deflt.name, expr: exclusion}
 }
 
 // resolveAttachName resolves a name as the statement spells it, 0 for none.

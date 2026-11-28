@@ -827,12 +827,27 @@ refused rather than run. It is a library entry only: `migrate` does not route an
 The `DEFAULT` partition's proof refuses the writes the parent routes there inside the new bound
 from when it is added until the attach commits, so the flow refuses a parent with a `DEFAULT`
 partition unless `AttachPartitionOptions.AcceptDefaultWriteWindow` is set, and adds that proof
-last. **A run that stops without attaching drops that proof again**, whatever stopped it: a
-failed step, the `ATTACH`'s lock budget, a cancelled context, or a lost table lock. The drop runs
-under a context of its own, bounded by `HolderWait` plus a short cleanup budget, and appears in
-the report as a step of kind `default-proof` with action `dropped`; the report is returned with
-the error. If that drop itself fails, the error names the `CHECK` and the `ALTER TABLE ... DROP
-CONSTRAINT` that removes it, and an operator runs it unless the table turns out to be attached.
+last. **A run that returns without attaching drops that proof again**, whatever stopped it: a
+failed step, a refusal, the `ATTACH`'s lock budget, a cancelled context, or a lost table lock. The
+drop runs under a context of its own, bounded by `HolderWait` plus a short cleanup budget, and
+appears in the report as a step of kind `default-proof` with action `dropped`; the report is
+returned with the error. A refusal that finds no proof there returns without waiting for or
+locking the `DEFAULT` partition. If the drop itself fails, the error is an
+`*executor.AttachDefaultProofLeftError` whose fields name the `DEFAULT` partition, the `CHECK`,
+and the `ALTER TABLE ... DROP CONSTRAINT` that removes it (`DropSQL`).
+
+**A process that dies between adding the proof and the `ATTACH` leaves the proof in place**, as
+does a run whose connection drops while that add commits, and it keeps refusing the writes the
+parent routes to the `DEFAULT` partition inside the new bound until the same statement runs
+again: a rerun that attaches drops it with the `ATTACH`, and a rerun refused before it adds
+anything drops it before the refusal returns. Hosts should therefore rerun
+the same statement promptly after a run whose process died. The proof is a `CHECK` on the
+`DEFAULT` partition named `pgsprite_attach_default_` followed by 16 hex digits. If the statement
+will not be rerun, and only while the table is not a partition of the parent, an operator drops it:
+
+```sql
+ALTER TABLE <schema>.<default partition> DROP CONSTRAINT pgsprite_attach_default_<16 hex digits>;
+```
 
 Everything else a stop leaves stays on the new table, and **running the same statement again
 resumes from it**: the bound proof (a `CHECK` named `pgsprite_attach_bound_...`, enforced for new
@@ -843,7 +858,7 @@ already attached drops any proof still there and reports each as a `dropped` ste
 | Outcome | Persists | Retry | Orchestrator action |
 | --- | --- | --- | --- |
 | `attach-partition-unsupported-shape` | nothing | no, permanent | The statement is not one `ATTACH PARTITION ... FOR VALUES` on a schema-qualified parent (another statement, an unqualified parent, a `DEFAULT` bound). Fix the statement |
-| `attach-partition-table` | nothing added; a proof an earlier run left on the `DEFAULT` partition is dropped | no, permanent | The new table is missing, not a plain table, already a partition or inheritance child, or its columns differ from the parent's by name, type, or collation; or the `DEFAULT` partition is not a plain table. An operator fixes the table, then the same statement runs |
+| `attach-partition-table` | nothing added; a proof an earlier run left on the `DEFAULT` partition is dropped | no, permanent | The new table is missing, not a plain table, already a partition or inheritance child, or has columns the `ATTACH` refuses: by name, type, or collation, by whether and how each is generated, or, from PostgreSQL 17, an identity column; or the `DEFAULT` partition is not a plain table. An operator fixes the table, then the same statement runs |
 | `attach-partition-default-window` | nothing added; a proof an earlier run left on the `DEFAULT` partition is dropped | no, permanent | The parent has a `DEFAULT` partition and the caller did not accept its write window. Set `AcceptDefaultWriteWindow`, or detach the `DEFAULT` partition first |
 | `pool-too-small` | nothing | no, permanent | The pool holds fewer connections than a concurrent index build needs; refused before the lock is taken. Resize the pool |
 | `execution-failed` with SQLSTATE `23514` (`check_violation`) in the chain | the new table's work so far, its bound proof `NOT VALID`; never the `DEFAULT` partition's proof | not until the rows move | Rows of the new table fall outside the bound, or rows of the `DEFAULT` partition fall inside it; the error names the table and the `CHECK`. Move those rows, then rerun |
