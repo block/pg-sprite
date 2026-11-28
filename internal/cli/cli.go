@@ -1,8 +1,8 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
 // status (the optimistic front door), pull, diff, and fmt (the declarative
 // front door), lint and suggest (the offline checker and advisor),
-// capabilities (the embedded support matrix), and reap (the orphan-slot
-// reaper).
+// capabilities (the embedded support matrix), reap (the orphan-slot
+// reaper), and discard (abandon a stopped copy-and-swap run).
 package cli
 
 import (
@@ -34,6 +34,7 @@ type CLI struct {
 	Capabilities CapabilitiesCmd `cmd:"" help:"Print the embedded support matrix."`
 	Status       StatusCmd       `cmd:"" help:"Report the status of a running schema change."`
 	Reap         ReapCmd         `cmd:"" help:"Drop the orphan replication slots and publications that stopped copy-and-swap runs left in the connected database."`
+	Discard      DiscardCmd      `cmd:"" help:"Abandon a stopped copy-and-swap run on one table without running its change: drop its shadow table, its write fence or replication slot and publication, and its checkpoint row."`
 }
 
 // New returns a command tree for kong.Parse. The version is the same
@@ -346,3 +347,18 @@ type ReapCmd struct {
 
 // Run implements the reap subcommand.
 func (c *ReapCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
+
+// DiscardCmd abandons the stopped copy-and-swap run on one table: whatever
+// the run left — its shadow table, its write fence (offline) or replication
+// slot and publication (live), and its checkpoint row — is dropped, and the
+// change is not run. A run in progress, a run whose swap committed, and a
+// change that completed are refused and nothing is dropped.
+type DiscardCmd struct {
+	DBFlags `embed:""`
+
+	Table string `arg:"" name:"table" placeholder:"SCHEMA.TABLE" help:"The table whose stopped run to discard, named exactly as --restart names it: the schema-qualified name, an unquoted name in lower case."`
+	JSON  bool   `help:"Emit the report as JSON."`
+}
+
+// Run implements the discard subcommand.
+func (c *DiscardCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
