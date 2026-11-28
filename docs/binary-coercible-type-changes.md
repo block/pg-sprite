@@ -466,8 +466,11 @@ PostgreSQL can prove. It accepts exactly:
 - `varbit(n) → varbit(m)` with `m ≥ n`, and `varbit(n) → varbit`;
 - `cidr → inet`.
 
-Each rule leaves every stored value as it is, and the column's indexes are reused, not
-rebuilt. A lower temporal precision rounds every value, a shorter `varbit` truncates, and
+Each rule leaves every stored value as it is, and a plain, valid index on the column with
+its default operator class keeps its storage. Any other index on the column, such as an
+expression, partial, or invalid index or one with another operator class, is still rebuilt
+under the statement's `ACCESS EXCLUSIVE` lock, as
+[the index caveat above](#no-rewrite-is-not-no-cost) describes. A lower temporal precision rounds every value, a shorter `varbit` truncates, and
 `inet → cidr` masks host bits, so each of those rewrites.
 
 The widening rules apply to scalar columns only. An array column is a relabel only when
