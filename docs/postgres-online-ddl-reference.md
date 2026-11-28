@@ -267,7 +267,7 @@ ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lo
 
 ### Safe pattern: attach a partition without a scan or an index build
 
-`ATTACH PARTITION` does up to three pieces of work, and skips each one only when something
+`ATTACH PARTITION` does up to four pieces of work, and skips each one only when something
 already proves it is unnecessary:
 
 | Work | Skipped when | Runs under |
@@ -275,13 +275,14 @@ already proves it is unnecessary:
 | Scan the attached table, to prove every row fits the new bound | A validated `CHECK` on the attached table implies the bound | ACCESS EXCLUSIVE on the attached table |
 | Scan the `DEFAULT` partition, to prove none of its rows belongs in the new bound | The parent has no `DEFAULT` partition, or a validated `CHECK` on it excludes the bound | ACCESS EXCLUSIVE on the `DEFAULT` partition |
 | Build each of the parent's indexes on the attached table | The attached table already has an index equivalent to the parent's (see below). For the parent's primary key or unique constraint, the matching index must also back a constraint (`ADD CONSTRAINT … USING INDEX`): a bare unique index is left alone and a new one is built | ACCESS EXCLUSIVE on the attached table |
+| Create each of the parent's foreign keys on the attached table, checking every row against the referenced table | The attached table already has a validated foreign key of the same definition (columns, referenced table and columns, `MATCH`, actions, deferrability), under any name | ACCESS EXCLUSIVE on the attached table |
 
 The attach also refuses, outright, a table that lacks one of the parent's `CHECK` constraints
 under the same name and validated, or that allows NULL in a column the parent declares
 `NOT NULL`. `LIKE` copies `NOT NULL` but copies the `CHECK`s only with `INCLUDING CONSTRAINTS`;
 on a table that already holds rows, add each `CHECK` `NOT VALID` and `VALIDATE` it, as in step 3.
 
-Do all three ahead of time, online, and the attach changes only the catalog. For a parent
+Do all four ahead of time, online, and the attach changes only the catalog. For a parent
 `events`, range-partitioned on `created_at`, with primary key `(id, created_at)`, an index on
 `kind`, and a `DEFAULT` partition `events_default`:
 
@@ -341,6 +342,20 @@ ALTER TABLE events_default DROP CONSTRAINT events_default_not_2027_01;
   method, and uniqueness. A near miss is left in place as an extra index and a new one is
   built under the attach's lock. Before attaching, compare `pg_get_indexdef` of each of the
   new table's indexes with the parent's.
+- When the parent has foreign keys, give the new table each of them before step 5, for a
+  parent foreign key `(account_id) REFERENCES accounts (id)`:
+
+  ```sql
+  ALTER TABLE events_2027_01 ADD CONSTRAINT events_2027_01_account_fk
+      FOREIGN KEY (account_id) REFERENCES accounts (id) NOT VALID;
+  ALTER TABLE events_2027_01 VALIDATE CONSTRAINT events_2027_01_account_fk;
+  ```
+
+  The `ADD` takes a brief SHARE ROW EXCLUSIVE on both tables; the `VALIDATE` scans the new
+  table under SHARE UPDATE EXCLUSIVE. A validated foreign key of the same definition the
+  table already has, under any name, is adopted as it stands. On PostgreSQL 18 a `NOT VALID`
+  foreign key of the parent is still validated for a new partition, and a `NOT ENFORCED` one
+  is cloned without a scan.
 - A partition key column that allows nulls must be proven non-null too: the partition
   constraint includes `IS NOT NULL` on the key. Add `created_at IS NOT NULL AND` to the
   step 3 `CHECK`, or the attach scans the new table anyway.

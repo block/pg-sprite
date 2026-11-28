@@ -141,7 +141,10 @@ type RunOptions struct {
 // built and the source fenced or its slot made (ST-6). A copier refusal
 // wraps both ErrInvalidOptions and the copier's own sentinel. A copier
 // pace is refused as well: a live run sets its own, from its catch-up's
-// lag, and a quiesced run has no stream to fall behind. The verifier's
+// lag, and a quiesced run has no stream to fall behind. A negative slot
+// lag ceiling is refused here too: a resume judges its slot by the
+// ceiling before the catch-up that would refuse the value starts, and
+// would read any slot as over it. The verifier's
 // options are validated where they are consumed, by its constructor,
 // except the cap on the keys a live pass may leave for the swap, which
 // the pass would otherwise refuse only after the whole copy.
@@ -157,6 +160,9 @@ func (o RunOptions) validate() error {
 	}
 	if o.Copier.Pace.Backlog != nil {
 		return fmt.Errorf("%w: a live run paces its copy by its own catch-up's lag and a quiesced run has none; leave Copier.Pace zero", ErrInvalidOptions)
+	}
+	if o.Catchup.SlotLagCeiling < 0 {
+		return fmt.Errorf("%w: slot lag ceiling %d is negative; use zero for the default", ErrInvalidOptions, o.Catchup.SlotLagCeiling)
 	}
 	if o.CheckpointInterval < 0 {
 		return fmt.Errorf("%w: checkpoint interval %s is negative; use zero for the default", ErrInvalidOptions, o.CheckpointInterval)
