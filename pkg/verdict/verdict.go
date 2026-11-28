@@ -872,7 +872,9 @@ func (v Verdict) String() string {
 			fmt.Fprintf(&b, "\n  owner:     %s", v.Owner)
 		}
 	}
-	fmt.Fprintf(&b, "\n  statement: %s", v.Statement)
+	if v.Statement != "" {
+		fmt.Fprintf(&b, "\n  statement: %s", v.Statement)
+	}
 	if v.Attempts > 0 {
 		fmt.Fprintf(&b, "\n  attempts:  %d", v.Attempts)
 	}

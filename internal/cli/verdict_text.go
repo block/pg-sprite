@@ -29,7 +29,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 			fmt.Fprintf(&b, "\n  %s     %s", pal.bold("owner:"), v.Owner)
 		}
 	}
-	fmt.Fprintf(&b, "\n  %s %s", pal.bold("statement:"), v.Statement)
+	if v.Statement != "" {
+		fmt.Fprintf(&b, "\n  %s %s", pal.bold("statement:"), v.Statement)
+	}
 	if v.Attempts > 0 {
 		fmt.Fprintf(&b, "\n  %s  %d", pal.bold("attempts:"), v.Attempts)
 	}
