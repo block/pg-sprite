@@ -203,8 +203,8 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 		v.DependentTriggers = d.DependentTriggers
 		v.DependentGeneratedColumns = d.DependentGeneratedColumns
 		if d.Reason == planner.ReasonDependentView {
-			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
-				"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", "))
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; %s",
+				d.Operation, d.ViewsPhrase(), d.ViewsHelp())
 		}
 		if d.Reason == planner.ReasonDependentPolicy {
 			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a policy reads it; %s",

@@ -19,7 +19,8 @@ import (
 // that read it, from any schema. A view that reads the table without naming
 // a column, or reads another table, does not count against the column, and
 // a column no view reads is absent. A view on an inheritance child counts
-// for the tree, not for the table alone.
+// for the tree, not for the table alone. The materialized views among them
+// are named apart, so a refusal can call each by its kind.
 func TestReadColumnDependentsViews(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -53,6 +54,7 @@ func TestReadColumnDependentsViews(t *testing.T) {
 		"note":  sortedQualified([2]string{schema, "admin_notes"}, [2]string{other, "Notes"}),
 	}, views.Tree)
 	assert.Equal(t, views.Tree, views.Drop, "admins inherits every column from users alone, so a drop reaches it")
+	assert.Equal(t, []string{fmt.Sprintf(`"%s"."Notes"`, other)}, deps.MaterializedViews)
 	assert.Empty(t, deps.Policies.Tree, "no policy reads users")
 }
 

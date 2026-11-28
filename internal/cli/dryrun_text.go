@@ -72,7 +72,13 @@ func writeDependentHelp(w *stickyWriter, d planner.Decision) {
 		}
 		w.diag("help", "", text)
 	}
-	help(planner.ReasonDependentView, "view", "views", d.DependentViews, "drop or redefine those views first, then re-plan")
+	if len(d.DependentViews) > 0 {
+		text := d.ViewsHelp()
+		if d.Reason != planner.ReasonDependentView {
+			text = "the change is also blocked by " + d.ViewsPhrase() + ": " + text
+		}
+		w.diag("help", "", text)
+	}
 	help(planner.ReasonDependentPolicy, "policy", "policies", d.DependentPolicies, d.DependentFix.Help("policies"))
 	help(planner.ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers, d.DependentFix.Help("triggers"))
 	help(planner.ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns, planner.GeneratedColumnHelp)
@@ -447,7 +453,7 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 		return "the planner knows no safe path for this statement"
 	}
 	if d.Reason == planner.ReasonDependentView {
-		return d.Operation + " changes a column read by " + strings.Join(d.DependentViews, ", ") +
+		return d.Operation + " changes a column read by " + d.ViewsPhrase() +
 			", and PostgreSQL refuses to retype or drop a column while a view reads it"
 	}
 	if d.Reason == planner.ReasonDependentPolicy {

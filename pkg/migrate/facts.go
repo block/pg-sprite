@@ -101,6 +101,7 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 			return Facts{}, err
 		}
 		classifier.DependentViews, classifier.DropDependentViews, classifier.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
+		classifier.MaterializedViews = deps.MaterializedViews
 		classifier.DependentPolicies, classifier.DropDependentPolicies, classifier.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 		classifier.DependentTriggers = planner.ColumnDependents(deps.Triggers)
 		classifier.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)

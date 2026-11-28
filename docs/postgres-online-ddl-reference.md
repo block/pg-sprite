@@ -685,7 +685,13 @@ column, or also inherits it from a table outside the drop, keeps its copy, so a
 view on that copy does not count, while a child that inherits it along two paths
 from the dropped table loses it, so a view on that copy does. The plan
 names each view in `decisions[].dependent_views`, and a refused run's verdict in
-`dependent_views`. Drop or redefine the views first, then re-plan. A rename is not
+`dependent_views`. The refusal names a materialized view by its kind, and its help
+gives the manual path the change takes, chosen as for
+[`dependent-policy`](#dependent-policy): change the views so they no longer read the
+column before a drop, recreate them around a type change PostgreSQL runs in place in
+one transaction, or point them at a new column for a type change that rewrites the
+table. Recreating a materialized view runs its query to fill it again while that
+transaction blocks the table. A rename is not
 refused, because a view follows the column. `DROP COLUMN … CASCADE`, which the
 server runs by dropping the views with the column, is refused as `cascading-drop`
 instead.
@@ -721,7 +727,7 @@ meets the same refusal. Add a column of the new type instead, backfill it, point
 policies at it, then drop the old column. A rename is not refused, because a policy follows
 the column. `DROP COLUMN … CASCADE`, which drops the policies with the column, is
 refused as `cascading-drop` instead. When a view and a policy both read the column,
-the decision is `dependent-view`; re-plan after the views are handled. The planner
+the decision is `dependent-view`, and the help gives the same path for both. The planner
 reads the policies from live facts, so the linter, which has none, never reports it,
 and the server's own refusal remains the backstop for a policy created after
 planning.
