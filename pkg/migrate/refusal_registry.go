@@ -3,6 +3,7 @@ package migrate
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -403,13 +404,16 @@ func desiredStatementRefusal(kind statement.Kind) (verdict.Refusal, bool) {
 // DesiredFileRefusal reports whether err is a refusal of the desired file
 // itself, returned by [statement.ParseDesiredFile] before anything is
 // planned, by the planner while it builds the desired table, or by the diff
-// for a change it does not derive, and returns the refusal verdict for it. sql is the refused statement when err does
+// for a change it does not derive, and returns the refusal verdict for it. A
+// file that also declares no table for its other statements says so in the
+// detail. sql is the refused statement when err does
 // not name one (the file's CREATE TABLE for a planner refusal); a parse
 // refusal that names its statement, or a statement the server rejected on the
 // scratch schema, reports that one instead. ok is false
 // for every other error, including a syntax error, which is an input error
 // and not a refusal.
 func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
+	original := err
 	refusedStatements := desiredRefusedStatements(err)
 	err = decisiveDesiredRefusal(err)
 	ref, ok := desiredFileRefusal(err)
@@ -419,7 +423,7 @@ func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 	if !ok {
 		return verdict.Verdict{}, false
 	}
-	detail := fmt.Sprintf("%v; nothing was planned or executed", err)
+	detail := fmt.Sprintf("%v%s", err, nothingPlanned)
 	if disallowed, isStatement := errors.AsType[*statement.DisallowedStatementError](err); isStatement {
 		sql = disallowed.SQL
 		detail = "a desired file holds one CREATE TABLE, its indexes, and its row security, or one enum type, " +
@@ -445,10 +449,23 @@ func DesiredFileRefusal(err error, sql string) (verdict.Verdict, bool) {
 				"partitions; nothing was planned or executed"
 		}
 	}
+	if errors.Is(original, statement.ErrNoCreateTable) {
+		detail = strings.TrimSuffix(detail, nothingPlanned) + noTableBesideRefusals + nothingPlanned
+	}
 	v := verdict.Verdict{Statement: sql, Detail: detail}.WithRefusal(ref)
 	v.RefusedStatements = refusedStatements
 	return v, true
 }
+
+// nothingPlanned closes a desired file refusal's detail.
+const nothingPlanned = "; nothing was planned or executed"
+
+// noTableBesideRefusals is what a desired file refusal's detail adds when the
+// file also declares no table for its other statements, so its author adds
+// the table and fixes the refused statements in one edit instead of finding
+// the missing table on the next run.
+const noTableBesideRefusals = "; the file also declares no CREATE TABLE, so add the table's CREATE TABLE " +
+	"or move its other statements to the file of the table they belong to"
 
 // desiredRefusedStatements lists every statement a desired file refused, in
 // file order, with where each starts, when it refused more than one. A file
