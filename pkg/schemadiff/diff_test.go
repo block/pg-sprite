@@ -172,11 +172,11 @@ func TestDiffRenameShapeIsDropPlusAdd(t *testing.T) {
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		`ALTER TABLE "public"."users" DROP COLUMN "email"`,
 		`ALTER TABLE "public"."users" ADD COLUMN "email_address" text`,
+		`ALTER TABLE "public"."users" DROP COLUMN "email"`,
 	}, sqls(changes))
-	assert.True(t, changes[0].Destructive)
-	assert.False(t, changes[1].Destructive)
+	assert.False(t, changes[0].Destructive)
+	assert.True(t, changes[1].Destructive)
 }
 
 func TestDiffDropColumnIsDestructive(t *testing.T) {
@@ -611,7 +611,9 @@ func TestDiffPartitionedParentLeavesAValidIndexWithTheDesiredDefinition(t *testi
 	assert.Empty(t, changes)
 }
 
-func TestDiffOrderingDropsBeforeAddsBeforeIndexes(t *testing.T) {
+// A dropped column goes last: everything the plan adds is in place before
+// the column, and whatever reads it, is gone.
+func TestDiffOrderingDropsAColumnAfterAddsAndIndexes(t *testing.T) {
 	live := base()
 	live.Columns = append(live.Columns, Column{Name: "legacy", Type: "integer"})
 
@@ -624,9 +626,9 @@ func TestDiffOrderingDropsBeforeAddsBeforeIndexes(t *testing.T) {
 	changes, err := Diff("public", live, desired)
 	require.NoError(t, err)
 	require.Equal(t, []string{
-		`ALTER TABLE "public"."events" DROP COLUMN "legacy"`,
 		`ALTER TABLE "public"."events" ADD COLUMN "email" text NOT NULL`,
 		`CREATE INDEX events_email_idx ON public.events USING btree (email)`,
+		`ALTER TABLE "public"."events" DROP COLUMN "legacy"`,
 	}, sqls(changes))
 }
 

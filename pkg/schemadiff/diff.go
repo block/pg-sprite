@@ -347,9 +347,10 @@ type ConstraintValidation struct {
 // Order is dependency-correct: drops first (indexes, then constraints, then
 // columns, then NOT NULLs), then column adds and alters, then constraint
 // adds, then index creates, then foreign key adds — so an added column
-// exists before an index or constraint that references it. Four kinds of
-// change keep the old object in place until its replacement is, unless the
-// plan also drops or retypes a column:
+// exists before an index or constraint that references it. A plan that
+// drops a column drops it last, unless it changes its columns first (see
+// changesColumnsFirst). Four kinds of change keep the old object in place
+// until its replacement is, unless the plan changes its columns first:
 //
 //   - A changed index is replaced in the create bucket, built under a
 //     temporary name before the old index is dropped (see replacedIndexes).
@@ -425,12 +426,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	partitioned := live.PartitionKey != ""
 
 	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
-	dropsOrRetypes := dropsOrRetypesColumn(live, desiredCols)
-	replaced, err := replacedInPlace(partitioned, dropsOrRetypes, schema, liveCons, liveIdx, desired, desiredIdx)
+	columnsFirst := changesColumnsFirst(live, desired.Columns)
+	replaced, err := replacedInPlace(partitioned, columnsFirst, schema, liveCons, liveIdx, desired, desiredIdx)
 	if err != nil {
 		return nil, err
 	}
-	replacedIdx, err := replacedIndexes(partitioned, dropsOrRetypes, schema, liveCons, liveIdx, desired, desiredIdx, adopted)
+	replacedIdx, err := replacedIndexes(partitioned, columnsFirst, schema, liveCons, liveIdx, desired, desiredIdx, adopted)
 	if err != nil {
 		return nil, err
 	}
@@ -455,10 +456,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// desired table declares again under another name. A
 	// uniqueness or rule that moves to another name or another kind of
 	// object keeps holding while its replacement builds, and a replacement
-	// that fails leaves the old one standing. A plan that drops or retypes a
-	// column keeps the drops first, since a dropped column takes the indexes
-	// and constraints that read it with it, and so does a drop whose name
-	// the desired table reuses.
+	// that fails leaves the old one standing. A plan that changes its
+	// columns first (see changesColumnsFirst) keeps the drops first, and so
+	// does a drop whose name the desired table reuses. A plan that drops a column holds its drops like any other and
+	// drops the column last, so the column never takes an index or
+	// constraint with it before its replacement holds.
 	held := heldDrops{
 		uniqueness: addsUniqueness(desired, liveIdx, liveCons),
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
@@ -469,7 +471,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// validates, which come last; every other held drop goes before them, so a foreign key
 	// the plan adds cannot bind to a key the plan is about to drop.
 	var heldChanges, heldForeignKeys []Change
-	waits := func(ch Change) bool { return !dropsOrRetypes && held.holds(ch) }
+	waits := func(ch Change) bool { return !columnsFirst && held.holds(ch) }
 	appendDrop := func(ch Change) {
 		switch {
 		case !waits(ch):
@@ -558,12 +560,21 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// flagged destructive for the caller to gate. Generated columns go
 	// first: PostgreSQL refuses to drop a column a generated column still
 	// reads, and a generated column never reads another.
+	//
+	// A dropped column takes every index and constraint that reads it with
+	// it, so the column drops go last, after every replacement is built and
+	// every old object the plan drops itself is gone: a key, a check, or a
+	// foreign key the file changes on the columns that remain holds until
+	// its replacement does. A plan that changes its columns first (see
+	// changesColumnsFirst) keeps them here, after the drops and before the
+	// adds and retypes.
+	var columnDrops []Change
 	for _, generated := range []bool{true, false} {
 		for _, col := range live.Columns {
 			if _, ok := desiredCols[col.Name]; ok || col.IsGenerated() != generated {
 				continue
 			}
-			changes = append(changes, Change{
+			columnDrops = append(columnDrops, Change{
 				SQL:         "ALTER TABLE " + table + " DROP COLUMN " + pgx.Identifier{col.Name}.Sanitize(),
 				Kind:        ChangeDropColumn,
 				Destructive: true,
@@ -584,6 +595,10 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// key covered loses its NOT NULL only once nothing requires it.
 	notNullDrops := dropNotNullChanges(table, live, desiredCols)
 	notNullAfterKeySwap := replacesPrimaryKey(replaced, liveCons)
+	if columnsFirst {
+		changes = append(changes, columnDrops...)
+		columnDrops = nil
+	}
 	if !notNullAfterKeySwap {
 		changes = append(changes, notNullDrops...)
 	}
@@ -718,6 +733,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// exists.
 	changes = append(changes, foreignKeys...)
 	changes = append(changes, heldForeignKeys...)
+
+	// Deferred column drops close the plan. Nothing before them can rewrite
+	// the table (changesColumnsFirst), so each still has the attribute
+	// number it was reviewed by.
+	changes = append(changes, columnDrops...)
 
 	return changes, nil
 }

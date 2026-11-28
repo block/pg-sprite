@@ -49,16 +49,17 @@ type inPlaceReplacement struct {
 // replacedInPlace names the constraints of a table diff that are replaced
 // in place, keyed by constraint name. A partitioned parent keeps the drop
 // and re-add, since the server refuses USING INDEX and NOT VALID foreign
-// keys there. So does a table whose diff drops or retypes a column: a
-// dropped column takes the constraints that read it with it, and a retype
-// re-checks the constraints that are still in place.
+// keys there. So does a table whose diff changes its columns first (see
+// changesColumnsFirst). A diff that only drops columns replaces in place
+// like any other: the column drops run after the replacements, so a dropped
+// column never takes an old constraint with it before the new one holds.
 //
 // A key replacement an earlier run left after its build is picked up there:
 // a valid index under the temporary name with the desired definition is
 // swapped in, not built again. Any other index under that name is refused.
-func replacedInPlace(partitioned, dropsOrRetypesColumn bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]inPlaceReplacement, error) {
+func replacedInPlace(partitioned, columnsFirst bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index) (map[string]inPlaceReplacement, error) {
 	replaced := make(map[string]inPlaceReplacement)
-	if partitioned || dropsOrRetypesColumn {
+	if partitioned || columnsFirst {
 		return replaced, nil
 	}
 	desiredCons := constraintsByName(desired.Constraints)
@@ -225,12 +226,44 @@ func replaceInPlaceChanges(table, schema string, had, con Constraint, r inPlaceR
 	return replaceRuleChanges(table, schema, had, con)
 }
 
-// dropsOrRetypesColumn reports whether the diff drops a live column or
-// changes a kept column's type.
-func dropsOrRetypesColumn(live Model, desiredCols map[string]Column) bool {
+// changesColumnsFirst reports whether the diff runs its column drops and
+// retypes ahead of everything it builds, rather than holding the column
+// drops for the end of the plan. A retype does, since it re-checks and
+// rebuilds the indexes and constraints still in place. So does a column drop
+// beside an added column that may rewrite the table: a rewrite renumbers the
+// columns, and a dropped column is reviewed by the number it has when the
+// plan is derived. An added column may rewrite when it carries a default, a
+// generation expression, or an identity, since only the planner can prove
+// such an add runs in place.
+func changesColumnsFirst(live Model, desired []Column) bool {
+	liveCols := columnsByName(live.Columns)
+	desiredCols := columnsByName(desired)
 	for _, col := range live.Columns {
-		want, ok := desiredCols[col.Name]
-		if !ok || want.Type != col.Type {
+		if want, ok := desiredCols[col.Name]; ok && want.Type != col.Type {
+			return true
+		}
+	}
+	return dropsColumn(live, desiredCols) && addsColumnThatMayRewrite(liveCols, desired)
+}
+
+// dropsColumn reports whether the diff drops a live column.
+func dropsColumn(live Model, desiredCols map[string]Column) bool {
+	for _, col := range live.Columns {
+		if _, ok := desiredCols[col.Name]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// addsColumnThatMayRewrite reports whether the diff adds a column whose
+// add the planner may route to a table rewrite.
+func addsColumnThatMayRewrite(liveCols map[string]Column, desired []Column) bool {
+	for _, col := range desired {
+		if _, ok := liveCols[col.Name]; ok {
+			continue
+		}
+		if col.Default != "" || col.Generated || col.Identity != IdentityNone {
 			return true
 		}
 	}

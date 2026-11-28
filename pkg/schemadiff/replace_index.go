@@ -41,15 +41,16 @@ type indexReplacement struct {
 // replaced rather than dropped and rebuilt, keyed by index name. A
 // partitioned parent keeps the drop and rebuild, since its index is built
 // partition by partition and never concurrently. So does a table whose diff
-// drops or retypes a column: a dropped column takes its indexes with it,
-// and a retype rebuilds them.
+// changes its columns first (see changesColumnsFirst). A diff that only
+// drops columns replaces like any other: the column drops run after the
+// replacements.
 //
 // A replacement an earlier run left part-way is picked up where it stopped:
 // a valid temp index with the desired definition is not built again, and
 // when the old index is already gone, only the rename is left.
-func replacedIndexes(partitioned, dropsOrRetypesColumn bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index, adopted map[string]struct{}) (map[string]indexReplacement, error) {
+func replacedIndexes(partitioned, columnsFirst bool, schema string, liveCons map[string]Constraint, liveIdx map[string]Index, desired Model, desiredIdx map[string]Index, adopted map[string]struct{}) (map[string]indexReplacement, error) {
 	replaced := make(map[string]indexReplacement)
-	if partitioned || dropsOrRetypesColumn {
+	if partitioned || columnsFirst {
 		return replaced, nil
 	}
 	desiredCons := constraintsByName(desired.Constraints)

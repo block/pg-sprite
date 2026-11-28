@@ -857,6 +857,6 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	// The renderer wraps prose; compare with whitespace collapsed.
 	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also drops or retypes a column, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; "+
+	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; "+
 		"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter")
 }
