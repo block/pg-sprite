@@ -78,7 +78,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	tableExists := true
 	var changes []schemadiff.Change
 	var facts planner.Facts
-	var changedForeignKeys map[string]bool
+	var changedForeignKeys, columnFirstForeignKeys map[string]bool
 	live, err := schemadiff.Introspect(ctx, pool, req.Schema, ds.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
@@ -115,6 +115,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, err
 		}
 		changedForeignKeys = schemadiff.ForeignKeysDroppedBeforeTheirReplacement(live, desired)
+		columnFirstForeignKeys = schemadiff.ForeignKeysDroppedForColumnChange(live, desired)
 		if changes, facts.NotNullHelpers, err = resumeNotNullHelpers(ctx, pool, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
@@ -164,6 +165,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		return plan.Report{}, err
 	}
 	plan.RefuseUndeclarableForeignKeyDrops(&report, undeclarableForeignKeys(live))
+	plan.RefuseColumnFirstForeignKeyDrops(&report, columnFirstForeignKeys)
 	plan.RefuseChangedForeignKeyDrops(&report, changedForeignKeys)
 	if !tableExists {
 		// Shape refusals are stamped first so the disclosure below only

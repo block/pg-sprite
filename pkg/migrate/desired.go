@@ -965,13 +965,17 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 func foreignKeyDropRefusalDetail(cause verdict.Cause) string {
 	switch cause {
 	case verdict.CauseChangedForeignKey:
-		return "drops a foreign key the file changes under the same name where the new key cannot be added in the same statement, " +
+		return "drops a foreign key the file changes under the same name on a partitioned table, where the new key cannot be added in the same statement, " +
 			"which would leave writes checked against no key until the new one is added — declare the changed key under a new name"
+	case verdict.CauseColumnFirstForeignKey:
+		return "drops a foreign key ahead of the key the plan adds or validates, because the plan also changes a column and runs its drops first, " +
+			"which would leave writes checked against no key until the new one is added — apply the column change on its own first, then the foreign key change"
 	case verdict.CauseUndeclarableForeignKey:
 		return "drops a foreign key a desired file cannot declare, one into another schema or one onto its own table through a standalone unique index — " +
 			"to remove it, run the statement through the imperative front door (migrate --alter)"
 	default:
-		return "drops a foreign key: either the file changes it under the same name where the new key cannot be added in the same statement, so declare the changed key under a new name, " +
+		return "drops a foreign key: either the file changes it under the same name on a partitioned table, so declare the changed key under a new name, " +
+			"or the plan also changes a column and runs its drops first, so apply the column change on its own first, " +
 			"or a desired file cannot declare it, so remove it through the imperative front door (migrate --alter)"
 	}
 }

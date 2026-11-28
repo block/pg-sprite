@@ -979,10 +979,11 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 // A refused foreign-key drop says in words why it is not applied
 // declaratively and names the one remedy its cause calls for, so the reader
 // of the diff knows what to change. A report with no cause, such as one
-// decoded from JSON, names both.
+// decoded from JSON, names every remedy.
 func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
 	const (
-		changed      = "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
+		changed      = "desired-state apply does not drop this foreign key: the file changes it under the same name on a partitioned table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name"
+		columnFirst  = "desired-state apply does not drop this foreign key: the plan also retypes a column, or drops one beside an added column that may rewrite the table, so it drops the key before the new one is added, which would leave writes checked against no key in between, so apply the column change on its own first, then the foreign key change"
 		undeclarable = "desired-state apply does not drop this foreign key: a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"
 	)
 	for _, tt := range []struct {
@@ -991,9 +992,12 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 		want  string
 	}{
 		{"a key changed under the same name", verdict.CauseChangedForeignKey, changed},
+		{"a key a column change drops first", verdict.CauseColumnFirstForeignKey, columnFirst},
 		{"a key a desired file cannot declare", verdict.CauseUndeclarableForeignKey, undeclarable},
-		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key: either the file changes it under the same name on a partitioned table or in a plan that also retypes a column or drops one beside an added column that may rewrite the table, which would leave writes checked against no key until the new one is added, so declare the changed key under a new name; " +
-			"or a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, so to remove it, run the statement with pg-sprite migrate --alter"},
+		{"a refusal with no cause", "", "desired-state apply does not drop this foreign key: it would leave writes checked against no key until the new one is added. " +
+			"If the file changes it under the same name on a partitioned table, declare the changed key under a new name; " +
+			"if the plan also retypes a column, or drops one beside an added column that may rewrite the table, apply the column change on its own first, then the foreign key change; " +
+			"if a desired file cannot declare it, since it references another schema or its own table through a standalone unique index, run the statement with pg-sprite migrate --alter to remove it"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			report := plan.NewReport(plan.SourceDiff)

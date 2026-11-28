@@ -15,7 +15,7 @@ import (
 // key a desired file cannot declare. A statement with no cause refuses with
 // the reason alone.
 func TestStatementRefusalCarriesTheForeignKeyCause(t *testing.T) {
-	for _, cause := range []verdict.Cause{verdict.CauseChangedForeignKey, verdict.CauseUndeclarableForeignKey, ""} {
+	for _, cause := range []verdict.Cause{verdict.CauseChangedForeignKey, verdict.CauseColumnFirstForeignKey, verdict.CauseUndeclarableForeignKey, ""} {
 		r, _ := statementRefusal(0, plan.Statement{
 			SQL:          `ALTER TABLE app.events DROP CONSTRAINT events_user_fk`,
 			Disposition:  router.DispositionRefuse,
@@ -29,13 +29,19 @@ func TestStatementRefusalCarriesTheForeignKeyCause(t *testing.T) {
 }
 
 // The detail of a refused foreign-key drop names the one remedy that
-// applies: a key changed under the same name is declared under a new name,
-// and a key a desired file cannot declare is removed through the imperative
-// front door. Without a cause, it names both.
+// applies: a key changed under the same name is declared under a new name, a
+// key a column change drops first waits for the column change to land on its
+// own, and a key a desired file cannot declare is removed through the
+// imperative front door. Without a cause, it names every remedy.
 func TestForeignKeyDropRefusalDetailNamesTheRemedy(t *testing.T) {
 	changed := foreignKeyDropRefusalDetail(verdict.CauseChangedForeignKey)
 	assert.Contains(t, changed, "declare the changed key under a new name")
 	assert.NotContains(t, changed, "migrate --alter")
+
+	columnFirst := foreignKeyDropRefusalDetail(verdict.CauseColumnFirstForeignKey)
+	assert.Contains(t, columnFirst, "apply the column change on its own first, then the foreign key change")
+	assert.NotContains(t, columnFirst, "under a new name")
+	assert.NotContains(t, columnFirst, "migrate --alter")
 
 	undeclarable := foreignKeyDropRefusalDetail(verdict.CauseUndeclarableForeignKey)
 	assert.Contains(t, undeclarable, "migrate --alter")
@@ -43,5 +49,6 @@ func TestForeignKeyDropRefusalDetailNamesTheRemedy(t *testing.T) {
 
 	either := foreignKeyDropRefusalDetail("")
 	assert.Contains(t, either, "under a new name")
+	assert.Contains(t, either, "apply the column change on its own first")
 	assert.Contains(t, either, "migrate --alter")
 }

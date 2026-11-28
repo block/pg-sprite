@@ -81,11 +81,23 @@ func TestForeignKeysDroppedBeforeTheirReplacement(t *testing.T) {
 		})
 	}
 
+	// The keys a column change drops first are their own set, apart from a
+	// partitioned parent's key changed under the same name.
+	assert.Equal(t, map[string]bool{"events_user_fk": true},
+		ForeignKeysDroppedForColumnChange(live, withKeys(retypedName(base()), fk("events_user_cascade_fk", cascade))),
+		"a retype that adds a key drops the old key first, whatever the new key's name")
+	assert.Equal(t, map[string]bool{},
+		ForeignKeysDroppedForColumnChange(live, withKeys(withoutName(base()), fk("events_user_cascade_fk", cascade))),
+		"a column drop beside no rewriting add keeps its drops last")
+
 	parent := live
 	parent.PartitionKey = "RANGE (id)"
 	assert.Equal(t, map[string]bool{"events_user_fk": true},
 		ForeignKeysDroppedBeforeTheirReplacement(parent, withKeys(base(), fk("events_user_fk", cascade))),
 		"a partitioned parent drops a key changed under the same name before adding it again")
+	assert.Equal(t, map[string]bool{},
+		ForeignKeysDroppedForColumnChange(parent, withKeys(base(), fk("events_user_fk", cascade))),
+		"a partitioned parent's key changed under the same name is not a column-first drop")
 
 	moved, err := Diff("app", live, withKeys(base(), fk("events_user_cascade_fk", cascade)))
 	require.NoError(t, err)

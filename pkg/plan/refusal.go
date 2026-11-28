@@ -93,6 +93,15 @@ func ChangedForeignKeyRefusal() verdict.Refusal {
 		WithCause(verdict.CauseChangedForeignKey)
 }
 
+// ColumnFirstForeignKeyRefusal classifies the desired-state drop of a
+// foreign key that a plan changing its columns first runs ahead of the key it
+// adds or validates. The plan keeps the statement, so the diff stays visible
+// while execution refuses it.
+func ColumnFirstForeignKeyRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey).
+		WithCause(verdict.CauseColumnFirstForeignKey)
+}
+
 // UndeclarableForeignKeyRefusal classifies the desired-state drop of a
 // foreign key a desired file cannot declare. The plan keeps the statement,
 // so the diff stays visible while execution refuses it.

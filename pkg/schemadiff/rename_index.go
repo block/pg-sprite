@@ -238,25 +238,45 @@ func installsForeignKey(desired Model, liveCons, desiredCons map[string]Constrai
 // ForeignKeysDroppedBeforeTheirReplacement names the live foreign keys the
 // plan drops before a foreign key it adds or validates is in place, which
 // leaves writes between the two statements checked against no key at all.
-// That is every dropped key in a plan that adds or validates a foreign key
-// and also changes its columns first (see changesColumnsFirst), since such a
-// plan keeps its drops first, and, on a partitioned parent, a key the desired table declares under
-// the same name with another definition: the server refuses a NOT VALID
-// foreign key there, so the key is dropped and added again in two statements.
-// Elsewhere a key changed under the same name is replaced by one statement
-// that drops it and adds the new key NOT VALID, which leaves no gap.
+// That is every key ForeignKeysDroppedForColumnChange names, and, on a
+// partitioned parent, a key the desired table declares under the same name
+// with another definition: the server refuses a NOT VALID foreign key there,
+// so the key is dropped and added again in two statements. Elsewhere a key
+// changed under the same name is replaced by one statement that drops it and
+// adds the new key NOT VALID, which leaves no gap.
 func ForeignKeysDroppedBeforeTheirReplacement(live, desired Model) map[string]bool {
-	liveCons := constraintsByName(live.Constraints)
 	desiredCons := constraintsByName(desired.Constraints)
-	dropsFirst := changesColumnsFirst(live, desired.Columns) && installsForeignKey(desired, liveCons, desiredCons)
-	partitioned := live.PartitionKey != ""
-	keys := map[string]bool{}
+	keys := ForeignKeysDroppedForColumnChange(live, desired)
+	if live.PartitionKey == "" {
+		return keys
+	}
 	for _, con := range live.Constraints {
 		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
 			continue
 		}
-		want, ok := desiredCons[con.Name]
-		if dropsFirst || (partitioned && ok && want.ForeignKey) {
+		if want, ok := desiredCons[con.Name]; ok && want.ForeignKey {
+			keys[con.Name] = true
+		}
+	}
+	return keys
+}
+
+// ForeignKeysDroppedForColumnChange names the live foreign keys the plan
+// drops first because it also changes its columns first (see
+// changesColumnsFirst) while it adds or validates a foreign key: such a plan
+// keeps every drop ahead of what it builds, so each dropped key leaves writes
+// checked against no key until the new one is in place. A new name for the
+// key does not help, since the old key's drop still runs first; applying the
+// column change on its own, and the foreign key change after it, does.
+func ForeignKeysDroppedForColumnChange(live, desired Model) map[string]bool {
+	liveCons := constraintsByName(live.Constraints)
+	desiredCons := constraintsByName(desired.Constraints)
+	keys := map[string]bool{}
+	if !changesColumnsFirst(live, desired.Columns) || !installsForeignKey(desired, liveCons, desiredCons) {
+		return keys
+	}
+	for _, con := range live.Constraints {
+		if con.ForeignKey && constraintNeedsDrop(con, desiredCons) {
 			keys[con.Name] = true
 		}
 	}

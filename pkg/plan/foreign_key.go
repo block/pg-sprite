@@ -18,6 +18,17 @@ func RefuseUndeclarableForeignKeyDrops(report *Report, undeclarable map[string]b
 	refuseForeignKeyDrops(report, undeclarable, UndeclarableForeignKeyRefusal())
 }
 
+// RefuseColumnFirstForeignKeyDrops marks as refused every statement that
+// drops one of the named foreign keys: a live key a plan that changes its
+// columns first drops ahead of the foreign key it adds or validates. Between
+// the two statements writes are checked against no key. A new name for the
+// key does not close that gap; applying the column change on its own first
+// does. It runs before RefuseChangedForeignKeyDrops, so a key both name keeps
+// this cause: the column change has to land first either way.
+func RefuseColumnFirstForeignKeyDrops(report *Report, keys map[string]bool) {
+	refuseForeignKeyDrops(report, keys, ColumnFirstForeignKeyRefusal())
+}
+
 // RefuseChangedForeignKeyDrops marks as refused every statement that drops
 // one of the named foreign keys: a live key the plan drops before the
 // foreign key that replaces it is added, such as one the desired file
