@@ -941,8 +941,8 @@ const NotNullWithoutDefaultHelp = "give the column a constant DEFAULT, which Pos
 // rewrites the table to check every row against a type that declares
 // constraints, whatever default the column is given.
 func NotNullFromTypeHelp(typeName string) string {
-	return "the column's type, " + typeName + ", declares NOT NULL itself, and PostgreSQL rewrites the table " +
-		"to check every row against it whatever default the column is given; add the column with the type's base type instead"
+	return "the column's type, " + typeName + ", declares NOT NULL itself, so the column needs a default, " +
+		"and with one PostgreSQL rewrites the table to check every row against the type; add the column with the type's base type instead"
 }
 
 // ConstrainedTypeHelp is the operator-facing manual path for adding a

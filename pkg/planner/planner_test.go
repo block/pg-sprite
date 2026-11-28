@@ -1318,8 +1318,8 @@ func TestClassifyNamesTheTypeANotNullColumnTakesItsNotNullFrom(t *testing.T) {
 		assert.Equal(t, planner.ReasonNotNullWithoutDefault, d.Reason, sql)
 		assert.Equal(t, want, d.NotNullFromType, sql)
 	}
-	assert.Equal(t, "the column's type, billing.tier_required, declares NOT NULL itself, and PostgreSQL rewrites the table "+
-		"to check every row against it whatever default the column is given; add the column with the type's base type instead",
+	assert.Equal(t, "the column's type, billing.tier_required, declares NOT NULL itself, so the column needs a default, "+
+		"and with one PostgreSQL rewrites the table to check every row against the type; add the column with the type's base type instead",
 		planner.NotNullFromTypeHelp("billing.tier_required"))
 }
 
