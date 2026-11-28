@@ -17,6 +17,7 @@ import (
 func TestDropsObjectShapes(t *testing.T) {
 	email := &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: "t_email_key", Definition: "UNIQUE (email)"}
 	check := &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: "t_qty_check", Definition: "CHECK ((qty > 0))"}
+	pkey := &schemadiff.DroppedObject{Kind: schemadiff.DroppedConstraint, Name: "t_pkey", Definition: "PRIMARY KEY (id)"}
 	cases := []struct {
 		name    string
 		sql     string
@@ -28,6 +29,12 @@ func TestDropsObjectShapes(t *testing.T) {
 		{name: "a key replaced by its new index",
 			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_email_key, ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key_new`,
 			dropped: email, drops: true},
+		{name: "a primary key swapped in under another name",
+			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_pkey, ADD CONSTRAINT t_id_pk PRIMARY KEY USING INDEX t_id_pk_new`,
+			dropped: pkey, drops: true},
+		{name: "a unique key added under another name",
+			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_email_key, ADD CONSTRAINT t_email_uniq UNIQUE USING INDEX t_email_uniq_new`,
+			dropped: email, refused: true},
 		{name: "a rule replaced NOT VALID",
 			sql:     `ALTER TABLE s.t DROP CONSTRAINT t_qty_check, ADD CONSTRAINT t_qty_check CHECK (qty > 5) NOT VALID`,
 			dropped: check, drops: true},

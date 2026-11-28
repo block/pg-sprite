@@ -441,6 +441,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
+	replacedLive := replacedLiveConstraints(replaced)
 	replacedIdx, err := replacedIndexes(partitioned, columnsFirst, schema, liveCons, liveIdx, desired, desiredIdx, adopted)
 	if err != nil {
 		return nil, err
@@ -462,8 +463,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	// A unique index or unique constraint the plan drops is held back until
 	// the plan's new unique indexes and constraints are in place, a foreign
-	// key until the plan's new foreign keys are, and so is a constraint the
-	// desired table declares again under another name. A
+	// key until the plan's new foreign keys are, a CHECK until the plan's
+	// new CHECKs are, and so is a constraint the desired table declares
+	// again under another name. A
 	// uniqueness or rule that moves to another name or another kind of
 	// object keeps holding while its replacement builds, and a replacement
 	// that fails leaves the old one standing. A plan that changes its
@@ -476,6 +478,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		liveIdx:    liveIdx, liveCons: liveCons, desiredIdx: desiredIdx, desiredCons: desiredCons,
 		renamedRules: renamedConstraintDefs(desired, liveCons),
 		foreignKeys:  installsForeignKey(desired, liveCons, desiredCons),
+		checks:       addsCheck(desired, liveCons),
 	}
 	// A held foreign key waits for the foreign keys the plan adds or
 	// validates, which come last; every other held drop goes before them, so a foreign key
@@ -505,7 +508,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
 			continue
 		}
-		if _, ok := replaced[con.Name]; ok {
+		if replacedLive[con.Name] {
 			continue
 		}
 		drop := dropConstraintChange(table, con)
@@ -556,7 +559,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
 			continue
 		}
-		if _, ok := replaced[con.Name]; ok {
+		if replacedLive[con.Name] {
 			continue
 		}
 		if err := refuseReferencedKeyDrop(schema, live.Table, con, droppedForeignKeys); err != nil {
@@ -604,7 +607,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// in while the old one keeps rejecting duplicates, and a column the old
 	// key covered loses its NOT NULL only once nothing requires it.
 	notNullDrops := dropNotNullChanges(table, live, desiredCols)
-	notNullAfterKeySwap := replacesPrimaryKey(replaced, liveCons)
+	notNullAfterKeySwap := replacesPrimaryKey(replaced)
 	if columnsFirst {
 		changes = append(changes, columnDrops...)
 		columnDrops = nil
@@ -667,7 +670,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 		had, ok := liveCons[con.Name]
 		if r, inPlace := replaced[con.Name]; inPlace {
-			replacement, err := replaceInPlaceChanges(table, schema, had, con, r)
+			replacement, err := replaceInPlaceChanges(table, schema, r.live, con, r)
 			if err != nil {
 				return nil, err
 			}

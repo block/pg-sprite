@@ -22,8 +22,8 @@ import (
 // attempts, so the apply provably runs while the writer is going.
 const columnDropWriterStart = 10 * time.Second
 
-// columnDropCase is a table whose file drops a column and changes a rule on
-// the columns that remain. forbidden inserts a row that both the old rule
+// columnDropCase is a table whose file replaces a rule, by dropping a column
+// it read or by renaming it. forbidden inserts a row that both the old rule
 // and the new one reject, numbered n so each attempt is a distinct row.
 type columnDropCase struct {
 	fixture   string
@@ -125,31 +125,80 @@ func TestRunDesiredKeepsARuleWhileDroppingAColumn(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(name, func(t *testing.T) {
-			pool, schema := columnDropTable(t, tc.fixture)
-			reviewed := plannedDrop(t, pool, schema, tc.desired)
+		t.Run(name, func(t *testing.T) { runWhileWritingForbidden(t, tc) })
+	}
+}
 
-			ctx, stop := context.WithCancel(t.Context())
-			var attempts, accepted atomic.Int64
-			var wg sync.WaitGroup
-			wg.Go(func() { writeForbidden(ctx, pool, schema, tc.forbidden, &attempts, &accepted) })
-			require.Eventually(t, func() bool { return attempts.Load() >= 10 }, columnDropWriterStart, 10*time.Millisecond,
-				"the writer is running before the apply starts")
+// runWhileWritingForbidden applies tc's file while a writer inserts rows
+// both rules reject, and checks that none got in and the new rule holds.
+func runWhileWritingForbidden(t *testing.T, tc columnDropCase) {
+	t.Helper()
+	pool, schema := columnDropTable(t, tc.fixture)
+	reviewed := plannedDrop(t, pool, schema, tc.desired)
 
-			res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
-				Schema: schema, Desired: parseDesired(t, tc.desired),
-				ExpectedFingerprint: reviewed.Fingerprint, AllowDestructive: schema + ".t",
-			}, runOptions())
-			stop()
-			wg.Wait()
-			require.NoError(t, err)
-			require.Equal(t, verdict.OutcomeExecuted, res.Outcome, "%s", res.Detail)
+	ctx, stop := context.WithCancel(t.Context())
+	var attempts, accepted atomic.Int64
+	var wg sync.WaitGroup
+	wg.Go(func() { writeForbidden(ctx, pool, schema, tc.forbidden, &attempts, &accepted) })
+	require.Eventually(t, func() bool { return attempts.Load() >= 10 }, columnDropWriterStart, 10*time.Millisecond,
+		"the writer is running before the apply starts")
 
-			assert.Zero(t, accepted.Load(), "no row both rules reject got in, of %d attempts", attempts.Load())
-			def, validated := constraintDef(t, pool, schema, tc.rule)
-			assert.Equal(t, tc.wantDef(schema), def)
-			assert.True(t, validated)
-			assert.Empty(t, plannedDrop(t, pool, schema, tc.desired).Statements, "the table converges")
-		})
+	res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+		Schema: schema, Desired: parseDesired(t, tc.desired),
+		ExpectedFingerprint: reviewed.Fingerprint, AllowDestructive: schema + ".t",
+	}, runOptions())
+	stop()
+	wg.Wait()
+	require.NoError(t, err)
+	require.Equal(t, verdict.OutcomeExecuted, res.Outcome, "%s", res.Detail)
+
+	assert.Zero(t, accepted.Load(), "no row both rules reject got in, of %d attempts", attempts.Load())
+	def, validated := constraintDef(t, pool, schema, tc.rule)
+	assert.Equal(t, tc.wantDef(schema), def)
+	assert.True(t, validated)
+	assert.Empty(t, plannedDrop(t, pool, schema, tc.desired).Statements, "the table converges")
+}
+
+// A file that renames a primary key, or renames a CHECK and changes its
+// rule, never lets in a row both rules reject: the new rule is in place
+// before the old one goes, whether or not the file also drops a column.
+func TestRunDesiredKeepsARuleWhileRenamingIt(t *testing.T) {
+	duplicateID := func(schema string, n int64) string {
+		return fmt.Sprintf(`INSERT INTO %s.t (id) VALUES (%d)`, schema, 1+n%1000)
+	}
+	negativeAmount := func(schema string, n int64) string {
+		return fmt.Sprintf(`INSERT INTO %s.t (id, amt) VALUES (%d, -1)`, schema, 100000+n)
+	}
+	for name, tc := range map[string]columnDropCase{
+		"a primary key": {
+			fixture: `CREATE TABLE %[1]s.t (id int NOT NULL, CONSTRAINT t_pkey PRIMARY KEY (id));
+			INSERT INTO %[1]s.t SELECT g FROM generate_series(1, 1000) g`,
+			desired:   `CREATE TABLE t (id int NOT NULL, CONSTRAINT t_id_pk PRIMARY KEY (id));`,
+			forbidden: duplicateID,
+			rule:      "t_id_pk", wantDef: func(string) string { return "PRIMARY KEY (id)" },
+		},
+		"a primary key beside a dropped column": {
+			fixture: `CREATE TABLE %[1]s.t (id int NOT NULL, legacy int, CONSTRAINT t_pkey PRIMARY KEY (id));
+			INSERT INTO %[1]s.t (id) SELECT g FROM generate_series(1, 1000) g`,
+			desired:   `CREATE TABLE t (id int NOT NULL, CONSTRAINT t_id_pk PRIMARY KEY (id));`,
+			forbidden: duplicateID,
+			rule:      "t_id_pk", wantDef: func(string) string { return "PRIMARY KEY (id)" },
+		},
+		"a check with a wider rule": {
+			fixture: `CREATE TABLE %[1]s.t (id int PRIMARY KEY, amt int, CONSTRAINT t_chk CHECK (amt >= 0 AND amt < 100000000));
+			INSERT INTO %[1]s.t SELECT g, g FROM generate_series(1, 1000) g`,
+			desired:   `CREATE TABLE t (id int PRIMARY KEY, amt int, CONSTRAINT t_amt_chk CHECK (amt >= 0));`,
+			forbidden: negativeAmount,
+			rule:      "t_amt_chk", wantDef: func(string) string { return "CHECK ((amt >= 0))" },
+		},
+		"a check with a wider rule beside a dropped column": {
+			fixture: `CREATE TABLE %[1]s.t (id int PRIMARY KEY, amt int, legacy int, CONSTRAINT t_chk CHECK (amt >= 0 AND amt < 100000000));
+			INSERT INTO %[1]s.t (id, amt) SELECT g, g FROM generate_series(1, 1000) g`,
+			desired:   `CREATE TABLE t (id int PRIMARY KEY, amt int, CONSTRAINT t_amt_chk CHECK (amt >= 0));`,
+			forbidden: negativeAmount,
+			rule:      "t_amt_chk", wantDef: func(string) string { return "CHECK ((amt >= 0))" },
+		},
+	} {
+		t.Run(name, func(t *testing.T) { runWhileWritingForbidden(t, tc) })
 	}
 }

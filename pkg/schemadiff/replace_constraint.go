@@ -39,6 +39,9 @@ const replacementIndexSuffix = "_new"
 
 // inPlaceReplacement is how one changed constraint is replaced in place.
 type inPlaceReplacement struct {
+	// live is the live constraint the replacement drops: the one under the
+	// same name, or the primary key a renamed primary key replaces.
+	live Constraint
 	// built is set for a primary key or unique constraint whose new index
 	// an earlier run already built under its temporary name, valid and with
 	// the desired definition, and stopped before the swap. The plan then
@@ -54,6 +57,11 @@ type inPlaceReplacement struct {
 // like any other: the column drops run after the replacements, so a dropped
 // column never takes an old constraint with it before the new one holds.
 //
+// A primary key the file declares under another name is replaced the same
+// way, since a table has only one: dropping the old key first would let
+// duplicates in while the new key's index builds, and a failed build would
+// leave the table with no key at all.
+//
 // A key replacement an earlier run left after its build is picked up there:
 // a valid index under the temporary name with the desired definition is
 // swapped in, not built again. Any other index under that name is refused.
@@ -68,45 +76,105 @@ func replacedInPlace(partitioned, columnsFirst bool, schema string, liveCons map
 		if !ok || had.Def == con.Def || validatesInPlace(had, con) || !sameConstraintFamily(had, con) {
 			continue
 		}
-		if isKey(con) {
-			if err := refuseReferencedKeyReplacement(had); err != nil {
-				return nil, err
-			}
-			name := replacementIndexName(con.Name)
-			if _, taken := desiredIdx[name]; taken {
-				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that index",
-					ErrUnsupportedChange, con.Name, name)
-			}
-			if _, taken := desiredCons[name]; taken {
-				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that constraint",
-					ErrUnsupportedChange, con.Name, name)
-			}
-			if _, taken := liveCons[name]; taken {
-				return nil, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the live table already names; rename that constraint",
-					ErrUnsupportedChange, con.Name, name)
-			}
-			if ix, taken := liveIdx[name]; taken {
-				resumed, err := isKeyReplacementBuild(ix, con)
-				if err != nil {
-					return nil, err
-				}
-				if !resumed {
-					return nil, replacementIndexTaken(schema, con.Name, ix)
-				}
-				replaced[con.Name] = inPlaceReplacement{built: true}
-				continue
-			}
+		if !isKey(con) {
+			replaced[con.Name] = inPlaceReplacement{live: had}
+			continue
 		}
-		replaced[con.Name] = inPlaceReplacement{}
+		r, err := keyReplacement(schema, had, con, liveCons, liveIdx, desiredIdx, desiredCons)
+		if err != nil {
+			return nil, err
+		}
+		replaced[con.Name] = r
+	}
+	if had, con, ok := renamedPrimaryKey(liveCons, liveIdx, desired.Constraints, desiredCons); ok {
+		r, err := keyReplacement(schema, had, con, liveCons, liveIdx, desiredIdx, desiredCons)
+		if err != nil {
+			return nil, err
+		}
+		replaced[con.Name] = r
 	}
 	return replaced, nil
 }
 
+// keyReplacement checks that con's new index can be built under its
+// temporary name to replace had, and picks up a build an earlier run left
+// there.
+func keyReplacement(schema string, had, con Constraint, liveCons map[string]Constraint, liveIdx map[string]Index, desiredIdx map[string]Index, desiredCons map[string]Constraint) (inPlaceReplacement, error) {
+	if err := refuseReferencedKeyReplacement(had); err != nil {
+		return inPlaceReplacement{}, err
+	}
+	name := replacementIndexName(con.Name)
+	if _, taken := desiredIdx[name]; taken {
+		return inPlaceReplacement{}, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that index",
+			ErrUnsupportedChange, con.Name, name)
+	}
+	if _, taken := desiredCons[name]; taken {
+		return inPlaceReplacement{}, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the desired table also names; rename that constraint",
+			ErrUnsupportedChange, con.Name, name)
+	}
+	if _, taken := liveCons[name]; taken {
+		return inPlaceReplacement{}, unsupported(CauseReplacementIndexName, "%w: constraint %q is replaced by building its new index as %q, which the live table already names; rename that constraint",
+			ErrUnsupportedChange, con.Name, name)
+	}
+	if ix, taken := liveIdx[name]; taken {
+		resumed, err := isKeyReplacementBuild(ix, con)
+		if err != nil {
+			return inPlaceReplacement{}, err
+		}
+		if !resumed {
+			return inPlaceReplacement{}, replacementIndexTaken(schema, con.Name, ix)
+		}
+		return inPlaceReplacement{live: had, built: true}, nil
+	}
+	return inPlaceReplacement{live: had}, nil
+}
+
+// renamedPrimaryKey returns the live primary key and the desired one when
+// the file declares the table's primary key under a name the live table
+// does not have, and the live key's name is not declared at all. A desired
+// key whose name a live standalone index has is left to be adopted.
+func renamedPrimaryKey(liveCons map[string]Constraint, liveIdx map[string]Index, desired []Constraint, desiredCons map[string]Constraint) (had, con Constraint, ok bool) {
+	for _, c := range desired {
+		if c.Primary && isKey(c) {
+			con, ok = c, true
+		}
+	}
+	if !ok {
+		return Constraint{}, Constraint{}, false
+	}
+	if _, named := liveCons[con.Name]; named {
+		return Constraint{}, Constraint{}, false
+	}
+	if _, named := liveIdx[con.Name]; named {
+		return Constraint{}, Constraint{}, false
+	}
+	for _, c := range liveCons {
+		if !c.Primary {
+			continue
+		}
+		if _, named := desiredCons[c.Name]; named {
+			return Constraint{}, Constraint{}, false
+		}
+		return c, con, true
+	}
+	return Constraint{}, Constraint{}, false
+}
+
+// replacedLiveConstraints names the live constraints the plan replaces in
+// place, which the statement that adds each replacement drops.
+func replacedLiveConstraints(replaced map[string]inPlaceReplacement) map[string]bool {
+	names := make(map[string]bool, len(replaced))
+	for _, r := range replaced {
+		names[r.live.Name] = true
+	}
+	return names
+}
+
 // replacesPrimaryKey reports whether the plan replaces the table's primary
 // key in place.
-func replacesPrimaryKey(replaced map[string]inPlaceReplacement, liveCons map[string]Constraint) bool {
-	for name := range replaced {
-		if liveCons[name].Primary {
+func replacesPrimaryKey(replaced map[string]inPlaceReplacement) bool {
+	for _, r := range replaced {
+		if r.live.Primary {
 			return true
 		}
 	}

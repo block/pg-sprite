@@ -102,6 +102,9 @@ type heldDrops struct {
 	// foreignKeys says the plan adds or validates a foreign key, which may
 	// be what replaces a foreign key it drops.
 	foreignKeys bool
+	// checks says the plan adds or changes a CHECK, which may be what
+	// replaces a CHECK it drops.
+	checks      bool
 	liveIdx     map[string]Index
 	liveCons    map[string]Constraint
 	desiredIdx  map[string]Index
@@ -110,8 +113,9 @@ type heldDrops struct {
 
 // holds reports whether ch is a drop that waits: a unique index or unique
 // constraint when the plan adds uniqueness, a foreign key when the plan adds
-// one, or a constraint the desired table adds again under another name. A drop whose name the desired table
-// reuses never waits, since it clears that name.
+// one, a CHECK when the plan adds or changes one, or a constraint the
+// desired table adds again under another name. A drop whose name the
+// desired table reuses never waits, since it clears that name.
 func (h heldDrops) holds(ch Change) bool {
 	if ch.Drops == nil || namedByDesired(ch.Drops.Name, h.desiredIdx, h.desiredCons) {
 		return false
@@ -125,7 +129,8 @@ func (h heldDrops) holds(ch Change) bool {
 		if !ok || con.Primary {
 			return false
 		}
-		return (h.uniqueness && isUniqueConstraint(con)) || (h.foreignKeys && con.ForeignKey) || h.renamedRules[con.Def]
+		return (h.uniqueness && isUniqueConstraint(con)) || (h.foreignKeys && con.ForeignKey) ||
+			(h.checks && isCheckConstraint(con)) || h.renamedRules[con.Def]
 	}
 	return false
 }
@@ -165,6 +170,23 @@ func addsUniqueness(desired Model, liveIdx map[string]Index, liveCons map[string
 	}
 	for _, con := range desired.Constraints {
 		if had, ok := liveCons[con.Name]; isUniqueConstraint(con) && (!ok || had.Def != con.Def) {
+			return true
+		}
+	}
+	return false
+}
+
+// addsCheck reports whether the plan adds a CHECK under a name the live
+// table does not have or changes one it has. A CHECK the plan drops waits
+// for it, so a rule that moves to another name and definition keeps
+// rejecting writes while its replacement is added and validated, and a
+// replacement that fails validation leaves the old rule standing.
+func addsCheck(desired Model, liveCons map[string]Constraint) bool {
+	for _, con := range desired.Constraints {
+		if !isCheckConstraint(con) {
+			continue
+		}
+		if had, ok := liveCons[con.Name]; !ok || had.Def != con.Def {
 			return true
 		}
 	}

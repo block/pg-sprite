@@ -92,12 +92,22 @@ func dropsObject(st statement.Statement, d *schemadiff.DroppedObject) (bool, err
 // check runs beside the drop's on the same statement (an adoption's
 // index, or the later VALIDATE's definition), so nothing in it goes
 // unchecked, and the table is never without one rule or the other.
+//
+// A primary key added USING INDEX may take another name: a table has only
+// one primary key, so a key the file renames is swapped in by the same one
+// statement, and the adoption's index is checked the same way.
 func replacesConstraint(ops []statement.Op, d *schemadiff.DroppedObject) bool {
 	if d.Kind != schemadiff.DroppedConstraint || len(ops) != 2 || !opDrops(ops[0], d) {
 		return false
 	}
 	add := ops[1]
-	return add.Kind == statement.OpAddConstraint && add.Name == d.Name && (add.NotValid || add.UsingIndex)
+	if add.Kind != statement.OpAddConstraint {
+		return false
+	}
+	if add.Name == d.Name {
+		return add.NotValid || add.UsingIndex
+	}
+	return add.Constraint == statement.ConstraintPrimaryKey && add.UsingIndex
 }
 
 // refuseDroppedObjectDrift locks st's table in ACCESS EXCLUSIVE, the lock
