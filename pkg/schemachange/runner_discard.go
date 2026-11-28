@@ -83,8 +83,16 @@ func (d Discarded) Nothing() bool {
 //     as resume-slot-foreign and left. A held slot is refused with an
 //     error wrapping decode.ErrSlotActive and left; a slot of the name
 //     that is not this database's logical slot is not the engine's and is
-//     left. Nothing found is the zero Discarded with Schema and Table set,
-//     whose Nothing is true, and no error.
+//     left. Both refusals are first judged before anything is dropped,
+//     from the catalog reading that found the leftovers and a read of
+//     every table's rows, so a slot another table's row names or a
+//     process holds when the discard starts is refused with the shadow
+//     and the fence still standing. Those readings are not under the
+//     slot's lock, so both are judged again at the slot: a row saved or a
+//     holder attached in between is refused there, after the shadow and
+//     the fence are gone, and reported beside them. Nothing found is the
+//     zero Discarded with Schema and Table set, whose Nothing is true,
+//     and no error.
 //
 // A slot is dropped over a replication connection, so a discard that
 // finds one refuses a shape whose privilege proof did not verify
@@ -97,6 +105,18 @@ func (d Discarded) Nothing() bool {
 // before its publication). RowPhase is set only once the row is deleted.
 // A lost table lock is reported as shadow-lock-lost, and a nil pool as
 // ErrInvariantViolation before the lock is taken.
+//
+// The table lock is released before Discard returns. A release that fails
+// after a discard that completed is returned as ErrLockReleaseFailed
+// wrapping the release's error, beside a Discarded that names everything
+// dropped: the discard is done and only the release failed. A release
+// that fails after a discard that itself failed is joined with that
+// error without the sentinel. The lock is a session-level advisory lock:
+// the release closes the lock's session whether or not its unlock
+// succeeded, and PostgreSQL lets go of a session's advisory locks when
+// the session ends, so the lock is free once the server sees the session
+// gone; until then another Discard or Run of the table is refused with
+// the *dbconn.TableLockHeldError, never left waiting.
 func (r *Runner) Discard(ctx context.Context, pool *pgxpool.Pool, shape preflight.CopySwapShape) (discarded Discarded, err error) {
 	if err := checkProof(shape); err != nil {
 		return Discarded{}, err
@@ -117,7 +137,7 @@ func (r *Runner) Discard(ctx context.Context, pool *pgxpool.Pool, shape prefligh
 		if lock.Err() == nil {
 			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)
 			defer cancel()
-			err = errors.Join(err, lock.Release(releaseCtx))
+			err = joinDiscardRelease(err, schema, table, lock.Release(releaseCtx))
 		}
 	}()
 	discarded, err = r.discard(ctx, pool, lock, shape)
@@ -125,6 +145,28 @@ func (r *Runner) Discard(ctx context.Context, pool *pgxpool.Pool, shape prefligh
 		return discarded, lockLossCause(lock, fmt.Errorf("discard %s.%s: %w", schema, table, err))
 	}
 	return discarded, nil
+}
+
+// ErrLockReleaseFailed reports a Runner.Discard that completed — everything
+// its Discarded names is dropped, and nothing it found is left — whose
+// release of the table lock afterwards failed. It wraps the release's own
+// error. A discard that itself failed returns its own error joined with
+// the release's, without this sentinel, so errors.Is(err,
+// ErrLockReleaseFailed) never makes a partial discard read as complete.
+var ErrLockReleaseFailed = errors.New("discard completed; releasing the table lock failed")
+
+// joinDiscardRelease folds the table lock's release error into the
+// discard's outcome: a release failure after a discard that completed is
+// ErrLockReleaseFailed, and one after a discard that failed is joined
+// with the discard's error as it stands.
+func joinDiscardRelease(discardErr error, schema, table string, releaseErr error) error {
+	if releaseErr == nil {
+		return discardErr
+	}
+	if discardErr != nil {
+		return errors.Join(discardErr, fmt.Errorf("release table lock for %s.%s: %w", schema, table, releaseErr))
+	}
+	return fmt.Errorf("discard %s.%s: %w: %w", schema, table, ErrLockReleaseFailed, releaseErr)
 }
 
 // discard reads the table's row under the lock and discards what it
@@ -194,6 +236,9 @@ func (r *Runner) discardLeftovers(ctx context.Context, pool *pgxpool.Pool, lock 
 	if err := requireReplication(shape, found); err != nil {
 		return discarded, err
 	}
+	if err := r.refuseUndroppableOrphan(ctx, shape, found); err != nil {
+		return discarded, err
+	}
 	if found.shadow {
 		if err := r.discardShadow(ctx, pool, lock, shape); err != nil {
 			return discarded, err
@@ -241,9 +286,7 @@ func (r *Runner) discardOrphanSlot(ctx context.Context, pool *pgxpool.Pool, shap
 			// INV: ST-3 — the slot's name is a hash, so another table's
 			// run can own the same name; a slot a live row of any table
 			// names is that run's and is left, as the reaper leaves it.
-			foreign := &decode.ForeignStateError{Object: decode.ForeignObjectSlot, Name: name,
-				Detail: "a checkpoint row of another table names it"}
-			return refuse(CauseResumeSlotForeign, []error{foreign}, "slot %s of %s.%s's derived name is another table's run's", name, shape.Schema(), shape.Table())
+			return foreignOrphanSlot(shape)
 		}
 		// INV: ST-3 — an unrecorded slot is dropped only while no process
 		// holds it; a held slot is its holder's and is left as found.
@@ -252,6 +295,45 @@ func (r *Runner) discardOrphanSlot(ctx context.Context, pool *pgxpool.Pool, shap
 		}
 		return nil
 	})
+}
+
+// refuseUndroppableOrphan refuses, before anything is dropped, a slot or
+// publication of the table's derived name that discardOrphanSlot would
+// refuse: one another table's live row names, or a slot a process holds.
+// Both readings are taken without the slot's lock, so they only keep a
+// refusal the catalog already shows from arriving after the shadow and
+// the fence are gone; discardOrphanSlot still judges both again, the row
+// under the slot's lock and the holder at the drop itself, so a row saved
+// or a holder attached after this check is refused there.
+func (r *Runner) refuseUndroppableOrphan(ctx context.Context, shape preflight.CopySwapShape, found leftovers) error {
+	if !found.slot && !found.publication {
+		return nil
+	}
+	name := shape.DecodingName()
+	owned, err := r.store.LiveRowNamesSlot(ctx, name)
+	if err != nil {
+		return err
+	}
+	if owned {
+		// INV: ST-3 — another table's live row names the slot: it is that
+		// run's, and the discard drops nothing of this table's either.
+		return foreignOrphanSlot(shape)
+	}
+	if found.held {
+		// INV: ST-3 — a held slot is its holder's; the discard refuses it
+		// and drops nothing, rather than drop the shadow and stop at it.
+		return fmt.Errorf("discard unrecorded slot %s: %w: held by backend %d", name, decode.ErrSlotActive, found.holder)
+	}
+	return nil
+}
+
+// foreignOrphanSlot is the resume-slot-foreign refusal of a slot of the
+// table's derived name that another table's live row names.
+func foreignOrphanSlot(shape preflight.CopySwapShape) error {
+	name := shape.DecodingName()
+	foreign := &decode.ForeignStateError{Object: decode.ForeignObjectSlot, Name: name,
+		Detail: "a checkpoint row of another table names it"}
+	return refuse(CauseResumeSlotForeign, []error{foreign}, "slot %s of %s.%s's derived name is another table's run's", name, shape.Schema(), shape.Table())
 }
 
 // requireReplication refuses a discard that would drop a slot under a
@@ -267,9 +349,12 @@ func requireReplication(shape preflight.CopySwapShape, found leftovers) error {
 
 // leftovers is what the catalog shows under the names a run on the table
 // makes: the shadow, the write fence on the source, and the slot and
-// publication of the table's derived decoding name.
+// publication of the table's derived decoding name. held reports that a
+// process held the slot when it was read, and holder names that process.
 type leftovers struct {
 	shadow, fence, slot, publication bool
+	held                             bool
+	holder                           int32
 }
 
 // names returns the slot and publication names found, empty for each the
@@ -324,6 +409,8 @@ func (r *Runner) findLeftovers(ctx context.Context, pool *pgxpool.Pool, lock *db
 		return leftovers{}, fmt.Errorf("inspect slot %s: %w", shape.DecodingName(), err)
 	}
 	found.slot = slotFound && status.Own
+	found.held = found.slot && status.Active
+	found.holder = status.ActivePID
 	return found, nil
 }
 

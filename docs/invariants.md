@@ -1339,7 +1339,10 @@ orphan, under `Store.WithSlotLock`, every table's rows read again by slot name t
 `Store.LiveRowNamesSlot`, through `DropIdleSlot` (discard-drops-an-unrecorded-shadow-and-slot
 test), and refuses as `resume-slot-foreign` a slot another table's live row names, since the
 derived name is a hash two tables can share
-(`TestRunnerDiscardKeepsTheSlotAnotherTablesRowNames`) — where
+(`TestRunnerDiscardKeepsTheSlotAnotherTablesRowNames`), and a slot a process holds with
+`decode.ErrSlotActive`; both refusals are judged first, before the shadow or the fence is
+dropped, and again at the slot for a row or holder that arrived in between
+(`TestRunnerDiscardRefusesAHeldUnrecordedSlotBeforeDroppingAnything`) — where
 `Runner.checkDiscardable` drops a slot only when it is the target's derived name and refuses any other
 as `resume-row-mismatch` before discarding anything (refuses-a-row-naming-another-engine-slot
 test); the slot
