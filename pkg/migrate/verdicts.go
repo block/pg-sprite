@@ -173,25 +173,28 @@ func manualPath(g suggest.Guidance) string {
 func backendUnavailableVerdict(st statement.Statement, rs router.Statement) verdict.Verdict {
 	detail := fmt.Sprintf("the change requires the %s strategy, which does not carry this operation yet: "+
 		"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend)
-	if help, ok := constrainedTypeHelp(rs.Decisions); ok {
-		detail = detail + "; " + help
+	constrained := firstConstrainedType(rs.Decisions)
+	if constrained != "" {
+		detail = detail + "; " + planner.ConstrainedTypeHelp(constrained)
 	}
 	return verdict.Verdict{
-		Statement: st.SQL(),
-		Table:     qualified(st),
-		Detail:    detail,
+		Statement:       st.SQL(),
+		Table:           qualified(st),
+		Detail:          detail,
+		ConstrainedType: constrained,
 	}.WithRefusal(backendUnavailableRefusal())
 }
 
-// constrainedTypeHelp is the manual path for the first decision that adds a
-// column of a domain with constraints, which is what forces the rewrite.
-func constrainedTypeHelp(decisions []planner.Decision) (string, bool) {
+// firstConstrainedType is the domain of the first decision that adds a
+// column of a domain with constraints, which is what forces the rewrite,
+// and "" when no decision does.
+func firstConstrainedType(decisions []planner.Decision) string {
 	for _, d := range decisions {
 		if d.ConstrainedType != "" {
-			return planner.ConstrainedTypeHelp(d.ConstrainedType), true
+			return d.ConstrainedType
 		}
 	}
-	return "", false
+	return ""
 }
 
 // routeRefusalVerdict is the refusal for a statement the planner refused:
@@ -213,6 +216,7 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 	v.DependentTriggers = d.DependentTriggers
 	v.DependentPublications = d.DependentPublications
 	v.DependentGeneratedColumns = d.DependentGeneratedColumns
+	v.NotNullFromType = d.NotNullFromType
 	if d.Reason == planner.ReasonPartitionKey {
 		v.PartitionKeyTables = d.PartitionKeyTables
 	}
