@@ -16,6 +16,7 @@ import (
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -256,6 +257,21 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "starts from the beginning")
 		assert.NotContains(t, v.Detail, "fenced against writes")
 		assert.NotContains(t, v.Detail, "resumes from the row")
+	})
+
+	t.Run("a lock session that cannot read its own start is coded table-lock-unconfirmed", func(t *testing.T) {
+		// The Runner returns the lock's refusal as it stands: the session
+		// runs as a role without pg_read_all_stats, so the run took no lock
+		// and started nothing. The code is the one a partitioned build's
+		// unconfirmable lock carries, since the remedy is the same grant.
+		runErr := fmt.Errorf("read the table lock session for billing.orders: %w", dbconn.ErrSessionStartHidden)
+		v, err := copySwapRunVerdict(st, holdNone, runErr)
+		assert.ErrorIs(t, err, dbconn.ErrSessionStartHidden)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeTableLockUnconfirmed), v.Code)
+		assert.Equal(t, verdict.CauseNone, v.Cause)
+		assert.False(t, v.WritesBlocked)
+		assert.False(t, v.Abandoned)
 	})
 
 	// A slot that retained more WAL than the ceiling with no transaction

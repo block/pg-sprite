@@ -186,6 +186,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "foreign table partition", err: fmt.Errorf("app.t: %w", executor.ErrForeignTablePartition), want: executor.CodeForeignTablePartition},
 		{name: "unique index partition key", err: fmt.Errorf("app.t: %w", executor.ErrUniqueIndexPartitionKey), want: executor.CodeUniqueIndexPartitionKey},
 		{name: "table lock unconfirmed", err: fmt.Errorf("app.t: %w", executor.ErrTableLockUnconfirmed), want: executor.CodeTableLockUnconfirmed},
+		{name: "table lock session start hidden", err: fmt.Errorf("lock app.t for build: %w", dbconn.ErrSessionStartHidden), want: executor.CodeTableLockUnconfirmed},
 		{name: "partitioned foreign key name taken", err: fmt.Errorf("app.t_p1: %w", executor.ErrPartitionedForeignKeyNameTaken), want: executor.CodePartitionedForeignKeyNameTaken},
 		{name: "partitioned foreign key conflict", err: fmt.Errorf("app.t_p1: %w", executor.ErrPartitionedForeignKeyConflict), want: executor.CodePartitionedForeignKeyConflict},
 		{name: "partitioned foreign key referenced table", err: fmt.Errorf("app.r: %w", executor.ErrPartitionedForeignKeyReferencedTable), want: executor.CodePartitionedForeignKeyReferencedTable},
