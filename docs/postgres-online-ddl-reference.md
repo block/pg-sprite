@@ -121,7 +121,7 @@ the same dynamic via metadata locks. Read it first if any of that is unfamiliar.
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | ACCESS EXCLUSIVE | Yes | No | ✅ **Yes** | Values must be computed |
 | `ADD COLUMN ... UNIQUE` / `PRIMARY KEY` / `REFERENCES` / `CHECK` (inline constraint) | ACCESS EXCLUSIVE + index build or validation | No | No | ➖ Native pattern | Same work as the `ADD CONSTRAINT` form, under the `ADD COLUMN` lock — split: add the column first, then build the constraint online (`CONCURRENTLY` + `USING INDEX`, or `NOT VALID` + `VALIDATE`) |
 | `DROP COLUMN` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only; disk space reclaimed lazily by VACUUM |
-| `ALTER COLUMN TYPE` — binary-coercible (`varchar(50)→varchar(100)`, `varchar→text`, `numeric(10,2)→numeric(12,2)`) | ACCESS EXCLUSIVE (brief) | **No** | No (brief) | ❌ No | No scan when binary-coercible and no length restriction is added |
+| `ALTER COLUMN TYPE` — binary-coercible (`varchar(50)→varchar(100)`, `varchar→text`, `numeric(10,2)→numeric(12,2)`, `timestamp(3)→timestamp(6)`, `varbit(8)→varbit(16)`, `cidr→inet`) | ACCESS EXCLUSIVE (brief) | **No** | No (brief) | ❌ No | No scan when binary-coercible and no length restriction is added |
 | `ALTER COLUMN TYPE` — general (`int→bigint`, `text→jsonb`, `timestamp→timestamptz` w/ conversion) | ACCESS EXCLUSIVE | **Yes** (rewrite + reindex + revalidate FKs) | No | ✅ **Yes** | The classic "needs a tool" case |
 | `ALTER COLUMN SET DEFAULT` / `DROP DEFAULT` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only |
 | `ALTER COLUMN SET NOT NULL` | ACCESS EXCLUSIVE | No, but **full scan** | No | ➖ Native pattern | Use `NOT VALID` `CHECK` + `VALIDATE` (PG 12+) to skip the blocking scan |
@@ -519,7 +519,7 @@ refuses the change as [`dependent-view`](#dependent-view),
 [No rewrite is not no cost](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost).
 
 The type change is binary-coercible (for example `varchar(50)` → `varchar(100)`,
-or `varchar` → `text`), so PostgreSQL relabels the column in place without a
+`varchar` → `text`, `timestamp(3)` → `timestamp(6)`, or `cidr` → `inet`), so PostgreSQL relabels the column in place without a
 table rewrite. Runs as written. How PostgreSQL decides, which changes only
 *look* free (shortening `varchar`, changing `numeric` scale, `char(n)` → `text`),
 and the exact rules pg-sprite accepts are in

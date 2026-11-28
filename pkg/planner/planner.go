@@ -1321,8 +1321,10 @@ func targetTypeShape(op statement.Op, collationKept bool) typeShape {
 // binaryCoercible reports whether changing old to new is a relabel
 // PostgreSQL performs without a rewrite or scan. The rules are the
 // reference table's rows, deliberately narrow: widening varchar, varchar to
-// text, and widening numeric precision at the same scale. Anything not
-// provably on this list is not coercible.
+// text, widening numeric precision at the same scale, widening or removing
+// the precision of timestamp, timestamptz, time, and timetz, widening or
+// removing a varbit length, and cidr to inet. Anything not provably on this
+// list is not coercible.
 //
 // The widening rules hold for scalar columns only. An array column's
 // elements are converted one by one, and PostgreSQL rewrites the table for
@@ -1362,9 +1364,46 @@ func binaryCoercible(old, next typeShape) bool {
 		}
 		return len(old.mods) == 2 && len(next.mods) == 2 &&
 			next.mods[1] == old.mods[1] && next.mods[0] >= old.mods[0]
+	case "timestamp", "timestamptz", "time", "timetz":
+		return next.name == old.name && keepsTemporalPrecision(old.mods, next.mods)
+	case "varbit":
+		if next.name != "varbit" {
+			return false
+		}
+		if len(next.mods) == 0 {
+			return true // dropping the length bound
+		}
+		return len(old.mods) == 1 && len(next.mods) == 1 && next.mods[0] >= old.mods[0]
+	case "cidr":
+		// A cidr value is an inet value with no host bits set, stored the
+		// same way, so the cast is a relabel. The reverse masks host bits
+		// and rewrites.
+		return next.name == "inet" && len(next.mods) == 0
 	default:
 		return false
 	}
+}
+
+// maxTemporalPrecision is the largest fractional-seconds precision
+// PostgreSQL stores for timestamp, timestamptz, time, and timetz; an
+// unspecified precision means the same.
+const maxTemporalPrecision = 6
+
+// keepsTemporalPrecision reports whether a temporal type's new precision
+// keeps every stored value as it is: unspecified, the maximum, or at least
+// the old precision. PostgreSQL relabels those without a rewrite, and
+// rounds every value, rewriting the table, for a lower one.
+func keepsTemporalPrecision(old, next []int32) bool {
+	if len(next) == 0 {
+		return true
+	}
+	if len(next) != 1 {
+		return false
+	}
+	if next[0] >= maxTemporalPrecision {
+		return true
+	}
+	return len(old) == 1 && next[0] >= old[0]
 }
 
 // int32sEqual reports element-wise equality.
@@ -1401,6 +1440,8 @@ func catalogTypeName(name string) string {
 		return "time"
 	case "time with time zone":
 		return "timetz"
+	case "bit varying":
+		return "varbit"
 	default:
 		return name
 	}
