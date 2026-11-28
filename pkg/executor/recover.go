@@ -267,8 +267,11 @@ func recoverAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, 
 // table can start between them; the re-verification inside the lock
 // closes the window between the caller's inspection and the lock grant.
 func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target indexTarget, index string, existing invalidIndex) error {
+	// ready is the entry's readiness as the latest statement read it: the
+	// caller's inspection until the under-lock read below replaces it.
+	ready := existing.ready
 	fail := func(cleanup error) error {
-		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, Ready: existing.ready, Cleanup: cleanup}
+		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, Ready: ready, Cleanup: cleanup}
 	}
 	// The observation must be of the table the statement names. The entry's
 	// table OID already matched the resolution, but a rename between the
@@ -348,6 +351,7 @@ func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target in
 	if err != nil {
 		return fail(fmt.Errorf("re-verify index %s.%s under lock: %w", target.schema, index, err))
 	}
+	ready = readinessOf(indisready)
 	if tableName == nil || *tableName != target.table || tableSchema == nil || *tableSchema != target.schema {
 		return fail(ErrTargetIdentityChanged)
 	}
@@ -356,7 +360,7 @@ func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target in
 	}
 	if pid := pidValue(builderPID); pid != 0 {
 		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, BuilderPID: pid,
-			Ready: readinessOf(indisready), Cleanup: ErrInvalidIndexBuildInFlight}
+			Ready: ready, Cleanup: ErrInvalidIndexBuildInFlight}
 	}
 
 	quarantined := quarantineName(existing.oid)
