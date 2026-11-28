@@ -104,8 +104,13 @@ func TestExecuteNativeChecksTheReplicaIdentityOfWhatTheDropReaches(t *testing.T)
 	defer func() { _ = busy.Rollback(t.Context()) }()
 	_, err = busy.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.child IN ACCESS SHARE MODE", schema))
 	require.NoError(t, err)
+	// The wait outside the lock queue counts every child of a table named
+	// without ONLY, so it would wait out the busy child before the drop.
+	// Without it, the drop's own lock is what this step checks.
+	noHolderWait := executor.DefaultRetryPolicy()
+	noHolderWait.HolderWait = 0
 	require.NoError(t, executor.ExecuteNative(t.Context(), pool, parentPreflight,
-		mustParse(t, fmt.Sprintf("ALTER TABLE %s.parent DROP CONSTRAINT parent_code_key", schema)), budget, executor.DefaultRetryPolicy()))
+		mustParse(t, fmt.Sprintf("ALTER TABLE %s.parent DROP CONSTRAINT parent_code_key", schema)), budget, noHolderWait))
 	require.NoError(t, busy.Rollback(t.Context()))
 
 	err = executor.ExecuteNative(t.Context(), pool, pPreflight,

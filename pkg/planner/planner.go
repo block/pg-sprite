@@ -22,8 +22,10 @@
 package planner
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +33,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -86,6 +89,7 @@ func Reasons() []Reason {
 		ReasonDependentView,
 		ReasonDependentPolicy,
 		ReasonDependentTrigger,
+		ReasonDependentPublication,
 		ReasonDependentGeneratedColumn,
 		ReasonPartitionKey,
 		ReasonNotNullWithoutDefault,
@@ -190,6 +194,14 @@ const (
 	// column does not count, since the server records no dependency for
 	// it.
 	ReasonDependentTrigger Reason = "dependent-trigger"
+	// ReasonDependentPublication: the operation changes the type of, or
+	// drops, a column that a publication's column list or row filter for
+	// the table names. PostgreSQL refuses both while the publication
+	// names it, so the statement could only fail, and a desired-state run
+	// would stop part-way with the steps before it committed. The decision
+	// names the publications; a publication that publishes the table
+	// without a column list or row filter does not count.
+	ReasonDependentPublication Reason = "dependent-publication"
 	// ReasonDependentGeneratedColumn: the operation changes the type of,
 	// or drops, a column that a generated column's expression reads.
 	// PostgreSQL refuses both while the generated column exists, so the
@@ -355,6 +367,20 @@ type Decision struct {
 	// column, each schema-qualified with every identifier quoted, present
 	// whenever one blocks the change, whatever the decision's reason.
 	DependentViews []string `json:"dependent_views,omitempty"`
+	// DependentMaterializedViews names the materialized views among
+	// DependentViews and DependentViewDropOrder, rendered the same way, so
+	// the help can call each by its kind; recreating one runs its query to
+	// fill it again. Like DependentFix, it is not part of the plan-report
+	// contract.
+	DependentMaterializedViews []string `json:"-"`
+	// DependentViewDropOrder names every view the manual path drops to
+	// change DependentViews: those views and the views that read them,
+	// directly or through other views, deepest first, so each comes before
+	// every view it reads. PostgreSQL refuses to drop a view another view
+	// reads, so they are dropped in this order and recreated in reverse.
+	// It is nil when no view reads another, where any order works. Like
+	// DependentFix, it is not part of the plan-report contract.
+	DependentViewDropOrder []string `json:"-"`
 	// DependentPolicies names the row-level security policies that read
 	// the column, each rendered "policy" ON "schema"."table" with every
 	// identifier quoted, present whenever one blocks the change, whatever
@@ -365,6 +391,11 @@ type Decision struct {
 	// "schema"."table" with every identifier quoted, present whenever one
 	// blocks the change, whatever the decision's reason.
 	DependentTriggers []string `json:"dependent_triggers,omitempty"`
+	// DependentPublications names the publications whose column list or
+	// row filter for the table names the column, each rendered
+	// "publication" with its identifier quoted, present whenever one
+	// blocks the change, whatever the decision's reason.
+	DependentPublications []string `json:"dependent_publications,omitempty"`
 	// DependentGeneratedColumns names the generated columns whose
 	// expression reads the column, each rendered "schema"."table"."column"
 	// with every identifier quoted, present whenever one blocks the change,
@@ -376,17 +407,23 @@ type Decision struct {
 	// includes the column, each schema-qualified with every identifier
 	// quoted, present exactly for partition-key decisions.
 	PartitionKeyTables []string `json:"partition_key_tables,omitempty"`
-	// DependentFix is the manual path for the policies and triggers that
-	// block the change, which depends on what the change would do with
-	// those dependents out of the way. Like Kind, it is not part
+	// DependentFix is the manual path for the views, policies, and
+	// triggers that block the change, which depends on what the change
+	// would do with those dependents out of the way. Like Kind, it is not part
 	// of the plan-report contract: it selects the help the engine's own
 	// text renders.
 	DependentFix DependentFix `json:"-"`
+	// ReadsInTimeZone names the session time zone a change between
+	// timestamp and timestamptz reads every stored value in, so the
+	// engine's text can say which instant each value becomes. Empty for
+	// any other operation, or when the zone was not read. Like Kind, it is
+	// not part of the plan-report contract.
+	ReadsInTimeZone string `json:"-"`
 }
 
 // DependentFix is the manual path for a change PostgreSQL refuses while a
-// row-level security policy or a trigger reads the column: objects that
-// can be dropped and recreated around the change.
+// view, a row-level security policy, or a trigger reads the column:
+// objects that can be dropped and recreated around the change.
 type DependentFix string
 
 const (
@@ -397,7 +434,8 @@ const (
 	// DependentFixRecreateAroundChange is for a type change PostgreSQL runs
 	// in place. Dropping the dependents, running the change, and
 	// recreating them in one transaction holds the table's exclusive lock
-	// only briefly, and no session sees the table without them.
+	// only briefly, and no session sees the table without them; a
+	// materialized view holds it while its query fills it again.
 	DependentFixRecreateAroundChange DependentFix = "recreate-around-change"
 	// DependentFixExpandContract is for a type change that rewrites the
 	// table. Recreating the dependents around it would hold the exclusive
@@ -413,6 +451,17 @@ const (
 // names the generated columns.
 const GeneratedColumnHelp = "drop those generated columns first, then re-plan; " +
 	"adding a stored one back afterwards, or changing a stored one's expression instead, rewrites the table"
+
+// PublicationHelp is the operator-facing manual path for a
+// dependent-publication decision on an operation of kind, phrased to
+// follow a sentence that names the publications.
+func PublicationHelp(kind statement.OpKind) string {
+	if kind == statement.OpDropColumn {
+		return "remove the column from those publications' column lists and row filters with ALTER PUBLICATION ... SET TABLE, then re-plan the drop"
+	}
+	return "remove the column from those publications' column lists and row filters with ALTER PUBLICATION ... SET TABLE, run the change, then add it back; " +
+		"until it is back, subscribers do not receive the column, or receive rows the row filter would have held back"
+}
 
 // PartitionKeyHelp is the operator-facing manual path for a partition-key
 // decision, phrased to follow a sentence that names the partitioned
@@ -439,9 +488,138 @@ func (f DependentFix) Help(plural string) string {
 		return "this type change runs in place, without rewriting the table, so in one transaction drop those " + plural + ", run the change, and recreate them"
 	case DependentFixExpandContract:
 		return "this type change rewrites the table, so recreating the " + plural + " around it would block the table for the whole rewrite; " +
-			"add a column of the new type instead, backfill it, point those " + plural + " at it, then drop the old column"
+			"add a column of the new type instead, have the application write to both and backfill it, point those " + plural +
+			" at it and switch reads to it, then drop the old column once nothing uses it"
 	}
 	return string(f)
+}
+
+// ViewsPhrase names the views that block the change after "read by", each
+// by its kind: view "a"."v", materialized view "a"."m", or views "a"."v",
+// "a"."w" and materialized view "a"."m". It is "" when no view blocks it.
+func (d Decision) ViewsPhrase() string {
+	var plain, materialized []string
+	for _, name := range d.DependentViews {
+		if slices.Contains(d.DependentMaterializedViews, name) {
+			materialized = append(materialized, name)
+		} else {
+			plain = append(plain, name)
+		}
+	}
+	var parts []string
+	if len(plain) > 0 {
+		parts = append(parts, DependentsPhrase("view", "views", plain))
+	}
+	if len(materialized) > 0 {
+		parts = append(parts, DependentsPhrase("materialized view", "materialized views", materialized))
+	}
+	return strings.Join(parts, " and ")
+}
+
+// ViewsNoun is the plural noun for the views that block the change, for
+// DependentFix.Help: "views", "materialized views", or "views and
+// materialized views".
+func (d Decision) ViewsNoun() string {
+	materialized := 0
+	for _, name := range d.DependentViews {
+		if slices.Contains(d.DependentMaterializedViews, name) {
+			materialized++
+		}
+	}
+	switch materialized {
+	case 0:
+		return "views"
+	case len(d.DependentViews):
+		return "materialized views"
+	}
+	return "views and materialized views"
+}
+
+// ViewsHelp is the manual path for the views that block the change,
+// phrased to follow a sentence that names them: the dependent fix every
+// recreatable dependent shares, or, on a decision that carries none,
+// redefining the views before planning again. PostgreSQL changes a view's
+// columns only by dropping and recreating it, so the help says when that
+// happens, gives the order to drop the views in when one reads another,
+// and names what a dropped view takes with it so the reader recreates it
+// too.
+func (d Decision) ViewsHelp() string {
+	noun := d.ViewsNoun()
+	help := "drop or redefine those " + noun + " first, then re-plan"
+	if d.DependentFix != "" {
+		help = d.DependentFix.Help(noun)
+	}
+	if d.DependentFix == DependentFixRecreateAroundChange && len(d.DependentMaterializedViews) > 0 {
+		help += "; recreating a materialized view runs its query to fill it again while the transaction blocks the table"
+	}
+	if swap := d.viewSwap(); swap != "" {
+		help += "; " + swap
+	}
+	help += "; a dropped view loses its grants, comment, owner, options such as security_barrier, rules, INSTEAD OF triggers and column defaults"
+	if len(d.DependentMaterializedViews) > 0 {
+		help += ", and a materialized view its indexes too"
+	}
+	return help + ", so recreate those with each view"
+}
+
+// viewSwap says how the views change: by dropping and recreating them, in
+// one transaction at the step that changes them, and in the order
+// DependentViewDropOrder gives when one view reads another. A fix that
+// already drops and recreates the views around the change needs only the
+// order.
+func (d Decision) viewSwap() string {
+	const inPlace = "since CREATE OR REPLACE VIEW cannot remove or retype a column"
+	var parts []string
+	switch d.DependentFix {
+	case DependentFixRecreateAroundChange:
+	case DependentFixExpandContract:
+		parts = append(parts, "pointing a view at the new column means dropping and recreating it, "+inPlace+", so do that in one transaction at that step")
+	default:
+		parts = append(parts, "changing a view means dropping and recreating it in one transaction, "+inPlace)
+	}
+	if len(d.DependentViewDropOrder) > 0 {
+		parts = append(parts, "drop the views in this order: "+d.viewDropOrderPhrase()+", and recreate them in reverse")
+	}
+	return strings.Join(parts, "; ")
+}
+
+// viewDropOrderPhrase names DependentViewDropOrder in order, each by its
+// kind: view "a"."top", then materialized view "a"."sum".
+func (d Decision) viewDropOrderPhrase() string {
+	names := make([]string, len(d.DependentViewDropOrder))
+	for i, name := range d.DependentViewDropOrder {
+		names[i] = "view " + name
+		if slices.Contains(d.DependentMaterializedViews, name) {
+			names[i] = "materialized view " + name
+		}
+	}
+	return strings.Join(names, ", then ")
+}
+
+// viewDropOrder orders views and the views that read them, directly or
+// through other views, deepest first and then by name, or returns nil when
+// no view reads another. Each view's depth is its longest chain from any
+// of views, and a view in views that nothing among them reaches has depth
+// zero, so a view always sorts ahead of every view it reads, including
+// when one view in views reads another.
+func viewDropOrder(views []string, readers map[string]map[string]int) []string {
+	depths := map[string]int{}
+	for _, view := range views {
+		depths[view] = 0
+	}
+	ordered := false
+	for _, view := range views {
+		for reader, depth := range readers[view] {
+			depths[reader] = max(depths[reader], depth)
+			ordered = true
+		}
+	}
+	if !ordered {
+		return nil
+	}
+	return slices.SortedFunc(maps.Keys(depths), func(a, b string) int {
+		return cmp.Or(cmp.Compare(depths[b], depths[a]), cmp.Compare(a, b))
+	})
 }
 
 // OtherDependents phrases the dependents that block the change besides
@@ -455,9 +633,12 @@ func (d Decision) OtherDependents() string {
 			others = append(others, DependentsPhrase(singular, plural, names))
 		}
 	}
-	add(ReasonDependentView, "view", "views", d.DependentViews)
+	if d.Reason != ReasonDependentView && len(d.DependentViews) > 0 {
+		others = append(others, d.ViewsPhrase())
+	}
 	add(ReasonDependentPolicy, "policy", "policies", d.DependentPolicies)
 	add(ReasonDependentTrigger, "trigger", "triggers", d.DependentTriggers)
+	add(ReasonDependentPublication, "publication", "publications", d.DependentPublications)
 	add(ReasonDependentGeneratedColumn, "generated column", "generated columns", d.DependentGeneratedColumns)
 	return strings.Join(others, " and ")
 }
@@ -508,7 +689,7 @@ type Facts struct {
 	// absent from the map has the default collation. Retyping a column
 	// without a COLLATE clause resets it to the new type's default, so a
 	// column present here loses its collation and every index on it is
-	// rebuilt: never a relabel.
+	// rebuilt: never a relabel, unless the clause names this collation.
 	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// the tables below it key on; the zero value when none has one to
@@ -536,6 +717,14 @@ type Facts struct {
 	// OwnDependentViews is DependentViews for the table alone, which is
 	// all an ALTER TABLE ONLY changes.
 	OwnDependentViews map[string][]string
+	// MaterializedViews names the materialized views among the dependent
+	// views and their readers, rendered as they are
+	// (preflight.ColumnDependents).
+	MaterializedViews []string
+	// ViewReaders maps each dependent view to the views that read it,
+	// directly or through other views, each to its longest chain of views
+	// from the dependent view (preflight.ColumnDependents).
+	ViewReaders map[string]map[string]int
 	// DependentPolicies maps a column to the row-level security policies
 	// that read it, wherever they are defined, on the table or on any
 	// table below it (preflight.ReadColumnDependents), each rendered
@@ -554,6 +743,10 @@ type Facts struct {
 	// reads the column is not one: the server records no dependency for
 	// it and lets the change run.
 	DependentTriggers ColumnDependents
+	// DependentPublications maps a column to the publications whose column
+	// list or row filter for the table names it
+	// (preflight.ReadColumnDependents), each rendered "publication".
+	DependentPublications ColumnDependents
 	// GeneratedColumnCopies maps each generated column to its own copies,
 	// named as DependentGeneratedColumns names them, so a statement that
 	// drops a generated column stops it blocking a change to the columns
@@ -599,6 +792,16 @@ type Facts struct {
 	// an ordinary table or a partition, none for a partitioned parent.
 	// StorageUnread when the fact was not read, as in an offline lint.
 	Storage TableStorage
+	// SessionTimeZone is the TimeZone setting the engine's sessions run
+	// with (preflight.SessionTimeZone): the zone a change between
+	// timestamp and timestamptz reads every stored value in. Empty when
+	// the fact was not read, as in an offline lint.
+	SessionTimeZone string
+	// KeyedColumns are the columns an index or a foreign key reads, on
+	// the table or on a table below it (preflight.KeyedColumns). Nil when
+	// the fact was not read, as in an offline lint; a column absent from a
+	// non-nil map has no index and no foreign key.
+	KeyedColumns map[string]bool
 }
 
 // TableStorage is what a live read says about a table's own storage.
@@ -676,8 +879,8 @@ func policiesReadingColumn(op statement.Op, facts Facts) []string {
 
 // dependentsReached returns the dependents that read the column op
 // retypes or drops: the two column changes PostgreSQL refuses while a
-// view, a policy, a trigger, a generated column, or a partition key reads
-// the column. A rename is not one of them, since each follows the column. Under ONLY the change stops at
+// view, a policy, a trigger, a publication, a generated column, or a
+// partition key reads the column. A rename is not one of them, since each follows the column. Under ONLY the change stops at
 // the table, so only its own dependents count, and a recursive drop
 // counts only the copies of the column it drops.
 func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []string {
@@ -699,6 +902,12 @@ func dependentsReached(op statement.Op, tree, drop, own map[string][]string) []s
 func dependentFix(op statement.Op, facts Facts) DependentFix {
 	if op.Kind == statement.OpDropColumn {
 		return DependentFixRewriteDependents
+	}
+	// The operator runs the manual path in a session of their own, whose
+	// time zone the plan did not read, so a change between timestamp and
+	// timestamptz is not promised to stay in place there.
+	if swapsTimeZone(op, facts) {
+		return DependentFixExpandContract
 	}
 	if route, _, _ := classifyTypeChange(op, facts); route == RouteNative {
 		return DependentFixRecreateAroundChange
@@ -923,8 +1132,8 @@ func withoutInheritedCopies(generated []string, copies ColumnDependents) []strin
 }
 
 // dependentReason is the refusal reason for the first kind of dependent
-// that blocks d, in the order views, policies, triggers, generated
-// columns.
+// that blocks d, in the order views, policies, triggers, publications,
+// generated columns.
 func dependentReason(d Decision) (Reason, bool) {
 	switch {
 	case len(d.DependentViews) > 0:
@@ -933,6 +1142,8 @@ func dependentReason(d Decision) (Reason, bool) {
 		return ReasonDependentPolicy, true
 	case len(d.DependentTriggers) > 0:
 		return ReasonDependentTrigger, true
+	case len(d.DependentPublications) > 0:
+		return ReasonDependentPublication, true
 	case len(d.DependentGeneratedColumns) > 0:
 		return ReasonDependentGeneratedColumn, true
 	}
@@ -971,10 +1182,20 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	// Every kind of dependent that blocks the change is named, so the
 	// manual path clears all of them; the reason is the first kind.
 	d.DependentViews = viewsReadingColumn(op, facts)
+	d.DependentViewDropOrder = viewDropOrder(d.DependentViews, facts.ViewReaders)
+	for _, name := range slices.Concat(d.DependentViews, d.DependentViewDropOrder) {
+		if slices.Contains(facts.MaterializedViews, name) && !slices.Contains(d.DependentMaterializedViews, name) {
+			d.DependentMaterializedViews = append(d.DependentMaterializedViews, name)
+		}
+	}
+	if len(d.DependentMaterializedViews) == 0 {
+		d.DependentMaterializedViews = nil
+	}
 	d.DependentPolicies = policiesReadingColumn(op, facts)
 	d.DependentTriggers = facts.DependentTriggers.reached(op)
+	d.DependentPublications = facts.DependentPublications.reached(op)
 	d.DependentGeneratedColumns = withoutInheritedCopies(facts.DependentGeneratedColumns.reached(op), facts.GeneratedColumnCopies)
-	if len(d.DependentPolicies) > 0 || len(d.DependentTriggers) > 0 {
+	if len(d.DependentViews) > 0 || len(d.DependentPolicies) > 0 || len(d.DependentTriggers) > 0 {
 		d.DependentFix = dependentFix(op, facts)
 	}
 	if reason, blocked := dependentReason(d); blocked {
@@ -1071,14 +1292,20 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// error handling name, so it breaks the application like a column
 		// rename does. Without the live fact — an offline lint — the
 		// rename classifies as metadata-only, and the executor re-checks
-		// the constraint under the table's lock before it runs.
+		// the constraint under the table's lock before it runs. Either way
+		// the rename changes only the catalog's names: it reads no row of
+		// the table and runs no user code.
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		d.ProvenCatalogOnly = true
 		if facts.RenamedIndexConstraint != "" {
 			d.Reason = ReasonAppBreakingRename
 		}
 
 	case statement.OpAlterColumnType:
 		d.Route, d.Reason, d.Unverified = classifyTypeChange(op, facts)
+		if swapsTimeZone(op, facts) {
+			d.ReadsInTimeZone = facts.SessionTimeZone
+		}
 
 	case statement.OpSetNotNull:
 		// Native pattern: prove the invariant with a NOT VALID CHECK plus
@@ -1243,11 +1470,17 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
-	if _, collated := facts.ColumnCollations[op.Column]; collated {
-		// The live column has a collation of its own, which the new type
-		// either resets to its default or (with a COLLATE clause) replaces;
-		// either way every index on the column is rebuilt.
-		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	collationKept := false
+	if live, collated := facts.ColumnCollations[op.Column]; collated {
+		// The live column has a collation of its own. A type change with
+		// no COLLATE clause resets it to the new type's default, and one
+		// naming another collation replaces it; either way every index on
+		// the column is rebuilt. A clause naming the live collation keeps
+		// it, and the type rules decide.
+		if !keepsCollation(live, op.NewTypeCollationName) {
+			return RouteCopyAndSwap, ReasonTypeRewrite, false
+		}
+		collationKept = true
 	}
 	oldType, ok := facts.ColumnTypes[op.Column]
 	if !ok {
@@ -1256,10 +1489,71 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op)) {
+	old, next := parseTypeText(oldType), targetTypeShape(op, collationKept)
+	if timeZoneSwap(old, next) {
+		return classifyTimeZoneSwap(op, next, facts)
+	}
+	if binaryCoercible(old, next) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
+}
+
+// classifyTimeZoneSwap classifies a change between timestamp and
+// timestamptz. PostgreSQL reads each stored value in the session time
+// zone, and keeps the stored bytes only when that zone is UTC: in any
+// other zone every value moves by the zone's offset and the table is
+// rewritten. Even in UTC every index on the column is rebuilt under the
+// change's exclusive lock, since the index's operator class changes with
+// the type, and a foreign key the column is part of is checked again with
+// a scan, since its equality operator changes too. A precision below the
+// maximum rounds every value, and an array's elements are converted one by
+// one. So the change is a relabel only in UTC, for a scalar column no
+// index or foreign key reads, to an unspecified or maximum precision. A
+// zone or a key that was not read fails closed to the rewrite route,
+// marked unverified. The executor checks the zone again inside the
+// change's own transaction.
+func classifyTimeZoneSwap(op statement.Op, next typeShape, facts Facts) (Route, Reason, bool) {
+	if op.HasUsing || next.array || !keepsTemporalPrecision(nil, next.mods) {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	if facts.SessionTimeZone == "" {
+		return RouteCopyAndSwap, ReasonTypeRewrite, true
+	}
+	if !preflight.UTCTimeZone(facts.SessionTimeZone) {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	if facts.KeyedColumns == nil {
+		return RouteCopyAndSwap, ReasonTypeRewrite, true
+	}
+	if facts.KeyedColumns[op.Column] {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	return RouteNative, ReasonBinaryCoercible, false
+}
+
+// swapsTimeZone reports whether op changes a column between timestamp and
+// timestamptz, reading each stored value in the session time zone: a
+// USING expression decides the conversion itself.
+func swapsTimeZone(op statement.Op, facts Facts) bool {
+	if op.Kind != statement.OpAlterColumnType || op.HasUsing {
+		return false
+	}
+	live, ok := facts.ColumnTypes[op.Column]
+	if !ok {
+		return false
+	}
+	return timeZoneSwap(parseTypeText(live), targetTypeShape(op, true))
+}
+
+// timeZoneSwap reports whether old to next changes timestamp to
+// timestamptz or timestamptz to timestamp, as scalars or as arrays.
+func timeZoneSwap(old, next typeShape) bool {
+	if old.array != next.array {
+		return false
+	}
+	return (old.name == "timestamp" && next.name == "timestamptz") ||
+		(old.name == "timestamptz" && next.name == "timestamp")
 }
 
 // typeShape is a normalized type family plus its modifiers and whether it
@@ -1271,17 +1565,39 @@ type typeShape struct {
 	array bool
 }
 
+// keepsCollation reports whether a type change's COLLATE clause names the
+// live column's collation, rendered schema-qualified as schemadiff reads
+// it. An unqualified name keeps a pg_catalog collation of that name, since
+// the engine's sessions search pg_catalog first; a collation in any other
+// schema is kept only by a clause qualified with that schema, since an
+// unqualified name resolves through the search path. No clause, or a live
+// collation that does not parse, keeps nothing.
+func keepsCollation(live string, stated statement.QualifiedName) bool {
+	if stated.Name == "" {
+		return false
+	}
+	liveName, err := statement.ParseCollationName(live)
+	if err != nil {
+		return false
+	}
+	if stated.Schema == "" {
+		return liveName.Schema == "pg_catalog" && liveName.Name == stated.Name
+	}
+	return liveName == stated
+}
+
 // targetTypeShape reads the statement's target type into the shape
 // parseTypeText gives the live one. A type qualified with a schema other
 // than pg_catalog is a user type that only shares a built-in's name, and a
-// COLLATE clause changes the collation every index on the column is built
-// with, so neither gets a shape and neither matches a rule. The name is
+// COLLATE clause that changes the collation changes the one every index on
+// the column is built with, so neither gets a shape and neither matches a
+// rule. collationKept says the clause names the live collation. The name is
 // taken as the parser left it: the grammar already spells every built-in
 // the rules know by its catalog name (varchar, numeric, timestamptz), so a
 // target named "decimal" or "character varying" was quoted and names a
 // user type.
-func targetTypeShape(op statement.Op) typeShape {
-	if op.NewTypeSchema != "" || op.NewTypeCollation != "" {
+func targetTypeShape(op statement.Op, collationKept bool) typeShape {
+	if op.NewTypeSchema != "" || (op.NewTypeCollation != "" && !collationKept) {
 		return typeShape{}
 	}
 	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
@@ -1290,8 +1606,10 @@ func targetTypeShape(op statement.Op) typeShape {
 // binaryCoercible reports whether changing old to new is a relabel
 // PostgreSQL performs without a rewrite or scan. The rules are the
 // reference table's rows, deliberately narrow: widening varchar, varchar to
-// text, and widening numeric precision at the same scale. Anything not
-// provably on this list is not coercible.
+// text, widening numeric precision at the same scale, widening or removing
+// the precision of timestamp, timestamptz, time, and timetz, widening or
+// removing a varbit length, and cidr to inet. Anything not provably on this
+// list is not coercible.
 //
 // The widening rules hold for scalar columns only. An array column's
 // elements are converted one by one, and PostgreSQL rewrites the table for
@@ -1331,9 +1649,46 @@ func binaryCoercible(old, next typeShape) bool {
 		}
 		return len(old.mods) == 2 && len(next.mods) == 2 &&
 			next.mods[1] == old.mods[1] && next.mods[0] >= old.mods[0]
+	case "timestamp", "timestamptz", "time", "timetz":
+		return next.name == old.name && keepsTemporalPrecision(old.mods, next.mods)
+	case "varbit":
+		if next.name != "varbit" {
+			return false
+		}
+		if len(next.mods) == 0 {
+			return true // dropping the length bound
+		}
+		return len(old.mods) == 1 && len(next.mods) == 1 && next.mods[0] >= old.mods[0]
+	case "cidr":
+		// A cidr value is an inet value with no host bits set, stored the
+		// same way, so the cast is a relabel. The reverse masks host bits
+		// and rewrites.
+		return next.name == "inet" && len(next.mods) == 0
 	default:
 		return false
 	}
+}
+
+// maxTemporalPrecision is the largest fractional-seconds precision
+// PostgreSQL stores for timestamp, timestamptz, time, and timetz; an
+// unspecified precision means the same.
+const maxTemporalPrecision = 6
+
+// keepsTemporalPrecision reports whether a temporal type's new precision
+// keeps every stored value as it is: unspecified, the maximum, or at least
+// the old precision. PostgreSQL relabels those without a rewrite, and
+// rounds every value, rewriting the table, for a lower one.
+func keepsTemporalPrecision(old, next []int32) bool {
+	if len(next) == 0 {
+		return true
+	}
+	if len(next) != 1 {
+		return false
+	}
+	if next[0] >= maxTemporalPrecision {
+		return true
+	}
+	return len(old) == 1 && next[0] >= old[0]
 }
 
 // int32sEqual reports element-wise equality.
@@ -1370,6 +1725,8 @@ func catalogTypeName(name string) string {
 		return "time"
 	case "time with time zone":
 		return "timetz"
+	case "bit varying":
+		return "varbit"
 	default:
 		return name
 	}

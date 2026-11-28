@@ -53,6 +53,27 @@ const (
 	// CauseEnumValueReordered refuses when the desired file lists the live
 	// enum type's labels in another order.
 	CauseEnumValueReordered UnsupportedCause = "enum-value-reordered"
+	// CauseReplacementIndexName refuses when a primary key or unique
+	// constraint is replaced in place and the temporary name its new index
+	// is built under is one the table already uses.
+	CauseReplacementIndexName UnsupportedCause = "replacement-index-name"
+	// CauseReferencedIndex refuses when a standalone index that a foreign
+	// key references would be dropped, whether it is removed or changed, or
+	// when a primary key or unique constraint a foreign key references would
+	// be replaced: the foreign key depends on it, so PostgreSQL refuses the
+	// drop.
+	CauseReferencedIndex UnsupportedCause = "referenced-index"
+	// CauseRenamedIndexName refuses when the desired table gives a new
+	// constraint the name of a live index it renames: the index keeps its
+	// rule only by being renamed, and the constraint cannot take the name
+	// until it is.
+	CauseRenamedIndexName UnsupportedCause = "renamed-index-name"
+	// CauseMovedUniqueRule refuses when the desired table gives a new
+	// constraint the name of a live unique index while another unique index
+	// it builds takes over that index's key: the live index would be
+	// dropped before the new one is built, leaving the key without a
+	// unique rule while it builds.
+	CauseMovedUniqueRule UnsupportedCause = "moved-unique-rule"
 )
 
 // UnsupportedCauses is the closed set of causes [Diff], [IntrospectEnumType],
@@ -75,6 +96,10 @@ func UnsupportedCauses() []UnsupportedCause {
 		CauseEnumTypeKind,
 		CauseEnumValueRemoved,
 		CauseEnumValueReordered,
+		CauseReplacementIndexName,
+		CauseReferencedIndex,
+		CauseRenamedIndexName,
+		CauseMovedUniqueRule,
 	}
 }
 

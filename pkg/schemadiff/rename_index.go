@@ -1,0 +1,274 @@
+package schemadiff
+
+import (
+	"maps"
+	"slices"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// renamedIndexes matches each live index the desired table no longer names
+// to a desired index the live table does not name, when the two differ by
+// name alone. Such a pair is a rename, and the plan carries it as
+// ALTER INDEX ... RENAME TO, a catalog change that keeps the index serving
+// throughout. A drop and a rebuild would instead leave the table without the
+// index while the new one builds, which for a unique index lets duplicates
+// in. The result maps the live name to the desired index.
+//
+// An unfinished build, an index a new key constraint takes over, a claimed
+// index (an earlier run's build of a replacement, or an index a unique
+// constraint replaces), a desired index a replacement builds, and a desired
+// index already matched are left out, and each index joins at most one
+// pair. Indexes are visited in
+// name order, so two live indexes with the same definition always pair the
+// same way.
+func renamedIndexes(partitioned bool, live, desired []Index, liveIdx, desiredIdx map[string]Index,
+	adopted, claimed map[string]struct{}, replaced map[string]indexReplacement) (map[string]Index, error) {
+	renamed := make(map[string]Index)
+	taken := make(map[string]bool)
+	for _, ix := range sortedIndexes(live) {
+		if _, kept := desiredIdx[ix.Name]; kept || isUnfinishedBuild(partitioned, ix) || ix.Invalid {
+			continue
+		}
+		if _, ok := adopted[ix.Name]; ok {
+			continue
+		}
+		if _, ok := claimed[ix.Name]; ok {
+			continue
+		}
+		for _, want := range sortedIndexes(desired) {
+			if _, exists := liveIdx[want.Name]; exists || taken[want.Name] {
+				continue
+			}
+			if _, built := replaced[want.Name]; built {
+				continue
+			}
+			same, err := sameIndexUnderName(ix, want)
+			if err != nil {
+				return nil, err
+			}
+			if same {
+				renamed[ix.Name] = want
+				taken[want.Name] = true
+				break
+			}
+		}
+	}
+	return renamed, nil
+}
+
+// refuseConstraintOnRenamedIndexName refuses a plan that gives a new
+// constraint the name of a live index it renames. The index has to keep its
+// name until its rename, and the constraint needs the name to be added, so
+// one of the two would run against a name still in use.
+func refuseConstraintOnRenamedIndexName(renamed map[string]Index, liveCons, desiredCons map[string]Constraint) error {
+	for _, from := range slices.Sorted(maps.Keys(renamed)) {
+		if _, live := liveCons[from]; live {
+			continue
+		}
+		if _, declared := desiredCons[from]; declared {
+			return unsupported(CauseRenamedIndexName, "%w: constraint %q takes the name of index %q, which the desired table renames to %q; rename the index in one change and add the constraint in the next",
+				ErrUnsupportedChange, from, from, renamed[from].Name)
+		}
+	}
+	return nil
+}
+
+// renameIndexTargets returns the desired names renamed maps to.
+func renameIndexTargets(renamed map[string]Index) map[string]string {
+	targets := make(map[string]string, len(renamed))
+	for from, to := range renamed {
+		targets[to.Name] = from
+	}
+	return targets
+}
+
+// renameIndexChange is the statement that gives the live index from the
+// desired index's name, carrying from's definition for the run to check.
+func renameIndexChange(schema string, from Index, to string) Change {
+	return Change{
+		SQL:     "ALTER INDEX " + pgx.Identifier{schema, from.Name}.Sanitize() + " RENAME TO " + pgx.Identifier{to}.Sanitize(),
+		Kind:    ChangeRenameIndex,
+		Renames: &IndexRename{Index: from.Name, Def: from.Def},
+	}
+}
+
+func sortedIndexes(indexes []Index) []Index {
+	sorted := slices.Clone(indexes)
+	slices.SortFunc(sorted, func(a, b Index) int { return strings.Compare(a.Name, b.Name) })
+	return sorted
+}
+
+// isUniqueIndex reports a unique standalone index.
+func isUniqueIndex(ix Index) bool {
+	return strings.HasPrefix(ix.Def, "CREATE UNIQUE INDEX ")
+}
+
+// isUniqueConstraint reports a unique constraint. A live key's IndexDef is
+// not introspected, so it is told by the definition the server decompiles
+// for it. A primary key is left out, since a table has only one, so a new
+// primary key cannot be in place while the old one is.
+func isUniqueConstraint(con Constraint) bool {
+	return !con.Primary && strings.HasPrefix(con.Def, "UNIQUE ")
+}
+
+// heldDrops decides which of a plan's drops wait until the plan's new
+// indexes and constraints are in place.
+type heldDrops struct {
+	// uniqueness says the plan builds a unique index or adds a unique
+	// constraint, which may be what replaces a uniqueness it drops.
+	uniqueness bool
+	// renamedRules are the definitions of the constraints the desired table
+	// adds under a name the live table does not have.
+	renamedRules map[string]bool
+	// foreignKeys says the plan adds or validates a foreign key, which may
+	// be what replaces a foreign key it drops.
+	foreignKeys bool
+	// checks says the plan adds or changes a CHECK, which may be what
+	// replaces a CHECK it drops.
+	checks      bool
+	liveIdx     map[string]Index
+	liveCons    map[string]Constraint
+	desiredIdx  map[string]Index
+	desiredCons map[string]Constraint
+}
+
+// holds reports whether ch is a drop that waits: a unique index or unique
+// constraint when the plan adds uniqueness, a foreign key when the plan adds
+// one, a CHECK when the plan adds or changes one, or a constraint the
+// desired table adds again under another name. A drop whose name the
+// desired table reuses never waits, since it clears that name.
+func (h heldDrops) holds(ch Change) bool {
+	if ch.Drops == nil || namedByDesired(ch.Drops.Name, h.desiredIdx, h.desiredCons) {
+		return false
+	}
+	switch ch.Drops.Kind {
+	case DroppedIndex:
+		ix, ok := h.liveIdx[ch.Drops.Name]
+		return ok && h.uniqueness && isUniqueIndex(ix)
+	case DroppedConstraint:
+		con, ok := h.liveCons[ch.Drops.Name]
+		if !ok || con.Primary {
+			return false
+		}
+		return (h.uniqueness && isUniqueConstraint(con)) || (h.foreignKeys && con.ForeignKey) ||
+			(h.checks && isCheckConstraint(con)) || h.renamedRules[con.Def]
+	}
+	return false
+}
+
+// dropsForeignKey reports whether ch drops a live foreign key.
+func (h heldDrops) dropsForeignKey(ch Change) bool {
+	if ch.Drops == nil || ch.Drops.Kind != DroppedConstraint {
+		return false
+	}
+	con, ok := h.liveCons[ch.Drops.Name]
+	return ok && con.ForeignKey
+}
+
+// renamedConstraintDefs returns the definitions of the constraints desired
+// adds under names the live table does not have. A live constraint the file
+// no longer names whose definition is among them moved to another name.
+func renamedConstraintDefs(desired Model, liveCons map[string]Constraint) map[string]bool {
+	defs := make(map[string]bool)
+	for _, con := range desired.Constraints {
+		if _, ok := liveCons[con.Name]; !ok {
+			defs[con.Def] = true
+		}
+	}
+	return defs
+}
+
+// addsUniqueness reports whether the plan builds a unique index or adds a
+// unique constraint, either of which may be what replaces a uniqueness the
+// plan drops. That includes one under a name the live table already uses
+// whose definition the plan changes, such as an index that becomes unique:
+// the plan builds it again, and the build can fail.
+func addsUniqueness(desired Model, liveIdx map[string]Index, liveCons map[string]Constraint) bool {
+	for _, ix := range desired.Indexes {
+		if had, ok := liveIdx[ix.Name]; isUniqueIndex(ix) && (!ok || had.Invalid || had.Def != ix.Def) {
+			return true
+		}
+	}
+	for _, con := range desired.Constraints {
+		if had, ok := liveCons[con.Name]; isUniqueConstraint(con) && (!ok || had.Def != con.Def) {
+			return true
+		}
+	}
+	return false
+}
+
+// addsCheck reports whether the plan adds a CHECK under a name the live
+// table does not have or changes one it has. A CHECK the plan drops waits
+// for it, so a rule that moves to another name and definition keeps
+// rejecting writes while its replacement is added and validated, and a
+// replacement that fails validation leaves the old rule standing.
+func addsCheck(desired Model, liveCons map[string]Constraint) bool {
+	for _, con := range desired.Constraints {
+		if !isCheckConstraint(con) {
+			continue
+		}
+		if had, ok := liveCons[con.Name]; !ok || had.Def != con.Def {
+			return true
+		}
+	}
+	return false
+}
+
+// installsForeignKey reports whether the plan adds or validates a foreign
+// key: one under a name the live table does not have, one it changes, or one
+// an earlier run left NOT VALID. A foreign key the plan drops waits for it,
+// so a key that moves to another name or definition checks every write while
+// its replacement is added and validated, and a replacement that fails
+// leaves the old key standing.
+func installsForeignKey(desired Model, liveCons, desiredCons map[string]Constraint) bool {
+	for _, con := range desired.Constraints {
+		if !con.ForeignKey {
+			continue
+		}
+		had, ok := liveCons[con.Name]
+		if !ok || constraintNeedsDrop(had, desiredCons) || validatesInPlace(had, con) {
+			return true
+		}
+	}
+	return false
+}
+
+// ForeignKeysDroppedBeforeTheirReplacement names the live foreign keys the
+// plan drops before a foreign key it adds or validates is in place, which
+// leaves writes between the two statements checked against no key at all.
+// That is every dropped key in a plan that adds or validates a foreign key
+// and also changes its columns first (see changesColumnsFirst), since such a
+// plan keeps its drops first, and, on a partitioned parent, a key the desired table declares under
+// the same name with another definition: the server refuses a NOT VALID
+// foreign key there, so the key is dropped and added again in two statements.
+// Elsewhere a key changed under the same name is replaced by one statement
+// that drops it and adds the new key NOT VALID, which leaves no gap.
+func ForeignKeysDroppedBeforeTheirReplacement(live, desired Model) map[string]bool {
+	liveCons := constraintsByName(live.Constraints)
+	desiredCons := constraintsByName(desired.Constraints)
+	dropsFirst := changesColumnsFirst(live, desired.Columns) && installsForeignKey(desired, liveCons, desiredCons)
+	partitioned := live.PartitionKey != ""
+	keys := map[string]bool{}
+	for _, con := range live.Constraints {
+		if !con.ForeignKey || !constraintNeedsDrop(con, desiredCons) {
+			continue
+		}
+		want, ok := desiredCons[con.Name]
+		if dropsFirst || (partitioned && ok && want.ForeignKey) {
+			keys[con.Name] = true
+		}
+	}
+	return keys
+}
+
+// namedByDesired reports whether the desired table names an index or a
+// constraint name, which a drop has to clear before the plan creates it.
+func namedByDesired(name string, desiredIdx map[string]Index, desiredCons map[string]Constraint) bool {
+	if _, ok := desiredIdx[name]; ok {
+		return true
+	}
+	_, ok := desiredCons[name]
+	return ok
+}

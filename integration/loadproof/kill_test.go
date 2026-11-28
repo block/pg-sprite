@@ -21,6 +21,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -64,7 +65,8 @@ type killRun struct {
 	ExitCode   int    `json:"exit_code"`
 	// RowPhase is the checkpoint row's phase after the run, and
 	// WatermarkAtKill the key the row's watermark had landed through when
-	// the run was killed: the save the next run resumes from.
+	// the run was killed: the save the next run resumes from, absent when
+	// a copy was killed before its first save.
 	// FirstSavedWatermark is the first watermark the kill poll saw the run
 	// save in copying, the complete watermark's key when the copy had
 	// ended before the poll saw a partial one, and absent when the poll
@@ -73,6 +75,16 @@ type killRun struct {
 	RowPhase            string `json:"row_phase"`
 	WatermarkAtKill     *int64 `json:"watermark_at_kill,omitempty"`
 	FirstSavedWatermark *int64 `json:"first_saved_watermark,omitempty"`
+	// ResumedFromSave is whether the run is the killed copy's rerun and
+	// checkResumedFrom held its first copying save at or above the killed
+	// run's WatermarkAtKill. It is false on every other run, and on that
+	// rerun when the kill landed before the copy's first save, so a pass
+	// at such a size is not read as having proven a resume from a save.
+	ResumedFromSave bool `json:"resumed_from_save"`
+	// BackendsExitWaitMillis is how long the harness waited, after the
+	// run was killed and before it read the row, for the dead binary's
+	// backends to leave the server.
+	BackendsExitWaitMillis int64 `json:"backends_exit_wait_ms,omitempty"`
 	// ShadowOID is the relation the run left the change's new table in:
 	// after a kill, the shadow's; after the swap, the live table's. A run
 	// that resumed keeps it; one that started over built another.
@@ -156,9 +168,12 @@ func TestLoadProofKill(t *testing.T) {
 	}
 	require.NoError(t, killsErr)
 
-	finalStart := time.Now()
-	output, diagnostic, code := runBinary(t, runCtx, c, migrateArgs(c, table)...)
-	exited := time.Now()
+	// The last kill is mid-verify (killPoints), so the run left to finish
+	// resumes the verifying row; the poll reads the row throughout it and
+	// sends nothing.
+	k, finalErr := runUntilKilled(t, ctx, runCtx, c, pool, store, table, killNever, copier.Watermark{})
+	exited := k.exited
+	output := []byte(k.stdout)
 	atExit := load.Progress()
 	res.RunMillis = exited.Sub(started).Milliseconds()
 	w := watch.stop()
@@ -168,14 +183,16 @@ func TestLoadProofKill(t *testing.T) {
 	res.recordLoad(load.Snapshot(), atExit)
 	res.Runs = append(res.Runs, killRun{
 		Run:                   len(res.Runs) + 1,
-		StartedMillis:         finalStart.Sub(started).Milliseconds(),
-		RunMillis:             exited.Sub(finalStart).Milliseconds(),
+		StartedMillis:         k.started.Sub(started).Milliseconds(),
+		RunMillis:             exited.Sub(k.started).Milliseconds(),
 		SlotReleaseWaitMillis: waited.Milliseconds(),
-		ExitCode:              code,
+		ExitCode:              k.code,
 	})
 	final := &res.Runs[len(res.Runs)-1]
 
-	require.Equal(t, 0, code, "binary stdout: %s; stderr: %s", output, diagnostic)
+	require.NoError(t, finalErr)
+	require.NoError(t, checkResumedPastCopy(k.firstPhase), "run %d", final.Run)
+	require.Equal(t, 0, k.code, "binary stdout: %s; stderr: %s", output, k.stderr)
 	var v verdict.Verdict
 	require.NoError(t, json.Unmarshal(output, &v), "verdict JSON: %s", output)
 	final.Outcome, final.Code = string(v.Outcome), v.Code
@@ -210,24 +227,30 @@ func TestLoadProofKill(t *testing.T) {
 // killAndRerun runs the binary once per kill point, killing it there with
 // SIGKILL, and holds each kill to the phase it was aimed at
 // (checkKilledAt), each rerun to the shadow the first run built, and the
-// rerun of the killed copy to the save it left (checkResumedFrom). Before
-// every next run it waits, for at most release, for the server to let go
-// of the dead run's slot — a rerun that met it held would be refused as
-// resume-slot-held — and for the load to commit a few writes per worker,
-// so the stopped interval holds writes only the kept slot can carry into
-// the new table. It records every run in res as it ends and returns the
-// shadow's OID and the last slot wait, with an error when a kill did not
-// land where it was aimed, a rerun built another shadow, or a wait ran
-// out. An operator's interrupt fails the test at once, so its cleanups
-// run.
+// rerun of the killed copy to the save it left (checkResumedFrom), noting
+// in the record when the kill landed before the copy's first save and
+// left none. It reads the row a killed run left only once the dead
+// binary's backends have left the server. Before every next run it waits,
+// for at most release, for the server to let go of the dead run's slot —
+// a rerun that met it held would be refused as resume-slot-held — and for
+// the load to commit a few writes per worker, so the stopped interval
+// holds writes only the kept slot can carry into the new table. It records
+// every run in res as it ends and returns the shadow's OID and the last
+// slot wait, with an error when a kill did not land where it was aimed, a
+// rerun built another shadow or copied from below the killed copy's save,
+// or a wait ran out. An operator's interrupt fails the test at once, so
+// its cleanups run.
 func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, load *testutil.LoadGenerator, release time.Duration, started time.Time, res *results) (uint32, time.Duration, error) {
 	t.Helper()
 	var (
 		shadow uint32
 		waited time.Duration
-		// began is the watermark the row carried when the run started, and
-		// copyKilledAt the save a killed copy left for the run to resume.
+		// began is the watermark the row carried when the run started,
+		// after the point the run before it was killed at, and
+		// copyKilledAt the save a killed copy left for the run to resume,
+		// nil when it was killed before its first save.
 		began        copier.Watermark
+		after        killPoint
 		copyKilledAt *int64
 	)
 	for _, point := range killPoints() {
@@ -259,13 +282,19 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 		if err != nil {
 			return 0, 0, fmt.Errorf("run %d: %w", run.Run, err)
 		}
-		if copyKilledAt != nil {
-			if err := checkResumedFrom(*copyKilledAt, k.firstSaved); err != nil {
+		if after == killMidCopy {
+			if run.ResumedFromSave, err = checkResumedFrom(copyKilledAt, k.firstSaved); err != nil {
 				return 0, 0, fmt.Errorf("run %d: %w", run.Run, err)
 			}
-			copyKilledAt = nil
 		}
 		committedAtKill := load.Progress().Committed()
+		// A backend of the dead binary still in a statement can yet commit
+		// a save, so the row is read once they have all left.
+		exitWait, err := waitForDeadRunBackends(runCtx, pool, deadRunBackendsDeadline(release))
+		if err != nil {
+			return 0, 0, fmt.Errorf("run %d: %w", run.Run, err)
+		}
+		run.BackendsExitWaitMillis = exitWait.Milliseconds()
 		cp, err := store.Inspect(runCtx, table.Schema, table.Table)
 		if err != nil {
 			return 0, 0, fmt.Errorf("run %d: inspect the checkpoint row after the kill: %w", run.Run, err)
@@ -275,13 +304,10 @@ func killAndRerun(t *testing.T, ctx, runCtx context.Context, c config, pool *pgx
 			landed := cp.Watermark.Value()
 			run.WatermarkAtKill = &landed
 		}
-		if err := checkKilledAt(point, cp, k.verify, k.signal, k.code, k.stdout); err != nil {
+		if err := checkKilledAt(point, cp, k.sent, k.verify, k.signal, k.code, k.stdout); err != nil {
 			return 0, 0, fmt.Errorf("run %d: %w; stderr: %s", run.Run, err, k.stderr)
 		}
-		began = cp.Watermark
-		if point == killMidCopy {
-			copyKilledAt = run.WatermarkAtKill
-		}
+		began, after, copyKilledAt = cp.Watermark, point, run.WatermarkAtKill
 		if run.ShadowOID, err = relationOID(runCtx, pool, table.Schema, cp.ShadowTable); err != nil {
 			return 0, 0, fmt.Errorf("run %d: read the shadow the killed run left: %w", run.Run, err)
 		}
@@ -315,7 +341,10 @@ type killed struct {
 	// firstSaved is the first watermark the poll saw the row carry in
 	// copying other than the one it carried when the run started: the
 	// run's first copying save the poll saw, invalid when it saw none.
+	// firstPhase is the phase of the first row the poll read, phaseNotSeen
+	// when it read none.
 	firstSaved copier.Watermark
+	firstPhase checkpoint.Phase
 	// signal and code are how the binary ended: SIGKILL and -1 when the
 	// kill landed, zero and its exit code when it exited on its own first.
 	signal syscall.Signal
@@ -325,18 +354,29 @@ type killed struct {
 	stdout, stderr string
 }
 
-// runUntilKilled runs the binary with the proof's command line, progress
-// on stderr in place of the verdict JSON (killArgs), and kills it with
-// SIGKILL from a poll of the checkpoint row and the progress lines once
-// they show the run at point, noting the first copying save the poll sees
-// move off began, the watermark the row carried before the run. It returns how the
-// run ended; its error is the harness's: a binary that could not start or
-// a poll that failed. When ctx ends — the operator interrupted the proof —
-// the binary is killed and waited for, and the test fails so its cleanups
-// run.
+// runUntilKilled runs the binary with the proof's command line — for a run
+// it is to kill, progress on stderr in place of the verdict JSON
+// (killArgs) — and kills it with SIGKILL from a poll of the checkpoint row
+// and the progress lines once they show the run at point, noting the first
+// copying save the poll sees move off began, the watermark the row carried
+// before the run, and the phase of the first row it reads. It returns how
+// the run ended; its error is the harness's: a binary that could not start
+// or a poll that failed. A poll that fails kills the binary at once, so
+// the run's error is the poll's rather than a wait for the run budget.
+// When ctx ends — the operator interrupted the proof — the binary is
+// killed and waited for, and the test fails so its cleanups run.
 func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, point killPoint, began copier.Watermark) (killed, error) {
 	t.Helper()
-	cmd := exec.CommandContext(runCtx, c.Binary, killArgs(c, table)...)
+	// The run left to finish prints the verdict JSON the proof judges.
+	args := killArgs(c, table)
+	if point == killNever {
+		args = migrateArgs(c, table)
+	}
+	// Ending binaryCtx kills the binary: the run budget, an interrupt, or
+	// a poll that failed.
+	binaryCtx, killBinary := context.WithCancel(runCtx)
+	defer killBinary()
+	cmd := exec.CommandContext(binaryCtx, c.Binary, args...)
 	cmd.Env = append(os.Environ(), "PGSPRITE_URL="+c.DSN)
 	var stdout bytes.Buffer
 	stderr := newProgressLines()
@@ -352,8 +392,12 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 		wg      sync.WaitGroup
 		pollErr error
 	)
-	// The poll's goroutine alone writes firstSaved until it is waited for.
+	// The poll's goroutine alone writes firstPhase and firstSaved until it
+	// is waited for.
 	seen := func(cp checkpoint.Checkpoint) {
+		if k.firstPhase == phaseNotSeen {
+			k.firstPhase = cp.Phase
+		}
 		if k.firstSaved.Valid() || cp.Phase != checkpoint.PhaseCopying {
 			return
 		}
@@ -363,6 +407,9 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 	}
 	wg.Go(func() {
 		k.sent, k.fill, k.verify, pollErr = killWhenReached(pollCtx, pool, store, table, point, cmd.Process, seen, stderr)
+		if pollErr != nil {
+			killBinary()
+		}
 	})
 	waitErr := cmd.Wait()
 	k.exited = time.Now()
@@ -374,14 +421,76 @@ func runUntilKilled(t *testing.T, ctx, runCtx context.Context, c config, pool *p
 		k.verify = stderr.verify()
 	}
 	k.signal, k.code = exitSignal(cmd.ProcessState), cmd.ProcessState.ExitCode()
+	if pollErr != nil {
+		return k, fmt.Errorf("the kill poll failed, so the harness killed the binary: %w", pollErr)
+	}
 	var exit *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exit) {
 		return k, fmt.Errorf("wait for the binary: %w", waitErr)
 	}
-	if pollErr != nil {
-		return k, fmt.Errorf("the kill poll failed: %w", pollErr)
-	}
 	return k, nil
+}
+
+// deadRunBackendsDeadline bounds the wait, after a kill, for the dead
+// binary's backends to leave the server. A backend in a statement leaves
+// once the statement ends, which the binary's statement_timeout bounds,
+// and its walsender once the server's wal_sender_timeout notices the
+// connection gone, which release covers.
+func deadRunBackendsDeadline(release time.Duration) time.Duration {
+	return max(release, dbconn.DefaultStatementTimeout+slotReleaseMargin)
+}
+
+// binaryApplicationName is the application_name pkg/dbconn gives the
+// connections the binary opens, the start of its session probe's too.
+const binaryApplicationName = "pg-sprite"
+
+// errDeadRunBackends reports backends of a killed binary still on the
+// server when the wait for them ran out.
+var errDeadRunBackends = errors.New("backends of the killed binary are still on the server")
+
+// waitForDeadRunBackends waits, for at most deadline, until no backend in
+// the database carries the binary's application_name, and returns how long
+// it waited. The binary is dead, so no backend it opened can be added; the
+// deadline bounds the reads as well as the polling.
+func waitForDeadRunBackends(ctx context.Context, pool *pgxpool.Pool, deadline time.Duration) (time.Duration, error) {
+	began := time.Now()
+	waitCtx, cancel := context.WithTimeoutCause(ctx, deadline, fmt.Errorf("%w after %s", errDeadRunBackends, deadline))
+	defer cancel()
+	poll := time.NewTicker(commitPollInterval)
+	defer poll.Stop()
+	for {
+		pids, err := binaryBackends(waitCtx, pool)
+		if err != nil {
+			return 0, errors.Join(err, context.Cause(waitCtx))
+		}
+		if len(pids) == 0 {
+			return time.Since(began), nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return 0, fmt.Errorf("wait for backends %v of the killed binary to leave: %w", pids, context.Cause(waitCtx))
+		case <-poll.C:
+		}
+	}
+}
+
+// binaryBackends lists the backends in the pool's database whose
+// application_name starts with the binary's.
+func binaryBackends(ctx context.Context, pool *pgxpool.Pool) ([]int32, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT pid
+		FROM pg_stat_activity
+		WHERE datname = current_database()
+			AND starts_with(application_name, $1)
+		ORDER BY pid`, binaryApplicationName)
+	if err != nil {
+		return nil, fmt.Errorf("read the binary's backends: %w", err)
+	}
+	pids, err := pgx.CollectRows(rows, pgx.RowTo[int32])
+	if err != nil {
+		return nil, fmt.Errorf("read the binary's backends: %w", err)
+	}
+	return pids, nil
 }
 
 // killWhenReached reads the checkpoint row and the two relations' heap

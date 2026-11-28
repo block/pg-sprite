@@ -178,8 +178,8 @@ different levels of commitment:
 
 | Package | Role | Status |
 | --- | --- | --- |
-| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `pull` · `diff` · `fmt` · `lint` · `suggest` · `capabilities` · `status` · `reap` | all nine exist |
-| `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all nine exist |
+| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `pull` · `diff` · `fmt` · `lint` · `suggest` · `capabilities` · `status` · `reap` · `discard` | all ten exist |
+| `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all ten exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers, the advisory table lock and its session, and the replication connection | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); shadow DDL is validated by executing the retargeted statement on the empty shadow, and fingerprints come from `pkg/schemadiff`'s transaction-scoped scratch schema — execute-and-introspect, never AST surgery | exists |

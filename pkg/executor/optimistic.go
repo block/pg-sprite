@@ -104,6 +104,21 @@ type RetryPolicy struct {
 	MaxAttempts    int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	// HolderWait is the longest a step waits outside the lock queue,
+	// before its first attempt requests its lock, while a transaction
+	// that has held a lock reads or writes take, on a table the step
+	// locks, keeps holding it. An attempt that queued behind such a
+	// transaction would hold back every later reader and writer of the
+	// table for its whole lock budget. Once the holder finishes, the
+	// attempts run as they would without the wait. A holder still there
+	// when the wait runs out ends the step with a *LingeringHolderError
+	// before any attempt, so no reader or writer queues behind it; the
+	// step runs again unchanged once that transaction ends. Native and sequence steps,
+	// table drops, and create steps that declare a foreign key wait. An
+	// index rename, a concurrent partition detach, and an enum value add
+	// take no lock a reader or writer conflicts with, so they never wait.
+	// Zero requests the lock at once.
+	HolderWait time.Duration
 }
 
 // DefaultRetryPolicy returns the safe native-DDL retry policy used by
@@ -113,6 +128,7 @@ func DefaultRetryPolicy() RetryPolicy {
 		MaxAttempts:    3,
 		InitialBackoff: 100 * time.Millisecond,
 		MaxBackoff:     time.Second,
+		HolderWait:     DefaultHolderWait,
 	}
 }
 
@@ -131,6 +147,9 @@ func (p RetryPolicy) validate() error {
 	}
 	if p.MaxBackoff < p.InitialBackoff {
 		return fmt.Errorf("maximum retry backoff %s must be at least initial backoff %s", p.MaxBackoff, p.InitialBackoff)
+	}
+	if p.HolderWait < 0 || p.HolderWait > maxOverallBudget {
+		return fmt.Errorf("lock holder wait must be between 0 and %s, got %s", maxOverallBudget, p.HolderWait)
 	}
 	return nil
 }
@@ -258,6 +277,15 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	if err := retry.validate(); err != nil {
 		return err
 	}
+	// An ALTER INDEX ... RENAME TO names an index, not a table, so its
+	// ST-7 binding is checked in the catalog, under the table's lock, by
+	// the index-rename path rather than on the statement's text.
+	if st.Kind() == statement.KindRenameIndex {
+		if adopts != nil || validates != nil || dropped != nil {
+			return fmt.Errorf("%w: an index rename carries no adoption, validation, or drop check", ErrInvariantViolation)
+		}
+		return executeIndexRename(ctx, pool, pt, st, b, retry, nil, tracker)
+	}
 	// INV: ST-7 — the executor runs exactly the statement that was gated,
 	// and only against the table the preflight proof verified.
 	if st.Table() == "" || st.Schema() != pt.Schema() || st.Table() != pt.Table() {
@@ -269,7 +297,8 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	// under the session default), so the statement's unqualified secondary
 	// names — a column's type, an expression's function — resolve in the
 	// target schema whether the run creates the table or alters it.
-	// A native drop is checked against the replica identity, an index
+	// A native drop is checked against the replica identity, a column drop
+	// against the publications that name the column, an index
 	// adoption against the planned index definition, and a validation
 	// against the planned constraint definition, again inside the
 	// attempt's own transaction, under the lock it runs with: the plan's
@@ -282,6 +311,11 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	if len(drops) > 0 {
 		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
 			return refuseReplicaIdentityLoss(ctx, tx, st, drops)
+		})
+	}
+	if columns := droppedColumns(drops); len(columns) > 0 {
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refusePublishedColumnDrops(ctx, tx, st, columns)
 		})
 	}
 	if adopts != nil {
@@ -323,6 +357,15 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 			return refuseDroppedObjectDrift(ctx, tx, st, *dropped)
 		})
 	}
+	swaps, err := timeZoneSwapCandidates(st)
+	if err != nil {
+		return err
+	}
+	if len(swaps) > 0 {
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refuseTimeZoneSwapOutsideUTC(ctx, tx, st, swaps)
+		})
+	}
 	var before func(context.Context, pgx.Tx) error
 	if len(checks) > 0 {
 		before = func(ctx context.Context, tx pgx.Tx) error {
@@ -333,6 +376,17 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 			}
 			return nil
 		}
+	}
+	tables, err := nativeLockedTables(st, pt.Schema(), pt.Table())
+	if err != nil {
+		return err
+	}
+	// INV: LK-2 — the step requests its lock once no long-lived reader or
+	// writer holds one on a table it locks, so it never sits at the head of
+	// the lock queue behind one, and ends without requesting it when one is
+	// still there after HolderWait.
+	if err := awaitLockQueue(ctx, pool, tables, retry.HolderWait, systemHolderWaitClock(), trackerHolderWaitReport(tracker)); err != nil {
+		return err
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
 		return executeBoundedAttemptAs(ctx, pool, st, b, AttemptSearchPath(pt.Schema(), nil), "", before, nil)

@@ -124,8 +124,10 @@ type DesiredResult struct {
 	Owner verdict.Owner `json:"owner,omitempty"`
 	// Cause narrows the refusal reason to its typed discriminator, the
 	// same token the statement verdict would carry: the copy-and-swap
-	// gate or preflight cause of a whole-plan refusal at admission, or the
-	// cause of the statement verdict that stopped execution. Empty when
+	// gate or preflight cause of a whole-plan refusal at admission, the
+	// changed-foreign-key or undeclarable-foreign-key cause of a
+	// declarative-foreign-key refusal at admission, or the cause of the
+	// statement verdict that stopped execution. Empty when
 	// the reason has none or Outcome is not refused.
 	Cause verdict.Cause `json:"cause,omitempty"`
 	// Detail is the human explanation: why refused, what committed, or
@@ -197,13 +199,20 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // does not match the pinned fingerprint is refused before anything runs,
 // and so is a plan that routes a statement through copy-and-swap when that
 // route's preflight refuses the table or the server as they stand now. A plan
-// that builds an index on a partitioned table, or adds a foreign key to one
-// as the partitioned foreign key build, stops whole, with
+// that builds an index on a partitioned table, or adds a primary key,
+// unique constraint or foreign key to one as the partitioned key or
+// foreign key build, stops whole, with
 // [ErrConnectionRequired] or a [PartitionedIndexConnectionMismatchError], when
-// Options.Connection is unset or reaches another database than the pool.
-// An empty plan is executed with nothing to run, unless the table has a
-// copy-and-swap run stopped short of done: its shape may match only
-// because that run swapped it in, so it is refused with cause
+// Options.Connection is unset or reaches another database than the pool. A
+// plan whose partitioned key build the live catalog already refuses, for a
+// partition key column the key leaves out or a sub-partitioned partition, is
+// refused before anything runs ([AdmitPlanPartitionedKeys]), and a plan whose
+// partitioned foreign key build would refuse the referenced table or the
+// partition tree is refused or stopped whole by the build's own catalog
+// checks ([AdmitPlanPartitionedForeignKeys]). An empty plan is executed with
+// nothing to run, unless the table has a copy-and-swap run stopped short of
+// done: its shape may match only because that run swapped it in, so it is
+// refused with cause
 // copy-and-swap-run-stopped and the stopped statement is finished through
 // [Run]. Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
@@ -315,15 +324,15 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	// matches only because a stopped copy-and-swap run swapped its shape in
 	// is not converged: the run's row and what it still holds stand with
 	// nothing planned to finish them. A non-empty plan meets a stopped run
-	// in Run, statement by statement.
+	// in Run, statement by statement, and in the index drop that runs
+	// outside it.
 	if len(report.Statements) == 0 {
-		stopped, err := findStoppedRun(ctx, pool, report.Schema, report.Table)
+		refused, held, err := refuseEmptyPlanOverStoppedRun(ctx, pool, report)
 		if err != nil {
 			return DesiredResult{}, err
 		}
-		if stopped.standing() {
-			return DesiredResult{Plan: report}.refused(copySwapRunStoppedRefusal(),
-				desiredRunStoppedDetail(report.Schema, report.Table, stopped)), nil
+		if held {
+			return refused, nil
 		}
 		return DesiredResult{
 			Plan:    report,
@@ -354,6 +363,20 @@ func runDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return stopped, nil
 	}
 	stopped, admitted, err = admitPartitionedIndexBuild(ctx, pool, report, opts)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
+	}
+	stopped, admitted, err = AdmitPlanPartitionedKeys(ctx, pool, report)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
+	}
+	stopped, admitted, err = AdmitPlanPartitionedForeignKeys(ctx, pool, report)
 	if err != nil {
 		return stopped, err
 	}
@@ -408,6 +431,15 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 			return result, fmt.Errorf("%w: planned statement %d is destructive but carries no definition of what it drops",
 				executor.ErrInvariantViolation, i+1)
 		}
+		if ps.Kind == schemadiff.ChangeRenameIndex && ps.Renames == nil {
+			// The reviewed plan binds a rename to the definition of the
+			// index it renames; one that carries none cannot be re-checked
+			// before it runs, so it does not.
+			result.Outcome = verdict.OutcomeFailed
+			result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+			return result, fmt.Errorf("%w: planned statement %d renames an index but carries no definition of the index it renames",
+				executor.ErrInvariantViolation, i+1)
+		}
 		var (
 			v      verdict.Verdict
 			runErr error
@@ -420,9 +452,15 @@ func executePlan(ctx context.Context, pool *pgxpool.Pool, report plan.Report, op
 		case ps.Destructive:
 			stmtOpts := opts
 			stmtOpts.AllowDestructive = allowDestructive
-			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+			dropped, err := droppedWithReplacement(ps)
+			if err != nil {
+				result.Outcome = verdict.OutcomeFailed
+				result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+				return result, fmt.Errorf("planned statement %d: %w", i+1, err)
+			}
+			v, runErr = run(ctx, pool, st, stmtOpts, i+1, ps.Adopts, ps.Validates, dropped, ps.Renames)
 		default:
-			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops)
+			v, runErr = run(ctx, pool, st, opts, i+1, ps.Adopts, ps.Validates, ps.Drops, ps.Renames)
 		}
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
@@ -883,10 +921,14 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		}
 		r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
 		if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
-			return r, detail("drops a foreign key, which desired-state execution does not run yet — " +
-				"to apply it, run the statement through the imperative front door (migrate --alter)")
+			return r.WithCause(ps.RefusalCause), detail(foreignKeyDropRefusalDetail(ps.RefusalCause))
 		}
 		if err == nil {
+			if d, ok := firstRefusedDecision(ps.Decisions); ok {
+				if why, specific := refusedDecisionDetail(d); specific {
+					return r, detail("has no safe path: " + why)
+				}
+			}
 			return r, detail("has no safe path")
 		}
 		// Keep the statement's own reason where it has one; the class
@@ -897,6 +939,23 @@ func statementRefusal(i int, ps plan.Statement) (verdict.Refusal, string) {
 		return planIncoherentRefusal(), detail("is refused but carries no refusal class")
 	default:
 		return planIncoherentRefusal(), detail("carries a disposition this build does not know")
+	}
+}
+
+// foreignKeyDropRefusalDetail says why desired-state apply does not run a
+// planned foreign-key drop, and what to do instead, by the kind of drop
+// the plan refused.
+func foreignKeyDropRefusalDetail(cause verdict.Cause) string {
+	switch cause {
+	case verdict.CauseChangedForeignKey:
+		return "drops a foreign key the file changes under the same name where the new key cannot be added in the same statement, " +
+			"which would leave writes checked against no key until the new one is added — declare the changed key under a new name"
+	case verdict.CauseUndeclarableForeignKey:
+		return "drops a foreign key a desired file cannot declare, one into another schema or one onto its own table through a standalone unique index — " +
+			"to remove it, run the statement through the imperative front door (migrate --alter)"
+	default:
+		return "drops a foreign key: either the file changes it under the same name where the new key cannot be added in the same statement, so declare the changed key under a new name, " +
+			"or a desired file cannot declare it, so remove it through the imperative front door (migrate --alter)"
 	}
 }
 

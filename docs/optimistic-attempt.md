@@ -247,7 +247,7 @@ failed sequence.
 |---|---|---|---|
 | 1 | Online idiom / substituted sequence completed | Success verdict | Yes — online by proof |
 | 2 | Bounded attempt completed within budget | Success verdict | Yes — it was catalog-only |
-| 3a | Lock not granted within `lock_timeout` on any attempt | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03`; executor code `budget-lock-exceeded`) | No — nothing executed |
+| 3a | Lock not granted within `lock_timeout` on any attempt, or a transaction held the table for the whole wait outside the lock queue, so the lock was never requested | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03` when the lock was requested and timed out; no SQLSTATE when it was never requested; executor code `budget-lock-exceeded` in both) | No — nothing executed |
 | 3b | Statement ran past `statement_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: statement-budget` (SQLSTATE `57014`; executor code `budget-statement-exceeded`) | No — rolled back cleanly |
 | 4 | Table exceeds the size limit | `reason: not-native-safe-table-too-large` (a typed `*preflight.SizeError` underneath) | No — refused before any DDL, no lock taken |
 | 5 | Shape routes to an unimplemented strategy or to a copy-and-swap route the run did not open, or is refused by a plan/partition/tier gate | Typed plan refusal | No |
@@ -315,7 +315,8 @@ it — unless every operation in it is proven catalog-only (`sizeGuardApplies` i
 
 An operation is proven catalog-only when PostgreSQL has no path that touches the
 table's rows or run user code: `DROP COLUMN`, `DROP DEFAULT`, `DROP NOT NULL`,
-`DROP CONSTRAINT`, and an `ADD COLUMN` that meets both of these:
+`DROP CONSTRAINT`, `ALTER INDEX ... RENAME TO`, and an `ADD COLUMN` that meets
+both of these:
 
 - It has no default, or a literal one such as `0` or `'free'`.
 - Its probe proved it adds in place, checks no `NOT NULL` against every row, and
@@ -371,6 +372,7 @@ against `sizeGuardApplies`):
 | `dependent-view` | n/a — refused at plan time |
 | `dependent-policy` | n/a — refused at plan time |
 | `dependent-trigger` | n/a — refused at plan time |
+| `dependent-publication` | n/a — refused at plan time |
 | `dependent-generated-column` | n/a — refused at plan time |
 | `partition-key` | n/a — refused at plan time |
 | `not-null-without-default` | n/a — refused at plan time |

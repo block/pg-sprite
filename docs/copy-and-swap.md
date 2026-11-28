@@ -181,6 +181,8 @@ for as long as the source takes writes. After a stop, watch the slot's retained 
 (`pg_replication_slots`) and either resume soon or drop the slot deliberately, and raise the
 ceiling only with free space on the volume for that much WAL, read the way
 [Free disk space](#free-disk-space) describes for your platform.
+[replication-slots.md](replication-slots.md) explains what the slot holds on the server and is
+the runbook for checking it, resuming, dropping it, and starting over.
 
 `SIZE` is a positive whole number of bytes, optionally followed by a binary unit: `B`, `KiB`,
 `MiB`, `GiB`, or `TiB`, case-insensitive; `KB`, `MB`, `GB`, and `TB` mean the same binary
@@ -192,39 +194,35 @@ while pg-sprite keeps up (see below); a ceiling well below the default stops a b
 not more safely.
 
 The run stops with a failed verdict (exit 1) whose detail says which of three causes ended it;
-the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
-slot and the saved progress stay, so running the same command again resumes the run:
+with `--json` the verdict's `code` is `slot-lag-exceeded` and its `cause` is that cause's token,
+and the library's `decode.SlotLagExceededError` carries the same as its `Cause`. The
+slot and the saved progress stay for the next run to resume from, though a resume under the
+same ceiling can stop again, depending on the cause:
 
 - **`stream-behind`:** more WAL than the ceiling was waiting for pg-sprite to confirm, so
-  pg-sprite fell behind the source's writes. Resume once the write rate drops; the resume
-  drains the backlog from the slot.
+  pg-sprite fell behind the source's writes. The slot keeps that unconfirmed WAL after the
+  stop, so running the same command again under the same ceiling is refused
+  (`resume-slot-backlog`) before it opens the stream or restarts the copy: no shadow row is
+  cleared or copied and the slot confirms nothing. The check reads the slot as it stands at
+  the resume, so a resume admitted just under the ceiling can still stop `stream-behind`.
 - **`wal-retained`:** pg-sprite kept up, but the server retained more WAL than the ceiling
-  for longer than it takes to release WAL pg-sprite has confirmed. Look for a transaction holding
-  it back first: an open write transaction (`pg_stat_activity` where `backend_xid IS NOT
-  NULL`, oldest `xact_start` first) or a prepared one (`pg_prepared_xacts`). End it, then
-  resume. If there is none, the cluster writes more WAL per release interval and cycle than the
-  ceiling holds. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a busy source
-  each step stops one step short, so the slot keeps between 15 and 30 seconds of the cluster's
-  WAL even while pg-sprite keeps up. That is everything the server logs, not only the
+  for longer than it takes to release WAL pg-sprite has confirmed: an open or prepared
+  transaction holds it back, or the cluster writes more WAL per release interval and cycle than
+  the ceiling holds. PostgreSQL frees a slot's WAL in steps about 15 seconds apart, and on a
+  busy source each step stops one step short, so the slot keeps between 15 and 30 seconds of the
+  cluster's WAL even while pg-sprite keeps up. That is everything the server logs, not only the
   application's writes: the copy's own inserts into the shadow and other databases count too.
   The ceiling must hold more than 15 seconds and a catch-up cycle of it, with margin (ten
-  percent covers a record the server logs late or a stream a cycle slower). To read your slot
-  the same way, compare `pg_current_wal_lsn()` with `restart_lsn` (retained) and
-  `confirmed_flush_lsn` (unconfirmed) from `pg_replication_slots`; `make slot-release-proof`
-  logs the same three on a busy test source. Resume with a higher ceiling, above the retained WAL the detail reports, and with room on the volume for
-  that much WAL. The resume's preflight counts the new ceiling against
-  `--free-disk` beside the shadow, less the shadow already built and the WAL the slot already
-  retains (see [Free disk space](#free-disk-space)), so pass the free space the volume has now.
+  percent covers a record the server logs late or a stream a cycle slower);
+  `make slot-release-proof` logs the three measures on a busy test source.
 - **`wal-retained-hard-limit`:** pg-sprite kept up, but a cycle read the slot retaining more
-  than three times the ceiling before that release time had passed. A healthy slot peaks at
-  about twice its ceiling, so this is either a transaction holding the WAL back or a write rate
-  the ceiling cannot hold. Look for the transaction first, as for `wal-retained`, and end it,
-  then resume; if there is none, resume with a higher ceiling as for `wal-retained`:
+  than three times the ceiling before that grace had passed. A healthy slot peaks at about
+  twice its ceiling, so this is either a transaction holding the WAL back or a write rate the
+  ceiling cannot hold.
 
-```sh
-pg-sprite migrate --copy-and-swap --free-disk 50GiB --slot-lag-ceiling 4GiB \
-  --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
-```
+What to do for each cause, including how to find a transaction holding the WAL and how to
+resume with a higher ceiling, is the runbook's
+[The run stopped at the ceiling](replication-slots.md#the-run-stopped-at-the-ceiling).
 
 ## Run it
 
@@ -287,6 +285,7 @@ name for a rollback window; you drop it yourself when the window ends.
 | Stop a running change | Press Ctrl-C, or send `SIGTERM`, once. The run saves where its copy reached and exits. The table keeps its fence (offline) or its replication slot (live) until you resume or start over. |
 | Resume it | Run the same command again — `--copy-and-swap` included, since the resume is a copy-and-swap run too — with `--block-writes SCHEMA.TABLE` if the run blocked writes. It continues from where it stopped; unless the slot was lost, nothing is copied twice. If a live run's replication slot is gone or the server reports it lost (after a failover, or when the server drops a slot that retained too much WAL), or a reconcile stopped partway, the resume reconciles first, with no flag needed: it creates a new slot, compares every landed chunk against the source, recopies only those that differ, and then continues. The comparison takes time in proportion to the rows already copied ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)). |
 | Start over | Run the same command (again with `--copy-and-swap`) plus `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. `--restart` applies to `migrate --alter` only: `migrate --desired` rejects it, because there the derived plan, not you, decides which run the flag would discard. A stopped `--desired` copy resumes when you run the plan again; to start it over, run the stopped statement with `migrate --alter --copy-and-swap --restart SCHEMA.TABLE` first. The failed run's detail numbers the statement that stopped ("planned statement N of M"), and `pg-sprite diff --desired FILE --sql` prints the plan's statements. |
+| Abandon it | Run `pg-sprite discard SCHEMA.TABLE`, naming the table exactly as `--restart` does. pg-sprite drops the shadow, the fence or slot and publication, and the saved progress, and does not run the change: the table keeps its shape and rows, and takes writes again if the run blocked them. It is refused while a run is in progress and once the run's swap has committed, when the change is already live and the same command finishes it. See [Abandon a stopped copy-and-swap run](cli.md#abandon-a-stopped-copy-and-swap-run). |
 | Recover from bad data | When the server rejects a row under the new type or a constraint, the run reports `code: data-fault` and tries to abandon itself. Follow the verdict's detail: if it says the run was abandoned, nothing is left behind, so fix the data or the statement and run it again. If it says the run could not be abandoned, the shadow and the fence or slot remain, so fix the data or the statement and run it with `--restart SCHEMA.TABLE`. |
 
 ```sh
@@ -294,5 +293,5 @@ pg-sprite migrate --copy-and-swap --free-disk 50GiB --block-writes public.order_
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 
-A stopped live run keeps its replication slot, and the slot keeps WAL on the server. Resume it
-or start it over promptly rather than leaving it.
+A stopped live run keeps its replication slot, and the slot keeps WAL on the server. Resume it,
+start it over, or discard it promptly rather than leaving it.

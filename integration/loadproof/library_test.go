@@ -34,24 +34,26 @@ const slotIdleDeadline = 30 * time.Second
 // waitForSlotIdle waits, for at most deadline, until no backend holds the
 // slot the row names, as a host resuming a stopped run does, and returns
 // how long it waited. A slot that is gone is an error: the stopped run
-// left it to resume from.
+// left it to resume from. The deadline bounds the reads as well as the
+// polling, so a read the server is slow to answer cannot stretch it; a
+// wait the deadline ends reports errSlotStillHeld.
 func waitForSlotIdle(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.Store, table testutil.WorkloadTable, deadline time.Duration) (time.Duration, error) {
-	cp, err := store.Inspect(ctx, table.Schema, table.Table)
+	began := time.Now()
+	waitCtx, cancel := context.WithTimeoutCause(ctx, deadline, fmt.Errorf("%w after %s", errSlotStillHeld, deadline))
+	defer cancel()
+	cp, err := store.Inspect(waitCtx, table.Schema, table.Table)
 	if err != nil {
-		return 0, fmt.Errorf("inspect the checkpoint row before the resume: %w", err)
+		return 0, fmt.Errorf("inspect the checkpoint row before the resume: %w", errors.Join(err, context.Cause(waitCtx)))
 	}
 	if cp.SlotName == "" {
 		return 0, fmt.Errorf("the stopped live run's row in %s names no slot", cp.Phase)
 	}
-	began := time.Now()
-	giveUp := time.NewTimer(deadline)
-	defer giveUp.Stop()
 	poll := time.NewTicker(commitPollInterval)
 	defer poll.Stop()
 	for {
-		holder, found, err := slotHolder(ctx, pool, cp.SlotName)
+		holder, found, err := slotHolder(waitCtx, pool, cp.SlotName)
 		if err != nil {
-			return 0, fmt.Errorf("read replication slot %s: %w", cp.SlotName, err)
+			return 0, fmt.Errorf("read replication slot %s: %w", cp.SlotName, errors.Join(err, context.Cause(waitCtx)))
 		}
 		if !found {
 			return 0, fmt.Errorf("the stopped run's slot %s is gone, so there is no stream to resume", cp.SlotName)
@@ -60,10 +62,8 @@ func waitForSlotIdle(ctx context.Context, pool *pgxpool.Pool, store *checkpoint.
 			return time.Since(began), nil
 		}
 		select {
-		case <-ctx.Done():
-			return 0, fmt.Errorf("wait for slot %s to be let go: %w", cp.SlotName, ctx.Err())
-		case <-giveUp.C:
-			return 0, fmt.Errorf("%w: backend %d still holds %s after %s", errSlotStillHeld, holder, cp.SlotName, deadline)
+		case <-waitCtx.Done():
+			return 0, fmt.Errorf("wait for backend %d to let go of slot %s: %w", holder, cp.SlotName, context.Cause(waitCtx))
 		case <-poll.C:
 		}
 	}

@@ -206,11 +206,26 @@ func TestPlannedIndexDropMustExecuteConcurrently(t *testing.T) {
 		assert.Equal(t, "CREATE INDEX orders_qty_idx ON orders USING btree (qty)", definition)
 	})
 
+	withReplacement := func(ps plan.Statement, replacedBy string, r *schemadiff.IndexReplacement) plan.Statement {
+		ps.ReplacedBy, ps.Replacement = replacedBy, r
+		return ps
+	}
+	replacement := &schemadiff.IndexReplacement{Index: "orders_qty_idx_new", Def: "CREATE INDEX orders_qty_idx_new ON orders USING btree (qty) WHERE (qty > 0)"}
+
+	t.Run("the drop of a replaced index is accepted with its replacement", func(t *testing.T) {
+		index, _, err := plannedIndexDrop(report, withReplacement(drop(sql, concurrent), "orders_qty_idx_new", replacement), parse(t, sql))
+		require.NoError(t, err)
+		assert.Equal(t, "orders_qty_idx", index)
+	})
+
 	refused := []struct {
 		name string
 		ps   plan.Statement
 		sql  string
 	}{
+		{"a replaced index with no replacement to check", withReplacement(drop(sql, concurrent), "orders_qty_idx_new", nil), sql},
+		{"a replacement under another name", withReplacement(drop(sql, concurrent), "orders_qty_idx_other", replacement), sql},
+		{"a replacement the drop does not name", withReplacement(drop(sql, concurrent), "", replacement), sql},
 		{"a blocking execution form", drop(sql, sql), sql},
 		{"no execution form", drop(sql), sql},
 		{"two execution forms", drop(sql, concurrent, concurrent), sql},

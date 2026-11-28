@@ -43,7 +43,16 @@ func unsupportedChangeRefusal(err error) (verdict.Refusal, bool) {
 // CREATE TYPE, which locks no table, and a label the file dropped is renamed
 // with ALTER TYPE ... RENAME VALUE: both are catalog changes the owner runs
 // directly. A file that lists the live labels in another order asks for
-// nothing PostgreSQL can do, so the file is corrected (by design), and a
+// nothing PostgreSQL can do, so the file is corrected (by design). So is a
+// file that names an object after the temporary name a replaced key's new
+// index is built under: the object is renamed so the key can be replaced
+// without a moment unenforced. A file that removes or changes an index a
+// foreign key references is corrected too: the key is dropped or changed
+// first, or the index is kept. So is a file that gives a new constraint the
+// name of an index it renames: the rename lands in one change and the
+// constraint in the next. So is one that gives a new constraint the name of
+// a unique index whose key another index it builds takes over: that index
+// is built in one change and the constraint added in the next. A
 // name that holds another kind of type would have to be replaced, which the
 // planner does not construct.
 func unsupportedCauseRefusal(cause schemadiff.UnsupportedCause) (verdict.Refusal, bool) {
@@ -51,7 +60,8 @@ func unsupportedCauseRefusal(cause schemadiff.UnsupportedCause) (verdict.Refusal
 	case schemadiff.CauseStorageParameters, schemadiff.CauseIdentitySequence,
 		schemadiff.CauseEnumTypeMissing, schemadiff.CauseEnumValueRemoved:
 		return verdict.NoOnlineSafetyProblem(verdict.ReasonUnsupportedStatement, verdict.OwnerDirectOperator), true
-	case schemadiff.CauseEnumValueReordered:
+	case schemadiff.CauseEnumValueReordered, schemadiff.CauseReplacementIndexName, schemadiff.CauseReferencedIndex,
+		schemadiff.CauseRenamedIndexName, schemadiff.CauseMovedUniqueRule:
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
 	case schemadiff.CausePersistence, schemadiff.CauseCollationChange:
 		return rewriteRequiredRefusal(), true

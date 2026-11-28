@@ -19,7 +19,7 @@ PINS_FILE ?= compose/supabase.yml
 # Guide whose tested versions must name each of those pins' versions.
 GUIDE_FILE ?= docs/supabase.md
 
-.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-guide-versions check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof load-proof-library load-proof-kill slot-release-proof lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities check-vulnerabilities check-guide-versions check-image-pins test-image-pins test test-unit test-db test-db-slow test-db-rest test-own-server test-supported-postgres test-aws-boundary load-proof load-proof-library load-proof-kill slot-release-proof test-slot-release-proof-issue lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -118,7 +118,10 @@ load-proof-library: $(LOAD_PROOF_DB)
 # The load proof's crash variant: the same change under the same load, run
 # through the built binary, killed with SIGKILL mid-copy and mid-verify and
 # run again each time, as an operator does after a crash. Same variables
-# and database as load-proof; writes results-kill.json. What it proves:
+# and database as load-proof; writes results-kill.json. It takes up to three
+# runs' copy time plus a few minutes of slot waits that scale with the
+# server's wal_sender_timeout; `go test` run directly needs a -timeout above
+# the two-hour run budget plus cleanup. What it proves:
 # docs/testing.md#the-kill-load-proof.
 load-proof-kill: build $(LOAD_PROOF_DB)
 	@LOAD_PROOF_KILL=1 LOAD_PROOF_BIN=$(CURDIR)/bin/pg-sprite LOAD_PROOF_DSN="$(LOAD_PROOF_DSN)" $(GO) test -count=1 -timeout 3h -run '^TestLoadProofKill$$' -v ./integration/loadproof
@@ -130,6 +133,12 @@ load-proof-kill: build $(LOAD_PROOF_DB)
 # proves: docs/testing.md#how-to-run.
 slot-release-proof:
 	SLOT_RELEASE_PROOF=1 $(GO) test -race -count=1 -timeout 10m -run '^TestCatchupKeepsRunningWhileTheServerReleasesTheSlotAtItsOwnCadence$$' -v ./pkg/applier
+
+# Drive the script that keeps the Slot Release Proof's failure issue in step
+# with its scheduled runs through each outcome, against a stand-in gh: no
+# network, no token. Needs jq.
+test-slot-release-proof-issue:
+	@scripts/slot-release-proof-issue_test.sh
 
 lint:
 	golangci-lint run

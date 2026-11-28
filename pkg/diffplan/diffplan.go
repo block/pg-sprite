@@ -78,6 +78,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	tableExists := true
 	var changes []schemadiff.Change
 	var facts planner.Facts
+	var changedForeignKeys map[string]bool
 	live, err := schemadiff.Introspect(ctx, pool, req.Schema, ds.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
@@ -113,6 +114,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
+		changedForeignKeys = schemadiff.ForeignKeysDroppedBeforeTheirReplacement(live, desired)
 		if changes, facts.NotNullHelpers, err = resumeNotNullHelpers(ctx, pool, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
@@ -135,11 +137,20 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 				return plan.Report{}, err
 			}
 			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = deps.Views.Tree, deps.Views.Drop, deps.Views.Own
+			facts.MaterializedViews = deps.MaterializedViews
+			facts.ViewReaders = deps.ViewReaders
 			facts.DependentPolicies, facts.DropDependentPolicies, facts.OwnDependentPolicies = deps.Policies.Tree, deps.Policies.Drop, deps.Policies.Own
 			facts.DependentTriggers = planner.ColumnDependents(deps.Triggers)
+			facts.DependentPublications = planner.ColumnDependents(deps.Publications)
 			facts.DependentGeneratedColumns = planner.ColumnDependents(deps.GeneratedColumns)
 			facts.GeneratedColumnCopies = planner.ColumnDependents(deps.GeneratedColumnCopies)
 			facts.PartitionKeys = planner.ColumnDependents(deps.PartitionKeys)
+			if facts.SessionTimeZone, err = preflight.SessionTimeZone(ctx, pool); err != nil {
+				return plan.Report{}, err
+			}
+			if facts.KeyedColumns, err = preflight.KeyedColumns(ctx, pool, req.Schema, ds.Table()); err != nil {
+				return plan.Report{}, err
+			}
 		}
 	}
 	report.TableExists = &tableExists
@@ -149,7 +160,8 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if err := recordNotNullScaffolds(ctx, pool, report.Statements); err != nil {
 		return plan.Report{}, err
 	}
-	plan.RefuseForeignKeyDrops(&report)
+	plan.RefuseUndeclarableForeignKeyDrops(&report, undeclarableForeignKeys(live))
+	plan.RefuseChangedForeignKeyDrops(&report, changedForeignKeys)
 	if !tableExists {
 		// Shape refusals are stamped first so the disclosure below only
 		// describes the statements that remain executable.
@@ -180,13 +192,33 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	return report, nil
 }
 
+// undeclarableForeignKeys names the live table's foreign keys a desired file
+// cannot declare, so the diff always plans their drop: a key into another
+// schema, since a file names tables unqualified, and a key from the table to
+// itself whose referenced columns are unique only through a standalone
+// unique index, since the file's CREATE TABLE declares the key before the
+// CREATE INDEX after it runs. Export refuses the same two shapes.
+func undeclarableForeignKeys(live schemadiff.Model) map[string]bool {
+	keys := map[string]bool{}
+	for _, con := range live.Constraints {
+		if con.ForeignKey && (con.ReferencesOtherSchema || con.SelfReferencesStandaloneIndex) {
+			keys[con.Name] = true
+		}
+	}
+	return keys
+}
+
 // routePartitionedTarget applies the partitioned-parent routing to a plan
 // whose target table is partitioned, on a server of major version
-// serverMajor. The order is the contract: a foreign key the file adds is
-// routed to the partitioned foreign key build first, because before
-// PostgreSQL 18 RoutePartitionedParent refuses the planner's NOT VALID step
-// on a partitioned table and leaves a routed statement alone.
+// serverMajor. The order is the contract: a primary key or unique constraint
+// the file adds is routed to the partitioned key build, and a foreign key to
+// the partitioned foreign key build, before RoutePartitionedParent runs. That
+// refuses the planner's USING INDEX steps, and before PostgreSQL 18 its
+// NOT VALID step, on a partitioned table, and leaves a routed statement alone.
 func routePartitionedTarget(report *plan.Report, serverMajor int) error {
+	if err := plan.RouteDesiredPartitionedKeyBuilds(report); err != nil {
+		return err
+	}
 	if err := plan.RouteDesiredPartitionedForeignKeyBuilds(report, serverMajor); err != nil {
 		return err
 	}
@@ -388,10 +420,38 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 				ps.Validates = ch.AddsNotValid
 			}
 		}
+		if ch.AddsKey != nil {
+			adopts, err := adoptsInSequence(ps.ExecSQL, ch.AddsKey.Index)
+			if err != nil {
+				return nil, "", fmt.Errorf("plan derived statement %q: %w", routed.Statements[i].Statement, err)
+			}
+			if adopts {
+				ps.Adopts = ch.AddsKey
+			}
+		}
 		ps.Drops = ch.Drops
+		ps.ReplacedBy = ch.ReplacedBy
+		ps.Replacement = ch.Replacement
+		ps.Renames = ch.Renames
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil
+}
+
+// adoptsInSequence reports whether a step of execSQL takes over the named
+// index: an add of a primary key or unique constraint the planner runs as a
+// concurrent build and then ADD CONSTRAINT ... USING INDEX.
+func adoptsInSequence(execSQL []string, index string) (bool, error) {
+	for _, sql := range execSQL {
+		ops, err := statement.ParseOps(sql)
+		if err != nil {
+			return false, fmt.Errorf("read the operations of %q: %w", sql, err)
+		}
+		if len(ops) == 1 && ops[0].Kind == statement.OpAddConstraint && ops[0].UsingIndex && slices.Equal(ops[0].Indexes, []string{index}) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // validatesInSequence reports whether a step of execSQL validates the named

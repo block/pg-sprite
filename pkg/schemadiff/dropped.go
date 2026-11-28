@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -43,7 +44,7 @@ func ReadDroppedObject(ctx context.Context, q Querier, schema, table string, kin
 	}
 	switch kind {
 	case DroppedIndex:
-		indexes, err := introspectIndexes(ctx, q, oid)
+		indexes, err := introspectIndexes(ctx, q, oid, nil)
 		if err != nil {
 			return DroppedObject{}, false, fmt.Errorf("read the indexes of %s.%s: %w", schema, table, err)
 		}
@@ -74,7 +75,7 @@ func ReadDroppedObject(ctx context.Context, q Querier, schema, table string, kin
 			if kind == DroppedColumn {
 				return DroppedObject{
 					Kind: kind, Name: name, Definition: col.DroppedDefinition(),
-					Dependents: DependentLines(col.Dependents),
+					Dependents: DependentLines(col.Dependents), DependentObjects: slices.Clone(col.Dependents),
 				}, true, nil
 			}
 			if !col.NotNull {
