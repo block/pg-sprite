@@ -20,13 +20,21 @@ import (
 // the index for as long as the build takes, and a concurrent build waits for
 // every older transaction in the database. Duplicates could land in that
 // window and fail the build, leaving no unique rule at all.
+//
+// A unique constraint the desired table declares as a standalone index of
+// the same name is replaced the same way: the new index is built under the
+// temporary name while the constraint keeps enforcing its rule, then the
+// constraint is dropped and the new index renamed to its name.
 
 // indexReplacement is how one changed index is replaced.
 type indexReplacement struct {
 	// live is the index the table has under the desired name, with the
-	// old definition. Its zero value means an earlier run already dropped
-	// it, after building temp.
+	// old definition. It and constraint are both zero when an earlier run
+	// already dropped the old object, after building temp.
 	live Index
+	// constraint is the unique constraint the table has under the desired
+	// name, which the desired table declares as a standalone index instead.
+	constraint Constraint
 	// want is the desired index.
 	want Index
 	// temp is the temporary name the new index is built under.
@@ -38,7 +46,9 @@ type indexReplacement struct {
 }
 
 // replacedIndexes names the standalone indexes of a table diff that are
-// replaced rather than dropped and rebuilt, keyed by index name. A
+// replaced rather than dropped and rebuilt, keyed by index name: a changed
+// index, or a unique constraint the desired table declares as an index of
+// its name. A
 // partitioned parent keeps the drop and rebuild, since its index is built
 // partition by partition and never concurrently. So does a table whose diff
 // drops or retypes a column: a dropped column takes its indexes with it,
@@ -56,8 +66,16 @@ func replacedIndexes(partitioned, dropsOrRetypesColumn bool, schema string, live
 	for _, want := range desired.Indexes {
 		temp := replacementIndexName(want.Name)
 		had, ok := liveIdx[want.Name]
+		con, isConstraint := liveCons[want.Name]
+		r := indexReplacement{want: want, temp: temp, build: true}
 		switch {
 		case ok && isIndexChange(had, want, adopted):
+			if err := refuseReferencedIndexDrop(schema, desired.Table, had, true, nil); err != nil {
+				return nil, err
+			}
+			r.live = had
+		case !ok && isConstraint && isUniqueConstraint(con):
+			r.constraint = con
 		case ok && had.Invalid:
 			if err := refuseInterruptedReplacementDrop(schema, liveIdx, desiredIdx, adopted, had, want, temp); err != nil {
 				return nil, err
@@ -77,13 +95,9 @@ func replacedIndexes(partitioned, dropsOrRetypesColumn bool, schema string, live
 		default:
 			continue
 		}
-		if err := refuseReferencedIndexDrop(schema, desired.Table, had, true, nil); err != nil {
-			return nil, err
-		}
 		if err := refuseTakenReplacementName(want.Name, temp, desiredIdx, desiredCons, liveCons); err != nil {
 			return nil, err
 		}
-		r := indexReplacement{live: had, want: want, temp: temp, build: true}
 		if built, taken := liveIdx[temp]; taken {
 			same, err := sameIndexUnderName(built, want)
 			if err != nil {
@@ -200,11 +214,12 @@ func sameIndexUnderName(built, want Index) (bool, error) {
 	return got == wanted, nil
 }
 
-// replaceIndexChanges is the plan that replaces r.live with r.want: build
-// the new index under its temporary name, drop the old index, then rename
-// the new one to the old name. Each step a resumed replacement has already
-// taken is left out.
-func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
+// replaceIndexChanges is the plan that replaces r.live or r.constraint with
+// r.want: build the new index under its temporary name, drop the old index
+// or constraint, then rename the new index to the old name. Each step a
+// resumed replacement has already taken is left out. table is the
+// qualified table a constraint is dropped from.
+func replaceIndexChanges(schema, table string, r indexReplacement) ([]Change, error) {
 	var changes []Change
 	def, err := statement.RenameIndex(r.want.Def, r.temp)
 	if err != nil {
@@ -217,12 +232,22 @@ func replaceIndexChanges(schema string, r indexReplacement) ([]Change, error) {
 		}
 		changes = append(changes, Change{SQL: create, Kind: ChangeCreateIndex})
 	}
-	if r.live.Name != "" {
+	switch {
+	case r.live.Name != "":
 		changes = append(changes, Change{
 			SQL:         "DROP INDEX " + pgx.Identifier{schema, r.live.Name}.Sanitize(),
 			Kind:        ChangeDropIndex,
 			Destructive: true,
 			Drops:       &DroppedObject{Kind: DroppedIndex, Name: r.live.Name, Definition: r.live.Def},
+			ReplacedBy:  r.temp,
+			Replacement: &IndexReplacement{Index: r.temp, Def: def},
+		})
+	case r.constraint.Name != "":
+		changes = append(changes, Change{
+			SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{r.constraint.Name}.Sanitize(),
+			Kind:        dropConstraintKind(r.constraint),
+			Destructive: true,
+			Drops:       &DroppedObject{Kind: DroppedConstraint, Name: r.constraint.Name, Definition: r.constraint.Def},
 			ReplacedBy:  r.temp,
 			Replacement: &IndexReplacement{Index: r.temp, Def: def},
 		})

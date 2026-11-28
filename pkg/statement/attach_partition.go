@@ -105,6 +105,22 @@ func AttachedPartition(sql string) (AttachPartition, bool, error) {
 	}, true, nil
 }
 
+// PrintedPartitionBound parses a partition bound as pg_get_expr prints a
+// partition's relpartbound, such as `FOR VALUES FROM ('2027-01-01') TO
+// ('2028-01-01')` or `DEFAULT`, through the grammar, as the bound of an
+// ATTACH PARTITION that is parsed and never run.
+func PrintedPartitionBound(printed string) (PartitionBound, error) {
+	const prefix = "ALTER TABLE pg_sprite_partition_bound ATTACH PARTITION pg_sprite_partition_bound_child "
+	attach, ok, err := AttachedPartition(prefix + printed)
+	if err != nil {
+		return PartitionBound{}, fmt.Errorf("partition bound %q: %w", printed, err)
+	}
+	if !ok {
+		return PartitionBound{}, fmt.Errorf("%w: partition bound %q", ErrUnexpectedPartitionBound, printed)
+	}
+	return attach.Bound, nil
+}
+
 func partitionBound(spec *pganalyze.PartitionBoundSpec) (PartitionBound, error) {
 	if spec == nil {
 		return PartitionBound{}, fmt.Errorf("%w: ATTACH PARTITION has no bound", ErrUnexpectedPartitionBound)

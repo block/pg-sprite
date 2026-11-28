@@ -76,6 +76,47 @@ func TestClassifyTypeChangeRewritesACollatedLiveColumn(t *testing.T) {
 	assert.False(t, plan.Decisions[0].Unverified, "the live collation was known; this is a proven rewrite route")
 }
 
+// A COLLATE clause that names the live column's own collation keeps it, so
+// the type rules decide: a varchar widen stays a relabel and reuses the
+// column's indexes. A clause naming another collation, or none, changes the
+// collation and stays a rewrite. An unqualified name keeps only a
+// pg_catalog collation, since the engine's sessions search pg_catalog
+// first and any other schema depends on the search path. A name with a
+// database part is never read as kept: joined, its first parts would match
+// a schema whose name holds a dot.
+func TestClassifyTypeChangeKeepsTheRelabelWhenTheCollationStays(t *testing.T) {
+	for _, tc := range []struct {
+		name, live, sql string
+		route           planner.Route
+	}{
+		{name: "unqualified, built-in", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE "C"`, route: planner.RouteNative},
+		{name: "qualified, built-in", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE pg_catalog."C"`, route: planner.RouteNative},
+		{name: "qualified, schema-local", live: `app.names`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE app.names`, route: planner.RouteNative},
+		{name: "unqualified, schema-local", live: `app.names`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE names`, route: planner.RouteCopyAndSwap},
+		{name: "another collation", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE "POSIX"`, route: planner.RouteCopyAndSwap},
+		{name: "another schema", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE app."C"`, route: planner.RouteCopyAndSwap},
+		{name: "kept, narrowed", live: `pg_catalog."C"`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(20) COLLATE "C"`, route: planner.RouteCopyAndSwap},
+		{name: "database-qualified", live: `"a.b".x`, sql: `ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE a.b.x`, route: planner.RouteCopyAndSwap},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := planner.Facts{
+				ColumnTypes:      map[string]string{"c": "character varying(50)"},
+				ColumnCollations: map[string]string{"c": tc.live},
+			}
+			plan, err := planner.Classify(tc.sql, facts)
+			require.NoError(t, err)
+			require.Len(t, plan.Decisions, 1)
+			assert.Equal(t, tc.route, plan.Decisions[0].Route)
+			assert.False(t, plan.Decisions[0].Unverified)
+		})
+	}
+
+	uncollated := planner.Facts{ColumnTypes: map[string]string{"c": "character varying(50)"}}
+	plan, err := planner.Classify(`ALTER TABLE t ALTER COLUMN c TYPE varchar(100) COLLATE "C"`, uncollated)
+	require.NoError(t, err)
+	assert.Equal(t, planner.RouteCopyAndSwap, plan.Decisions[0].Route, "a clause on a column with the default collation changes it")
+}
+
 // The same widen on a column with the default collation stays a relabel:
 // the collation fact must only ever take the route away from native for
 // the column it names.

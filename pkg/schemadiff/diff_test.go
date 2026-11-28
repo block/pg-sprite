@@ -136,6 +136,20 @@ func TestDiffRefusesCollationChanges(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// A type change on a column with an explicit collation carries the
+// collation in its TYPE clause, so the retyped column keeps it: without the
+// clause PostgreSQL gives the column the new type's default.
+func TestDiffTypeChangeKeepsTheColumnsCollation(t *testing.T) {
+	collated := func(typ string) Model {
+		return Model{Table: "words", Columns: []Column{{Name: "tag", Type: typ, Collation: `pg_catalog."C"`}}}
+	}
+	changes, err := Diff("public", collated("character varying(20)"), collated("character varying(40)"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		`ALTER TABLE "public"."words" ALTER COLUMN "tag" TYPE character varying(40) COLLATE pg_catalog."C"`,
+	}, sqls(changes))
+}
+
 func TestDiffAddColumn(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns, Column{
@@ -504,7 +518,11 @@ func TestDiffKeyConstraintAdoptsTheLiveIndex(t *testing.T) {
 		other := Index{Name: "events_name_key", Def: "CREATE UNIQUE INDEX events_name_key ON events USING btree (name) WHERE (id > 0)"}
 		changes, err := Diff("public", live(other), desired(unique))
 		require.NoError(t, err)
-		assert.Equal(t, rebuild, sqls(changes))
+		assert.Equal(t, []string{
+			"CREATE UNIQUE INDEX events_name_key_new ON public.events USING btree (name)",
+			`DROP INDEX "public"."events_name_key"`,
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key_new"`,
+		}, sqls(changes), "the constraint's index is built before the old index goes (see TestDiffSameNameKindSwapBuildsFirst)")
 	})
 
 	t.Run("an unfinished build", func(t *testing.T) {
