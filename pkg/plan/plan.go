@@ -83,7 +83,9 @@ import (
 // dependent_publications decision field.
 // Version 33 added the not_null_from_type and constrained_type decision
 // fields.
-const FormatVersion = 33
+// Version 34 added the column-limit planner reason and the column_limit
+// decision field.
+const FormatVersion = 34
 
 // Source identifies which front door derived the plan.
 type Source string

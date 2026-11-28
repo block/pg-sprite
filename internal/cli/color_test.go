@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/lint"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -186,6 +187,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		PartitionKeyTables:        []string{`"public"."t"`},
 		NotNullFromType:           `"public"."positive_qty"`,
 		ConstrainedType:           `"public"."positive_qty"`,
+		ColumnLimit:               &preflight.ColumnNumbers{Fullest: []preflight.FullTable{{Name: `"public"."t"`, Root: true}}},
 		ExecutedSQL:               []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
 		SQLState:                  "23514",
 		ServerError:               `check constraint "c" of relation "t" is violated by some row`,
