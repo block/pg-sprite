@@ -267,6 +267,22 @@ func (f reconcileFixture) killWalsender(t *testing.T, cap *capture, slotName str
 	f.awaitSlotReleased(t, slotName)
 }
 
+// awaitSlotReleased polls until the catalog shows nothing holding the slot,
+// which is after the holder's walsender has exited. A timeout names the
+// backend still holding it, which tells a walsender stuck past its release
+// from a new holder that took the slot.
+func (f reconcileFixture) awaitSlotReleased(t *testing.T, name string) {
+	t.Helper()
+	const slotReleased = 10 * time.Second
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		status, found, err := decode.InspectSlot(t.Context(), f.pool, name)
+		if !assert.NoError(collect, err) || !assert.True(collect, found) {
+			return
+		}
+		assert.False(collect, status.Active, "slot %s is still held by backend %d", name, status.ActivePID)
+	}, slotReleased, 50*time.Millisecond)
+}
+
 // copyAll runs the copier to completion while a capture consumes the
 // stream, the way a run copies.
 func copyAll(t *testing.T, f reconcileFixture, c *copier.Copier) {

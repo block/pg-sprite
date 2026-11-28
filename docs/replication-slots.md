@@ -331,7 +331,9 @@ or `SIGTERM` rather than dropping the slot under it. If the process that ran it 
 (killed, or its host lost), the server's stream process for it holds the slot until
 `wal_sender_timeout` passes; see [The run was killed or the host died](#the-run-was-killed-or-the-host-died).
 Once you know that process is gone, `SELECT pg_terminate_backend(<active_pid>)` ends the
-stream process, which holds no data of its own, and the slot can be dropped.
+stream process, which holds no data of its own. The stream process lets go of the slot a
+moment after it ends, and `pg_drop_replication_slot` refuses a slot that is still held
+rather than waiting, so run the query above again until `active` is false, then drop it.
 
 To start over, which discards everything the stopped run built:
 

@@ -120,7 +120,7 @@ func (f slotFixture) awaitSlotReleased(t *testing.T, name string) {
 		if !assert.NoError(collect, err) || !assert.True(collect, found) {
 			return
 		}
-		assert.False(collect, status.Active, "the holder's walsender must have let go")
+		assert.False(collect, status.Active, "slot %s is still held by backend %d", name, status.ActivePID)
 	}, slotReleased, 50*time.Millisecond)
 }
 

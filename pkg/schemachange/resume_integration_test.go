@@ -57,20 +57,6 @@ func (f reconcileFixture) holdSlot(t *testing.T, slot *decode.Slot) func() {
 	return release
 }
 
-// awaitSlotReleased polls until the catalog shows nothing holding the slot,
-// which is after the holder's walsender has exited.
-func (f reconcileFixture) awaitSlotReleased(t *testing.T, name string) {
-	t.Helper()
-	const slotReleased = 10 * time.Second
-	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		status, found, err := decode.InspectSlot(t.Context(), f.pool, name)
-		if !assert.NoError(collect, err) || !assert.True(collect, found) {
-			return
-		}
-		assert.False(collect, status.Active, "the holder's walsender must have let go")
-	}, slotReleased, 50*time.Millisecond)
-}
-
 // assertRefusesForeignSlot reads cp as a clean-phase row and as a row
 // already reconciling, and expects both to refuse the slot under the name
 // as foreign — neither a clean resume nor a reconcile may touch it — while
